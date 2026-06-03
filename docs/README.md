@@ -32,6 +32,7 @@ Docs are split by intent:
 | Doc | What it covers |
 |---|---|
 | [`app/ARCHITECTURE.md`](app/ARCHITECTURE.md) | The Hexagonal (Ports & Adapters) layering, the `api/` / `worker/` / `proto/` module boundaries and dependency direction, the catalog of domain Ports per side, and the architecture-level design decisions from `REQUIREMENTS.md` Section 9.1. |
+| [`app/STORAGE.md`](app/STORAGE.md) | The API-side authoritative store: the `Storage` Port contract, the authoritative data layout, atomic snapshot publish, file version retention, path-traversal protection, and the fs / remote-fs / object adapter families. |
 | [`app/CONFIGURATION.md`](app/CONFIGURATION.md) | Runtime configuration for `api/` and `worker/`: sources and precedence, secret handling, config-driven adapter selection (Storage backend, token service, execution drivers), the authentication-hardening knobs and defaults, and snapshot-cadence settings. |
 | [`app/DATABASE.md`](app/DATABASE.md) | The persistence model for the core entities (`REQUIREMENTS.md` Appendix B): tables, keys, relationships, the desired/observed-state split on `Server`, cascade behavior, and the M1 persistence-technology decision behind the persistence Port. Metadata only — bulk artifacts live in `Storage`. |
 
