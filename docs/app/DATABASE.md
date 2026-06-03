@@ -527,5 +527,5 @@ holds atomically.
 |---|---|
 | [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; entity sketch (Appendix B), permission catalog (Appendix A), resolved decisions (Section 9) |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Hexagonal layering, the persistence Port (`<Entity>Repository` + `UnitOfWork`), the desired/observed authority split |
-| [`STORAGE.md`](STORAGE.md) *(planned, #17)* | The `Storage` Port: world/JAR/backup-archive bytes that this model references but does not store |
-| [`CONFIGURATION.md`](CONFIGURATION.md) *(planned, #16)* | Runtime configuration & adapter selection (incl. which persistence adapter is bound) |
+| [`STORAGE.md`](STORAGE.md) | The `Storage` Port: world/JAR/backup-archive bytes that this model references but does not store |
+| [`CONFIGURATION.md`](CONFIGURATION.md) | Runtime configuration & adapter selection (incl. which persistence adapter is bound) |

@@ -511,5 +511,5 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
 |---|---|
 | [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | Source of truth: Sections 6.8–6.12, FR-DATA-1…7, FR-FILE-3, FR-FILE-4, FR-BAK-*, FR-VER-3. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | `Storage` Port placement (Section 5.1), layering and edge wiring (Section 2), naming (Section 6), the running-server file-access decision (Section 7.2) that bounds this Port's file ops to the stopped-server case. |
-| `DATABASE.md` *(planned, #15)* | The metadata indexing the blobs this document lays out (`Server`, `Backup`, `FileEditHistory`). Blob layout is here; metadata tables are there. |
-| `CONFIGURATION.md` *(planned, #16)* | The runtime keys that select the backend family and tune snapshot interval / version-retention count. This document defines *what* is selectable; #16 names the keys. |
+| [`DATABASE.md`](DATABASE.md) | The metadata indexing the blobs this document lays out (`Server`, `Backup`, `FileEditHistory`). Blob layout is here; metadata tables are there. |
+| [`CONFIGURATION.md`](CONFIGURATION.md) | The runtime keys that select the backend family and tune snapshot interval / version-retention count. This document defines *what* is selectable; `CONFIGURATION.md` names the keys. |

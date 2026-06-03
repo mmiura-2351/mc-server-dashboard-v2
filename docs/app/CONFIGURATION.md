@@ -329,7 +329,7 @@ lose up to one interval of changes (REQUIREMENTS.md FR-DATA-5).
 |---|---|
 | [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; the source of truth for scope. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Hexagonal layering, module boundaries, the Ports catalog these keys select adapters for, and wiring at the edge. |
-| `DATABASE.md` *(planned, #15)* | Persistence model behind `database.url`. |
-| `STORAGE.md` *(planned, #17)* | `Storage` adapter contracts and the per-backend keys behind `storage.backend`. |
-| `proto/` contract reference *(planned, #2)* | The control-plane messages, including Worker capability advertisement. |
+| [`DATABASE.md`](DATABASE.md) | Persistence model behind `database.url`. |
+| [`STORAGE.md`](STORAGE.md) | `Storage` adapter contracts and the per-backend keys behind `storage.backend`. |
+| [`CONTROL_PLANE.md`](CONTROL_PLANE.md) | The control-plane messages, including Worker capability advertisement. |
 | [`../dev/CONTRIBUTING.md`](../dev/CONTRIBUTING.md) | The change workflow for editing these docs. |
