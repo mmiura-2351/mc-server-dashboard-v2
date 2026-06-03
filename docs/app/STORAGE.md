@@ -266,6 +266,11 @@ The publish step's atomicity is realized differently per adapter family, but the
   read-after-write). The prior prefix's objects are garbage-collected after the
   flip (Section 7.3).
 
+For the fs / remote-fs backends, after the symlink rename the parent directory is
+fsynced so the flip survives power loss (symmetric with the Section 4.4 single-file
+fsync note); a flip that is lost despite being complete is otherwise bounded by the
+FR-DATA-5 RPO.
+
 ### 4.3 Crash safety
 
 | Crash point | fs / remote-fs | object |
@@ -291,6 +296,14 @@ This keeps a concurrent `read_file` from ever seeing a torn file. Capturing the
 prior version into `versions/` (Section 5) happens **before** the overwrite, so a
 crash mid-write leaves both the old `current/` content and the retained version
 consistent.
+
+A single-file `write_file` and a whole-working-set publish/restore are never
+issued concurrently for the same server: they are serialized at the application
+layer per the Section 6.9 state-branching policy and decision 8.2 (Storage file
+edits happen only on a stopped server, while publish happens for a running
+server's snapshot or during restore, which requires a stop). The Storage adapter
+itself does not arbitrate concurrent publish and `write_file` on the same server;
+the application layer is responsible for not issuing them concurrently.
 
 ---
 
@@ -385,7 +398,7 @@ ARCHITECTURE.md Section 6 (e.g. `FsStorage`, `ObjectStorage`).
 | Single-file write | temp-write + fsync + atomic rename, same as fs. |
 | Path-traversal | Identical to fs (the adapter logic is shared). |
 | Best for | Letting the authoritative store outlive a single API host / sit on shared infrastructure without moving to object storage. |
-| Caveat | Atomicity and durability depend on the mount's semantics; the adapter documents the required guarantees (symlink support, atomic same-dir rename, fsync durability) and the operator must provision a mount that meets them. Cross-device rename caveat (Section 7.1) applies identically. |
+| Caveat | Atomicity and durability depend on the mount's semantics; the adapter documents the required guarantees (symlink support, atomic same-dir rename, fsync durability) and the operator must provision a mount that meets them. SMB mounts frequently lack POSIX symlink support, so the remote-fs adapter requires a backing filesystem/mount with POSIX symlink and atomic same-directory rename semantics (NFS qualifies; SMB often does not). Cross-device rename caveat (Section 7.1) applies identically. |
 
 `remote-fs` may share most code with `fs` (both are path-based); they are
 distinct entries because their **operational guarantees and failure modes
