@@ -36,8 +36,14 @@ Run from this directory (`api/`):
 ```
 api/
 ├── src/mc_server_dashboard_api/   # package source (src-layout)
+├── src/mcsd/                      # generated control-plane stubs (do not edit)
 └── tests/                         # pytest tests
 ```
+
+The `src/mcsd/` tree is the generated gRPC control-plane contract (package
+`mcsd.controlplane.v1`). It is checked in; regenerate with `make proto-gen` from
+the repo root (see [`../proto/README.md`](../proto/README.md)). It is excluded
+from the ruff/mypy gates as machine-generated code.
 
 Import-direction contracts (import-linter, configured in `pyproject.toml`)
 enforce the Hexagonal dependency rules from ARCHITECTURE.md Section 2.2; the

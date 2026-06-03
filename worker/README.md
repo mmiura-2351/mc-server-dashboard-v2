@@ -24,6 +24,11 @@ worker/
 
 Dependency direction points inward to `domain`; see ARCHITECTURE.md Section 2.2.
 
+The generated control-plane gRPC stubs are checked in under
+`internal/controlplane/` (package `controlplanev1`). Do not edit them by hand;
+regenerate with `make proto-gen` from the repo root (see
+[`../proto/README.md`](../proto/README.md)).
+
 ## Toolchain
 
 - **Go**: 1.26 (pinned in `go.mod`; see

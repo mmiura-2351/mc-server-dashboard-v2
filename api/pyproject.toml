@@ -3,7 +3,18 @@ name = "mc-server-dashboard-api"
 version = "0.0.0"
 description = "Authoritative API service for mc-server-dashboard v2"
 requires-python = ">=3.13,<3.14"
-dependencies = []
+# Runtime dependencies needed by the generated control-plane stubs at import
+# time. Ranges cap the next major (docs/dev/DEPENDENCIES.md Section 1); versions
+# respect the 7-day cooldown (Section 3) at the time they were added.
+dependencies = [
+    # grpcio 1.80.0 (2026-03-30) and protobuf 6.x runtime for the generated
+    # gRPC + message code. The protobuf major is bounded to 6 to match the
+    # generator (grpcio-tools 1.80.0 emits protobuf-6 code). grpcio 1.81.0
+    # (2026-06-01) is inside the 7-day cooldown as of this change, so cap below
+    # it; lift the cap to <2 once it ages out (docs/dev/DEPENDENCIES.md §3).
+    "grpcio>=1.80.0,<1.81",
+    "protobuf>=6.31.1,<7",
+]
 
 [dependency-groups]
 # Dev / tooling dependencies: kept current, no upper bound
@@ -16,17 +27,26 @@ dev = [
     "mypy>=2.1.0",
     "pytest>=9.0.3",
     "import-linter>=2.11",
+    # Control-plane codegen. grpcio-tools bundles protoc + the python/grpc
+    # generators; mypy-protobuf adds .pyi type stubs. Both pinned outside the
+    # cooldown (grpcio-tools 1.80.0 2026-03-30; mypy-protobuf 5.1.0 2026-04-28).
+    "grpcio-tools>=1.80.0,<1.81",
+    "mypy-protobuf>=5.1.0,<6",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# The generated control-plane stubs live in the top-level `mcsd` package
+# (mirroring the proto package `mcsd.controlplane.v1`); ship both packages.
 [tool.hatch.build.targets.wheel]
-packages = ["src/mc_server_dashboard_api"]
+packages = ["src/mc_server_dashboard_api", "src/mcsd"]
 
 [tool.ruff]
 src = ["src", "tests"]
+# Generated gRPC stubs are not hand-written code; do not lint or format them.
+extend-exclude = ["src/mcsd"]
 
 [tool.ruff.lint]
 # Conservative starter set: pyflakes, pycodestyle, isort.
@@ -35,6 +55,13 @@ select = ["E", "F", "I"]
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+# Generated stubs (mypy-protobuf output) are excluded from strict checking;
+# they are machine-generated and consumed via their own .pyi types.
+exclude = ["^src/mcsd/"]
+
+[[tool.mypy.overrides]]
+module = "mcsd.*"
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

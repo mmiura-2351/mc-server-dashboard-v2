@@ -12,6 +12,7 @@
 .PHONY: all check lint format test \
 	api-lint api-format api-test \
 	worker-lint worker-format worker-test \
+	proto-lint proto-gen proto-check \
 	bootstrap hooks-install
 
 # golangci-lint is not part of the Go distribution; it is installed into a
@@ -19,12 +20,20 @@
 GOLANGCI_VERSION := v2.12.2
 GOLANGCI := worker/.bin/golangci-lint
 
+# protoc code-generation plugins. Pinned + documented (proto/README.md,
+# docs/dev/DEPENDENCIES.md). The Go plugins install into the same gitignored
+# worker/.bin; the Python generators come from the api/ dev group (uv).
+PROTOC_GEN_GO_VERSION := v1.36.11
+PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
+PROTOC_GEN_GO := worker/.bin/protoc-gen-go
+PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
+
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
-check: lint test
+check: lint test proto-check
 
-lint: api-lint worker-lint
+lint: api-lint worker-lint proto-lint
 
 format: api-format worker-format
 
@@ -88,10 +97,44 @@ hooks-install:
 	@echo "git hooks installed (core.hooksPath -> .githooks)"
 
 # ---------------------------------------------------------------------------
-# proto/ (buf) -- extension point.
-# proto/ does not exist on main yet (a sibling PR adds it; see #22). When it
-# lands, wire `buf lint` into the lint target here, e.g.:
-#   lint: api-lint worker-lint proto-lint
-#   proto-lint:
-#   	cd proto && buf lint
+# proto/ (buf) -- the shared control-plane contract.
+#
+# Stubs are checked in (see proto/README.md). `proto-gen` regenerates them
+# deterministically; `proto-check` (run by `check` and CI) fails if the working
+# tree's stubs drift from a fresh generation.
 # ---------------------------------------------------------------------------
+
+proto-lint:
+	cd proto && buf lint
+
+# Regenerate both languages' stubs from proto/. Go via buf (pinned local
+# plugins); Python via grpcio-tools + mypy-protobuf (pinned in api/ dev group).
+proto-gen: $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
+	cd proto && buf generate
+	cd api && uv run python -m grpc_tools.protoc \
+		-I ../proto \
+		--python_out=src \
+		--grpc_python_out=src \
+		--mypy_out=src \
+		--mypy_grpc_out=src \
+		../proto/mcsd/controlplane/v1/control_plane.proto
+
+# Drift gate: regenerate and fail if anything changed -- modified tracked stubs
+# or new untracked ones (CI + `make check`).
+proto-check: proto-gen
+	@dirty="$$(git status --porcelain -- worker/internal/controlplane api/src/mcsd)"; \
+	if [ -n "$$dirty" ]; then \
+		echo "proto stubs are stale; run 'make proto-gen' and commit:"; \
+		echo "$$dirty"; \
+		git --no-pager diff -- worker/internal/controlplane api/src/mcsd; \
+		exit 1; \
+	fi
+
+# Install the pinned Go protoc plugins into worker/.bin if missing.
+$(PROTOC_GEN_GO):
+	cd worker && GOBIN="$$(pwd)/.bin" go install \
+		google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+
+$(PROTOC_GEN_GO_GRPC):
+	cd worker && GOBIN="$$(pwd)/.bin" go install \
+		google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)

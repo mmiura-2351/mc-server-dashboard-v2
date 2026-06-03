@@ -1,0 +1,32 @@
+# Code generation for the control-plane contract.
+#
+# This template generates Go stubs only; the Python stubs are produced by
+# grpcio-tools + mypy-protobuf (see proto/README.md "Regeneration"). Both
+# generators are driven by a single `make proto-gen`. The split exists because
+# the grpc Python generator ships only inside grpcio-tools (as a protoc
+# frontend, not a `protoc-gen-*` plugin buf can invoke), so pinning it through
+# buf is not possible; grpcio-tools pins protoc + both generators in one wheel.
+#
+# Plugin versions are pinned and documented in proto/README.md
+# (docs/dev/DEPENDENCIES.md: pinned, outside the 7-day cooldown).
+version: v2
+
+# The .proto contract carries no `go_package` option (the contract stays
+# language-neutral). Managed mode injects it at generation time, so the import
+# path is `.../worker/internal/controlplane/<proto path>`.
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane
+
+plugins:
+  # Go message types. Pinned binary installed into worker/.bin by `make proto-gen`.
+  - local: ../worker/.bin/protoc-gen-go
+    out: ../worker/internal/controlplane
+    opt: paths=source_relative
+
+  # Go gRPC service stubs.
+  - local: ../worker/.bin/protoc-gen-go-grpc
+    out: ../worker/internal/controlplane
+    opt: paths=source_relative
