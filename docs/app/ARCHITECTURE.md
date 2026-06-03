@@ -100,8 +100,8 @@ itself.
 
 These rules are mechanically checkable and should be enforced by import-direction
 contracts in CI (e.g. import-linter on the Python side, an equivalent guard on
-the Go side). The exact tooling is established in `dev/DEVELOPMENT.md` when the
-toolchains land.
+the Go side). The exact tooling and how to run it locally are in
+[`../dev/DEVELOPMENT.md`](../dev/DEVELOPMENT.md) Section 5.
 
 ### 2.3 Why this applies to both services
 
@@ -246,7 +246,8 @@ spirit (idiomatic Go names) but keeps the same Port/adapter/permission concepts.
 The per-domain directory layout inside `api/` (a `domain/ application/ adapters/
 api/` quadrant per bounded context, with wiring isolated to a single
 dependencies file) follows the legacy layout and is detailed in
-`dev/DEVELOPMENT.md` when the Python toolchain lands.
+[`../dev/DEVELOPMENT.md`](../dev/DEVELOPMENT.md) Section 4 as the Python domain
+code lands.
 
 ---
 
