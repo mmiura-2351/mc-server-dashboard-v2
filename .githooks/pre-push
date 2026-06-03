@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#
+# pre-push: run the full verification gate (lint + typecheck + test for both
+# ecosystems) -- the same `make check` that CI runs. A failed hook means the
+# push did NOT happen (docs/dev/CONTRIBUTING.md Section 4); fix the cause rather
+# than bypassing with --no-verify.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "pre-push: make check"
+make check
