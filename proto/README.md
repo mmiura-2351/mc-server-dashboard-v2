@@ -1,17 +1,26 @@
 # proto
 
 The shared protobuf / gRPC **control-plane** contract between `api/` and
-`worker/`, managed as a [buf](https://buf.build) module. This package contains
-the contract only — no generated code and no language wiring (that lands with
-issue #22). For the contract reference (stream lifecycle, message flow, and the
-requirement mapping) see [`../docs/app/CONTROL_PLANE.md`](../docs/app/CONTROL_PLANE.md).
+`worker/`, managed as a [buf](https://buf.build) module. The contract lives
+here; the generated stubs are **checked in** under each consumer (see
+[Regeneration](#regeneration)). For the contract reference (stream lifecycle,
+message flow, and the requirement mapping) see
+[`../docs/app/CONTROL_PLANE.md`](../docs/app/CONTROL_PLANE.md).
 
 ## Layout
 
 ```
 proto/
 ├── buf.yaml                                  # buf module: lint + breaking config
+├── buf.gen.yaml                              # code generation (Go via buf)
 └── mcsd/controlplane/v1/control_plane.proto  # the WorkerService bidi-stream contract
+```
+
+Generated stubs (do not edit by hand; regenerate with `make proto-gen`):
+
+```
+worker/internal/controlplane/mcsd/controlplane/v1/   # Go: *.pb.go, *_grpc.pb.go
+api/src/mcsd/controlplane/v1/                         # Python: *_pb2.py(i), *_pb2_grpc.py(i)
 ```
 
 The proto package is `mcsd.controlplane.v1`. The version segment is part of the
@@ -51,6 +60,41 @@ buf format -w   # auto-format the .proto files
 
 `buf breaking` compares against a baseline; wire it to the default branch once a
 generation/CI step exists (issue #22).
+
+## Regeneration
+
+Stubs are **checked in** rather than generated on demand, so `worker/` and
+`api/` build and import without a proto toolchain present, and CI for each
+consumer needs no codegen step. Freshness is enforced by a drift gate: CI
+(`.github/workflows/proto.yml`) and `make check` run `make proto-check`, which
+regenerates and fails if the result differs from what is committed.
+
+Regenerate both languages with one command from the repo root:
+
+```
+make proto-gen
+```
+
+This drives two pinned generators:
+
+- **Go** via `buf generate` (`buf.gen.yaml`), using local plugins installed
+  into the gitignored `worker/.bin/`:
+  - `protoc-gen-go` **v1.36.11**
+  - `protoc-gen-go-grpc` **v1.6.2**
+- **Python** via `grpc_tools.protoc` + `mypy-protobuf` from the `api/` dev
+  group (resolved from `api/uv.lock`):
+  - `grpcio-tools` **1.80.0** (bundles protoc + the python/grpc generators)
+  - `mypy-protobuf` **5.1.0** (`.pyi` type stubs)
+
+The split exists because the gRPC Python generator ships only inside
+`grpcio-tools` as a protoc frontend (not a `protoc-gen-*` plugin buf can
+invoke). Versions are pinned outside the 7-day supply-chain cooldown per
+[`../docs/dev/DEPENDENCIES.md`](../docs/dev/DEPENDENCIES.md); bump them in the
+Makefile (Go) and `api/pyproject.toml` (Python).
+
+Generated Go and Python are excluded from the strict lint/type gates
+(golangci-lint skips `DO NOT EDIT` files automatically; ruff/mypy exclude
+`api/src/mcsd` via `api/pyproject.toml`).
 
 ## Conventions
 

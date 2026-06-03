@@ -1,0 +1,61 @@
+name: proto
+
+on:
+  pull_request:
+    paths:
+      - "proto/**"
+      - "worker/internal/controlplane/**"
+      - "api/src/mcsd/**"
+      - "api/pyproject.toml"
+      - "api/uv.lock"
+      - "Makefile"
+      - ".github/workflows/proto.yml"
+  push:
+    branches: [main]
+    paths:
+      - "proto/**"
+      - "worker/internal/controlplane/**"
+      - "api/src/mcsd/**"
+      - "api/pyproject.toml"
+      - "api/uv.lock"
+      - "Makefile"
+      - ".github/workflows/proto.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go (for the pinned Go protoc plugins)
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: worker/go.mod
+
+      - name: Set up uv (for the pinned Python generators)
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: api/uv.lock
+
+      - name: Set up buf
+        uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+        with:
+          version: 1.70.0
+          github_token: ${{ github.token }}
+
+      - name: Sync api dev toolchain (grpcio-tools, mypy-protobuf)
+        working-directory: api
+        run: uv sync --locked
+
+      - name: Lint (buf)
+        run: make proto-lint
+
+      - name: Drift check (regenerate and diff)
+        run: make proto-check
