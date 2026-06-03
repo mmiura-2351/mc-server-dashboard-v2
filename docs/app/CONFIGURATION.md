@@ -1,0 +1,335 @@
+# Configuration
+
+> Status: **Design** · Audience: contributors and operators of `api/` and
+> `worker/`
+>
+> This document defines the **runtime configuration surface** of v2 and the
+> **config-driven adapter selection** mechanism. It refines, but does not
+> contradict, [`../REQUIREMENTS.md`](../REQUIREMENTS.md) and
+> [`ARCHITECTURE.md`](ARCHITECTURE.md); where they disagree, the requirements
+> win and this document is wrong.
+>
+> Scope is the *configuration contract* — which keys exist, what they select,
+> and their defaults — not how configuration is loaded. The loader lands with
+> the implementation (epic #3+). Key names below are the agreed surface; minor
+> renames during implementation are acceptable as long as the grouping and
+> selection semantics hold.
+
+## Table of Contents
+
+1. [Principles](#1-principles)
+2. [Sources and precedence](#2-sources-and-precedence)
+3. [Secrets](#3-secrets)
+4. [Config-driven adapter selection](#4-config-driven-adapter-selection)
+5. [API configuration](#5-api-configuration)
+6. [Worker configuration](#6-worker-configuration)
+7. [Authentication hardening](#7-authentication-hardening)
+8. [Snapshot cadence](#8-snapshot-cadence)
+9. [Related documents](#9-related-documents)
+
+---
+
+## 1. Principles
+
+- **Wiring at the edge.** Configuration is read **only** at the edge / wiring
+  layer (ARCHITECTURE.md Section 2.1) — the process `main`, DI setup, and the
+  routers/handlers. It selects and constructs adapters, then injects Ports into
+  use cases. Domain and application layers never read configuration; they
+  receive already-wired Ports (ARCHITECTURE.md Section 2.2).
+- **Config-driven adapter selection.** Every swappable technology sits behind a
+  Port (REQUIREMENTS.md NFR-PORT-1); which adapter fulfils a Port is a
+  configuration choice, not a code change (REQUIREMENTS.md FR-DATA-2). See
+  Section 4.
+- **Secrets via configuration/environment.** No secret is ever hard-coded
+  (REQUIREMENTS.md NFR-SEC-3). See Section 3.
+- **Proportionate surface.** Target scale is small (REQUIREMENTS.md
+  NFR-SCALE-1); the configuration surface is the minimum needed to select
+  adapters and tune the documented behaviours, not an exhaustive knob for every
+  internal constant.
+- **Two independent processes.** `api/` (Python) and `worker/` (Go) are
+  configured independently; each has its own configuration. `proto/` is a build
+  artifact and has no runtime configuration.
+
+---
+
+## 2. Sources and precedence
+
+Both services read configuration from two sources, with environment variables
+overriding the file:
+
+```
+   defaults (in code)  <  config file  <  environment variables
+   (lowest precedence)                    (highest precedence)
+```
+
+- **Defaults** are the values in this document; a key omitted everywhere takes
+  its default. A key with no default (marked *required*) must be supplied.
+- **Config file** — a single file per service (e.g. `api.toml` /
+  `worker.toml`; the concrete format is fixed when the loader lands). Holds the
+  non-secret bulk of configuration and is the recommended place for
+  adapter-selection and tuning keys.
+- **Environment variables** — highest precedence; override any file value. The
+  intended channel for **secrets** (Section 3) and for per-deployment overrides
+  (container/orchestrator injection). Names are the UPPERCASE keys in the tables
+  below.
+
+A startup configuration error (a required key missing, an unknown adapter name,
+a malformed value) is **fatal**: the service fails fast at boot rather than
+starting in a half-configured state.
+
+The tables below give the **logical key name**. The environment-variable form
+is the key prefixed per service (`MCD_API_` for `api/`, `MCD_WORKER_` for
+`worker/`) to avoid collisions; the file form nests the same key under its
+group. The exact prefix is confirmed when the loader lands.
+
+---
+
+## 3. Secrets
+
+Secrets are read from configuration/environment and **never** hard-coded or
+committed (REQUIREMENTS.md NFR-SEC-3). Every key that carries a credential, key,
+or token is marked **secret** in the tables below.
+
+- Secrets are supplied via **environment variables** (Section 2) or a
+  file-system path to the secret material (e.g. a TLS key file), never inline in
+  a committed config file.
+- Secret values are **masked** wherever configuration is logged or echoed, in
+  line with the structured-logging masking rule (REQUIREMENTS.md NFR-OBS-1).
+- A missing **required** secret is a fatal startup error (Section 2); the
+  service does not fall back to an insecure default.
+
+The M1 secrets are: the API token-signing key (Section 5), the Worker's
+credential for authenticating to the API, and the TLS material for the
+control channel (Sections 5 and 6).
+
+---
+
+## 4. Config-driven adapter selection
+
+Selection follows one pattern: a **selector key** names the adapter for a Port,
+and **adapter-specific keys** configure the chosen adapter. The wiring layer
+reads the selector, constructs that adapter, and binds it to the Port
+(ARCHITECTURE.md Section 2.1). An unknown adapter name is a fatal startup error
+(Section 2). Keys for non-selected adapters are ignored.
+
+| Port (ref.) | Selector key | Adapter choices (M1) | Side |
+|---|---|---|---|
+| `Storage` (FR-DATA-2) | `storage.backend` | `fs` / `remote-fs` / `object` | api |
+| `PasswordHasher` (FR-AUTH-3) | `auth.password.hash` | `argon2` / `bcrypt` | api |
+| `ExecutionDriver` (FR-EXE-2) | `worker.drivers` | subset of `host-process` / `container` | worker |
+
+Notes:
+
+- The Worker's `ExecutionDriver` selection is a **set**, not one value: a Worker
+  advertises *which* drivers it offers (Section 6), and the API's greedy
+  placement filters Workers by the driver a server needs (REQUIREMENTS.md
+  FR-WRK-3). Selecting `host-process` only, `container` only, or both is a
+  per-Worker configuration choice.
+- The `Storage` adapter contract and the per-backend keys' full semantics are
+  owned by STORAGE.md (#17); this document fixes only the **selector** and the
+  shape of the adapter-specific groups (Section 5.2).
+- Other Ports in ARCHITECTURE.md Section 5 have a **single M1 adapter** and so
+  need no selector key (e.g. `TokenService`, `PermissionChecker`,
+  `WorkerRegistry`, `Clock`); they are added here only if a future milestone
+  introduces a choice. `TokenService` is a single "JWT-or-equivalent" adapter
+  (ARCHITECTURE.md Section 5.1, FR-AUTH-2); its `auth.token.algorithm` is an
+  adapter parameter (Section 5.3), not an adapter selector.
+
+---
+
+## 5. API configuration
+
+Grouped by concern. **Secret** marks credentials/keys (Section 3); *required*
+marks keys with no default.
+
+### 5.1 Server and transport
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `server.host` | `0.0.0.0` | | Bind address for the HTTP API (REST + data-plane endpoint). |
+| `server.http_port` | `8000` | | Port for the HTTP API. |
+| `server.grpc_port` | `50051` | | Port the control-plane gRPC server listens on for Worker-initiated streams (REQUIREMENTS.md Section 5.1). |
+| `server.public_base_url` | *required* | | Externally reachable base URL of the API's data-plane HTTP endpoint, handed to Workers for hydrate/snapshot transfer (REQUIREMENTS.md Section 5.2). |
+| `control.tls.cert_file` | *required* | | Path to the control-channel TLS certificate (REQUIREMENTS.md NFR-SEC-1). |
+| `control.tls.key_file` | *required* | secret | Path to the control-channel TLS private key. |
+| `control.heartbeat_timeout_seconds` | `30` | | Liveness window: a Worker missing heartbeats past this is marked disconnected (REQUIREMENTS.md FR-WRK-2). |
+
+### 5.2 Persistence and Storage adapter
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `database.url` | *required* | secret | Connection string for the persistence adapter (may embed credentials). Model owned by DATABASE.md (#15). |
+| `storage.backend` | `fs` | | Selector for the `Storage` Port (Section 4): `fs` / `remote-fs` / `object`. |
+| `storage.fs.root` | `./data` | | Root directory when `storage.backend = fs`. |
+| `storage.remote_fs.*` | — | partly | Mount/endpoint settings when `storage.backend = remote-fs`; secret members masked. Detail in STORAGE.md (#17). |
+| `storage.object.endpoint` | — | | Object-store endpoint when `storage.backend = object`. |
+| `storage.object.bucket` | — | | Object-store bucket/container. |
+| `storage.object.access_key` | — | secret | Object-store access key. |
+| `storage.object.secret_key` | — | secret | Object-store secret key. |
+
+Only the keys for the selected `storage.backend` are read; the rest are ignored
+(Section 4). The authoritative per-backend key list and the atomic-snapshot
+publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md (#17).
+
+### 5.3 Authentication: tokens and password hashing
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `auth.token.algorithm` | `HS256` | | Signing algorithm of the `TokenService` JWT adapter (REQUIREMENTS.md FR-AUTH-2), e.g. `HS256` / `RS256`. A parameter of the adapter, not an adapter selector (Section 4). |
+| `auth.token.signing_key` | *required* | secret | Signing key/secret for access & refresh tokens (REQUIREMENTS.md FR-AUTH-2). For an asymmetric algorithm this is the private key (path or value). |
+| `auth.token.access_ttl_seconds` | `900` | | Short-lived access-token lifetime. |
+| `auth.token.refresh_ttl_seconds` | `1209600` | | Long-lived refresh-token lifetime (14 days). |
+| `auth.password.hash` | `argon2` | | `PasswordHasher` selector (Section 4): `argon2` / `bcrypt`. |
+
+Password **policy** (strength, brute-force, proxy trust) is configured
+separately in Section 7.
+
+### 5.4 Snapshot cadence
+
+The API drives snapshot scheduling (REQUIREMENTS.md FR-DATA-7); see Section 8
+for the full cadence model.
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `snapshot.default_interval_seconds` | `3600` | | Global default periodic snapshot interval applied to every running server. |
+| `snapshot.min_interval_seconds` | `300` | | Lower bound a per-server override may not go below (guards against snapshot thrash). |
+
+### 5.5 Observability
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `log.level` | `info` | | Log verbosity. |
+| `log.format` | `json` | | Structured-log format; `json` keeps logs machine-parseable (REQUIREMENTS.md NFR-OBS-1). |
+
+---
+
+## 6. Worker configuration
+
+The Worker is stateless and replaceable (REQUIREMENTS.md FR-WRK-4); its
+configuration tells it **where the API is**, **how to authenticate**, **what it
+can run**, and **where its scratch space is**.
+
+### 6.1 API connection and authentication
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `api.grpc_endpoint` | *required* | | Address of the API control-plane gRPC server the Worker dials to open its persistent stream (REQUIREMENTS.md Section 5.1). |
+| `api.data_plane_url` | *required* | | Base URL of the API's HTTP data-plane endpoint for hydrate/snapshot transfer (REQUIREMENTS.md FR-DATA-3). May be discovered from the API at registration; this key is the fallback/override. |
+| `api.credential` | *required* | secret | The Worker's credential for authenticating to the API (REQUIREMENTS.md NFR-SEC-1, FR-WRK-1). |
+| `api.tls.ca_file` | *required* | | Path to the CA bundle used to verify the API's control-channel TLS (REQUIREMENTS.md NFR-SEC-1). |
+| `api.tls.client_cert_file` | — | | Path to the Worker's client certificate, when the control channel uses mTLS. |
+| `api.tls.client_key_file` | — | secret | Path to the Worker's client private key (mTLS). |
+| `worker.id` | *(auto)* | | Stable identifier the Worker registers under; defaults to a generated/host-derived value. |
+
+### 6.2 Advertised capabilities
+
+The Worker advertises its capabilities at registration (REQUIREMENTS.md
+FR-WRK-1); these feed the API's greedy placement filter (FR-WRK-3).
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `worker.drivers` | `host-process` | | `ExecutionDriver` set this Worker offers (Section 4): any subset of `host-process` / `container`. Advertised as a capability. |
+| `worker.max_servers` | `0` | | Free-capacity hint for placement; `0` means "no advertised cap" at this scale. |
+
+The concrete capability message on the wire is defined in `proto/` (#2); this
+section fixes only what the operator configures.
+
+### 6.3 Execution and scratch
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `worker.scratch_dir` | *required* | | Local scratch directory where the Worker hydrates a server's working set and runs it (REQUIREMENTS.md FR-DATA-4); the `WorkingDir` Port's root (ARCHITECTURE.md Section 5.2). |
+| `driver.container.docker_host` | *(daemon default)* | | Docker daemon endpoint when the `container` driver is enabled. |
+| `java.install_dir` | *(auto-discover)* | | Directory of installed Java runtimes the `JavaRuntimeSelector` chooses from per server (REQUIREMENTS.md FR-EXE-5). |
+
+### 6.4 Observability
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `log.level` | `info` | | Log verbosity. |
+| `log.format` | `json` | | Structured-log format (REQUIREMENTS.md NFR-OBS-1). |
+
+---
+
+## 7. Authentication hardening
+
+These knobs implement REQUIREMENTS.md FR-AUTH-4 on the **API** side. The
+bindings are the FR-AUTH-4 bullets (password strength, brute-force protection,
+reverse-proxy trust). The defaults below are the proven baseline from the legacy
+[SECURITY.md](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/SECURITY.md),
+adopted as-is for M1; the legacy document remains a reference, not a binding
+spec.
+
+### 7.1 Password policy
+
+| Key | Default | Meaning |
+|---|---|---|
+| `auth.password.min_length` | `12` | Minimum password length (characters). |
+| `auth.password.max_length` | `128` | Maximum length (bcrypt 72-byte cap plus a DoS guard). |
+| `auth.password.require_complexity` | `true` | Enforce the complexity-or-length rule: at least 3 of {upper, lower, digit, symbol} **or** at least 16 characters. |
+| `auth.password.check_common_list` | `true` | Reject passwords on a common-password blocklist (legacy baseline: SecLists xato-net top-10,000). |
+| `auth.password.forbid_user_info` | `true` | Reject a password containing the username or the email local-part. |
+| `auth.password.forbid_simple_patterns` | `true` | Reject 4+ repeated characters or 4+ sequential alphabet/keyboard/numeric runs. |
+
+### 7.2 Brute-force protection
+
+Per-username and per-IP failure thresholds over sliding windows, lockout with
+exponential back-off, and an artificial failure delay against timing-based
+enumeration (REQUIREMENTS.md FR-AUTH-4).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `auth.brute_force.enabled` | `true` | Master switch for brute-force protection. |
+| `auth.brute_force.username_threshold` | `5` | Failures per username before lockout. |
+| `auth.brute_force.username_window_seconds` | `900` | Sliding window for the per-username count. |
+| `auth.brute_force.ip_threshold` | `20` | Failures per source IP before throttling. |
+| `auth.brute_force.ip_window_seconds` | `300` | Sliding window for the per-IP count. |
+| `auth.brute_force.lockout_base_seconds` | `900` | Initial lockout duration; doubles on repeat (exponential back-off). |
+| `auth.brute_force.lockout_max_seconds` | `86400` | Cap on the backed-off lockout duration. |
+| `auth.brute_force.delay_ms` | `200` | Artificial delay added on a failed attempt to deny timing enumeration. |
+
+### 7.3 Reverse-proxy trust
+
+Forwarded client IPs are honored **only** from explicitly trusted proxy peers
+(REQUIREMENTS.md FR-AUTH-4); the per-IP brute-force counter depends on a
+trustworthy client IP.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `auth.proxy.trust_forwarded_headers` | `false` | Whether to read the forwarded-for header at all. |
+| `auth.proxy.trusted_proxies` | *(empty)* | List of proxy peer IPs/CIDRs; the forwarded header is honored only when the immediate peer is on this list. |
+
+---
+
+## 8. Snapshot cadence
+
+Snapshot cadence is **periodic-with-per-server-override plus event-driven**
+(REQUIREMENTS.md FR-DATA-7, Section 9 decision #4). Configuration covers the two
+periodic dimensions; event-driven snapshots are behavioural, not configured.
+
+- **Global default interval** — `snapshot.default_interval_seconds` (Section
+  5.4) applies to every running server.
+- **Per-server override** — each server may carry its own interval, stored on
+  the `Server` entity (REQUIREMENTS.md Appendix B) and edited through the
+  server-configuration API, **not** through this static configuration file. An
+  override is clamped to at least `snapshot.min_interval_seconds`.
+- **Event-driven snapshots** — taken on graceful stop and on-demand backup
+  (REQUIREMENTS.md FR-DATA-7, Section 6.11) regardless of the interval; they have
+  no configuration key.
+
+The effective periodic interval for a running server is its per-server override
+if set, otherwise the global default. The interval bounds the RPO: a crash may
+lose up to one interval of changes (REQUIREMENTS.md FR-DATA-5).
+
+---
+
+## 9. Related documents
+
+| Doc | Covers |
+|---|---|
+| [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; the source of truth for scope. |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Hexagonal layering, module boundaries, the Ports catalog these keys select adapters for, and wiring at the edge. |
+| `DATABASE.md` *(planned, #15)* | Persistence model behind `database.url`. |
+| `STORAGE.md` *(planned, #17)* | `Storage` adapter contracts and the per-backend keys behind `storage.backend`. |
+| `proto/` contract reference *(planned, #2)* | The control-plane messages, including Worker capability advertisement. |
+| [`../dev/CONTRIBUTING.md`](../dev/CONTRIBUTING.md) | The change workflow for editing these docs. |

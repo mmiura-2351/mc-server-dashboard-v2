@@ -32,6 +32,7 @@ Docs are split by intent:
 | Doc | What it covers |
 |---|---|
 | [`app/ARCHITECTURE.md`](app/ARCHITECTURE.md) | The Hexagonal (Ports & Adapters) layering, the `api/` / `worker/` / `proto/` module boundaries and dependency direction, the catalog of domain Ports per side, and the architecture-level design decisions from `REQUIREMENTS.md` Section 9.1. |
+| [`app/CONFIGURATION.md`](app/CONFIGURATION.md) | Runtime configuration for `api/` and `worker/`: sources and precedence, secret handling, config-driven adapter selection (Storage backend, token service, execution drivers), the authentication-hardening knobs and defaults, and snapshot-cadence settings. |
 
 More entries are written during the design phase: the `proto/` control-plane
 contract reference, `CONFIGURATION.md`, `DATABASE.md`, and the storage/execution
