@@ -115,7 +115,6 @@ reads the selector, constructs that adapter, and binds it to the Port
 | Port (ref.) | Selector key | Adapter choices (M1) | Side |
 |---|---|---|---|
 | `Storage` (FR-DATA-2) | `storage.backend` | `fs` / `remote-fs` / `object` | api |
-| `TokenService` (FR-AUTH-2) | `auth.token.algorithm` | JWT signing algorithm (e.g. `HS256` / `RS256`) | api |
 | `PasswordHasher` (FR-AUTH-3) | `auth.password.hash` | `argon2` / `bcrypt` | api |
 | `ExecutionDriver` (FR-EXE-2) | `worker.drivers` | subset of `host-process` / `container` | worker |
 
@@ -130,8 +129,11 @@ Notes:
   owned by STORAGE.md (#17); this document fixes only the **selector** and the
   shape of the adapter-specific groups (Section 5.2).
 - Other Ports in ARCHITECTURE.md Section 5 have a **single M1 adapter** and so
-  need no selector key (e.g. `PermissionChecker`, `WorkerRegistry`, `Clock`);
-  they are added here only if a future milestone introduces a choice.
+  need no selector key (e.g. `TokenService`, `PermissionChecker`,
+  `WorkerRegistry`, `Clock`); they are added here only if a future milestone
+  introduces a choice. `TokenService` is a single "JWT-or-equivalent" adapter
+  (ARCHITECTURE.md Section 5.1, FR-AUTH-2); its `auth.token.algorithm` is an
+  adapter parameter (Section 5.3), not an adapter selector.
 
 ---
 
@@ -173,7 +175,7 @@ publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md (#17).
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `auth.token.algorithm` | `HS256` | | `TokenService` signing algorithm selector (Section 4). |
+| `auth.token.algorithm` | `HS256` | | Signing algorithm of the `TokenService` JWT adapter (REQUIREMENTS.md FR-AUTH-2), e.g. `HS256` / `RS256`. A parameter of the adapter, not an adapter selector (Section 4). |
 | `auth.token.signing_key` | *required* | secret | Signing key/secret for access & refresh tokens (REQUIREMENTS.md FR-AUTH-2). For an asymmetric algorithm this is the private key (path or value). |
 | `auth.token.access_ttl_seconds` | `900` | | Short-lived access-token lifetime. |
 | `auth.token.refresh_ttl_seconds` | `1209600` | | Long-lived refresh-token lifetime (14 days). |
