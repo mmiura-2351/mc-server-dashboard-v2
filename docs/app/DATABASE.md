@@ -172,7 +172,7 @@ Constraints: `UNIQUE(username)`, `UNIQUE(email)`.
 > counters over sliding windows, lockout with back-off) is **auth-hardening
 > runtime state**, not a core entity. Whether it is a short-lived table or an
 > in-memory/cache structure is a SECURITY/CONFIGURATION concern, not part of this
-> core model; it is intentionally omitted here. See the follow-up note in the PR.
+> core model; it is intentionally omitted here.
 
 ### `refresh_token`
 
@@ -301,6 +301,10 @@ member per resource (its `permissions` set is amended in place).
 > Section 10. `resource_id` is a soft reference (no DB-level FK) because
 > `resource_type` is polymorphic; referential cleanup for the M1 resource type
 > (server) is handled in the delete use case and by the membership-removal cascade.
+> Because there is no FK on `resource_id`, deleting a single server does not
+> remove its grants automatically: the server-delete use case must also delete the
+> `resource_grant` rows for `(resource_type='server', resource_id=<server.id>)` in
+> the same `UnitOfWork` transaction (Section 10), so no dangling grant rows remain.
 
 ---
 
@@ -496,6 +500,13 @@ Distinct from member removal, **deleting a whole Community** cascades to its
 `membership`, `role`, `membership_role`, `resource_grant`, `server` (and thence
 `backup`, `file_edit_history`) rows via `ON DELETE CASCADE`, while `audit_log`
 keeps its soft-referenced history.
+
+Also distinct, **deleting a single server** (without deleting its Community) must
+sweep the `resource_grant` rows that point at it. Since `resource_id` is a soft
+reference (no FK; Section 6), this is not automatic: the server-delete use case
+deletes the `resource_grant` rows for `(resource_type='server', resource_id=<server.id>)`
+in the same `UnitOfWork` transaction as the `server` row — the same pattern as the
+member-removal grant cleanup — so no dangling polymorphic grant rows remain.
 
 The two grant-cleanup paths above (cascade vs use-case) exist because
 `resource_grant` is keyed by `user_id` for natural querying (Section 6); the
