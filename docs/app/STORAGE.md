@@ -78,12 +78,15 @@ across servers (FR-VER-3) and contain no Community data.
 │   └── <community-id>/
 │       └── servers/
 │           └── <server-id>/
-│               ├── current/                 # authoritative working set (the published snapshot)
-│               │   ├── world/
-│               │   ├── server.properties
-│               │   └── ...                   # the server's full working directory
-│               ├── incoming/                 # staging area for in-flight snapshot transfers (Section 4)
-│               │   └── <transfer-id>/
+│               ├── current -> snapshots/<snapshot-id>/  # symlink to the live snapshot; the publish pointer (Section 4)
+│               ├── snapshots/                # published working-set snapshots; current points at the live one
+│               │   └── <snapshot-id>/        # the full working directory for one published state
+│               │       ├── world/
+│               │       ├── server.properties
+│               │       └── ...
+│               ├── incoming/                 # staging area for in-flight snapshot/restore transfers (Section 4)
+│               │   ├── <transfer-id>/        # an in-flight snapshot being streamed in
+│               │   └── restore-<backup-id>/  # a backup being extracted before publish (Section 4.1)
 │               ├── versions/                 # retained per-file versions for rollback (Section 5)
 │               │   └── <relative-file-path>/
 │               │       ├── <version-id>      # an immutable prior content of that file
@@ -97,10 +100,18 @@ across servers (FR-VER-3) and contain no Community data.
 
 Notes:
 
-- `current/` is the authoritative copy. While a server is running it is
-  temporarily stale (FR-DATA-4); `Storage` does not know server state — the
-  application layer decides when to read `current/` vs. read-through to the
-  Worker per the Section 6.9 state-branching policy.
+- `current` is a **symlink** to the live entry under `snapshots/`; it names the
+  authoritative copy and is the atomic-publish pointer (Section 4.2).
+  Dereferencing `current/` reaches the authoritative working set. While a server
+  is running that copy is temporarily stale (FR-DATA-4); `Storage` does not know
+  server state — the application layer decides when to read `current/` vs.
+  read-through to the Worker per the Section 6.9 state-branching policy.
+- `snapshots/<snapshot-id>/` holds published working-set states. Only the one
+  targeted by the `current` symlink is authoritative; superseded snapshots are
+  reclaimed after a publish (Section 4.3). Single-file edits (Section 4.4) mutate
+  the live snapshot in place via a temp-sibling rename, atomic at file
+  granularity; whole-working-set publishes mint a new snapshot and flip the
+  pointer.
 - `<community-id>` and `<server-id>` are opaque identifiers minted by the API
   (not user-supplied names), so the namespace cannot collide and is not subject
   to path-traversal from naming (Section 6).
@@ -209,11 +220,13 @@ Every operation that replaces `current/` (snapshot commit, backup restore)
 follows the same two-phase shape:
 
 1. **Stage.** Write the entire new working set into an isolated, non-authoritative
-   location (`incoming/<transfer-id>/` for snapshots; an extraction staging dir
+   location (`incoming/<transfer-id>/` for snapshots; `incoming/restore-<backup-id>/`
    for restores). `current/` is untouched throughout.
-2. **Publish.** Once the staged copy is **proven complete**, make it
-   authoritative in a single atomic step (Section 4.2). Only after publish
-   succeeds is the old `current/` reclaimed.
+2. **Publish.** Once the staged copy is **proven complete**, move it into
+   `snapshots/<snapshot-id>/` and make it authoritative by a single atomic
+   pointer switch (Section 4.2). The pointer switch is the only step that changes
+   what `current` resolves to. Only after it succeeds is the superseded snapshot
+   reclaimed.
 
 A transfer is "proven complete" before publish by the caller signalling
 end-of-stream plus an integrity check (size/manifest match between what the
@@ -226,11 +239,24 @@ refuses to publish without it.
 The publish step's atomicity is realized differently per adapter family, but the
 *observable guarantee* is identical (Section 7 tabulates it per adapter):
 
-- **fs / remote-fs:** publish is a **directory rename**
-  (`incoming/<transfer-id>/` → `current/`, after moving the old `current/`
-  aside). Rename within one filesystem is atomic, so a reader sees either the old
-  or the new `current/`, never a partial. The old copy is deleted only after the
-  rename returns.
+- **fs / remote-fs:** publish is a **`current` symlink flip**, mirroring the
+  object backend's pointer design. The staged copy is first moved into
+  `snapshots/<snapshot-id>/` (a fresh, never-before-published name, so this move
+  never overwrites anything authoritative). Then a new symlink is created at a
+  temporary name pointing at that snapshot and **atomically renamed over
+  `current`** (`rename(2)` of one symlink onto another, within the server
+  directory). Same-directory rename is atomic on POSIX filesystems, so `current`
+  resolves to either the old snapshot or the new one at every instant — it is
+  never absent and never partial. The superseded snapshot is deleted only after
+  the flip returns.
+
+  This is chosen over `renameat2(RENAME_EXCHANGE)` (Linux-only; commonly
+  unsupported over NFS/SMB) and over deleting `current/` then renaming the new
+  copy into place (which leaves a window where `current` does not exist — the
+  exact defect being fixed). A symlink flip needs only atomic same-directory
+  rename, which is already the guarantee the remote-fs adapter requires of its
+  mount (Section 7.2), so it is the portable option across all path-based
+  backends.
 - **object:** there is no atomic multi-object rename, so the published state is
   named by a **single pointer object** (a small `current.json`-style manifest
   listing the object keys that make up the live working set). Publish writes all
@@ -244,14 +270,17 @@ The publish step's atomicity is realized differently per adapter family, but the
 
 | Crash point | fs / remote-fs | object |
 |---|---|---|
-| During **stage** (writing `incoming/`) | `current/` intact; orphan staging dir is cleaned by `abort_snapshot` or a startup sweep | `current/` intact; orphan data objects under the un-referenced prefix are GC'd |
-| Between stage and **publish** | `current/` intact (still old copy); staging discarded on recovery | pointer still references old prefix; new prefix is orphaned and GC'd |
-| During **publish** | the rename is atomic — it either happened or it did not; a partial rename cannot be observed | the pointer PUT is atomic — it either references the old or the new prefix |
-| After publish, before old-copy reclaim | `current/` is the new copy; the set-aside old copy is an orphan, cleaned on recovery | pointer references the new prefix; old prefix is an orphan, GC'd |
+| During **stage** (writing `incoming/`) | `current` still points at the old snapshot; orphan staging dir is cleaned by `abort_snapshot` or a startup sweep | pointer still references old prefix; orphan data objects under the un-referenced prefix are GC'd |
+| After stage, before the staged copy is **moved into `snapshots/`** | `current` unchanged (old snapshot); the staged dir in `incoming/` is an orphan, cleaned on recovery | pointer still references old prefix; new prefix is orphaned and GC'd |
+| After move into `snapshots/`, before the **symlink flip** | `current` still points at the old snapshot; the freshly moved `snapshots/<snapshot-id>/` is not yet referenced, so it is an orphan, cleaned by the sweep (it is unreferenced because no symlink targets it) | (no analogue — object stage writes directly under the new prefix) |
+| During the **symlink flip** | same-directory rename is atomic — `current` resolves to either the old or the new snapshot; it is never absent and never a partial pointer | the pointer PUT is atomic — it either references the old or the new prefix |
+| After the flip, before superseded-snapshot reclaim | `current` points at the new snapshot; the superseded `snapshots/<snapshot-id>/` is an orphan (unreferenced by `current`), cleaned on recovery | pointer references the new prefix; old prefix is an orphan, GC'd |
 
-The invariant in every row: **`current/` (or the pointer) is never partial.**
-Recovery is idempotent — re-running `abort_snapshot` or the startup sweep over
-orphaned staging/prefixes is always safe.
+The invariant in every row: **`current` (or the object pointer) always resolves
+to one complete snapshot — never absent, never partial.** Recovery is
+idempotent: the startup sweep reclaims any `snapshots/<snapshot-id>/` not
+targeted by `current` and any leftover `incoming/` staging dir, and re-running
+`abort_snapshot` or the sweep is always safe.
 
 ### 4.4 Single-file writes
 
@@ -341,22 +370,22 @@ ARCHITECTURE.md Section 6 (e.g. `FsStorage`, `ObjectStorage`).
 | Aspect | Guarantee / mechanism |
 |---|---|
 | Backing | A directory tree on the API host's local disk, rooted at `<root>` (Section 2). |
-| Atomic publish | Directory `rename(2)` within one filesystem (Section 4.2). |
+| Atomic publish | `current` symlink flip via same-directory `rename(2)` (Section 4.2). |
 | Single-file write | temp-write + fsync + atomic rename (Section 4.4). |
 | Path-traversal | canonicalize + root-containment check (Section 6). |
 | Best for | The legacy single-host posture and the simplest M1 deployment. |
-| Caveat | `<root>` must be a single filesystem so renames are atomic; the staging and current dirs must not straddle a mount boundary (a cross-device rename is not atomic). |
+| Caveat | `<root>` must be a single filesystem so the snapshot move and the symlink rename stay atomic; staging, snapshots, and the symlink must not straddle a mount boundary (a cross-device rename is not atomic). |
 
 ### 7.2 remote-fs (network/shared filesystem)
 
 | Aspect | Guarantee / mechanism |
 |---|---|
 | Backing | A POSIX-like remote/shared mount (NFS, SMB, a CSI volume) presented as a normal path. |
-| Atomic publish | Same directory-rename mechanism as fs, **provided the mount honors atomic rename and close-to-open consistency.** |
+| Atomic publish | Same `current` symlink-flip mechanism as fs, **provided the mount honors symlinks, atomic same-directory rename, and close-to-open consistency.** |
 | Single-file write | temp-write + fsync + atomic rename, same as fs. |
 | Path-traversal | Identical to fs (the adapter logic is shared). |
 | Best for | Letting the authoritative store outlive a single API host / sit on shared infrastructure without moving to object storage. |
-| Caveat | Atomicity and durability depend on the mount's semantics; the adapter documents the required guarantees (atomic same-dir rename, fsync durability) and the operator must provision a mount that meets them. Cross-device rename caveat (7.1) applies identically. |
+| Caveat | Atomicity and durability depend on the mount's semantics; the adapter documents the required guarantees (symlink support, atomic same-dir rename, fsync durability) and the operator must provision a mount that meets them. Cross-device rename caveat (Section 7.1) applies identically. |
 
 `remote-fs` may share most code with `fs` (both are path-based); they are
 distinct entries because their **operational guarantees and failure modes
