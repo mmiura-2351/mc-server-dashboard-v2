@@ -58,8 +58,21 @@ buf build       # compile the module (sanity check)
 buf format -w   # auto-format the .proto files
 ```
 
-`buf breaking` compares against a baseline; wire it to the default branch once a
-generation/CI step exists (issue #22).
+### Breaking-change detection
+
+`buf breaking` compares the working tree's contract against the baseline on
+`origin/main` and fails on any backwards-incompatible change (those drive a
+MAJOR version bump per [`../docs/dev/RELEASING.md`](../docs/dev/RELEASING.md)).
+Run it locally from the repo root before pushing:
+
+```
+make proto-breaking   # needs origin/main fetched (git fetch origin main)
+```
+
+It is **not** part of `make check`: `check` is meant to be fast and depend only
+on local state, whereas this needs network/git refs to resolve the baseline.
+The enforced gate is the proto CI workflow (`.github/workflows/proto.yml`),
+which runs `make proto-breaking` on every PR that touches the contract.
 
 ## Regeneration
 

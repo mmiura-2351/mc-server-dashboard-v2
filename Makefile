@@ -12,7 +12,7 @@
 .PHONY: all check lint format test \
 	api-lint api-format api-test \
 	worker-lint worker-format worker-test \
-	proto-lint proto-gen proto-check \
+	proto-lint proto-gen proto-check proto-breaking \
 	bootstrap hooks-install
 
 # golangci-lint is not part of the Go distribution; it is installed into a
@@ -106,6 +106,14 @@ hooks-install:
 
 proto-lint:
 	cd proto && buf lint
+
+# Breaking-change gate: compare the working tree's proto/ against the contract
+# on origin/main and fail on any backwards-incompatible change (those drive a
+# MAJOR bump per docs/dev/RELEASING.md). Needs origin/main fetched locally; not
+# part of `make check` (keeps `check` fast + local-state-independent). The proto
+# CI workflow is the enforced gate; this target is for local pre-flight.
+proto-breaking:
+	cd proto && buf breaking . --against '../.git#branch=origin/main,subdir=proto'
 
 # Regenerate both languages' stubs from proto/. Go via buf (pinned local
 # plugins); Python via grpcio-tools + mypy-protobuf (pinned in api/ dev group).
