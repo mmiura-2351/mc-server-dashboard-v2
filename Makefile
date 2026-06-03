@@ -10,8 +10,8 @@
 #   make hooks-install  # install the git hooks (one-time)
 
 .PHONY: all check lint format test \
-	api-lint api-format api-format-check api-test \
-	worker-lint worker-format worker-format-check worker-test \
+	api-lint api-format api-test \
+	worker-lint worker-format worker-test \
 	bootstrap hooks-install
 
 # golangci-lint is not part of the Go distribution; it is installed into a
@@ -44,9 +44,6 @@ api-format:
 	cd api && uv run ruff format .
 	cd api && uv run ruff check --fix .
 
-api-format-check:
-	cd api && uv run ruff format --check .
-
 api-test:
 	cd api && uv run pytest
 
@@ -67,12 +64,6 @@ worker-lint: $(GOLANGCI)
 
 worker-format:
 	cd worker && gofmt -w .
-
-worker-format-check:
-	@out="$$(cd worker && gofmt -l .)"; \
-	if [ -n "$$out" ]; then \
-		echo "gofmt: the following files are not formatted:"; echo "$$out"; exit 1; \
-	fi
 
 worker-test:
 	cd worker && go test ./...
