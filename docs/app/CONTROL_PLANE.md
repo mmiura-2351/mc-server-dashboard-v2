@@ -189,6 +189,11 @@ Notes:
   realized by the Worker's `WorkingDir` Port (ARCHITECTURE.md Section 5.2). The
   control plane is for small interactive edits; bulk movement stays on the data
   plane (ARCHITECTURE.md Section 7.2).
+- **Delete and config edit are not control-plane commands.** Server delete and
+  config editing (FR-SRV-2) are API/Storage-side operations: deleting a running
+  server is stop-then-delete, and config edits on a running server go through the
+  `ReadFile` / `EditFile` file-access commands above (ARCHITECTURE.md
+  Section 7.2).
 
 ---
 
@@ -207,7 +212,12 @@ events such as a heartbeat).
 `ServerState` enumerates the observed states. REQUIREMENTS.md FR-SRV-4 names
 running / stopped / starting / crashed; the contract adds the transient
 `STOPPING` and `RESTARTING` states the lifecycle commands pass through, so a
-client sees an accurate live state during a transition.
+client sees an accurate live state during a transition. The `ServerState` enum
+is the full set of values a Worker can report; the API caches the last-reported
+value in `observed_state` ([`DATABASE.md`](DATABASE.md)). The `unknown` value
+that column also allows is an API-side inference (set when the owning Worker
+disconnects), never reported by a Worker, so it is deliberately outside this wire
+contract and the enum has no `UNKNOWN` value.
 
 Real-time delivery is best-effort end to end: if the control plane is down the
 API's REST endpoints still function and clients simply miss live updates

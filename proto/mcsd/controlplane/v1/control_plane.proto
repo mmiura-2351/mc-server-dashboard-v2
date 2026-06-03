@@ -315,7 +315,11 @@ message StatusChange {
 
 // ServerState is the observed runtime state of a server (FR-SRV-4:
 // running / stopped / starting / crashed, plus the in-between transitions and a
-// restarting state the lifecycle commands produce).
+// restarting state the lifecycle commands produce). This is the full set of
+// values a Worker can report. The API caches the last-reported value in
+// Server.observed_state (DATABASE.md); that column also allows "unknown", which
+// is an API-side inference (set when the owning Worker disconnects), never
+// reported by a Worker, so it is intentionally not a value here.
 enum ServerState {
   SERVER_STATE_UNSPECIFIED = 0;
   SERVER_STATE_STARTING = 1;
