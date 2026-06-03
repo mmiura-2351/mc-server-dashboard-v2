@@ -1,0 +1,25 @@
+# Configuration for GitHub's generated release notes.
+# Groups merged PRs by their category label and excludes noise.
+# Labels and groups mirror docs/dev/CONTRIBUTING.md Section 5.
+changelog:
+  exclude:
+    labels:
+      - dependencies
+      - chore
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking
+    - title: Features
+      labels:
+        - feature-request
+        - enhancement
+    - title: Bug Fixes
+      labels:
+        - bug
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Other Changes
+      labels:
+        - "*"
