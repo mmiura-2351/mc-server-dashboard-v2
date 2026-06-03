@@ -6,6 +6,8 @@ on:
       - "proto/**"
       - "worker/internal/controlplane/**"
       - "api/src/mcsd/**"
+      - "api/pyproject.toml"
+      - "api/uv.lock"
       - "Makefile"
       - ".github/workflows/proto.yml"
   push:
@@ -14,6 +16,8 @@ on:
       - "proto/**"
       - "worker/internal/controlplane/**"
       - "api/src/mcsd/**"
+      - "api/pyproject.toml"
+      - "api/uv.lock"
       - "Makefile"
       - ".github/workflows/proto.yml"
 
