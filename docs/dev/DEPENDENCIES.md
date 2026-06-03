@@ -29,7 +29,9 @@ lands and are marked *(forthcoming)*.
 
 - Each ecosystem commits its lockfile (`api/`: the uv lockfile; `worker/`:
   `go.sum` with `go.mod`). Lockfiles are the reproducibility boundary and must
-  be committed.
+  be committed. (`worker/go.sum` is generated, and from then on committed, only
+  once the module has external dependencies; a dependency-free module has only
+  `go.mod`.)
 - Reproducible installs resolve from the lockfile; routine updates regenerate it
   through the ecosystem's own command *(forthcoming)*.
 
