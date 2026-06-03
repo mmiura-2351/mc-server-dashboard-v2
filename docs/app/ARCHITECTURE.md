@@ -337,13 +337,12 @@ version-to-Java mapping is a working reference for the selector.
 
 ## 8. Related documents
 
-These slot in as their issues land; this document links them and does not
-duplicate their content.
+This document links these and does not duplicate their content.
 
-| Doc | Covers | Issue |
-|---|---|---|
-| [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; the source of truth for scope | — |
-| `DATABASE.md` *(planned)* | Persistence model for the core entities | #15 |
-| `CONFIGURATION.md` *(planned)* | Runtime configuration & adapter selection | #16 |
-| `STORAGE.md` *(planned)* | `Storage` adapter contracts & atomic snapshot publish | #17 |
-| `proto/` contract reference *(planned)* | Concrete control-plane messages | #2 |
+| Doc | Covers |
+|---|---|
+| [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; the source of truth for scope |
+| [`DATABASE.md`](DATABASE.md) | Persistence model for the core entities |
+| [`CONFIGURATION.md`](CONFIGURATION.md) | Runtime configuration & adapter selection |
+| [`STORAGE.md`](STORAGE.md) | `Storage` adapter contracts & atomic snapshot publish |
+| [`CONTROL_PLANE.md`](CONTROL_PLANE.md) | Concrete control-plane messages |
