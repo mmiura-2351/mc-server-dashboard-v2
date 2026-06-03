@@ -11,7 +11,7 @@ that needs more than a paragraph lives here.
 
 Docs are split by intent:
 
-- **`app/`** *(planned)* — how the running system works: architecture,
+- **`app/`** — how the running system works: architecture,
   persisted data, the HTTP surface, the API↔Worker control-plane contract,
   runtime configuration, cross-cutting behaviour. Read these when reasoning
   about the system itself.
@@ -27,12 +27,15 @@ Docs are split by intent:
 |---|---|
 | [`REQUIREMENTS.md`](REQUIREMENTS.md) | What v2 must do and the architectural constraints it must satisfy: the API/Worker split, pluggable execution, the Community model, two-layer authorization, data/storage lifecycle, and the resolved design decisions. The source of truth for scope. |
 
-## Application docs (`app/`) — planned
+## Application docs (`app/`)
 
-To be written during the design phase. Expected entries: `ARCHITECTURE.md`
-(the Hexagonal layering and the api/worker/proto boundaries), the `proto/`
-control-plane contract reference, `CONFIGURATION.md`, `DATABASE.md`, and the
-storage/execution adapter references.
+| Doc | What it covers |
+|---|---|
+| [`app/ARCHITECTURE.md`](app/ARCHITECTURE.md) | The Hexagonal (Ports & Adapters) layering, the `api/` / `worker/` / `proto/` module boundaries and dependency direction, the catalog of domain Ports per side, and the architecture-level design decisions from `REQUIREMENTS.md` Section 9.1. |
+
+More entries are written during the design phase: the `proto/` control-plane
+contract reference, `CONFIGURATION.md`, `DATABASE.md`, and the storage/execution
+adapter references.
 
 ## Development docs (`dev/`)
 
