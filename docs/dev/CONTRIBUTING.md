@@ -53,8 +53,18 @@ runs the full `make check` (lint + typecheck + test for both ecosystems).
 - **Title**: short imperative ("Fix Y", not "Fixed Y" or "Y fix").
 - **Body**: include `Resolves #N` (or `Fixes` / `Refs`) on its own line when a
   related issue exists; omit it when there is none.
-- Each PR carries a category label — these drive the generated release notes
-  (see [`RELEASING.md`](RELEASING.md)).
+- Each PR carries **exactly one** category label — these drive the generated
+  release notes (see [`RELEASING.md`](RELEASING.md)). Pick the single best fit:
+
+  | Label | When to use | Release-notes group |
+  |---|---|---|
+  | `breaking` | Backwards-incompatible change (HTTP API, `proto/` contract, or operator-visible behavior) | Breaking Changes |
+  | `feature-request` | New capability beyond the current scope | Features |
+  | `enhancement` | Improvement to existing functionality | Features |
+  | `bug` | Bug fix | Bug Fixes |
+  | `documentation` | Docs-only change | Documentation |
+  | `dependencies` | Dependency updates | *excluded* |
+  | `chore` | Release/CI/build maintenance with no user-facing effect | *excluded* |
 - In this monorepo, a PR that changes the `proto/` contract updates `api/` and
   `worker/` together; never merge a contract change that leaves one side
   uncompiled or unimplemented.
