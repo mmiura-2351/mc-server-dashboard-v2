@@ -36,7 +36,7 @@ On registration and password change the API rejects a password that fails any
 enabled rule. The rules and their defaults are configured under `auth.password.*`
 ([`CONFIGURATION.md`](CONFIGURATION.md) Section 7.1):
 
-- **Length** — between `min_length` (12) and `max_length` (128). The upper bound
+- **Length** — between `min_length` and `max_length`. The upper bound
   is a DoS guard and respects the bcrypt 72-byte cap.
 - **Complexity-or-length** — at least 3 of {upper, lower, digit, symbol} **or**
   at least 16 characters (`require_complexity`).
@@ -63,24 +63,24 @@ Section 7.2); the algorithm is:
 1. **Record** every authentication attempt (username, source IP, success flag,
    timestamp).
 2. **Per-username window** — count failures for the username within
-   `username_window_seconds` (900 s). At `username_threshold` (5) the account is
+   `username_window_seconds`. At `username_threshold` the account is
    locked.
 3. **Per-IP window** — count failures from the source IP within
-   `ip_window_seconds` (300 s). At `ip_threshold` (20) the source IP is
+   `ip_window_seconds`. At `ip_threshold` the source IP is
    throttled. This depends on a trustworthy client IP (Section 4).
 4. **Lockout with exponential back-off** — the lockout duration starts at
-   `lockout_base_seconds` (900 s) and doubles on each repeat lockout of the same
-   account, capped at `lockout_max_seconds` (86 400 s). A per-account historic
+   `lockout_base_seconds` and doubles on each repeat lockout of the same
+   account, capped at `lockout_max_seconds`. A per-account historic
    lockout count drives the doubling.
-5. **Artificial failure delay** — every failed attempt incurs `delay_ms` (200 ms)
-   so a caller cannot distinguish "no such user" from "wrong password" by timing,
-   denying username enumeration.
+5. **Artificial failure delay** — every failed attempt incurs the
+   `delay_ms` delay so a caller cannot distinguish "no such user" from
+   "wrong password" by timing, denying username enumeration.
 
 A successful authentication clears the active lockout and resets the back-off for
 that account.
 
 This algorithm needs **runtime state** that outlives a single request: the
-attempt records the sliding windows count, and the per-account lockout/back-off
+attempt records that the sliding windows count over, and the per-account lockout/back-off
 record. Where that state lives is decided in Section 3.
 
 ---
