@@ -62,9 +62,11 @@ It works because of two conventions the project already follows:
 - PR titles are short and imperative, and each PR carries a category label.
 
 At release time, the notes for `vX.Y.Z` are produced from the PRs merged since
-the previous tag — grouped by label (features / fixes / breaking / …) and with
-noise (e.g. dependency or release-automation PRs) excluded. The grouping and
-exclusion rules live in repository release configuration *(forthcoming)*.
+the previous tag — grouped by label (Breaking Changes / Features / Bug Fixes /
+Documentation, with anything else under Other Changes) and with noise (the
+`dependencies` and `chore` labels) excluded. The grouping and exclusion rules
+live in [`.github/release.yml`](../../.github/release.yml); the labels driving
+them are defined in [`CONTRIBUTING.md`](CONTRIBUTING.md) Section 5.
 
 A curated `CHANGELOG.md` may be reintroduced if external consumers appear or at
 `1.0.0`. Until then, the generated notes on each GitHub Release are the
@@ -97,4 +99,5 @@ the main line.
 
 - **Version source-of-truth** in the monorepo (a top-level version file vs. the
   git tag as the authority, and how `api/` and `worker/` read it at build time).
-- **Release automation** tool, and the release-notes grouping/exclusion config.
+- **Release automation** tool (the release-notes grouping/exclusion config is
+  set; see Section 3).
