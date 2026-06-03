@@ -1,0 +1,52 @@
+[project]
+name = "mc-server-dashboard-api"
+version = "0.0.0"
+description = "Authoritative API service for mc-server-dashboard v2"
+requires-python = ">=3.13,<3.14"
+dependencies = []
+
+[dependency-groups]
+# Dev / tooling dependencies: kept current, no upper bound
+# (docs/dev/DEPENDENCIES.md Section 1). Versions respect the 7-day
+# supply-chain cooldown (Section 3) at the time they were added.
+dev = [
+    # ruff 0.15.15 (2026-05-28) is inside the 7-day cooldown as of this
+    # change; cap below it. Lift the cap once it ages out (Section 3).
+    "ruff>=0.15.14,<0.15.15",
+    "mypy>=2.1.0",
+    "pytest>=9.0.3",
+    "import-linter>=2.11",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mc_server_dashboard_api"]
+
+[tool.ruff]
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Conservative starter set: pyflakes, pycodestyle, isort.
+select = ["E", "F", "I"]
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.importlinter]
+root_packages = ["mc_server_dashboard_api"]
+
+# Import-direction enforcement scaffolding (ARCHITECTURE.md Section 2.2).
+# The per-domain quadrants (domain / application / adapters / api) are not
+# yet present, so this contract is intentionally minimal. Layer contracts
+# are added as the domain packages land.
+[[tool.importlinter.contracts]]
+name = "Package is importable"
+type = "independence"
+modules = ["mc_server_dashboard_api"]
