@@ -1,0 +1,19 @@
+# golangci-lint configuration (schema v2). See https://golangci-lint.run.
+# Pinned tool version is documented in worker/README.md.
+version: "2"
+
+linters:
+  # Start from the curated default set and add a few high-signal linters.
+  default: standard
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - revive
+
+formatters:
+  enable:
+    - gofmt
