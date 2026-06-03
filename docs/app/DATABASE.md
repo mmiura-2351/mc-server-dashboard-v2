@@ -327,7 +327,7 @@ assigned Worker.
 | `execution_backend` | text | `host_process` / `container` (CHECK enum) |
 | `config` | jsonb | server configuration blob (properties, JVM args, snapshot-interval override per FR-DATA-7) |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
-| `observed_state` | text | last state reported by the Worker: `running` / `stopped` / `starting` / `crashed` / `unknown` (CHECK enum) |
+| `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
 | `assigned_worker_id` | uuid FK → `worker.id` nullable | `ON DELETE SET NULL` (FR-WRK-4) |
 | `created_at` / `updated_at` | timestamptz | |
@@ -343,7 +343,12 @@ are a cache of reality, never an authority. Divergence between them is normal an
 expected (a server can be `desired=running, observed=crashed`); reconciliation
 (re-issuing commands, marking servers on a dead Worker) reads both. This mirrors
 [`ARCHITECTURE.md`](ARCHITECTURE.md) Section 3.3 (API holds desired state, Worker
-reports observed state).
+reports observed state). The reportable values (`starting` / `running` /
+`stopping` / `stopped` / `restarting` / `crashed`) mirror the control-plane
+`ServerState` enum ([`CONTROL_PLANE.md`](CONTROL_PLANE.md)); `unknown` is
+**API-inferred** — set by the API when the owning Worker disconnects and never
+reported by a Worker, which is why the proto `ServerState` enum has no `UNKNOWN`
+value.
 
 **`execution_backend` immutability.** The backend is stored as a plain column but
 is **immutable for the server's lifetime** in M1 (FR-EXE-3,

@@ -1,0 +1,361 @@
+// The Minecraft Server Dashboard v2 control-plane contract.
+//
+// A single Worker-initiated gRPC bidirectional stream multiplexes API->Worker
+// commands and Worker->API events (REQUIREMENTS.md Section 5.1). Registration is
+// the first Worker->API message; thereafter the stream carries commands,
+// command results, and asynchronous events (status / log / metrics / heartbeat).
+//
+// See docs/app/CONTROL_PLANE.md for the stream lifecycle, message-flow diagrams,
+// and the requirement-by-requirement mapping. This file is the binding contract;
+// the doc explains it.
+syntax = "proto3";
+
+package mcsd.controlplane.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// WorkerService is the only control-plane service. Workers dial the API and open
+// the persistent stream; the API never dials a Worker (Workers have no inbound
+// exposure, REQUIREMENTS.md Section 5.1).
+service WorkerService {
+  // Session is the single bidirectional stream for one connected Worker. The
+  // Worker sends WorkerMessage values (starting with a Register), the API sends
+  // ApiMessage values (commands). Closing the stream disconnects the Worker.
+  rpc Session(stream WorkerMessage) returns (stream ApiMessage);
+}
+
+// ---------------------------------------------------------------------------
+// Envelopes
+// ---------------------------------------------------------------------------
+
+// WorkerMessage is every message a Worker sends to the API over the stream.
+// Exactly one payload field is set.
+message WorkerMessage {
+  // correlation_id ties a flow together end to end (REQUIREMENTS.md NFR-OBS-1).
+  // For a command_result it MUST equal the originating ApiCommand.command_id so
+  // the API can match a result to its command. For unsolicited events it is a
+  // fresh id the API can log and trace.
+  string correlation_id = 1;
+
+  // emitted_at is the Worker's clock reading when the message was produced.
+  google.protobuf.Timestamp emitted_at = 2;
+
+  oneof payload {
+    // Register MUST be the first message on a fresh stream (FR-WRK-1).
+    Register register = 3;
+    // CommandResult answers an ApiCommand (success or error).
+    CommandResult command_result = 4;
+    // Event is an asynchronous status / log / metrics / heartbeat report.
+    Event event = 5;
+  }
+}
+
+// ApiMessage is every message the API sends to a Worker over the stream.
+// Exactly one payload field is set.
+message ApiMessage {
+  // correlation_id traces the flow (REQUIREMENTS.md NFR-OBS-1). For a command it
+  // is the same value as the command's command_id; for register_ack it echoes
+  // the Register message's correlation_id.
+  string correlation_id = 1;
+
+  // sent_at is the API's clock reading when the message was produced.
+  google.protobuf.Timestamp sent_at = 2;
+
+  oneof payload {
+    // RegisterAck accepts or rejects a Register (sent first, in response).
+    RegisterAck register_ack = 3;
+    // ApiCommand instructs the Worker to act on a server.
+    ApiCommand api_command = 4;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Registration & capability advertisement (FR-WRK-1)
+// ---------------------------------------------------------------------------
+
+// Register is the Worker's opening message: who it is and what it can run.
+message Register {
+  // worker_id is the stable identifier the Worker registers under
+  // (CONFIGURATION.md Section 6.1 worker.id).
+  string worker_id = 1;
+
+  // worker_version is the Worker build/release string, for fleet visibility.
+  string worker_version = 2;
+
+  // capabilities advertises the drivers and resources the API's greedy
+  // placement filters on (FR-WRK-3).
+  WorkerCapabilities capabilities = 3;
+}
+
+// WorkerCapabilities is what a Worker advertises at registration (FR-WRK-1).
+message WorkerCapabilities {
+  // drivers is the set of execution backends this Worker offers
+  // (CONFIGURATION.md Section 6.2 worker.drivers).
+  repeated ExecutionDriverKind drivers = 1;
+
+  // max_servers is the Worker's free-capacity hint for placement; 0 means "no
+  // advertised cap" (CONFIGURATION.md Section 6.2 worker.max_servers).
+  uint32 max_servers = 2;
+
+  // resources advertises host resources for placement and monitoring.
+  HostResources resources = 3;
+}
+
+// HostResources is a coarse description of a Worker host's resources.
+message HostResources {
+  // cpu_cores is the number of logical CPUs available to the Worker.
+  uint32 cpu_cores = 1;
+  // memory_bytes is the total memory available to the Worker.
+  uint64 memory_bytes = 2;
+}
+
+// ExecutionDriverKind enumerates the execution backends (FR-EXE-2, FR-EXE-4).
+enum ExecutionDriverKind {
+  EXECUTION_DRIVER_KIND_UNSPECIFIED = 0;
+  EXECUTION_DRIVER_KIND_HOST_PROCESS = 1;
+  EXECUTION_DRIVER_KIND_CONTAINER = 2;
+}
+
+// RegisterAck accepts or rejects a registration.
+message RegisterAck {
+  // accepted is true when the API admitted this Worker into the registry.
+  bool accepted = 1;
+
+  // heartbeat_interval is how often the API expects a HEARTBEAT event. The API
+  // marks the Worker disconnected after it misses heartbeats past its liveness
+  // window (CONFIGURATION.md Section 5.1 control.heartbeat_timeout_seconds,
+  // FR-WRK-2).
+  google.protobuf.Duration heartbeat_interval = 2;
+
+  // rejection_reason explains a refusal (e.g. bad credential, duplicate id);
+  // empty when accepted is true.
+  string rejection_reason = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Commands: API -> Worker (FR-SRV-2, FR-SRV-5, Section 6.9, Section 7.2)
+// ---------------------------------------------------------------------------
+
+// ApiCommand is one instruction the Worker must act on and answer with a
+// CommandResult carrying the same command_id.
+message ApiCommand {
+  // command_id correlates this command with its CommandResult
+  // (REQUIREMENTS.md NFR-OBS-1).
+  string command_id = 1;
+
+  // server_id is the API's identifier for the target server. Set for every
+  // per-server command; empty only for future fleet-wide commands.
+  string server_id = 2;
+
+  oneof command {
+    StartServer start = 3;
+    StopServer stop = 4;
+    RestartServer restart = 5;
+    // ServerCommand forwards an RCON / console command (FR-SRV-5).
+    ServerCommand server_command = 6;
+    // Hydrate triggers the Worker to pull the working set from the API data
+    // plane before launch (FR-DATA-4). The bulk transfer itself rides the HTTP
+    // data plane, not this stream (Section 5.2).
+    HydrateTrigger hydrate = 7;
+    // Snapshot triggers the Worker to push its working set back to the API data
+    // plane (FR-DATA-4, FR-DATA-7).
+    SnapshotTrigger snapshot = 8;
+    // ReadFile reads from a running server's live working set (Section 7.2).
+    ReadFile read_file = 9;
+    // EditFile writes to a running server's live working set (Section 7.2).
+    EditFile edit_file = 10;
+  }
+}
+
+// StartServer launches a server on the Worker. Hydrate (FR-DATA-4) precedes the
+// launch; the API issues a HydrateTrigger first, then StartServer.
+message StartServer {
+  // driver is the execution backend to use; it MUST be one the Worker
+  // advertised (FR-EXE-3 fixes it per server).
+  ExecutionDriverKind driver = 1;
+
+  // jar_relpath is the server JAR path inside the hydrated working set. The API
+  // owns JAR retrieval and ships it via hydrate; the Worker never fetches it
+  // (ARCHITECTURE.md Section 7.3).
+  string jar_relpath = 2;
+
+  // minecraft_version lets the Worker pick the Java runtime (FR-EXE-5); the API
+  // does not choose the java binary.
+  string minecraft_version = 3;
+}
+
+// StopServer stops a running server. A graceful stop takes an event-driven
+// snapshot before exit (FR-DATA-7); set force to skip the graceful path.
+message StopServer {
+  bool force = 1;
+}
+
+// RestartServer stops then starts the server in place.
+message RestartServer {}
+
+// ServerCommand forwards a console / RCON command to the running server
+// (FR-SRV-5). The output is returned in the CommandResult.
+message ServerCommand {
+  // line is the raw command line sent to the server console (e.g. "say hi").
+  string line = 1;
+}
+
+// HydrateTrigger tells the Worker to pull a server's working set from the API
+// data plane into local scratch (FR-DATA-4). transfer_url and transfer_token
+// address the API-terminated HTTP data-plane endpoint (Section 5.2); the bulk
+// bytes never traverse this stream.
+message HydrateTrigger {
+  string transfer_url = 1;
+  // transfer_token is a short-lived credential authorizing this one transfer.
+  string transfer_token = 2;
+}
+
+// SnapshotTrigger tells the Worker to push its working set back to the API data
+// plane (FR-DATA-4, FR-DATA-7). For a running server the Worker performs
+// save-all over RCON first (Section 6.9).
+message SnapshotTrigger {
+  string transfer_url = 1;
+  string transfer_token = 2;
+}
+
+// ReadFile reads a path from a running server's live working set (Section 7.2).
+// Path-traversal protection is enforced on the Worker side (FR-FILE-4).
+message ReadFile {
+  // path is relative to the server's working-set root.
+  string path = 1;
+}
+
+// EditFile writes content to a path in a running server's live working set
+// (Section 7.2). Path-traversal protection is enforced on the Worker side
+// (FR-FILE-4).
+message EditFile {
+  string path = 1;
+  bytes content = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Command results: Worker -> API
+// ---------------------------------------------------------------------------
+
+// CommandResult answers exactly one ApiCommand. The enclosing WorkerMessage's
+// correlation_id equals the command's command_id.
+message CommandResult {
+  // success is true when the command was applied without error.
+  bool success = 1;
+
+  // error describes the failure; absent when success is true.
+  CommandError error = 2;
+
+  // result carries command-specific output, when the command produces any.
+  oneof result {
+    // command_output is the console/RCON output for a ServerCommand.
+    string command_output = 3;
+    // file_content is the bytes read for a ReadFile.
+    bytes file_content = 4;
+  }
+}
+
+// CommandError reports why a command failed (NFR-OBS-1 error reporting).
+message CommandError {
+  // code classifies the failure for programmatic handling.
+  CommandErrorCode code = 1;
+  // message is a human-readable explanation for logs and operators.
+  string message = 2;
+}
+
+// CommandErrorCode classifies a command failure.
+enum CommandErrorCode {
+  COMMAND_ERROR_CODE_UNSPECIFIED = 0;
+  // The target server is not known to this Worker.
+  COMMAND_ERROR_CODE_SERVER_NOT_FOUND = 1;
+  // The command is invalid for the server's current state (e.g. start a
+  // running server, RCON on a stopped one).
+  COMMAND_ERROR_CODE_INVALID_STATE = 2;
+  // The requested execution driver is not available on this Worker.
+  COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE = 3;
+  // A file path was rejected (traversal / not found / not permitted).
+  COMMAND_ERROR_CODE_FILE_ACCESS_DENIED = 4;
+  // A hydrate/snapshot data-plane transfer failed.
+  COMMAND_ERROR_CODE_TRANSFER_FAILED = 5;
+  // The Worker failed to apply the command for an unclassified reason.
+  COMMAND_ERROR_CODE_INTERNAL = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Events: Worker -> API (FR-MON-1..3, FR-WRK-2, FR-SRV-4)
+// ---------------------------------------------------------------------------
+
+// Event is an asynchronous report from a Worker, not tied to a command.
+message Event {
+  // server_id scopes the event to a server; empty for Worker-wide events such
+  // as a heartbeat.
+  string server_id = 1;
+
+  oneof event {
+    // StatusChange reports an observed server-state transition (FR-SRV-4,
+    // FR-MON-1).
+    StatusChange status_change = 2;
+    // LogLine streams a line of server output (FR-MON-2).
+    LogLine log_line = 3;
+    // Metrics reports basic runtime metrics (FR-MON-3).
+    Metrics metrics = 4;
+    // Heartbeat is the liveness signal (FR-WRK-2).
+    Heartbeat heartbeat = 5;
+  }
+}
+
+// StatusChange reports the Worker's observed runtime state for a server
+// (FR-SRV-4). The API holds desired state; this is the observed side.
+message StatusChange {
+  ServerState state = 1;
+  // detail optionally explains the transition (e.g. a crash reason).
+  string detail = 2;
+}
+
+// ServerState is the observed runtime state of a server (FR-SRV-4:
+// running / stopped / starting / crashed, plus the in-between transitions and a
+// restarting state the lifecycle commands produce). This is the full set of
+// values a Worker can report. The API caches the last-reported value in
+// Server.observed_state (DATABASE.md); that column also allows "unknown", which
+// is an API-side inference (set when the owning Worker disconnects), never
+// reported by a Worker, so it is intentionally not a value here.
+enum ServerState {
+  SERVER_STATE_UNSPECIFIED = 0;
+  SERVER_STATE_STARTING = 1;
+  SERVER_STATE_RUNNING = 2;
+  SERVER_STATE_STOPPING = 3;
+  SERVER_STATE_STOPPED = 4;
+  SERVER_STATE_RESTARTING = 5;
+  SERVER_STATE_CRASHED = 6;
+}
+
+// LogLine is a single line of a server's console output (FR-MON-2).
+message LogLine {
+  // line is the raw log text without a trailing newline.
+  string line = 1;
+  // stream distinguishes stdout from stderr.
+  LogStream stream = 2;
+}
+
+// LogStream identifies which output stream a LogLine came from.
+enum LogStream {
+  LOG_STREAM_UNSPECIFIED = 0;
+  LOG_STREAM_STDOUT = 1;
+  LOG_STREAM_STDERR = 2;
+}
+
+// Metrics is a basic runtime metrics sample for a server (FR-MON-3). Fields are
+// best-effort; a Worker that cannot measure one leaves it zero.
+message Metrics {
+  // cpu_millis is CPU usage in thousandths of a core (1000 == one full core).
+  uint32 cpu_millis = 1;
+  // memory_bytes is the resident memory of the server process.
+  uint64 memory_bytes = 2;
+  // player_count is the number of connected players, when known.
+  uint32 player_count = 3;
+}
+
+// Heartbeat is the periodic liveness signal (FR-WRK-2). Its cadence is the
+// heartbeat_interval the API returned in RegisterAck.
+message Heartbeat {}

@@ -1,0 +1,21 @@
+# buf module for the v2 control-plane contract (shared by api/ and worker/).
+# See proto/README.md for buf install + usage, and docs/app/CONTROL_PLANE.md
+# for the contract reference.
+version: v2
+modules:
+  - path: .
+lint:
+  # The standard buf rule set; STANDARD already mandates package versioning
+  # (mcsd.controlplane.v1) and the directory-matches-package layout.
+  use:
+    - STANDARD
+  # The Session RPC is a single bidi stream that multiplexes many command and
+  # event types; its request/response are deliberately the WorkerMessage /
+  # ApiMessage envelopes, not RPC-named SessionRequest/SessionResponse. Except
+  # the request/response naming rules so those meaningful names are allowed.
+  except:
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - FILE
