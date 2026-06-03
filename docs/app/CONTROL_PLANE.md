@@ -1,0 +1,266 @@
+# Control Plane
+
+> Status: **Design** · Audience: contributors to `api/`, `worker/`, `proto/`
+>
+> This document is the reference for the API↔Worker **control-plane**
+> contract: the gRPC bidirectional stream, its lifecycle, the command and event
+> messages, and how each maps to [`../REQUIREMENTS.md`](../REQUIREMENTS.md). The
+> binding contract is the buf module under [`../../proto/`](../../proto/)
+> (`mcsd.controlplane.v1`); this document explains it. Where the two disagree,
+> the `.proto` files and the requirements win and this document is wrong.
+
+## Table of Contents
+
+1. [Scope](#1-scope)
+2. [Connection model](#2-connection-model)
+3. [Message envelopes and correlation](#3-message-envelopes-and-correlation)
+4. [Stream lifecycle](#4-stream-lifecycle)
+5. [Commands (API to Worker)](#5-commands-api-to-worker)
+6. [Events (Worker to API)](#6-events-worker-to-api)
+7. [Error reporting](#7-error-reporting)
+8. [Requirement mapping](#8-requirement-mapping)
+9. [Related documents](#9-related-documents)
+
+---
+
+## 1. Scope
+
+The control plane is the lightweight, always-on command/event channel between
+the API and a Worker (REQUIREMENTS.md Section 5.2). It carries small,
+latency-sensitive messages: lifecycle commands, RCON/console commands,
+hydrate/snapshot **triggers**, file read/edit of a running server, and the
+Worker's status / log / metrics / heartbeat events.
+
+It does **not** carry bulk data. World/JAR/backup transfer (hydrate, snapshot)
+rides the separate **data plane** — an API-terminated HTTP endpoint — so large
+transfers never block control traffic (REQUIREMENTS.md Section 5.2,
+ARCHITECTURE.md Section 4). The control plane only *triggers* a transfer and
+hands the Worker the URL and a one-time token; the bytes move out of band.
+
+---
+
+## 2. Connection model
+
+The Worker initiates and maintains a single persistent gRPC **bidirectional
+stream** to the API (REQUIREMENTS.md Section 5.1). One stream multiplexes
+everything for that Worker; the API never dials a Worker, so Workers need no
+inbound exposure and can be added or removed dynamically (ARCHITECTURE.md
+Section 7.2).
+
+The service is one RPC:
+
+```
+service WorkerService {
+  rpc Session(stream WorkerMessage) returns (stream ApiMessage);
+}
+```
+
+- `WorkerMessage` — everything the Worker sends (registration, command
+  results, events).
+- `ApiMessage` — everything the API sends (registration acknowledgement,
+  commands).
+
+The channel is authenticated and encrypted with TLS/mTLS (REQUIREMENTS.md
+NFR-SEC-1); the TLS material and the Worker credential are configuration
+(CONFIGURATION.md Sections 5.1 and 6.1). Transport security sits below this
+contract and is not modelled in the `.proto`.
+
+---
+
+## 3. Message envelopes and correlation
+
+Both directions wrap their payload in a `oneof` envelope so the single stream
+can multiplex many message types and grow new ones without a new RPC. Every
+envelope carries a `correlation_id` and a timestamp.
+
+`correlation_id` traces a flow end to end (REQUIREMENTS.md NFR-OBS-1):
+
+- An `ApiCommand` carries its own `command_id`. The matching `CommandResult`
+  sets the enclosing `WorkerMessage.correlation_id` to that same `command_id`,
+  so the API pairs a result to its command.
+- `RegisterAck` echoes the `Register` message's `correlation_id`.
+- Unsolicited events use a fresh `correlation_id` the API logs and traces.
+
+```
+WorkerMessage{correlation_id, emitted_at, oneof: Register | CommandResult | Event}
+ApiMessage   {correlation_id, sent_at,    oneof: RegisterAck | ApiCommand}
+```
+
+`ApiCommand` itself is a second `oneof` (one command per message) carrying
+`command_id` and the target `server_id`; `Event` is a `oneof` of the four event
+kinds. Adding a command or event type is an additive `oneof` field — a
+backward-compatible change under the module's `FILE` breaking rule.
+
+---
+
+## 4. Stream lifecycle
+
+### 4.1 Connect and register
+
+```
+   Worker                                   API
+     │  open Session stream                  │
+     │ ───────────────────────────────────▶ │
+     │  WorkerMessage{Register: id, caps}    │   (FR-WRK-1)
+     │ ───────────────────────────────────▶ │
+     │                                       │  add to Worker registry
+     │   ApiMessage{RegisterAck: accepted,   │
+     │              heartbeat_interval}      │   (FR-WRK-2)
+     │ ◀─────────────────────────────────── │
+     │                                       │
+```
+
+`Register` MUST be the first message on a fresh stream. It advertises the
+Worker's id, version, and `WorkerCapabilities` (available drivers, capacity
+hint, host resources) — the input to the API's greedy placement
+(FR-WRK-1, FR-WRK-3). The API answers `RegisterAck`: `accepted` plus the
+`heartbeat_interval` it expects; on refusal, `accepted=false` with a
+`rejection_reason` and the API closes the stream.
+
+### 4.2 Steady state
+
+```
+   Worker                                   API
+     │  Event{Heartbeat}  (every interval)   │   (FR-WRK-2)
+     │ ───────────────────────────────────▶ │
+     │  Event{StatusChange | LogLine |       │   (FR-MON-1..3)
+     │        Metrics}                       │
+     │ ───────────────────────────────────▶ │
+     │                                       │
+     │   ApiCommand{command_id, server_id,   │   (FR-SRV-2/5,
+     │              start | stop | ...}      │    Section 6.9)
+     │ ◀─────────────────────────────────── │
+     │  CommandResult{correlation_id =       │
+     │      command_id, success | error}     │   (NFR-OBS-1)
+     │ ───────────────────────────────────▶ │
+```
+
+Commands and events interleave freely on the one stream. The API may have
+several commands in flight; `command_id` keeps each result matched to its
+command.
+
+### 4.3 Heartbeat and liveness
+
+The Worker emits `Event{Heartbeat}` every `heartbeat_interval` (returned in
+`RegisterAck`). The API marks the Worker disconnected when heartbeats lapse past
+its liveness window, `control.heartbeat_timeout_seconds` (CONFIGURATION.md
+Section 5.1), which is set comfortably above the interval (FR-WRK-2).
+
+### 4.4 Disconnect and reconnect
+
+A stream ends on a clean close, a transport error, or a missed-heartbeat
+timeout. On disconnect the API marks the Worker's servers accordingly
+(FR-WRK-4); those servers can be (re)started on another eligible Worker after a
+hydrate from authoritative storage. The Worker is responsible for reconnecting:
+it opens a fresh `Session` and re-`Register`s from scratch, re-advertising its
+capabilities. The control plane keeps **no** cross-stream session state —
+each connect is a clean registration, matching the stateless, replaceable nature
+of Workers (REQUIREMENTS.md Section 5.1, FR-WRK-4). The API's record of desired
+state is authoritative and drives any catch-up commands after a reconnect.
+
+---
+
+## 5. Commands (API to Worker)
+
+All commands are `ApiCommand` payloads with a `command_id` and `server_id`. Each
+maps to a lifecycle operation, RCON forwarding, a data-plane trigger, or a
+running-server file access.
+
+| Command | Meaning | Result payload | Req. ref |
+|---|---|---|---|
+| `StartServer` | Launch the server (after a preceding hydrate). Carries the driver, JAR relpath, and MC version (Worker picks the Java runtime). | none | FR-SRV-2, FR-EXE-5, ARCHITECTURE.md Section 7.3 |
+| `StopServer` | Stop the server; graceful stop triggers an event-driven snapshot. `force` skips graceful. | none | FR-SRV-2, FR-DATA-7 |
+| `RestartServer` | Stop then start in place. | none | FR-SRV-2 |
+| `ServerCommand` | Forward an RCON/console line. | `command_output` | FR-SRV-5 |
+| `HydrateTrigger` | Pull the working set from the data plane before launch; carries the transfer URL + one-time token. | none | FR-DATA-4 |
+| `SnapshotTrigger` | Push the working set back to the data plane (save-all first for a running server). | none | FR-DATA-4, FR-DATA-7, Section 6.9 |
+| `ReadFile` | Read a path from a running server's live working set. | `file_content` | Section 6.9, Section 7.2 |
+| `EditFile` | Write a path in a running server's live working set. | none | Section 6.9, Section 7.2 |
+
+Notes:
+
+- **Hydrate / snapshot are triggers only.** The command carries a transfer URL
+  and a short-lived token addressing the API's HTTP data plane; the Worker moves
+  the bytes there, off this stream (REQUIREMENTS.md Section 5.2). The data-plane
+  endpoint spec is epic #8, out of scope here.
+- **File access rides the control plane** for *running* servers only; a stopped
+  server's files are served from authoritative Storage by the API directly
+  (Section 6.9). Path-traversal protection is enforced Worker-side (FR-FILE-4),
+  realized by the Worker's `WorkingDir` Port (ARCHITECTURE.md Section 5.2). The
+  control plane is for small interactive edits; bulk movement stays on the data
+  plane (ARCHITECTURE.md Section 7.2).
+
+---
+
+## 6. Events (Worker to API)
+
+All events are `Event` payloads, scoped by `server_id` (empty for Worker-wide
+events such as a heartbeat).
+
+| Event | Meaning | Req. ref |
+|---|---|---|
+| `StatusChange` | Observed server-state transition; the Worker reports observed state, the API holds desired state. | FR-SRV-4, FR-MON-1 |
+| `LogLine` | One line of server console output (stdout/stderr). | FR-MON-2 |
+| `Metrics` | Basic runtime metrics (CPU, memory, player count; best-effort). | FR-MON-3 |
+| `Heartbeat` | Periodic liveness signal. | FR-WRK-2 |
+
+`ServerState` enumerates the observed states. REQUIREMENTS.md FR-SRV-4 names
+running / stopped / starting / crashed; the contract adds the transient
+`STOPPING` and `RESTARTING` states the lifecycle commands pass through, so a
+client sees an accurate live state during a transition.
+
+Real-time delivery is best-effort end to end: if the control plane is down the
+API's REST endpoints still function and clients simply miss live updates
+(FR-MON-4). That degradation is API-side behaviour, not part of this contract.
+
+---
+
+## 7. Error reporting
+
+A `CommandResult` with `success=false` carries a `CommandError`: a
+`CommandErrorCode` for programmatic handling and a human-readable `message` for
+logs and operators (REQUIREMENTS.md NFR-OBS-1). The codes cover the failure
+classes a Worker can hit:
+
+| Code | When |
+|---|---|
+| `SERVER_NOT_FOUND` | The target server is unknown to this Worker. |
+| `INVALID_STATE` | The command is invalid for the current state (e.g. start a running server, RCON on a stopped one). |
+| `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
+| `FILE_ACCESS_DENIED` | A file path was rejected (traversal / not found / not permitted). |
+| `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |
+| `INTERNAL` | An unclassified failure applying the command. |
+
+A registration refusal is reported differently: `RegisterAck.accepted=false`
+with a `rejection_reason`, since it predates any command.
+
+---
+
+## 8. Requirement mapping
+
+| Requirement | Where in the contract |
+|---|---|
+| Section 5.1 (one Worker-initiated bidi stream) | `WorkerService.Session`; `Register` is the first Worker message (Section 2, Section 4.1) |
+| FR-WRK-1 (register + advertise capabilities) | `Register`, `WorkerCapabilities`, `HostResources` (Section 4.1) |
+| FR-WRK-2 (liveness via heartbeat) | `Event{Heartbeat}`, `RegisterAck.heartbeat_interval` (Section 4.3) |
+| FR-WRK-3 (greedy placement input) | `WorkerCapabilities.drivers` / `max_servers` / `resources` |
+| FR-WRK-4 (replaceable Worker; reconnect) | Stateless reconnect + re-register (Section 4.4) |
+| FR-SRV-2 (start/stop/restart) | `StartServer`, `StopServer`, `RestartServer` (Section 5) |
+| FR-SRV-4 (observed runtime state) | `StatusChange`, `ServerState` (Section 6) |
+| FR-SRV-5 (RCON/server command forwarding) | `ServerCommand` → `command_output` (Section 5) |
+| FR-DATA-4 / FR-DATA-7 (hydrate/snapshot triggers) | `HydrateTrigger`, `SnapshotTrigger` (triggers only; Section 5) |
+| Section 6.9 / Section 7.2 (running-server file access) | `ReadFile`, `EditFile` (Section 5) |
+| FR-MON-1..3 (status/log/metrics) | `StatusChange`, `LogLine`, `Metrics` (Section 6) |
+| FR-EXE-5 (Worker picks Java runtime) | `StartServer.minecraft_version`; no Java field from the API (Section 5) |
+| NFR-OBS-1 (correlation IDs, error reporting) | `correlation_id`, `command_id`, `CommandError` (Section 3, Section 7) |
+
+---
+
+## 9. Related documents
+
+| Doc | Covers |
+|---|---|
+| [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; the source of truth for scope. |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | The two planes (Section 4), the `ControlPlane`/`APIClient` Ports (Section 5), and file-access-on-control-plane (Section 7.2). |
+| [`CONFIGURATION.md`](CONFIGURATION.md) | Control-channel ports, TLS material, and the heartbeat-timeout key (Sections 5.1, 6.1). |
+| [`../../proto/README.md`](../../proto/README.md) | The buf module: install, lint, and conventions. The binding `.proto` contract lives there. |
