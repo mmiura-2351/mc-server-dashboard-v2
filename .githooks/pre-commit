@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# pre-commit: format + lint the modules that have staged changes.
+#
+# Scoped to changed modules so the common case (touching one module) stays
+# fast. Auto-formatting that modifies a tracked, staged file aborts the commit
+# so you can review and re-stage -- a failed hook means the commit did NOT
+# happen (docs/dev/CONTRIBUTING.md Section 4). Do not bypass with --no-verify;
+# fix the cause instead.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Staged files (added/copied/modified/renamed), NUL-safe.
+staged="$(git diff --cached --name-only --diff-filter=ACMR -z | tr '\0' '\n')"
+
+api_changed=false
+worker_changed=false
+while IFS= read -r f; do
+	[ -z "$f" ] && continue
+	case "$f" in
+		api/*) api_changed=true ;;
+		worker/*) worker_changed=true ;;
+	esac
+done <<< "$staged"
+
+fail=0
+
+# Abort if formatting changed any tracked file, telling the user to re-stage.
+warn_dirty() {
+	if ! git diff --quiet; then
+		echo
+		echo "pre-commit: formatting modified tracked files. Review and re-stage:"
+		git diff --name-only | sed 's/^/  /'
+		fail=1
+	fi
+}
+
+if $api_changed; then
+	echo "pre-commit: api/ (format + lint)"
+	make api-format
+	warn_dirty
+	make api-lint
+fi
+
+if $worker_changed; then
+	echo "pre-commit: worker/ (format + lint)"
+	make worker-format
+	warn_dirty
+	make worker-lint
+fi
+
+if [ "$fail" -ne 0 ]; then
+	echo
+	echo "pre-commit failed: re-stage the formatted files and commit again."
+	exit 1
+fi

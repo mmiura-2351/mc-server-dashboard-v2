@@ -5,8 +5,9 @@ requests, review, and merge. Behavioral guidance for *how to write the code* is
 in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
 [`../README.md`](../README.md).
 
-> Some steps reference hooks and CI that are still being set up. Follow the
-> intent; concrete commands are added as the toolchain lands.
+> Hooks and CI are wired (see Section 4 and `.github/workflows/`). Some other
+> steps reference mechanisms still being set up; follow the intent, concrete
+> commands are added as the toolchain lands.
 
 ## 1. Issues
 
@@ -31,6 +32,16 @@ in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
   `feature/{slug}`.
 
 ## 4. Commits
+
+Install the git hooks once per clone:
+
+```sh
+make hooks-install
+```
+
+This points `core.hooksPath` at the checked-in `.githooks/`. The **pre-commit**
+hook formats and lints the modules with staged changes; the **pre-push** hook
+runs the full `make check` (lint + typecheck + test for both ecosystems).
 
 - Don't bypass failing pre-commit / pre-push hooks; fix the cause. If a hook
   fails, the commit did not happen — make a **new** commit rather than
