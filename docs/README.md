@@ -36,6 +36,7 @@ Docs are split by intent:
 | [`app/CONFIGURATION.md`](app/CONFIGURATION.md) | Runtime configuration for `api/` and `worker/`: sources and precedence, secret handling, config-driven adapter selection (Storage backend, token service, execution drivers), the authentication-hardening knobs and defaults, and snapshot-cadence settings. |
 | [`app/CONTROL_PLANE.md`](app/CONTROL_PLANE.md) | The API↔Worker control-plane contract: the single gRPC bidirectional-stream service, its connect/register/heartbeat/reconnect lifecycle, the command and event messages, error reporting, and how each maps to the requirements. The binding contract is the `proto/` buf module. |
 | [`app/DATABASE.md`](app/DATABASE.md) | The persistence model for the core entities (`REQUIREMENTS.md` Appendix B): tables, keys, relationships, the desired/observed-state split on `Server`, cascade behavior, and the M1 persistence-technology decision behind the persistence Port. Metadata only — bulk artifacts live in `Storage`. |
+| [`app/SECURITY.md`](app/SECURITY.md) | Authentication-hardening behaviour for `REQUIREMENTS.md` FR-AUTH-4: password-policy semantics, the brute-force/lockout algorithm, trusted-proxy client-IP resolution, and the decision on where the brute-force/lockout runtime state lives (DB-backed, behind a Port). |
 
 More entries are written during the design phase: the `proto/` control-plane
 contract reference, `CONFIGURATION.md`, `DATABASE.md`, and the storage/execution

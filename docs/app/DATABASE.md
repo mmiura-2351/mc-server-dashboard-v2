@@ -170,9 +170,9 @@ Constraints: `UNIQUE(username)`, `UNIQUE(email)`.
 
 > The brute-force / lockout state from FR-AUTH-4 (per-username and per-IP failure
 > counters over sliding windows, lockout with back-off) is **auth-hardening
-> runtime state**, not a core entity. Whether it is a short-lived table or an
-> in-memory/cache structure is a SECURITY/CONFIGURATION concern, not part of this
-> core model; it is intentionally omitted here.
+> runtime state**, not a core entity, and is intentionally omitted from this core
+> model. Its home is decided in [`SECURITY.md`](SECURITY.md) Section 3: dedicated
+> DB-backed tables behind a Port, kept separate from this graph.
 
 ### `refresh_token`
 
