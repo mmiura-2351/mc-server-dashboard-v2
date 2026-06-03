@@ -1,0 +1,99 @@
+name: release
+
+# Tag-driven release. Pushing a SemVer tag (vX.Y.Z or vX.Y.Z-rc.N) publishes a
+# GitHub Release with notes generated from the PRs merged since the previous tag
+# (grouping/exclusion config lives in .github/release.yml). See
+# docs/dev/RELEASING.md.
+on:
+  push:
+    tags:
+      - "v*"
+
+# The git tag is the single source of truth for the version (RELEASING.md
+# Section 4); the workflow only needs write access to publish the Release.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout (full history + tags for the monotonicity check)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag is well-formed SemVer
+        id: tag
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # vX.Y.Z or vX.Y.Z-rc.N; no leading zeros (RELEASING.md Section 2).
+          semver_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$'
+          if [[ ! "${tag}" =~ ${semver_re} ]]; then
+            echo "::error::Tag '${tag}' is not a valid release tag. Expected vX.Y.Z or vX.Y.Z-rc.N (see docs/dev/RELEASING.md Section 2)."
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          if [[ "${tag}" == *-rc.* ]]; then
+            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "prerelease=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Validate monotonicity (tag > latest existing release tag)
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          semver_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$'
+
+          # Strict SemVer "greater than": returns 0 if $1 > $2. Needed because
+          # `sort -V` orders a pre-release ABOVE its release (v0.2.0-rc.1 after
+          # v0.2.0), the opposite of SemVer. Inputs are validated release tags.
+          semver_gt() {
+            local a="${1#v}" b="${2#v}"
+            local a_base="${a%%-*}" b_base="${b%%-*}" a_pre="" b_pre=""
+            [[ "$a" == *-* ]] && a_pre="${a#*-}"
+            [[ "$b" == *-* ]] && b_pre="${b#*-}"
+            local a1 a2 a3 b1 b2 b3
+            IFS=. read -r a1 a2 a3 <<< "$a_base"
+            IFS=. read -r b1 b2 b3 <<< "$b_base"
+            if (( a1 != b1 )); then (( a1 > b1 )); return; fi
+            if (( a2 != b2 )); then (( a2 > b2 )); return; fi
+            if (( a3 != b3 )); then (( a3 > b3 )); return; fi
+            # Equal base: a release outranks any pre-release of it.
+            if [[ -z "$a_pre" && -n "$b_pre" ]]; then return 0; fi
+            if [[ -n "$a_pre" && -z "$b_pre" ]]; then return 1; fi
+            if [[ -z "$a_pre" && -z "$b_pre" ]]; then return 1; fi
+            (( ${a_pre#rc.} > ${b_pre#rc.} ))
+          }
+
+          # Highest existing well-formed release tag other than this one.
+          previous=""
+          while IFS= read -r t; do
+            [[ -z "$t" ]] && continue
+            if [[ -z "$previous" ]] || semver_gt "$t" "$previous"; then
+              previous="$t"
+            fi
+          done < <(git tag --list 'v*' | grep -E "${semver_re}" | grep -vxF "${tag}")
+
+          if [[ -z "${previous}" ]]; then
+            echo "No previous release tag; '${tag}' is the first release."
+            exit 0
+          fi
+          if ! semver_gt "${tag}" "${previous}"; then
+            echo "::error::Tag '${tag}' is not greater than the latest release tag '${previous}'."
+            exit 1
+          fi
+          echo "Previous release tag: ${previous} -> releasing ${tag}."
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          args=(--title "${tag}" --generate-notes --verify-tag)
+          if [[ "${{ steps.tag.outputs.prerelease }}" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${tag}" "${args[@]}"
