@@ -164,11 +164,15 @@ class FakeServerRepository(ServerRepository):
         server_id: ServerId,
         observed_state: ObservedState,
         observed_at: dt.datetime,
+        *,
+        unassign: bool = False,
     ) -> None:
         server = self.by_id.get(server_id)
         if server is not None:
             server.observed_state = observed_state
             server.observed_at = observed_at
+            if unassign:
+                server.assigned_worker_id = None
 
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime

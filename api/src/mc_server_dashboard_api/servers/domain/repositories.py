@@ -86,11 +86,20 @@ class ServerRepository(abc.ABC):
         server_id: ServerId,
         observed_state: ObservedState,
         observed_at: dt.datetime,
+        *,
+        unassign: bool = False,
     ) -> None:
         """Cache the worker-reported observed state for ``server_id`` (FR-SRV-4).
 
         A no-op if the server is absent (it may have been deleted while the
         Worker still tracked it).
+
+        ``unassign`` additionally clears ``assigned_worker_id`` in the same write.
+        It is set only on a CONFIRMED stop (a graceful stop the Worker reports
+        complete, or a SERVER_NOT_FOUND convergence) where no live instance can
+        remain: clearing the assignment then lets a later start re-place under
+        ``require_unassigned`` (issue #206). Crash/disconnect paths leave the
+        assignment intact (the stickiness invariant), so they do not set it.
         """
 
     @abc.abstractmethod

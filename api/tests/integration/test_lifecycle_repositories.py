@@ -131,6 +131,43 @@ async def test_update_lifecycle_persists_desired_and_assignment(
     assert loaded.assigned_worker_id == WorkerId(worker)
 
 
+async def test_record_observed_state_unassign_clears_assignment(
+    engine: AsyncEngine,
+) -> None:
+    # A confirmed stop records observed=stopped and clears the assignment in one
+    # write, so a later start can re-place under require_unassigned (issue #206).
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    worker = uuid.uuid4()
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        server.desired_state = DesiredState.RUNNING
+        server.assigned_worker_id = WorkerId(worker)
+        server.updated_at = _NOW
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.record_observed_state(
+            server_id,
+            observed_state=ObservedState.STOPPED,
+            observed_at=_NOW,
+            unassign=True,
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.STOPPED
+    assert loaded.assigned_worker_id is None
+
+
 async def test_update_lifecycle_compare_and_set_rejects_lost_race(
     engine: AsyncEngine,
 ) -> None:
@@ -260,6 +297,9 @@ async def test_sink_marks_worker_servers_unknown(engine: AsyncEngine) -> None:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.UNKNOWN
+    # Worker disconnect keeps the assignment (stickiness invariant, issue #206):
+    # only a confirmed stop unassigns; the row stays assigned to its Worker.
+    assert loaded.assigned_worker_id == WorkerId(worker)
 
 
 async def test_sink_counts_running_assignments(engine: AsyncEngine) -> None:

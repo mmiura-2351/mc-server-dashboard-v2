@@ -611,6 +611,97 @@ async def test_stop_sets_stopped_dispatches_and_decrements() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
+async def test_stop_graceful_success_unassigns_and_records_stopped() -> None:
+    # A graceful stop confirms the process is gone, so the assignment is cleared
+    # and observed converges to stopped in the same transaction (issue #206).
+    # Clearing the assignment lets a later start re-place (require_unassigned).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane()
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.assigned_worker_id is None
+    assert result.observed_state is ObservedState.STOPPED
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id is None
+    assert stored.observed_state is ObservedState.STOPPED
+    # The placement-load decrement still happens exactly once, on the desired
+    # flip -- the later unassign must not double-decrement (issue #206).
+    assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_stop_then_start_succeeds() -> None:
+    # The regression that escaped (issue #206): stop must unassign so the
+    # subsequent start's require_unassigned compare-and-set can re-place the
+    # server instead of 409ing forever.
+    community, server_id, worker = _ids()
+    next_worker = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    await StopServer(uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    started = await StartServer(
+        uow=uow,
+        control_plane=FakeControlPlane(place_to=WorkerId(next_worker)),
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert started.desired_state is DesiredState.RUNNING
+    assert started.assigned_worker_id == WorkerId(next_worker)
+
+
+async def test_stop_failed_dispatch_keeps_assignment() -> None:
+    # A failed stop dispatch may have left the process alive: the assignment must
+    # stick so the reconciler's redispatch_stop owns convergence (issue #206).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")}
+    )
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
 async def test_stop_succeeds_even_when_final_snapshot_fails() -> None:
     # A failing final snapshot must not fail the stop itself: the server is down
     # and the stop already succeeded; the snapshot is best-effort (FR-DATA-7).
@@ -722,12 +813,50 @@ async def test_stop_server_not_found_converges_to_stopped() -> None:
 
     assert result.desired_state is DesiredState.STOPPED
     assert result.observed_state is ObservedState.STOPPED
+    # No live instance remains, so the assignment is cleared too (issue #206),
+    # letting a later start re-place under require_unassigned.
+    assert result.assigned_worker_id is None
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
     assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id is None
     # No live instance to snapshot: the stop dispatched, the snapshot did not.
     assert [kind for kind, _, _ in cp.dispatched] == ["stop"]
     assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_stop_server_not_found_then_start_succeeds() -> None:
+    # The SERVER_NOT_FOUND convergence path must also unassign, so the stop ->
+    # start chain succeeds after a crashed/already-gone instance (issue #206).
+    community, server_id, worker = _ids()
+    next_worker = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    await StopServer(
+        uow=uow,
+        control_plane=FakeControlPlane(
+            outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+        ),
+        clock=FakeClock(_NOW),
+    )(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    started = await StartServer(
+        uow=uow,
+        control_plane=FakeControlPlane(place_to=WorkerId(next_worker)),
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert started.desired_state is DesiredState.RUNNING
+    assert started.assigned_worker_id == WorkerId(next_worker)
 
 
 @pytest.mark.parametrize(
@@ -1108,3 +1237,58 @@ async def test_redispatch_stop_replays_stop_without_decrement() -> None:
     )
     assert [k for k, _, _ in cp.dispatched] == ["stop"]
     assert cp.decremented == []
+    # A confirmed stop clears the assignment so a later start can re-place it
+    # (issue #206); the decrement is not repeated here.
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id is None
+
+
+async def test_redispatch_stop_server_not_found_unassigns() -> None:
+    # SERVER_NOT_FOUND on redispatch means no live instance remains: converge by
+    # clearing the assignment, same as the success path (issue #206).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW)).redispatch_stop(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id is None
+
+
+async def test_redispatch_stop_failure_keeps_assignment() -> None:
+    # A failed redispatch leaves the process possibly alive: keep the assignment
+    # so a later tick retries the SAME Worker (issue #206 stickiness).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")}
+    )
+    with pytest.raises(CommandDispatchError):
+        await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).redispatch_stop(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker)
