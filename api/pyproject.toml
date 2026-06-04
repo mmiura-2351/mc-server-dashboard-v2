@@ -14,6 +14,17 @@ dependencies = [
     # it; lift the cap to <2 once it ages out (docs/dev/DEPENDENCIES.md §3).
     "grpcio>=1.80.0,<1.81",
     "protobuf>=6.31.1,<7",
+    # API framework stack (ARCHITECTURE.md Section 7.4). 0.x libraries cap the
+    # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md §1). All
+    # versions respect the 7-day cooldown (Section 3): released on/before
+    # 2026-05-28 as of this change.
+    "fastapi>=0.136.3,<0.137",          # 2026-05-23
+    "uvicorn>=0.48.0,<0.49",            # 2026-05-24
+    "pydantic-settings>=2.14.1,<3",     # 2026-05-08
+    # Persistence adapter: async SQLAlchemy over asyncpg, migrations via Alembic.
+    "sqlalchemy[asyncio]>=2.0.50,<3",   # 2026-05-24
+    "asyncpg>=0.31.0,<0.32",            # 2025-11-24
+    "alembic>=1.18.4,<2",               # 2026-02-10
 ]
 
 [dependency-groups]
@@ -32,6 +43,12 @@ dev = [
     # cooldown (grpcio-tools 1.80.0 2026-03-30; mypy-protobuf 5.1.0 2026-04-28).
     "grpcio-tools>=1.80.0,<1.81",
     "mypy-protobuf>=5.1.0,<6",
+    # ASGI transport for FastAPI's TestClient (exercises the app in-process,
+    # no network). 0.28.1 (2024-12-06), outside the cooldown.
+    "httpx>=0.28.1",
+    # Async test support for pytest (async DB-probe + endpoint tests).
+    # 1.2.0 (2026-05-24), outside the cooldown.
+    "pytest-asyncio>=1.2.0,<2",
 ]
 
 [build-system]
@@ -65,15 +82,46 @@ follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [tool.importlinter]
 root_packages = ["mc_server_dashboard_api"]
 
-# Import-direction enforcement scaffolding (ARCHITECTURE.md Section 2.2).
-# The per-domain quadrants (domain / application / adapters / api) are not
-# yet present, so this contract is intentionally minimal. Layer contracts
-# are added as the domain packages land.
+# Import-direction enforcement (ARCHITECTURE.md Section 2.2). Each bounded
+# context owns a domain / application / adapters / api quadrant; the layered
+# contract below enforces the inward dependency rule per context. The edge
+# (app factory, config, logging, middleware, dependencies) is the only place
+# that may import adapters + application, and is excluded from the layered
+# contracts. Add a new layered contract per context as contexts land.
 [[tool.importlinter.contracts]]
-name = "Package is importable"
-type = "independence"
-modules = ["mc_server_dashboard_api"]
+name = "core context layers (domain <- application <- api; adapters at the edge)"
+type = "layers"
+layers = [
+    "mc_server_dashboard_api.core.api",
+    "mc_server_dashboard_api.core.application",
+    "mc_server_dashboard_api.core.domain",
+]
+# `adapters` is deliberately NOT a layer here: it implements domain Ports and is
+# bound to them only in the wiring module, so it must not be importable by
+# application/api. The independence + forbidden contracts below pin that.
+
+# Adapters must not be imported by domain or application (ARCHITECTURE.md 2.1).
+[[tool.importlinter.contracts]]
+name = "domain and application do not import adapters"
+type = "forbidden"
+source_modules = [
+    "mc_server_dashboard_api.core.domain",
+    "mc_server_dashboard_api.core.application",
+]
+forbidden_modules = ["mc_server_dashboard_api.core.adapters"]
+
+# Domain imports nothing internal (ARCHITECTURE.md 2.1: standard library only).
+[[tool.importlinter.contracts]]
+name = "domain imports nothing internal"
+type = "forbidden"
+source_modules = ["mc_server_dashboard_api.core.domain"]
+forbidden_modules = [
+    "mc_server_dashboard_api.core.application",
+    "mc_server_dashboard_api.core.adapters",
+    "mc_server_dashboard_api.core.api",
+]

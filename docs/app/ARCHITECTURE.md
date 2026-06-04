@@ -334,6 +334,33 @@ driver's/Worker's concern, not the API's"). The legacy
 [JAVA_COMPATIBILITY.md](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/JAVA_COMPATIBILITY.md)
 version-to-Java mapping is a working reference for the selector.
 
+### 7.4 API framework stack: FastAPI + async SQLAlchemy + Alembic
+
+**Decision.** The `api/` service is built on **FastAPI** (ASGI, served by
+Uvicorn) with **async SQLAlchemy 2.x** over **asyncpg** as the persistence
+adapter behind the `<Entity>Repository` / `UnitOfWork` Ports (Section 5.1), and
+**Alembic** for schema migrations. Configuration is loaded with
+**pydantic-settings** at the edge (CONFIGURATION.md Section 1).
+
+**Alternatives considered.**
+1. *Litestar / Starlette-only / Flask* instead of FastAPI.
+2. *A non-SQLAlchemy data layer* (raw asyncpg, an async ORM such as Tortoise, or
+   SQLModel) instead of async SQLAlchemy + Alembic.
+
+**Rationale.** FastAPI is the proven default: the legacy system shipped on it,
+it gives request/response validation and OpenAPI for free, and its dependency
+injection is a natural fit for binding Ports at the edge (Section 2.1) — keeping
+routers thin. The alternatives in (1) are viable but offer no advantage that
+justifies diverging from a stack the team already operates; simplicity-first
+favors the known quantity. For (2), async SQLAlchemy is the mature async ORM
+with a first-class migration tool (Alembic) and the session/transaction
+primitives the `UnitOfWork` Port needs; raw asyncpg would re-implement that
+machinery, and the smaller async ORMs trade ecosystem maturity for little gain.
+asyncpg is the high-performance PostgreSQL driver SQLAlchemy's async engine
+targets (DATABASE.md Section 1). All four sit *behind* Ports or at the edge, so
+this is an adapter/edge choice that does not reach `domain` or `application`
+(Section 2.2) and remains replaceable (NFR-PORT-1).
+
 ---
 
 ## 8. Related documents
