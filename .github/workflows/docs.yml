@@ -27,5 +27,8 @@ jobs:
 
       # The checker is pure stdlib python3 (ubuntu-latest ships it); no setup
       # action or dependency install is needed.
+      - name: Docs checker self-test
+        run: python3 scripts/check_docs.py --self-test
+
       - name: Docs conventions (links, section-mark glyph, v1 term)
         run: python3 scripts/check_docs.py

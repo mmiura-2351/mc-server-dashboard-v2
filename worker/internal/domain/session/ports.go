@@ -46,7 +46,7 @@ type Command struct {
 	// Line is the console/RCON line for ServerCommand.
 	Line string
 	// TransferURL addresses the API HTTP data plane for a HydrateTrigger /
-	// SnapshotTrigger; the bulk bytes move there, off this stream (Section 5.2).
+	// SnapshotTrigger; the bulk bytes move there, off this stream (Section 5).
 	TransferURL string
 	// TransferToken is the short-lived credential authorizing one transfer.
 	TransferToken string

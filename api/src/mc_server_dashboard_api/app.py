@@ -116,12 +116,13 @@ def _resolve_config_file() -> Path | None:
 
 
 def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
-    """Bind the :class:`Storage` Port to the config-selected adapter (STORAGE.md §7).
+    """Bind the :class:`Storage` Port to the config-selected adapter.
 
-    ``fs`` is the M1 default and ``remote-fs`` reuses it via a POSIX mount
-    (Section 7.2). ``object`` binds the S3-compatible adapter (Section 7.3); its
-    endpoint/bucket/credentials are required and a missing one fails fast at boot
-    rather than starting with an unusable store (CONFIGURATION.md Section 3).
+    Backend selection follows STORAGE.md Section 7. ``fs`` is the M1 default and
+    ``remote-fs`` reuses it via a POSIX mount (Section 7.2). ``object`` binds the
+    S3-compatible adapter (Section 7.3); its endpoint/bucket/credentials are
+    required and a missing one fails fast at boot rather than starting with an
+    unusable store (CONFIGURATION.md Section 3).
     """
 
     if settings.storage.backend in ("fs", "remote-fs"):

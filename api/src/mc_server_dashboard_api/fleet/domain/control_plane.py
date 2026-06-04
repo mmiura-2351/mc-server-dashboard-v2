@@ -114,7 +114,7 @@ class HydrateCommand:
     """Trigger the Worker to pull its working set from the data plane (FR-DATA-4).
 
     Carries the API-terminated HTTP transfer URL and a short-lived token; the
-    bulk bytes never traverse the control-plane stream (CONTROL_PLANE.md §5.2).
+    bulk bytes never traverse the control-plane stream (CONTROL_PLANE.md Section 5).
     """
 
     transfer_url: str

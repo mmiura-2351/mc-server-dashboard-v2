@@ -138,7 +138,7 @@ class ControlPlane(abc.ABC):
 
         The adapter addresses the data-plane endpoint for ``(community_id,
         server_id)`` and hands the Worker the URL + a short-lived token; the bulk
-        bytes move off the control-plane stream (CONTROL_PLANE.md Section 5.2).
+        bytes move off the control-plane stream (CONTROL_PLANE.md Section 5).
         """
 
     @abc.abstractmethod

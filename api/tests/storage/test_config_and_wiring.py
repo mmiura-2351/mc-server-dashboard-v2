@@ -1,6 +1,7 @@
-"""Storage config keys + edge wiring (CONFIGURATION.md §5.2, STORAGE.md §7).
+"""Storage config keys + edge wiring.
 
-Defaults, TOML/env overrides, the backend selector admitting future backends, and
+References CONFIGURATION.md Section 5.2 and STORAGE.md Section 7. Covers the
+defaults, TOML/env overrides, the backend selector admitting future backends, and
 the app-factory fail-fast on an unimplemented backend.
 """
 

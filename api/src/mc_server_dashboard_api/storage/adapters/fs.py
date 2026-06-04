@@ -661,7 +661,10 @@ def _rmtree(path: Path) -> None:
 
 
 def _fsync_dir(path: Path) -> None:
-    """fsync a directory so a rename/flip within it survives power loss (§4.2)."""
+    """fsync a directory so a rename/flip within it survives power loss.
+
+    See Section 4.2.
+    """
 
     fd = os.open(path, os.O_RDONLY)
     try:

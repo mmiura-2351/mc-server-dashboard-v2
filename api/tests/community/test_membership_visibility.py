@@ -1,4 +1,4 @@
-"""Unit tests for the Layer-1 membership-visibility primitive (FR-COMM-3, §6.4).
+"""Unit tests for the Layer-1 membership-visibility primitive (FR-COMM-3, Section 6.4).
 
 A non-member must get no existence signal; the route layer turns a ``False``
 here into a 404 before any Layer-2 permission evaluation.
