@@ -106,6 +106,19 @@ async def test_abort_is_idempotent(harness: StorageHarness) -> None:
     await harness.storage.abort_snapshot(handle)  # no raise
 
 
+async def test_commit_empty_transfer_is_refused(harness: StorageHarness) -> None:
+    """An empty staging area is not a publishable transfer (STORAGE.md Section 4.1).
+
+    A ``begin -> commit`` with no staged bytes must be refused by both backends:
+    a worker packing an empty working set is a bug signal, never a valid snapshot.
+    """
+
+    community, server = new_scope()
+    handle = await harness.storage.begin_snapshot(community, server)
+    with pytest.raises(IncompleteTransferError):
+        await harness.storage.commit_snapshot(handle)
+
+
 async def test_commit_after_commit_rejects_reused_handle(
     harness: StorageHarness,
 ) -> None:

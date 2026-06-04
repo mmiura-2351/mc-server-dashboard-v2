@@ -24,7 +24,6 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     ObjectStorage,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
-    IncompleteTransferError,
     PathTraversalError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -33,7 +32,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
 )
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
-from tests.storage.helpers import drain, new_scope, read_tar, tar_stream
+from tests.storage.helpers import drain, new_scope, read_tar, stream_of, tar_stream
 
 
 def _store_and_storage() -> tuple[FakeS3Store, ObjectStorage]:
@@ -81,12 +80,27 @@ async def test_staged_uploads_land_under_incoming_prefix() -> None:
     assert staged[0].endswith("world/a")
 
 
-async def test_commit_empty_transfer_is_refused() -> None:
+async def test_multipart_upload_consumes_parts_chunk_wise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A multipart upload streams part-by-part, never one whole-body read.
+
+    Shrink the part size so a modest payload spans several parts, then assert the
+    fake recorded more than one part: a client-side regression that buffered the
+    stream whole (collapsing to a single part) would fail here (Section 7.3).
+    """
+
+    from mc_server_dashboard_api.storage.adapters import object_store
+
+    monkeypatch.setattr(object_store, "_PART", 4096)
     store, storage = _store_and_storage()
-    community, server = new_scope()
-    handle = await storage.begin_snapshot(community, server)
-    with pytest.raises(IncompleteTransferError):
-        await storage.commit_snapshot(handle)
+    data = b"j" * (4096 * 3 + 17)  # spans multiple shrunk parts
+
+    key = await storage.put_jar(stream_of(data, chunk=512))
+
+    jar_key = f"jars/{key.sha256}.jar"
+    assert store.objects[jar_key] == data
+    assert store.multipart_parts[jar_key] > 1
 
 
 @pytest.mark.parametrize("phase", [PublishPhase.AFTER_STAGE, PublishPhase.AFTER_MOVE])

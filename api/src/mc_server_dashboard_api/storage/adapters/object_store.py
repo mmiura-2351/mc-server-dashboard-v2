@@ -29,6 +29,14 @@ whole object, let alone the whole working set, in RAM); snapshot ingest spools t
 incoming tar to local scratch (bounded disk, like the fs adapter) and uploads each
 member via multipart so no whole member is held in memory.
 
+Backup creation (:func:`_write_backup_targz`) is bounded per-member, not
+per-chunk: it buffers one object's body whole in memory before adding it to the
+gzip stream, then releases it before the next. Peak memory is therefore the size
+of the single largest object in the snapshot — never the whole working set, but
+not the per-chunk bound the hydrate/ingest paths hold. This is acceptable because
+a Minecraft working set's largest individual file is well within memory; if a
+deployment ever stores a very large single object, this is the path to tighten.
+
 The S3 calls are confined to the narrow :class:`S3Client` protocol; the concrete
 aioboto3 client factory lives in :mod:`.object_client` so the dependency stays at
 the very edge and tests run against an in-memory stub.

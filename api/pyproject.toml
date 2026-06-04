@@ -37,7 +37,7 @@ dependencies = [
     # Async S3-compatible client behind the object Storage adapter (STORAGE.md
     # Section 7.3, #105). aioboto3 wraps aiobotocore to give an asyncio S3 client
     # with streaming bodies and multipart upload (the bounded-memory hydrate /
-    # snapshot transfer); it is confined to storage/adapters/object.py. 15.5.0
+    # snapshot transfer); it is confined to storage/adapters/object_client.py. 15.5.0
     # (2025-10-30) is well outside the 7-day cooldown (Section 3); cap the next
     # major. It ships no type stubs, handled by the mypy override below (the
     # grpcio precedent).
@@ -114,7 +114,7 @@ module = "grpc.*"
 ignore_missing_imports = true
 
 # aioboto3 / aiobotocore / botocore ship no type stubs. Treat their imports as
-# untyped so the object Storage adapter (storage/adapters/object.py) — the only
+# untyped so the object client (storage/adapters/object_client.py) — the only
 # module touching them at the transport edge — type-checks without third-party
 # stub packages (the grpcio precedent above).
 [[tool.mypy.overrides]]

@@ -301,12 +301,15 @@ class FsStorage(Storage):
         )
         if not staging.is_dir():
             raise IncompleteTransferError("no completed staging area to publish")
-        # The "proven complete" gate (STORAGE.md Section 4.1): existence of the
-        # staging dir is the only completeness check here. The end-of-stream
-        # completeness check (the streamed-byte-count vs. Content-Length match)
-        # lives at the data-plane HTTP edge (STORAGE.md Section 8, issue #106): the
-        # snapshot endpoint verifies the match and aborts the staging area on a
-        # mismatch, so commit is only reached for a transfer proven complete.
+        # The "proven complete" gate (STORAGE.md Section 4.1): an empty staging area
+        # is not a publishable transfer, so an empty staged dir is refused here too,
+        # matching the object adapter. The end-of-stream completeness check (the
+        # streamed-byte-count vs. Content-Length match) lives at the data-plane HTTP
+        # edge (STORAGE.md Section 8, issue #106): the snapshot endpoint verifies the
+        # match and aborts the staging area on a mismatch, so commit is only reached
+        # for a transfer proven complete.
+        if not await asyncio.to_thread(_dir_has_entries, staging):
+            raise IncompleteTransferError("no staged files to publish")
         await asyncio.to_thread(
             self._publish, fs_handle.community_id, fs_handle.server_id, staging
         )
@@ -649,6 +652,12 @@ def _new_version_id() -> str:
     """
 
     return f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}"
+
+
+def _dir_has_entries(path: Path) -> bool:
+    """True if ``path`` contains at least one entry (the empty-commit gate)."""
+
+    return any(path.iterdir())
 
 
 def _rmtree(path: Path) -> None:

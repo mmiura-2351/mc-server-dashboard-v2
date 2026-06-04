@@ -27,10 +27,17 @@ from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 
 
 class FakeS3Store:
-    """The shared bucket contents: an ordered key -> bytes map."""
+    """The shared bucket contents: an ordered key -> bytes map.
+
+    ``multipart_parts`` records, per key, how many parts the last multipart upload
+    consumed. A client-side regression that buffers a stream whole before uploading
+    would record a single part, so the per-part streaming contract (Section 7.3) is
+    observable in tests.
+    """
 
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
+        self.multipart_parts: dict[str, int] = {}
 
 
 class FakeS3Client:
@@ -60,10 +67,16 @@ class FakeS3Client:
         self._store.objects[key] = bytes(body)
 
     async def upload_multipart(self, key: str, parts: AsyncIterator[bytes]) -> None:
+        # Consume part-by-part (never a single whole-body read) and tally the parts,
+        # so a client that buffers the stream whole — collapsing to one part — is
+        # caught by the bounded-memory assertion in the tests (Section 7.3).
         buf = bytearray()
+        count = 0
         async for chunk in parts:
             buf.extend(chunk)
+            count += 1
         self._store.objects[key] = bytes(buf)
+        self._store.multipart_parts[key] = count
 
     async def head_object(self, key: str) -> int | None:
         obj = self._store.objects.get(key)

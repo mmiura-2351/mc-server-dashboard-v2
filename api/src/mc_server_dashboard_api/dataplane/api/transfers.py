@@ -198,7 +198,8 @@ async def publish_snapshot(
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
 
     The "proven complete" gate: a missing Content-Length is 411, an oversized one
-    is 413, and a streamed-byte count that does not match Content-Length is 400 —
+    is 413, a streamed-byte count that does not match Content-Length is 400, and a
+    body that stages zero files (an empty working set) is 400 ``empty_snapshot`` —
     in every reject path the staged transfer is aborted, so ``current/`` keeps the
     prior authoritative copy (FR-DATA-6, STORAGE.md Section 4.1).
 
@@ -255,9 +256,13 @@ async def publish_snapshot(
             detail="length_mismatch",
         ) from None
     except IncompleteTransferError:
+        # The body cleared the length gate but staged zero files: an empty working
+        # set is not a publishable snapshot (STORAGE.md Section 4.1). A worker
+        # packing an empty working dir is a bug signal, so reject it loudly; the
+        # abort leaves the prior authoritative copy intact.
         await storage.abort_snapshot(handle)
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="incomplete_transfer"
+            status_code=status.HTTP_400_BAD_REQUEST, detail="empty_snapshot"
         ) from None
     except BaseException:
         # Any failure mid-transfer (client disconnect, extraction error) discards
