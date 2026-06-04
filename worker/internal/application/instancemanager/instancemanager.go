@@ -81,13 +81,29 @@ type Manager struct {
 	events  chan session.StatusEvent
 	logs    chan session.LogEvent
 	metrics chan session.MetricsEvent
+
+	// Status coalescing (issue #96): observed_state must converge to the latest
+	// state per server even under sink backpressure, so status events are never
+	// dropped. When the events sink is full, the newest status for a server
+	// replaces any older pending one (latest-state-wins) in pendingStatus, and a
+	// single statusDispatcher goroutine drains it into events as the sink admits.
+	// coalescing marks a server whose status is being funneled through the
+	// dispatcher; while set, every status for that server is routed through the
+	// pending slot so a fast-path send can never overtake an in-flight dispatch
+	// (order is preserved per server). dirtyStatus is the FIFO of servers awaiting
+	// dispatch. statusNotify wakes the dispatcher (capacity 1: a coalesced signal).
+	statusMu      sync.Mutex
+	pendingStatus map[string]session.StatusEvent
+	coalescing    map[string]bool
+	dirtyStatus   []string
+	statusNotify  chan struct{}
 }
 
 // New builds a Manager. drivers maps an advertised driver name to its adapter;
 // scratchDir is the working-set root (worker.scratch_dir); openControl opens RCON
 // for ServerCommand forwarding.
 func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openControl controlFunc) *Manager {
-	return &Manager{
+	m := &Manager{
 		drivers:         drivers,
 		scratchDir:      scratchDir,
 		openControl:     openControl,
@@ -99,7 +115,12 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		events:          make(chan session.StatusEvent, 32),
 		logs:            make(chan session.LogEvent, 256),
 		metrics:         make(chan session.MetricsEvent, 32),
+		pendingStatus:   map[string]session.StatusEvent{},
+		coalescing:      map[string]bool{},
+		statusNotify:    make(chan struct{}, 1),
 	}
+	go m.statusDispatcher()
+	return m
 }
 
 // WithLogger sets the manager's logger.
@@ -603,19 +624,82 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 		if ev.State == execution.StateCrashed {
 			m.forgetIf(serverID, inst)
 		}
-		select {
-		case m.events <- session.StatusEvent{ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail}:
-		default:
-			m.logger.Warn("dropped status event; sink full", "server_id", serverID, "state", ev.State.String())
+		m.sendStatus(session.StatusEvent{ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail})
+	}
+}
+
+// sendStatus forwards a status event with latest-state-wins coalescing under
+// backpressure (issue #96). The fast path is a non-blocking send onto events,
+// which preserves order and every transition while the sink has room. When the
+// sink is full, the event is parked in the per-server pending slot (replacing any
+// older pending status for that server) and the dispatcher is woken to deliver it
+// once the sink drains. While a server is being routed through the dispatcher
+// (coalescing), every event for it goes through the slot so a fast-path send can
+// never overtake an in-flight dispatch: per-server ordering is preserved and only
+// superseded intermediate states are skipped.
+func (m *Manager) sendStatus(ev session.StatusEvent) {
+	m.statusMu.Lock()
+	if m.coalescing[ev.ServerID] {
+		m.pendingStatus[ev.ServerID] = ev
+		m.statusMu.Unlock()
+		return
+	}
+	select {
+	case m.events <- ev:
+		m.statusMu.Unlock()
+		return
+	default:
+	}
+	m.coalescing[ev.ServerID] = true
+	m.pendingStatus[ev.ServerID] = ev
+	m.dirtyStatus = append(m.dirtyStatus, ev.ServerID)
+	m.statusMu.Unlock()
+	select {
+	case m.statusNotify <- struct{}{}:
+	default:
+	}
+}
+
+// statusDispatcher drains coalesced status events onto the events sink, one
+// server at a time in arrival order, using blocking sends so backpressure is
+// absorbed (not dropped). It runs for the Manager's lifetime; events is never
+// closed, mirroring the existing stream posture, so the goroutine simply parks on
+// a quiet sink and exits with the process.
+func (m *Manager) statusDispatcher() {
+	for range m.statusNotify {
+		for {
+			m.statusMu.Lock()
+			if len(m.dirtyStatus) == 0 {
+				m.statusMu.Unlock()
+				break
+			}
+			serverID := m.dirtyStatus[0]
+			m.dirtyStatus = m.dirtyStatus[1:]
+			ev := m.pendingStatus[serverID]
+			delete(m.pendingStatus, serverID)
+			m.statusMu.Unlock()
+
+			m.events <- ev
+
+			m.statusMu.Lock()
+			if _, ok := m.pendingStatus[serverID]; ok {
+				// A newer status arrived while we were sending; keep coalescing
+				// and requeue so the latest is delivered after this one, in order.
+				m.dirtyStatus = append(m.dirtyStatus, serverID)
+			} else {
+				delete(m.coalescing, serverID)
+			}
+			m.statusMu.Unlock()
 		}
 	}
 }
 
 // logPump forwards an instance's captured log lines onto the merged log stream
 // (FR-MON-2). It exits when the instance closes its log channel (terminal
-// state). Under sink backpressure it drops the line with a warning, consistent
-// with the status-event posture (issue #96); the per-instance LogPump already
-// bounds and marks drops at the capture edge.
+// state). Under sink backpressure it drops the line with a warning: logs are a
+// stream, not state, so they keep the lossy posture (unlike status, which
+// coalesces; issue #96). The per-instance LogPump already bounds and marks drops
+// at the capture edge.
 func (m *Manager) logPump(serverID string, src execution.LogSource) {
 	for ev := range src.Logs() {
 		select {
@@ -630,7 +714,9 @@ func (m *Manager) logPump(serverID string, src execution.LogSource) {
 // Metrics event per tick until the instance terminates (done closed). When the
 // instance is not a StatsSource, or a sample errors, it emits an up-only sample
 // (server id with zero stats) so the API still learns the server is running
-// (FR-MON-3). A full sink drops the sample with a warning (issue #96 posture).
+// (FR-MON-3). A full sink drops the sample with a warning: metrics are a stream,
+// not state, so they keep the lossy posture (unlike status, which coalesces;
+// issue #96).
 func (m *Manager) metricsPump(serverID string, inst execution.Instance, done chan struct{}) {
 	stats, _ := inst.(execution.StatsSource)
 
