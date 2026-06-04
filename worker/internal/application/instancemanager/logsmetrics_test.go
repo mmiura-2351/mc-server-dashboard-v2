@@ -63,8 +63,13 @@ func (d *richDriver) Start(_ context.Context, spec execution.InstanceSpec) (exec
 // fakeClock drives the metrics ticker deterministically: After returns a channel
 // the test fires via tick().
 type fakeClock struct {
-	mu  sync.Mutex
+	mu sync.Mutex
+	// chs holds the After channels currently waited on by pump goroutines.
 	chs []chan time.Time
+	// registers counts every After registration ever made. A live pump increments
+	// it each time it re-parks in its select; once it stops increasing, the pump
+	// has exited (used by waitForPumpExit).
+	registers int
 }
 
 func (c *fakeClock) Now() time.Time { return time.Unix(0, 0) }
@@ -73,6 +78,7 @@ func (c *fakeClock) After(time.Duration) <-chan time.Time {
 	ch := make(chan time.Time, 1)
 	c.mu.Lock()
 	c.chs = append(c.chs, ch)
+	c.registers++
 	c.mu.Unlock()
 	return ch
 }
@@ -182,8 +188,8 @@ func TestManagerEmitsUpOnlyMetricsWithoutStatsSource(t *testing.T) {
 	}
 }
 
-// Stopping the instance tears down the metrics pump: after the instance reaches a
-// terminal state, no further metrics are emitted on subsequent ticks.
+// Stopping the instance tears down the metrics pump: once the pump goroutine has
+// exited, no further metrics are emitted on subsequent ticks.
 func TestMetricsPumpStopsAfterInstanceExit(t *testing.T) {
 	d := &richDriver{}
 	clk := &fakeClock{}
@@ -194,27 +200,36 @@ func TestMetricsPumpStopsAfterInstanceExit(t *testing.T) {
 	}
 	drainStatus(m)
 
+	// Wait until the pump is parked in its select loop (one After registered),
+	// proving it is alive before we tear it down.
+	waitFor(t, func() bool {
+		clk.mu.Lock()
+		defer clk.mu.Unlock()
+		return len(clk.chs) > 0
+	})
+
 	stop := session.Command{CommandID: "c2", ServerID: "s1", Kind: "StopServer"}
 	if res := m.Handle(context.Background(), stop); !res.Success {
 		t.Fatalf("stop = %+v", res)
 	}
 
-	// Give the pump goroutines time to observe the closed event channel and exit.
-	waitFor(t, func() bool {
-		clk.mu.Lock()
-		defer clk.mu.Unlock()
-		// After teardown no goroutine re-registers an After channel; firing any
-		// stragglers must not produce a metrics event.
-		return true
-	})
-	// Drain any After channels created before teardown, then assert no metrics.
+	// Wait until the pump goroutine has actually exited, then assert it emits no
+	// further metrics. Firing a tick that races the teardown select is
+	// non-deterministic (the pump may legitimately emit one straggler sample as done
+	// closes), so instead we observe exit directly through the fake clock: a live
+	// pump always re-registers an After channel before parking in its select, a dead
+	// one never does. We keep firing pending ticks (draining any straggler metrics)
+	// until the registration counter is stable across a tick that produces no new
+	// registration — at that point the goroutine has returned for good.
+	waitForPumpExit(t, clk, m)
+
+	// The pump has exited. A subsequent tick (no After channels exist, so it is a
+	// no-op) must not produce any metrics.
 	clk.tick()
 	select {
-	case ev, ok := <-m.Metrics():
-		if ok {
-			t.Fatalf("unexpected metrics after exit: %+v", ev)
-		}
-	case <-time.After(200 * time.Millisecond):
+	case ev := <-m.Metrics():
+		t.Fatalf("unexpected metrics after exit: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
 		// No metrics emitted — the pump stopped. Pass.
 	}
 }
@@ -306,6 +321,54 @@ func drainStatus(m *Manager) {
 		for range m.Events() { //nolint:revive // intentionally draining to channel close
 		}
 	}()
+}
+
+// waitForPumpExit blocks until the metrics pump goroutine has returned, draining
+// any straggler metrics it emits while tearing down. It fires each pending tick
+// and then confirms exit: a pump still in its loop re-registers an After channel
+// (registers grows) before parking, whereas an exited pump never registers again.
+// When a tick is consumed without a new registration appearing and no After
+// channels remain, the goroutine has exited for good.
+func waitForPumpExit(t *testing.T, clk *fakeClock, m *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		clk.mu.Lock()
+		before := clk.registers
+		pending := len(clk.chs)
+		clk.mu.Unlock()
+
+		if pending == 0 {
+			// Pump is parked on done with no live tick, or already exited. Either
+			// way it will take the done branch and never register again. Confirm by
+			// checking the counter is stable after a short grace period.
+			time.Sleep(2 * time.Millisecond)
+			clk.mu.Lock()
+			stable := clk.registers == before && len(clk.chs) == 0
+			clk.mu.Unlock()
+			if stable {
+				return
+			}
+			continue
+		}
+
+		// Fire the pending tick(s); drain any straggler metrics so the sink never
+		// blocks the pump on its way out.
+		clk.tick()
+		drainMetrics(m)
+	}
+	t.Fatal("metrics pump did not exit before deadline")
+}
+
+// drainMetrics non-blockingly removes any buffered metrics events.
+func drainMetrics(m *Manager) {
+	for {
+		select {
+		case <-m.Metrics():
+		default:
+			return
+		}
+	}
 }
 
 // waitFor polls cond until true or fails after a deadline.
