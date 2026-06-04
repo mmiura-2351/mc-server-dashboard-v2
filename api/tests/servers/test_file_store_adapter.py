@@ -102,6 +102,39 @@ async def test_edit_history_rollback_round_trip(tmp_path: Path) -> None:
     assert rolled == b"motd=original"
 
 
+async def test_write_on_never_snapshotted_server_succeeds(tmp_path: Path) -> None:
+    """An at-rest edit before any snapshot initializes the first version (issue #205).
+
+    A server that crashed before its first snapshot has no published working set;
+    the EULA-repair edit must succeed end-to-end (no unmapped NotFoundError → 500),
+    leaving the file readable.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    await adapter.write_file(
+        community_id=cid, server_id=sid, rel_path="eula.txt", content=b"eula=true"
+    )
+    out = await adapter.read_file(community_id=cid, server_id=sid, rel_path="eula.txt")
+    assert out == b"eula=true"
+
+
+async def test_list_dir_on_never_snapshotted_server_is_empty(tmp_path: Path) -> None:
+    """An at-rest listing before any snapshot is empty, not an error (issue #205)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    entries = await adapter.list_dir(
+        community_id=CommunityId(community), server_id=ServerId(server), rel_path="."
+    )
+    assert entries == []
+
+
 async def test_list_dir_browses_root(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = _scope()
