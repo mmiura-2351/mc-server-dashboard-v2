@@ -155,6 +155,19 @@ class SnapshotSettings(_Section):
     default_interval_seconds: int = Field(default=3600, gt=0)
     min_interval_seconds: int = Field(default=300, gt=0)
 
+    @model_validator(mode="after")
+    def _enforce_floor_below_default(self) -> SnapshotSettings:
+        # The default interval is itself an effective cadence and is clamped to
+        # the floor; a floor above the default would force every server above
+        # the configured default, which is contradictory. Reject at load
+        # (CONFIGURATION.md Section 5.4, fail-fast). Equal is fine.
+        if self.min_interval_seconds > self.default_interval_seconds:
+            raise ValueError(
+                "snapshot.min_interval_seconds must be <= "
+                "snapshot.default_interval_seconds"
+            )
+        return self
+
 
 class BackupSettings(_Section):
     """Scheduled-backup cadence (FR-BAK-3).
@@ -184,6 +197,18 @@ class PasswordSettings(_Section):
     check_common_list: bool = True
     forbid_user_info: bool = True
     forbid_simple_patterns: bool = True
+
+    @model_validator(mode="after")
+    def _enforce_min_below_max(self) -> PasswordSettings:
+        # A minimum length above the maximum admits no valid password, so the
+        # pair is contradictory even though each value passes its own bound.
+        # Reject at load (SECURITY.md Section 1, fail-fast). Equal is fine (a
+        # fixed-length requirement).
+        if self.min_length > self.max_length:
+            raise ValueError(
+                "auth.password.min_length must be <= auth.password.max_length"
+            )
+        return self
 
 
 class TokenSettings(_Section):
@@ -223,6 +248,19 @@ class TokenSettings(_Section):
             )
         return self
 
+    @model_validator(mode="after")
+    def _enforce_access_below_refresh(self) -> TokenSettings:
+        # The refresh token exists to outlive the short-lived access token; an
+        # access TTL >= the refresh TTL means the refresh expires no later than
+        # the access token, defeating the refresh mechanism. Strict ``<``:
+        # equal lifetimes are just as nonsensical. Reject at load
+        # (CONFIGURATION.md Section 5.3, fail-fast).
+        if self.access_ttl_seconds >= self.refresh_ttl_seconds:
+            raise ValueError(
+                "auth.token.access_ttl_seconds must be < auth.token.refresh_ttl_seconds"
+            )
+        return self
+
 
 class BruteForceSettings(_Section):
     """Brute-force protection (CONFIGURATION.md Section 7.2).
@@ -252,6 +290,19 @@ class BruteForceSettings(_Section):
     # A failures-only attack never triggers the on-success prune, so this keeps
     # the append-only table bounded. Defaults to one hour.
     prune_interval_seconds: int = Field(default=3600, gt=0)
+
+    @model_validator(mode="after")
+    def _enforce_lockout_base_below_max(self) -> BruteForceSettings:
+        # The lockout doubles from the base on each repeat and is capped at the
+        # max (SECURITY.md Section 2); a base above the cap means the very first
+        # lockout already exceeds its own ceiling, which is contradictory.
+        # Reject at load (fail-fast). Equal is fine (a fixed-duration lockout).
+        if self.lockout_base_seconds > self.lockout_max_seconds:
+            raise ValueError(
+                "auth.brute_force.lockout_base_seconds must be <= "
+                "auth.brute_force.lockout_max_seconds"
+            )
+        return self
 
 
 class ProxySettings(_Section):

@@ -178,10 +178,13 @@ def test_brute_force_field_accepts_boundary(
     # delay_ms = 0 is the explicit disable of the artificial failure delay
     # (CONFIGURATION.md Section 7.2); the rest accept their lowest legal value.
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
-    cfg = _write_toml(
-        tmp_path,
-        f"[auth.brute_force]\n{field} = {ok_value}\n",
-    )
+    body = f"[auth.brute_force]\n{field} = {ok_value}\n"
+    # lockout_max_seconds = 1 would fall below the default base (900) and trip
+    # the base <= max cross-field rule (issue #163); lower the base too so this
+    # case still exercises only the field-level lower bound.
+    if field == "lockout_max_seconds":
+        body += "lockout_base_seconds = 1\n"
+    cfg = _write_toml(tmp_path, body)
     settings = load_settings(config_file=cfg)
     assert getattr(settings.auth.brute_force, field) == ok_value
 
@@ -390,3 +393,124 @@ def test_hs256_signing_key_at_32_bytes_is_accepted(
     monkeypatch.setenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", "x" * 32)
     settings = load_settings(config_file=None)
     assert settings.auth.token.signing_key == "x" * 32
+
+
+# --- Cross-field consistency (issue #163) -----------------------------------
+# Pairs that pass their individual field bounds but are semantically
+# inconsistent (e.g. a min above its max). Each validator names both fields and
+# accepts the equal-values boundary where ``<=`` allows it; the access/refresh
+# TTL pair is strict (``<``) since equal lifetimes defeat the refresh mechanism.
+
+
+def test_password_min_length_above_max_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.password]\nmin_length = 130\nmax_length = 128\n",
+    )
+    with pytest.raises(ValidationError, match="min_length"):
+        load_settings(config_file=cfg)
+
+
+def test_password_min_length_equal_to_max_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.password]\nmin_length = 64\nmax_length = 64\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.auth.password.min_length == 64
+    assert settings.auth.password.max_length == 64
+
+
+def test_lockout_base_above_max_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.brute_force]\nlockout_base_seconds = 1000\nlockout_max_seconds = 900\n",
+    )
+    with pytest.raises(ValidationError, match="lockout_base_seconds"):
+        load_settings(config_file=cfg)
+
+
+def test_lockout_base_equal_to_max_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.brute_force]\nlockout_base_seconds = 900\nlockout_max_seconds = 900\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.auth.brute_force.lockout_base_seconds == 900
+    assert settings.auth.brute_force.lockout_max_seconds == 900
+
+
+def test_snapshot_min_above_default_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[snapshot]\ndefault_interval_seconds = 300\nmin_interval_seconds = 600\n",
+    )
+    with pytest.raises(ValidationError, match="min_interval_seconds"):
+        load_settings(config_file=cfg)
+
+
+def test_snapshot_min_equal_to_default_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[snapshot]\ndefault_interval_seconds = 300\nmin_interval_seconds = 300\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.snapshot.default_interval_seconds == 300
+    assert settings.snapshot.min_interval_seconds == 300
+
+
+def test_token_access_ttl_not_below_refresh_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.token]\naccess_ttl_seconds = 1000\nrefresh_ttl_seconds = 900\n",
+    )
+    with pytest.raises(ValidationError, match="access_ttl_seconds"):
+        load_settings(config_file=cfg)
+
+
+def test_token_access_ttl_equal_to_refresh_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Equal lifetimes are rejected too: the refresh token would expire no later
+    # than the access token, defeating the refresh mechanism (strict ``<``).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.token]\naccess_ttl_seconds = 900\nrefresh_ttl_seconds = 900\n",
+    )
+    with pytest.raises(ValidationError, match="access_ttl_seconds"):
+        load_settings(config_file=cfg)
+
+
+def test_token_access_ttl_below_refresh_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.token]\naccess_ttl_seconds = 900\nrefresh_ttl_seconds = 901\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.auth.token.access_ttl_seconds == 900
+    assert settings.auth.token.refresh_ttl_seconds == 901
