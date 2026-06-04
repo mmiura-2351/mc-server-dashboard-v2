@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"sync"
 	"time"
 )
 
@@ -36,6 +37,12 @@ type Runner struct {
 	// randFloat yields a value in [0,1) for backoff jitter; injectable for
 	// deterministic tests.
 	randFloat func() float64
+
+	// dispatcher holds the per-server command lanes for the active stream. It is
+	// (re)created on every serve and torn down with the stream; nil between
+	// connections. Stored on the Runner so tests can observe lane lifecycle.
+	mu         sync.Mutex
+	dispatcher *dispatcher
 }
 
 // Option configures a Runner.
@@ -150,27 +157,40 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 	return true, r.serve(ctx, transport, interval)
 }
 
-// maxConcurrentTransfers bounds how many long-running hydrate/snapshot handlers
-// run at once off the receive loop (issue #95). A small cap keeps a burst of
-// transfers from spawning unbounded goroutines while still letting independent
-// servers' transfers proceed in parallel.
-const maxConcurrentTransfers = 4
+// maxConcurrentLanes bounds how many per-server command lanes execute commands
+// at once off the receive loop (issue #95). A small cap keeps a burst of distinct
+// servers from spawning unbounded goroutines while still letting independent
+// servers' commands — including a slow graceful Stop — proceed in parallel. The
+// cap limits concurrent execution, not routing: the receive loop never blocks on
+// it, so a full pool delays only the start of additional servers' work, never the
+// dispatch of further commands.
+const maxConcurrentLanes = 4
 
 // serve runs the steady state: a heartbeat ticker, an inbound-command receive
 // loop, and a single serialized transport-send path, until the stream errors or
 // ctx is cancelled. The receive loop runs in a goroutine so a blocking
-// RecvCommand never starves the heartbeat; command results (from both inline and
-// off-loop handlers) flow back through the results channel so all transport
-// Sends happen on this one goroutine (a gRPC stream is not safe for concurrent
-// Send).
+// RecvCommand never starves the heartbeat; command results (from the per-server
+// lanes and the inline path) flow back through the results channel so all
+// transport Sends happen on this one goroutine (a gRPC stream is not safe for
+// concurrent Send).
 func (r *Runner) serve(ctx context.Context, transport Transport, interval time.Duration) error {
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	results := make(chan CommandResult, maxConcurrentTransfers+1)
+	results := make(chan CommandResult, maxConcurrentLanes+1)
+	disp := newDispatcher(serveCtx, r, results)
+	r.mu.Lock()
+	r.dispatcher = disp
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.dispatcher = nil
+		r.mu.Unlock()
+	}()
+
 	recvErr := make(chan error, 1)
 	go func() {
-		recvErr <- r.receiveLoop(serveCtx, transport, results)
+		recvErr <- r.receiveLoop(serveCtx, transport, disp)
 	}()
 
 	var events <-chan StatusEvent
@@ -212,37 +232,28 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 	}
 }
 
-// receiveLoop reads inbound commands and answers each, never blocking on a
-// long-running transfer. Lifecycle/console commands are fast and handled inline;
-// the long-running data-plane triggers (Hydrate/Snapshot) are dispatched off the
-// loop under a bounded semaphore so a slow transfer for one server does not delay
-// commands for another (issue #95). File commands (ReadFile/EditFile) are small
-// and stay inline on the loop, like ServerCommand. An unset/unknown command oneof
-// gets an "unsupported" result. A command is never silently dropped
-// (CONTROL_PLANE.md Section 5). Every result is pushed to results, drained by the
-// single sender in serve.
-func (r *Runner) receiveLoop(ctx context.Context, transport Transport, results chan<- CommandResult) error {
-	sem := make(chan struct{}, maxConcurrentTransfers)
+// receiveLoop reads inbound commands and routes each, never blocking on a
+// slow command for one server. A command targeting a server is handed to that
+// server's lane, which executes the server's commands serially (so start/stop for
+// one server never interleave) while different servers' lanes run concurrently —
+// a slow graceful Stop on one server no longer delays commands for another (issue
+// #95). A command with no server id (or an unset/unknown oneof) has no lane to
+// order against, so it is handled inline; an unhandled kind gets an "unsupported"
+// result. A command is never silently dropped (CONTROL_PLANE.md Section 5). Every
+// result is pushed to results, drained by the single sender in serve.
+func (r *Runner) receiveLoop(ctx context.Context, transport Transport, disp *dispatcher) error {
 	for {
 		cmd, err := transport.RecvCommand(ctx)
 		if err != nil {
 			return err
 		}
 
-		if isLongRunningKind(cmd.Kind) {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case sem <- struct{}{}:
-			}
-			go func(cmd Command) {
-				defer func() { <-sem }()
-				r.emitResult(ctx, results, r.handle(ctx, cmd))
-			}(cmd)
+		if cmd.ServerID == "" {
+			r.emitResult(ctx, disp.results, r.handle(ctx, cmd))
 			continue
 		}
 
-		r.emitResult(ctx, results, r.handle(ctx, cmd))
+		disp.dispatch(cmd)
 	}
 }
 
@@ -285,13 +296,100 @@ func isHandledKind(kind string) bool {
 	}
 }
 
-// isLongRunningKind reports whether a command should run off the serial receive
-// loop (the bulk data-plane transfers, issue #95).
-func isLongRunningKind(kind string) bool {
-	switch kind {
-	case "HydrateTrigger", "SnapshotTrigger":
-		return true
-	default:
-		return false
+// dispatcher routes commands to per-server lanes (issue #95). Each lane runs one
+// server's commands serially on its own goroutine; lanes run concurrently up to
+// sem's capacity. A lane is created on first use and removed once its queue
+// drains, so an ever-growing roster of servers leaks no goroutines. All state is
+// guarded by mu; the lane queue lives inline on the lane so enqueue and the
+// drain-and-exit decision are made under the same lock, closing the race where a
+// command arrives just as a lane decides to exit.
+type dispatcher struct {
+	r       *Runner
+	ctx     context.Context
+	results chan<- CommandResult
+	sem     chan struct{}
+
+	mu    sync.Mutex
+	lanes map[string]*lane
+}
+
+// lane is one server's serial command queue.
+type lane struct {
+	queue []Command
+}
+
+func newDispatcher(ctx context.Context, r *Runner, results chan<- CommandResult) *dispatcher {
+	return &dispatcher{
+		r:       r,
+		ctx:     ctx,
+		results: results,
+		sem:     make(chan struct{}, maxConcurrentLanes),
+		lanes:   make(map[string]*lane),
 	}
+}
+
+// dispatch queues cmd on its server's lane, starting the lane's worker if it is
+// not already running. It never blocks on command execution or the concurrency
+// cap, so a slow command for one server cannot delay routing for another.
+func (d *dispatcher) dispatch(cmd Command) {
+	d.mu.Lock()
+	l, ok := d.lanes[cmd.ServerID]
+	if !ok {
+		l = &lane{}
+		d.lanes[cmd.ServerID] = l
+	}
+	l.queue = append(l.queue, cmd)
+	d.mu.Unlock()
+
+	if !ok {
+		go d.runLane(cmd.ServerID, l)
+	}
+}
+
+// runLane drains a server's queue serially until it is empty, then removes the
+// lane and exits. It holds one sem slot for its lifetime, bounding how many
+// servers execute commands at once.
+func (d *dispatcher) runLane(serverID string, l *lane) {
+	select {
+	case d.sem <- struct{}{}:
+	case <-d.ctx.Done():
+		d.removeLane(serverID)
+		return
+	}
+	defer func() { <-d.sem }()
+
+	for {
+		d.mu.Lock()
+		if len(l.queue) == 0 {
+			delete(d.lanes, serverID)
+			d.mu.Unlock()
+			return
+		}
+		cmd := l.queue[0]
+		l.queue = l.queue[1:]
+		d.mu.Unlock()
+
+		d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, cmd))
+	}
+}
+
+// removeLane drops a lane that never started draining (ctx already cancelled).
+func (d *dispatcher) removeLane(serverID string) {
+	d.mu.Lock()
+	delete(d.lanes, serverID)
+	d.mu.Unlock()
+}
+
+// laneCount reports the number of live lanes on the active stream's dispatcher,
+// for tests asserting idle teardown. It is zero when no stream is being served.
+func (r *Runner) laneCount() int {
+	r.mu.Lock()
+	disp := r.dispatcher
+	r.mu.Unlock()
+	if disp == nil {
+		return 0
+	}
+	disp.mu.Lock()
+	defer disp.mu.Unlock()
+	return len(disp.lanes)
 }
