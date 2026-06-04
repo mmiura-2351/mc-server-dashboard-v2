@@ -225,6 +225,22 @@ class SqlAlchemyRoleRepository(RoleRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_role(row) for row in rows]
 
+    async def update(self, role: Role) -> None:
+        stmt = (
+            update(RoleModel)
+            .where(RoleModel.id == role.id.value)
+            .values(
+                name=role.name.value,
+                permissions=sorted(perm.value for perm in role.permissions),
+                updated_at=role.updated_at,
+            )
+        )
+        await self._session.execute(stmt)
+
+    async def delete(self, role_id: RoleId) -> None:
+        stmt = delete(RoleModel).where(RoleModel.id == role_id.value)
+        await self._session.execute(stmt)
+
 
 class SqlAlchemyResourceGrantRepository(ResourceGrantRepository):
     """:class:`ResourceGrantRepository` adapter over an ``AsyncSession``."""
@@ -265,6 +281,21 @@ class SqlAlchemyResourceGrantRepository(ResourceGrantRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_resource_grant(row) if row is not None else None
+
+    async def list_for_community(
+        self, community_id: CommunityId, user_id: UserId | None = None
+    ) -> list[ResourceGrant]:
+        stmt = select(ResourceGrantModel).where(
+            ResourceGrantModel.community_id == community_id.value
+        )
+        if user_id is not None:
+            stmt = stmt.where(ResourceGrantModel.user_id == user_id.value)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_resource_grant(row) for row in rows]
+
+    async def delete(self, grant_id: ResourceGrantId) -> None:
+        stmt = delete(ResourceGrantModel).where(ResourceGrantModel.id == grant_id.value)
+        await self._session.execute(stmt)
 
     async def delete_for_user_in_community(
         self, user_id: UserId, community_id: CommunityId

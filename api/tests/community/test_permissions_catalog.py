@@ -13,9 +13,12 @@ import pytest
 from mc_server_dashboard_api.community.domain.errors import UnknownPermissionError
 from mc_server_dashboard_api.community.domain.permissions import (
     COMMUNITY_PERMISSIONS,
+    GRANT_PERMISSIONS_BY_RESOURCE_TYPE,
     PLATFORM_ADMIN_PERMISSIONS,
     is_known_permission,
     is_platform_admin_permission,
+    require_community_permission,
+    require_grant_permission,
     require_known_permission,
 )
 from mc_server_dashboard_api.community.domain.value_objects import Permission
@@ -88,3 +91,44 @@ def test_require_known_permission_passes_through_a_catalog_code() -> None:
 def test_require_known_permission_rejects_unlisted_code() -> None:
     with pytest.raises(UnknownPermissionError):
         require_known_permission(Permission("server:teleport"))
+
+
+def test_require_community_permission_passes_through_a_community_code() -> None:
+    perm = Permission("role:manage")
+    assert require_community_permission(perm) is perm
+
+
+def test_require_community_permission_rejects_platform_admin_code() -> None:
+    # A platform-admin axis code must never be assignable via a role or grant.
+    with pytest.raises(UnknownPermissionError):
+        require_community_permission(Permission("worker:manage"))
+
+
+def test_require_community_permission_rejects_unknown_code() -> None:
+    with pytest.raises(UnknownPermissionError):
+        require_community_permission(Permission("server:teleport"))
+
+
+def test_grant_permissions_for_server_are_resource_scoped_families() -> None:
+    # A server grant may carry only server / file / backup operation codes.
+    assert {p.value for p in GRANT_PERMISSIONS_BY_RESOURCE_TYPE["server"]} == {
+        p.value
+        for p in COMMUNITY_PERMISSIONS
+        if p.value.split(":", 1)[0] in ("server", "file", "backup")
+    }
+
+
+def test_require_grant_permission_accepts_a_server_scoped_code() -> None:
+    perm = Permission("server:start")
+    assert require_grant_permission(perm, resource_type="server") is perm
+
+
+def test_require_grant_permission_rejects_community_wide_code_on_server() -> None:
+    # member:add is community-wide, not a per-server operation.
+    with pytest.raises(UnknownPermissionError):
+        require_grant_permission(Permission("member:add"), resource_type="server")
+
+
+def test_require_grant_permission_rejects_unknown_resource_type() -> None:
+    with pytest.raises(UnknownPermissionError):
+        require_grant_permission(Permission("server:start"), resource_type="widget")

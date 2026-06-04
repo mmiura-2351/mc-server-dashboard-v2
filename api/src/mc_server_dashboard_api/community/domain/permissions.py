@@ -91,3 +91,49 @@ def require_known_permission(permission: Permission) -> Permission:
     if permission not in ALL_PERMISSIONS:
         raise UnknownPermissionError(permission.value)
     return permission
+
+
+def require_community_permission(permission: Permission) -> Permission:
+    """Return ``permission`` if it is a *community-scoped* catalog code, else raise.
+
+    Roles and grants live inside a Community, so the permissions they carry must be
+    community-scoped (FR-AUTHZ-2/4); platform-admin axis codes (FR-AUTHZ-5) are
+    evaluated outside any Community and must never be assignable through a role or
+    grant. A platform-admin or wholly unknown code raises
+    :class:`UnknownPermissionError` — the edge maps both to one rejection.
+    """
+
+    if permission not in COMMUNITY_PERMISSIONS:
+        raise UnknownPermissionError(permission.value)
+    return permission
+
+
+# The community-scoped permission families a grant on each ``resource_type`` may
+# carry. M1's only resource type is ``server`` (DATABASE.md Section 6); a server
+# grant is a per-server scope, so it may only carry the resource-scoped families —
+# server / file / backup operations — never community-wide codes (member, role,
+# grant, community). This keeps grants honest without enumerating every code.
+GRANT_PERMISSIONS_BY_RESOURCE_TYPE: dict[str, frozenset[Permission]] = {
+    "server": frozenset(
+        permission
+        for permission in COMMUNITY_PERMISSIONS
+        if permission.value.split(":", 1)[0] in ("server", "file", "backup")
+    ),
+}
+
+
+def require_grant_permission(
+    permission: Permission, *, resource_type: str
+) -> Permission:
+    """Return ``permission`` if valid for a grant on ``resource_type``, else raise.
+
+    The permission must be community-scoped *and* belong to a family the resource
+    type supports (:data:`GRANT_PERMISSIONS_BY_RESOURCE_TYPE`). An unsupported or
+    unknown code raises :class:`UnknownPermissionError`. ``resource_type`` itself
+    is validated separately by the use case (it is a CHECK-constrained enum).
+    """
+
+    allowed = GRANT_PERMISSIONS_BY_RESOURCE_TYPE.get(resource_type, frozenset())
+    if permission not in allowed:
+        raise UnknownPermissionError(permission.value)
+    return permission
