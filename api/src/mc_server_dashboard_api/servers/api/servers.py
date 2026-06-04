@@ -269,6 +269,23 @@ async def update_server(
     use_case: Annotated[UpdateServer, Depends(get_update_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
+    """Edit a server's name/config (server:update).
+
+    **Error precedence (issue #115).** Validation runs first: config-bounds
+    (``config_too_large`` / ``config_invalid_shape``) and the cadence-override
+    floor/shape (``invalid_snapshot_interval`` / ``invalid_backup_schedule``) are
+    422 and are evaluated before any state gating. Only then does the state gate
+    apply: an edit that requires the server to be at rest but finds it running is
+    409 (``server_not_stopped``). So a below-floor override on a running server is
+    a 422, not a 409.
+
+    **Cadence-knob split (issue #115).** A config update that touches only the
+    operationally-safe keys (``snapshot_interval_seconds``,
+    ``backup_interval_hours``) bypasses the at-rest gate and is accepted while the
+    server runs; the schedulers pick up the new value on their next tick. Any
+    other config change — or a name change — keeps the at-rest requirement.
+    """
+
     config = None if body.config is None else _validated_config(body.config)
     try:
         server = await use_case(
