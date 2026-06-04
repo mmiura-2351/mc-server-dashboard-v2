@@ -2,8 +2,8 @@
 
 The connection string is a secret (CONFIGURATION.md Section 3), so it is read
 from the same ``MCD_API_`` configuration the service uses rather than from
-``alembic.ini``. ``target_metadata`` is the shared declarative ``Base.metadata``;
-each context's ORM models are imported so their tables register on it.
+``alembic.ini``. ``target_metadata`` comes from ``model_registry``, which imports
+each context's ORM models so their tables register on the shared ``Base.metadata``.
 """
 
 from __future__ import annotations
@@ -11,19 +11,15 @@ from __future__ import annotations
 import asyncio
 
 from alembic import context
+
+# ``model_registry`` imports every adapters model module so their tables register
+# on the shared ``Base.metadata`` it exposes as ``target_metadata``. Keeping the
+# registration in its own importable module lets a test verify it in isolation.
+from model_registry import target_metadata
 from sqlalchemy.engine import Connection
 
-from mc_server_dashboard_api.audit.adapters import models as _audit_models
-from mc_server_dashboard_api.community.adapters import models as _community_models
 from mc_server_dashboard_api.config import load_settings
-from mc_server_dashboard_api.core.adapters.database import Base, create_engine
-from mc_server_dashboard_api.identity.adapters import models as _identity_models
-from mc_server_dashboard_api.servers.adapters import models as _servers_models
-
-# Importing the models registers their tables on ``Base.metadata`` for autogenerate.
-_ = (_identity_models, _community_models, _servers_models, _audit_models)
-
-target_metadata = Base.metadata
+from mc_server_dashboard_api.core.adapters.database import create_engine
 
 
 def _database_url() -> str:
