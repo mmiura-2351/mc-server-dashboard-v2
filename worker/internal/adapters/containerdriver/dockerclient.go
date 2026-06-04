@@ -60,12 +60,13 @@ func unixSocketPath(host string) (string, bool) {
 
 // createBody is the /containers/create request payload.
 type createBody struct {
-	Image        string              `json:"Image"`
-	Cmd          []string            `json:"Cmd"`
-	WorkingDir   string              `json:"WorkingDir"`
-	Labels       map[string]string   `json:"Labels,omitempty"`
-	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
-	HostConfig   hostConfig          `json:"HostConfig"`
+	Image            string              `json:"Image"`
+	Cmd              []string            `json:"Cmd"`
+	WorkingDir       string              `json:"WorkingDir"`
+	Labels           map[string]string   `json:"Labels,omitempty"`
+	ExposedPorts     map[string]struct{} `json:"ExposedPorts,omitempty"`
+	HostConfig       hostConfig          `json:"HostConfig"`
+	NetworkingConfig *networkingConfig   `json:"NetworkingConfig,omitempty"`
 }
 
 type hostConfig struct {
@@ -76,6 +77,14 @@ type hostConfig struct {
 type portBinding struct {
 	HostIP   string `json:"HostIp"`
 	HostPort string `json:"HostPort"`
+}
+
+// networkingConfig attaches the container to a user-defined network at create
+// time. The Engine keys EndpointsConfig by network name; an empty endpoint object
+// is enough to join, and a user-defined network then resolves the container's
+// name via its embedded DNS (issue #218).
+type networkingConfig struct {
+	EndpointsConfig map[string]struct{} `json:"EndpointsConfig"`
 }
 
 // Create creates a container and returns its id.
@@ -94,6 +103,11 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 			key := p.ContainerPort + "/tcp"
 			body.ExposedPorts[key] = struct{}{}
 			body.HostConfig.PortBindings[key] = []portBinding{{HostIP: p.HostIP, HostPort: p.HostPort}}
+		}
+	}
+	if spec.Network != "" {
+		body.NetworkingConfig = &networkingConfig{
+			EndpointsConfig: map[string]struct{}{spec.Network: {}},
 		}
 	}
 

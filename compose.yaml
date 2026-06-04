@@ -92,6 +92,13 @@ services:
       # host firewall governs which game ports are actually reachable. RCON always
       # stays on loopback regardless of this value.
       MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP: "0.0.0.0"
+      # Attach the MC containers the worker creates to the compose network (pinned
+      # to "mcsd" below) so RCON is reached over the docker network at the
+      # container's name, never the host loopback. Inside this containerized worker
+      # the host loopback is the worker's own namespace, so the historical
+      # loopback-published RCON is unreachable (issue #218). With this set the
+      # worker also DROPS the host RCON publication: RCON never leaves the network.
+      MCD_WORKER_DRIVER_CONTAINER_NETWORK: mcsd
     # The Docker socket is how the container driver creates sibling MC containers.
     # group_add gives the worker process the host docker group so it can use the
     # socket without running privileged.
@@ -111,3 +118,13 @@ services:
 volumes:
   db-data:
   api-storage:
+
+networks:
+  # Pin the compose default network's name so the worker can attach the sibling
+  # MC containers it creates (via the Docker socket) to the SAME user-defined
+  # network and reach their RCON by container name (issue #218). User-defined
+  # networks provide container-name DNS; the default bridge does not.
+  # CAUTION: renaming the default network recreates every service container on the
+  # next `docker compose up` (the old default network is replaced).
+  default:
+    name: mcsd

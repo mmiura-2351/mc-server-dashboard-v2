@@ -14,7 +14,10 @@ app plus the gRPC control-plane server. `worker` is the execution agent: it dial
 the API's control plane, and in this deployment it runs the **container driver
 only** — it creates each Minecraft server as a sibling container via the host
 Docker daemon, mounting the server's working directory and publishing its game
-and RCON ports. The `migrate` service is a one-shot that applies the database
+port. The worker attaches every MC container to the pinned compose network
+(`mcsd`) and reaches each server's RCON by container name over that network, so
+**RCON never leaves the docker network** (the host RCON publication is dropped;
+see Section 6). The `migrate` service is a one-shot that applies the database
 schema before `api` starts.
 
 ## 2. Prerequisites
@@ -109,20 +112,35 @@ platform admin directly in the database (the only out-of-band step).
 ## 6. How Minecraft server ports reach clients
 
 The worker's container driver reads each server's `server.properties` and
-publishes its `server-port` (Minecraft default 25565) and `rcon.port` (default
-25575) from the MC container to the host. Players connect to the host on the
-server's game port. Because these MC containers are created at runtime — not
-declared in `compose.yaml` — the host firewall must allow inbound traffic to
-whichever game ports your servers use. Assign distinct `server-port` values per
-server to avoid host-port collisions.
+publishes its `server-port` (Minecraft default 25565) from the MC container to
+the host. Players connect to the host on the server's game port. Because these MC
+containers are created at runtime — not declared in `compose.yaml` — the host
+firewall must allow inbound traffic to whichever game ports your servers use.
+Assign distinct `server-port` values per server to avoid host-port collisions.
 
 The host interface the **game port** binds to is configurable via
 `driver.container.game_bind_ip` (env `MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP`).
 The in-code default is `127.0.0.1` (loopback-only); this `compose.yaml` overrides
 it to `0.0.0.0` so a started server accepts players out of the box, leaving the
-host firewall to govern which game ports are actually exposed. The **RCON port**
-always binds to loopback (`127.0.0.1`) regardless of this setting — it is the
-worker's host-side control channel and must not be reachable from off-host.
+host firewall to govern which game ports are actually exposed.
+
+The **RCON port** is the worker's control channel and is never exposed off-host.
+Its handling depends on `driver.container.network` (env
+`MCD_WORKER_DRIVER_CONTAINER_NETWORK`):
+
+- **Set** (this `compose.yaml`, value `mcsd`): the worker attaches each MC
+  container to that user-defined network and dials RCON at the container's name
+  over the network. The host RCON publication is **dropped** — RCON never leaves
+  the docker network. This is required for the containerized worker, whose own
+  loopback is not the host loopback where a published RCON port would land
+  (issue #218). The compose default network's name is pinned to `mcsd` so the
+  worker (a compose service) and the sibling MC containers it creates share the
+  same network with container-name DNS. The network **must be user-defined**
+  (a `docker network create` network, as the pinned `mcsd` is): the default
+  `bridge` has no container-name DNS, so pointing this at `bridge` lets the
+  attach succeed but the RCON dial silently fails.
+- **Unset** (bare-metal worker / host-process parity): RCON is published to the
+  host loopback (`127.0.0.1`) and dialed there, the historical behavior.
 
 ## 7. TLS guidance
 

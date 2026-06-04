@@ -51,9 +51,11 @@ const (
 )
 
 // controlFunc opens an execution.ServerControl (RCON) for a server, used for the
-// graceful-stop "stop" command. It returns an error when RCON is unavailable; the
-// driver then falls back to `docker stop`.
-type controlFunc func(ctx context.Context, spec execution.InstanceSpec) (execution.ServerControl, error)
+// graceful-stop "stop" command. rconHost is the host to dial RCON at — empty for
+// the host loopback (no network), or the container name when a user-defined
+// network is configured (issue #218). It returns an error when RCON is
+// unavailable; the driver then falls back to `docker stop`.
+type controlFunc func(ctx context.Context, spec execution.InstanceSpec, rconHost string) (execution.ServerControl, error)
 
 // Options tunes the driver.
 type Options struct {
@@ -66,6 +68,12 @@ type Options struct {
 	// GameBindIP is the host interface the game port is published on. Empty uses
 	// defaultGameBindIP (loopback), preserving the historical behavior.
 	GameBindIP string
+	// Network is the user-defined Docker network MC containers attach to. Empty
+	// (the default) keeps the historical behavior: containers run on the default
+	// bridge and RCON is published to the host loopback. When set, the driver
+	// attaches each container to this network, drops the RCON host publication, and
+	// dials RCON at the container name over the network (issue #218).
+	Network string
 }
 
 // Driver is the container ExecutionDriver.
@@ -76,6 +84,7 @@ type Driver struct {
 	workerID    string
 	stopTimeout time.Duration
 	gameBindIP  string
+	network     string
 }
 
 // New builds a container Driver. docker is the Engine seam; images resolves a
@@ -97,7 +106,20 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		workerID:    opts.WorkerID,
 		stopTimeout: timeout,
 		gameBindIP:  gameBindIP,
+		network:     opts.Network,
 	}
+}
+
+// RconHost returns the host that RCON for serverID is dialed at. It is empty when no
+// network is configured (the caller falls back to the host loopback), and the
+// container name when a user-defined network is configured: the network's
+// container-name DNS resolves it, so RCON is reached over the network rather than
+// the unreachable host loopback (issue #218).
+func (d *Driver) RconHost(serverID string) string {
+	if d.network == "" {
+		return ""
+	}
+	return containerName(serverID)
 }
 
 // Start resolves the base image, creates a container bind-mounting the working
@@ -111,21 +133,31 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	}
 
 	gamePort, rconPort := ports(spec.WorkingDir)
+	// The game port binds to the configured host interface (driver.container.
+	// game_bind_ip) so players can reach the server.
+	portMappings := []PortMapping{
+		{ContainerPort: gamePort, HostIP: d.gameBindIP, HostPort: gamePort},
+	}
+	// RCON publication depends on the topology. With no network configured (bare-
+	// metal / host-process parity) RCON is published on the host loopback and
+	// dialed there. With a user-defined network configured, the host RCON
+	// publication is DROPPED — RCON never leaves the docker network — and the
+	// driver dials RCON at the container name over that network instead (issue
+	// #218). It is a control channel that must never be exposed beyond loopback /
+	// the docker network.
+	if d.network == "" {
+		portMappings = append(portMappings,
+			PortMapping{ContainerPort: rconPort, HostIP: rconBindIP, HostPort: rconPort})
+	}
 	create := CreateSpec{
 		Name:       containerName(spec.ServerID),
 		Image:      image,
 		Cmd:        serverCmd(spec),
 		WorkingDir: containerWorkDir,
 		Binds:      []string{spec.WorkingDir + ":" + containerWorkDir},
-		// The game port binds to the configured host interface (driver.container.
-		// game_bind_ip) so players can reach the server; RCON stays on loopback
-		// unconditionally — it is the host-side control channel and must not be
-		// exposed.
-		Ports: []PortMapping{
-			{ContainerPort: gamePort, HostIP: d.gameBindIP, HostPort: gamePort},
-			{ContainerPort: rconPort, HostIP: rconBindIP, HostPort: rconPort},
-		},
-		Labels: d.labels(spec.ServerID),
+		Ports:      portMappings,
+		Network:    d.network,
+		Labels:     d.labels(spec.ServerID),
 	}
 
 	id, err := d.docker.Create(ctx, create)
@@ -144,6 +176,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		docker:      d.docker,
 		containerID: id,
 		openControl: d.openControl,
+		rconHost:    d.RconHost(spec.ServerID),
 		stopTimeout: d.stopTimeout,
 		events:      make(chan execution.StatusEvent, 8),
 		exited:      make(chan struct{}),
@@ -221,6 +254,9 @@ type instance struct {
 	docker      dockerAPI
 	containerID string
 	openControl controlFunc
+	// rconHost is the host the graceful-stop RCON connection dials: empty for the
+	// host loopback, the container name when a user-defined network is configured.
+	rconHost    string
 	stopTimeout time.Duration
 
 	events chan execution.StatusEvent
@@ -319,7 +355,7 @@ func isTerminal(s execution.ServerState) bool {
 // issued successfully. A failure returns false so Stop falls back to `docker
 // stop`.
 func (i *instance) tryRCONStop(ctx context.Context) bool {
-	ctrl, err := i.openControl(ctx, i.spec)
+	ctrl, err := i.openControl(ctx, i.spec, i.rconHost)
 	if err != nil {
 		return false
 	}

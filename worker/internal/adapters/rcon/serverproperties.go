@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,11 +14,19 @@ import (
 // not override it.
 const defaultRCONPort = "25575"
 
+// defaultRCONHost is the dial host when the caller passes an empty host: the host
+// loopback, preserving the historical bare-metal / host-process behavior.
+const defaultRCONHost = "127.0.0.1"
+
 // OpenFromWorkingDir dials RCON for a server using the rcon.port and
 // rcon.password from its working-dir server.properties (the canonical source of
-// a server's RCON settings). It errors when RCON is not enabled/configured; the
-// graceful-stop path then falls back to signals.
-func OpenFromWorkingDir(ctx context.Context, workingDir string) (*Client, error) {
+// a server's RCON settings) at the given host. An empty host dials the loopback
+// (127.0.0.1), the historical behavior; the container driver passes the MC
+// container's name when its containers run on a user-defined network, so RCON is
+// reached over that network instead of the unreachable host loopback (issue
+// #218). It errors when RCON is not enabled/configured; the graceful-stop path
+// then falls back to signals.
+func OpenFromWorkingDir(ctx context.Context, workingDir, host string) (*Client, error) {
 	props, err := readProperties(filepath.Join(workingDir, "server.properties"))
 	if err != nil {
 		return nil, err
@@ -33,7 +42,10 @@ func OpenFromWorkingDir(ctx context.Context, workingDir string) (*Client, error)
 	if port == "" {
 		port = defaultRCONPort
 	}
-	return Dial(ctx, "127.0.0.1:"+port, password)
+	if host == "" {
+		host = defaultRCONHost
+	}
+	return Dial(ctx, net.JoinHostPort(host, port), password)
 }
 
 // readProperties parses a Java .properties file into a map. Lines that are blank

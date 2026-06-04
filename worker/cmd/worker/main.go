@@ -103,9 +103,16 @@ func run(ctx context.Context) error {
 // containers from a previous run before any server is launched.
 func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.Logger) (*instancemanager.Manager, error) {
 	wc := cfg.Worker
-	openFromWorkingDir := func(ctx context.Context, spec execution.InstanceSpec) (execution.ServerControl, error) {
-		return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir)
+	// The host-process driver always dials RCON on the host loopback (empty host).
+	openLoopbackControl := func(ctx context.Context, spec execution.InstanceSpec) (execution.ServerControl, error) {
+		return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir, "")
 	}
+
+	// containerRconHost resolves the RCON dial host for a server. It is empty
+	// (loopback) unless a container driver with a configured network is built, in
+	// which case it returns the MC container's name so RCON is reached over the
+	// docker network rather than the unreachable host loopback (issue #218).
+	containerRconHost := func(string) string { return "" }
 
 	drivers := map[string]execution.ExecutionDriver{}
 	for _, name := range wc.Drivers {
@@ -114,7 +121,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 			drivers[name] = hostprocess.New(
 				javaruntime.New(wc.Java.Runtimes),
 				hostprocess.RealSpawn,
-				openFromWorkingDir,
+				openLoopbackControl,
 				hostprocess.Options{StopTimeout: 30 * time.Second},
 			)
 		case "container":
@@ -122,12 +129,19 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 			if err != nil {
 				return nil, err
 			}
+			// The container driver dials RCON at the host the driver derives from its
+			// topology (loopback when no network, the container name when a network is
+			// configured); the graceful-stop control func threads that host through.
+			openContainerControl := func(ctx context.Context, spec execution.InstanceSpec, rconHost string) (execution.ServerControl, error) {
+				return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir, rconHost)
+			}
 			cd := containerdriver.New(
 				docker,
 				containerdriver.NewImageSelector(cfg.Driver.Container.Images),
-				openFromWorkingDir,
-				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second, GameBindIP: cfg.Driver.Container.GameBindIP},
+				openContainerControl,
+				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second, GameBindIP: cfg.Driver.Container.GameBindIP, Network: cfg.Driver.Container.Network},
 			)
+			containerRconHost = cd.RconHost
 			// The sweep force-removes every container labelled for this Worker,
 			// including ones still running: a graceful restart while servers are up
 			// kills those live servers. That is the deliberate M1 stateless-worker
@@ -142,8 +156,18 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 		}
 	}
 
-	openControl := func(ctx context.Context, serverID string) (execution.ServerControl, error) {
-		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID))
+	// ServerCommand forwarding and the pre-snapshot save-all open RCON by server
+	// id; the dial host is resolved from the driver that actually runs that server.
+	// Only a container-driven server with a configured network is dialed over the
+	// network (its container name); every other server — including a host-process
+	// server on a worker that also advertises the container driver — keeps the host
+	// loopback, so a mixed-driver worker resolves each server correctly (issue #218).
+	openControl := func(ctx context.Context, serverID, driver string) (execution.ServerControl, error) {
+		host := ""
+		if driver == "container" {
+			host = containerRconHost(serverID)
+		}
+		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host)
 	}
 	return instancemanager.New(drivers, wc.ScratchDir, openControl).WithLogger(logger), nil
 }

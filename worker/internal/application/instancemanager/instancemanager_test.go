@@ -93,7 +93,7 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 	t.Helper()
 	scratch := t.TempDir()
 	return New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
-		func(context.Context, string) (execution.ServerControl, error) { return ctrl, nil })
+		func(context.Context, string, string) (execution.ServerControl, error) { return ctrl, nil })
 }
 
 func startCmd() session.Command {
@@ -180,6 +180,40 @@ func TestServerCommandForwardsOutput(t *testing.T) {
 	}
 	if len(ctrl.lines) != 1 || ctrl.lines[0] != "list" {
 		t.Fatalf("forwarded lines = %v, want [list]", ctrl.lines)
+	}
+}
+
+// TestOpenControlReceivesRunningServerDriver pins the per-server driver
+// resolution the RCON dial host depends on: on a worker that advertises both
+// drivers and a container network, the manager must hand openControl the driver
+// that actually runs each server, so the wiring resolves a host-process server's
+// RCON to the host loopback (empty host) rather than dialing the unreachable
+// container name (issue #218). The seam carries the driver name; the empty-host
+// resolution itself lives in main.go's openControl, exercised here through the
+// driver value the manager passes.
+func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
+	var gotDriver string
+	scratch := t.TempDir()
+	drivers := map[string]execution.ExecutionDriver{
+		"host-process": &fakeDriver{},
+		"container":    &fakeDriver{},
+	}
+	m := New(drivers, scratch, func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
+		gotDriver = driver
+		return &fakeControl{reply: "ok"}, nil
+	})
+
+	// Start a host-process server on the mixed-driver worker.
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("StartServer = %+v, want success", res)
+	}
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c6", ServerID: "s1", Kind: "ServerCommand", Line: "list"})
+	if !res.Success {
+		t.Fatalf("ServerCommand = %+v, want success", res)
+	}
+	if gotDriver != "host-process" {
+		t.Fatalf("openControl driver = %q, want host-process (so the host-process server resolves loopback, not the container name)", gotDriver)
 	}
 }
 
