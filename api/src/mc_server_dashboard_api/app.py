@@ -14,7 +14,7 @@ import inspect
 import logging
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -46,10 +46,20 @@ from mc_server_dashboard_api.middleware import correlation_id_middleware
 from mc_server_dashboard_api.servers.adapters.clock import (
     SystemClock as ServersSystemClock,
 )
+from mc_server_dashboard_api.servers.adapters.control_plane import (
+    FleetControlPlaneAdapter,
+)
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
+from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_loop
+from mc_server_dashboard_api.servers.adapters.unit_of_work import (
+    SqlAlchemyUnitOfWork as ServersUnitOfWork,
+)
 from mc_server_dashboard_api.servers.api import servers
+from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
+    RunSnapshotCadenceTick,
+)
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
@@ -168,6 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "api starting", extra={"config": settings.masked_dump()}
         )
         grpc_server = None
+        snapshot_task: asyncio.Task[None] | None = None
         if settings.control.enabled:
             # Run the control-plane gRPC server as a lifespan task on the same
             # asyncio event loop as FastAPI (grpc.aio): one process, one loop,
@@ -189,9 +200,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "control-plane gRPC server started",
                 extra={"port": settings.server.grpc_port},
             )
+            # Run the periodic snapshot scheduler as a lifespan task (FR-DATA-7),
+            # alongside the gRPC server: it dispatches snapshot triggers to the
+            # running servers via the same registry + control-plane state. Only
+            # started when the control plane is enabled — with no Worker channel
+            # there is nothing to snapshot. The tick resolution is the snapshot
+            # floor (CONFIGURATION.md Section 5.4).
+            scheduler = RunSnapshotCadenceTick(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+                control_plane=FleetControlPlaneAdapter(
+                    registry=registry,
+                    control_plane=app.state.control_plane,
+                    data_plane_base_url=settings.server.public_base_url,
+                    worker_credential=settings.control.worker_credential,
+                ),
+                clock=ServersSystemClock(),
+                default_interval_seconds=settings.snapshot.default_interval_seconds,
+                min_interval_seconds=settings.snapshot.min_interval_seconds,
+            )
+            snapshot_task = asyncio.create_task(
+                run_snapshot_loop(
+                    scheduler,
+                    tick_seconds=settings.snapshot.min_interval_seconds,
+                )
+            )
+            logging.getLogger(__name__).info("snapshot scheduler started")
         try:
             yield
         finally:
+            if snapshot_task is not None:
+                snapshot_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await snapshot_task
             if grpc_server is not None:
                 await grpc_server.stop(grace=None)
             await engine.dispose()

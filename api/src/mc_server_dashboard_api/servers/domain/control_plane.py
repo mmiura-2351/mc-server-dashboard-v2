@@ -80,6 +80,15 @@ class ControlPlane(abc.ABC):
         """
 
     @abc.abstractmethod
+    def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
+        """Return whether ``worker_id`` currently has a live session (FR-WRK-2).
+
+        The snapshot scheduler skips a server whose assigned Worker is gone
+        rather than dispatching a doomed snapshot trigger; the server is
+        re-evaluated on a later tick once the Worker reconnects (FR-DATA-5/7).
+        """
+
+    @abc.abstractmethod
     def increment_assignment(self, *, worker_id: WorkerId) -> None:
         """Record one more server placed on ``worker_id`` (placement load++)."""
 

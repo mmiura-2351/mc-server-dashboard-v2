@@ -34,6 +34,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     ControlPlane as FleetControlPlane,
 )
+from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
 from mc_server_dashboard_api.fleet.domain.placement import place
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
 from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind
@@ -118,6 +119,18 @@ class FleetControlPlaneAdapter(ControlPlane):
         if isinstance(chosen, FleetWorkerId):
             return _servers_worker(chosen)
         return None
+
+    def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
+        # The registry resolves liveness at read time from the heartbeat clock;
+        # ONLINE means the Worker has a live, recently-beating session. A DRAINING
+        # Worker stays connected (it just declines new placement), so it counts as
+        # connected for snapshots of servers already on it.
+        target = _fleet_worker(worker_id)
+        return any(
+            snapshot.id == target
+            and snapshot.status in (WorkerStatus.ONLINE, WorkerStatus.DRAINING)
+            for snapshot in self._registry.list_workers()
+        )
 
     def increment_assignment(self, *, worker_id: WorkerId) -> None:
         self._registry.increment_assignment(_fleet_worker(worker_id))

@@ -303,3 +303,26 @@ async def test_repository_count_running_for_worker(engine: AsyncEngine) -> None:
         repo = SqlAlchemyServerRepository(session)
         assert await repo.count_running_for_worker(WorkerId(worker)) == 1
         assert await repo.count_running_for_worker(WorkerId(uuid.uuid4())) == 0
+
+
+async def test_repository_list_running_assigned(engine: AsyncEngine) -> None:
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    running = await _create_server(engine, community_id, "running")
+    await _create_server(engine, community_id, "stopped")  # stays desired=stopped
+    worker = uuid.uuid4()
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(running)
+        assert server is not None
+        server.assigned_worker_id = WorkerId(worker)
+        server.desired_state = DesiredState.RUNNING
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.commit()
+
+    async with factory() as session:
+        repo = SqlAlchemyServerRepository(session)
+        candidates = await repo.list_running_assigned()
+    # Only the running, Worker-assigned server is a snapshot candidate.
+    assert [s.id for s in candidates] == [running]

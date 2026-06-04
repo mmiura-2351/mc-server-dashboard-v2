@@ -603,6 +603,9 @@ def get_update_server(request: Request) -> UpdateServer:
     return UpdateServer(
         uow=ServersUnitOfWork(session_factory),
         clock=ServersSystemClock(),
+        # The per-server snapshot-interval override carried on config is validated
+        # against the configured floor here (CONFIGURATION.md Section 5.4).
+        min_interval_seconds=get_settings(request).snapshot.min_interval_seconds,
     )
 
 

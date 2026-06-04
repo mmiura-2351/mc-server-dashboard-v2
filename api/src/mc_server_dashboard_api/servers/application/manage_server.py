@@ -31,6 +31,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownExecutionBackendError,
     UnknownServerTypeError,
 )
+from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
+    override_from_config,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -135,10 +138,17 @@ class ListServers:
 
 @dataclass(frozen=True)
 class UpdateServer:
-    """Edit a server's name/config while it is at rest (server:update)."""
+    """Edit a server's name/config while it is at rest (server:update).
+
+    A per-server snapshot-interval override carried on ``config`` is validated
+    against ``min_interval_seconds`` (the thrash floor, CONFIGURATION.md Section
+    5.4): a below-floor or non-integer value is rejected (FR-DATA-7), surfaced as
+    422 at the edge.
+    """
 
     uow: UnitOfWork
     clock: Clock
+    min_interval_seconds: int = 0
 
     async def __call__(
         self,
@@ -150,6 +160,9 @@ class UpdateServer:
         execution_backend: str | None = None,
     ) -> Server:
         new_name = None if name is None else ServerName(name)
+        if config is not None:
+            # Validate the override before any write; raises on a bad value.
+            override_from_config(config, floor=self.min_interval_seconds)
         async with self.uow:
             server = await self.uow.servers.get_by_id(server_id)
             if server is None or server.community_id != community_id:

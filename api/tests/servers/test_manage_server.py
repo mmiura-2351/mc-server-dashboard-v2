@@ -22,6 +22,7 @@ from mc_server_dashboard_api.servers.application.manage_server import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
+    InvalidSnapshotIntervalError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -175,6 +176,36 @@ async def test_update_edits_name_and_config_while_at_rest() -> None:
     assert updated.config == {"motd": "bye"}
     assert updated.updated_at == _LATER
     assert uow.commits == 1
+
+
+async def test_update_accepts_snapshot_interval_override_at_or_above_floor() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    updated = await UpdateServer(
+        uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300
+    )(
+        community_id=community,
+        server_id=server.id,
+        config={"snapshot_interval_seconds": 600},
+    )
+    assert updated.config["snapshot_interval_seconds"] == 600
+    assert uow.commits == 1
+
+
+async def test_update_rejects_snapshot_interval_override_below_floor() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(InvalidSnapshotIntervalError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+            community_id=community,
+            server_id=server.id,
+            config={"snapshot_interval_seconds": 60},
+        )
+    assert uow.commits == 0
 
 
 async def test_update_rejects_backend_change_as_immutable() -> None:

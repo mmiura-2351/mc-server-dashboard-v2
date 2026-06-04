@@ -129,6 +129,20 @@ class StorageSettings(_Section):
     version_retention: int = 10
 
 
+class SnapshotSettings(_Section):
+    """Snapshot cadence (CONFIGURATION.md Section 5.4, FR-DATA-7).
+
+    ``default_interval_seconds`` is the global periodic interval applied to every
+    running server; a per-server override (stored on the ``Server`` config blob,
+    DATABASE.md Section 7) replaces it. ``min_interval_seconds`` is the floor an
+    override may not go below, guarding against snapshot thrash; the effective
+    interval is clamped to at least this value.
+    """
+
+    default_interval_seconds: int = 3600
+    min_interval_seconds: int = 300
+
+
 class PasswordSettings(_Section):
     """Password hashing + policy (CONFIGURATION.md Sections 5.3 and 7.1).
 
@@ -226,6 +240,7 @@ class Settings(BaseSettings):
     log: LogSettings = Field(default_factory=LogSettings)
     database: DatabaseSettings
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
 
     @classmethod
@@ -268,6 +283,7 @@ class Settings(BaseSettings):
             "log": self.log.model_dump(),
             "database": {"url": _MASK},
             "storage": storage,
+            "snapshot": self.snapshot.model_dump(),
             "auth": auth,
         }
 

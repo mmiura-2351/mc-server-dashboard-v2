@@ -58,6 +58,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidLifecycleTransitionError,
     InvalidServerNameError,
+    InvalidSnapshotIntervalError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
     ServerNameAlreadyExistsError,
@@ -241,6 +242,8 @@ async def update_server(
         raise _conflict("server_not_stopped") from exc
     except InvalidServerNameError as exc:
         raise _unprocessable("invalid_server_name") from exc
+    except InvalidSnapshotIntervalError as exc:
+        raise _unprocessable("invalid_snapshot_interval") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
     return ServerResponse.from_entity(server)

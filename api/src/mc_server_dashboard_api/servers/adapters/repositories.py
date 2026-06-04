@@ -182,6 +182,14 @@ class SqlAlchemyServerRepository(ServerRepository):
         )
         return int((await self._session.execute(stmt)).scalar_one())
 
+    async def list_running_assigned(self) -> list[Server]:
+        stmt = select(ServerModel).where(
+            ServerModel.desired_state == DesiredState.RUNNING.value,
+            ServerModel.assigned_worker_id.is_not(None),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_server(row) for row in rows]
+
     async def delete(self, server_id: ServerId) -> None:
         stmt = delete(ServerModel).where(ServerModel.id == server_id.value)
         await self._session.execute(stmt)
