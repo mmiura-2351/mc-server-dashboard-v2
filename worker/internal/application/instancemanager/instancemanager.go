@@ -153,7 +153,15 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	}
 	// Relaunch with the original StartServer spec; RestartServer carries no
 	// driver/jar/version of its own.
+	//
+	// If the relaunch fails (stop succeeded, but Start does not), the server is
+	// left down and already evicted from the manager. We do not attempt recovery
+	// here: the API sees the coded CommandResult error plus the observed
+	// stopped/crashed status event, and desired-state reconciliation (bringing the
+	// server back to its intended state) is the API's job, not the Worker's.
 	res := m.handleStart(ctx, start)
+	// Carry the RestartServer's correlation id so the API can match the result to
+	// the command it issued, not the internal StartServer command.
 	res.CommandID = cmd.CommandID
 	return res
 }

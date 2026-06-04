@@ -219,6 +219,100 @@ func TestGracefulStopEscalatesToSIGKILL(t *testing.T) {
 	}
 }
 
+// Stopping a crashed instance is a prompt no-op success: the process is already
+// dead, so Stop must not signal it, must not spin waitExit's timeout, and must
+// not surface a Kill() error.
+func TestStopOnCrashedIsPromptNoOp(t *testing.T) {
+	proc := newFakeProcess()
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// Crash the process and wait until the terminal state is observed.
+	proc.exit(errors.New("exit status 1"))
+	drainTo(t, inst.Events(), execution.StateCrashed)
+
+	// Stop must return well under two stop-timeout escalation steps (~100ms here).
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- inst.Stop(context.Background(), true) }()
+	select {
+	case stopErr := <-done:
+		if stopErr != nil {
+			t.Fatalf("Stop on crashed instance: %v", stopErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop on crashed instance did not return promptly")
+	}
+	if elapsed := time.Since(start); elapsed >= 100*time.Millisecond {
+		t.Fatalf("Stop spun the timeout: took %v", elapsed)
+	}
+	if proc.gotSignal(syscall.SIGTERM) {
+		t.Fatal("Stop should not signal an already-dead process")
+	}
+}
+
+// A process that crashes mid-graceful-stop satisfies the Stop wait via the
+// crashed terminal state rather than timing out.
+func TestStopWaitSatisfiedByCrash(t *testing.T) {
+	proc := newFakeProcess()
+	// RCON "stop" does not exit the process; instead it crashes shortly after, so
+	// waitExit must complete on the crashed terminal state.
+	ctrl := &fakeControl{onStop: func() {
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			proc.exit(errors.New("exit status 1"))
+		}()
+	}}
+	d := newTestDriver(t, proc, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	start := time.Now()
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 50*time.Millisecond {
+		t.Fatalf("Stop timed out instead of completing on crash: took %v", elapsed)
+	}
+	if proc.gotSignal(syscall.SIGTERM) {
+		t.Fatal("Stop should not escalate to SIGTERM when the process crashes during the wait")
+	}
+}
+
+// waitExit honours the caller's context: a cancelled ctx unblocks Stop before
+// the stop timeout, and the driver then escalates to Kill().
+func TestStopHonoursContextCancellation(t *testing.T) {
+	proc := newFakeProcess()
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// The process never exits on SIGTERM; with ctx already cancelled, waitExit
+	// returns immediately and Stop escalates to Kill(), which releases Wait.
+	if err := inst.Stop(ctx, true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if !proc.killed {
+		t.Fatal("expected Kill() escalation after context cancellation")
+	}
+}
+
 func TestStartSpawnFailure(t *testing.T) {
 	proc := newFakeProcess()
 	proc.startErr = errors.New("exec: java not found")

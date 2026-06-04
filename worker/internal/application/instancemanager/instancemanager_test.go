@@ -217,6 +217,23 @@ func TestRestartStopsAndStarts(t *testing.T) {
 	}
 }
 
+// A successful restart's result carries the RestartServer's correlation id, not
+// the internal StartServer command's id, so the API can match it to the command
+// it issued.
+func TestRestartResultCarriesOriginalCorrelationID(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	_ = m.Handle(context.Background(), startCmd())
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "restart-id", ServerID: "s1", Kind: "RestartServer"})
+	if !res.Success {
+		t.Fatalf("restart = %+v, want success", res)
+	}
+	if res.CommandID != "restart-id" {
+		t.Fatalf("restart result CommandID = %q, want %q", res.CommandID, "restart-id")
+	}
+}
+
 func TestUnknownKindIsInternalError(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{CommandID: "c6", ServerID: "s1", Kind: "Mystery"})

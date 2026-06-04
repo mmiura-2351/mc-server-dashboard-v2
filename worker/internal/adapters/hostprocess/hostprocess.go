@@ -95,6 +95,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		openControl: d.openControl,
 		stopTimeout: d.stopTimeout,
 		events:      make(chan execution.StatusEvent, 8),
+		exited:      make(chan struct{}),
 		state:       execution.StateStarting,
 	}
 	inst.emit(execution.StateStarting, "")
@@ -125,6 +126,9 @@ type instance struct {
 	stopTimeout time.Duration
 
 	events chan execution.StatusEvent
+	// exited is closed by supervise once the process has reached a terminal
+	// state (stopped or crashed); waitExit selects on it.
+	exited chan struct{}
 
 	mu       sync.Mutex
 	state    execution.ServerState
@@ -144,7 +148,11 @@ func (i *instance) Events() <-chan execution.StatusEvent { return i.events }
 // SIGKILL after stopTimeout; a forced stop skips the RCON step.
 func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	i.mu.Lock()
-	if i.stopping || i.state == execution.StateStopped {
+	// Any terminal state (stopped or crashed) makes Stop a no-op success: the
+	// process is already gone, so signalling it would spin waitExit's timeout and
+	// can surface a spurious Kill() error. This also covers a Stop racing the
+	// crash-eviction window.
+	if i.stopping || isTerminal(i.state) {
 		i.mu.Unlock()
 		return nil
 	}
@@ -153,20 +161,25 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	i.mu.Unlock()
 	i.emit(execution.StateStopping, "")
 
-	if graceful && i.tryRCONStop(ctx) && i.waitExit(i.stopTimeout) {
+	if graceful && i.tryRCONStop(ctx) && i.waitExit(ctx, i.stopTimeout) {
 		return nil
 	}
 
 	_ = i.proc.Signal(syscall.SIGTERM)
-	if i.waitExit(i.stopTimeout) {
+	if i.waitExit(ctx, i.stopTimeout) {
 		return nil
 	}
 
 	if err := i.proc.Kill(); err != nil {
 		return fmt.Errorf("hostprocess: kill: %w", err)
 	}
-	i.waitExit(i.stopTimeout)
+	i.waitExit(ctx, i.stopTimeout)
 	return nil
+}
+
+// isTerminal reports whether s is a state the process can no longer leave.
+func isTerminal(s execution.ServerState) bool {
+	return s == execution.StateStopped || s == execution.StateCrashed
 }
 
 // tryRCONStop opens RCON and sends "stop", reporting whether the in-band stop was
@@ -184,20 +197,21 @@ func (i *instance) tryRCONStop(ctx context.Context) bool {
 	return true
 }
 
-// waitExit reports whether the process exited within d. The supervisor goroutine
-// observes the actual exit and emits the terminal state.
-func (i *instance) waitExit(d time.Duration) bool {
-	deadline := time.After(d)
-	for {
-		select {
-		case <-deadline:
-			return false
-		default:
-			if i.Status() == execution.StateStopped {
-				return true
-			}
-			time.Sleep(time.Millisecond)
-		}
+// waitExit reports whether the process reached a terminal state within d. The
+// supervisor goroutine observes the actual exit and closes i.exited, so any
+// terminal state (stopped or, when a process crashes mid-graceful-stop, crashed)
+// satisfies the wait. It returns false if the stop timeout elapses or ctx is
+// cancelled first.
+func (i *instance) waitExit(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-i.exited:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return false
 	}
 }
 
@@ -222,6 +236,8 @@ func (i *instance) supervise() {
 		i.set(execution.StateCrashed)
 		i.emit(execution.StateCrashed, detail)
 	}
+	// Release any in-flight waitExit now the terminal state is set.
+	close(i.exited)
 
 	i.mu.Lock()
 	i.closed = true

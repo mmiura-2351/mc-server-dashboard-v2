@@ -66,7 +66,12 @@ func javaMajorsFor(mcVersion string) ([]int, error) {
 	case v.atMost(1, 21, 11):
 		return []int{21}, nil
 	default:
-		// 26.x and newer (year-based versioning): server.jar targets Java 25.
+		// Policy: a Minecraft version newer than every bracket in this table
+		// selects the newest configured runtime. New MC releases generally require
+		// the latest Java, so until the table is extended with the next published
+		// bracket, the safest default is the most recent Java we know about (the
+		// current newest bracket targets Java 25). The table is the authoritative
+		// list and is extended as Mojang publishes new Java requirements.
 		return []int{25}, nil
 	}
 }

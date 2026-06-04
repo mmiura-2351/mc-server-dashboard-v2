@@ -106,6 +106,57 @@ func TestDialAuthFailure(t *testing.T) {
 	}
 }
 
+// An oversized frame (length prefix beyond maxBodyLen) is rejected before any
+// body allocation, with a clean error and no panic.
+func TestReadRejectsOversizedFrame(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := &Client{conn: cli, nextID: 1}
+	t.Cleanup(func() { _ = cli.Close() })
+
+	go func() {
+		defer func() { _ = srv.Close() }()
+		var length int32 = maxBodyLen + 1
+		_ = binary.Write(srv, binary.LittleEndian, length)
+	}()
+
+	done := make(chan error, 1)
+	go func() { _, _, _, err := c.read(); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("read accepted an oversized frame, want error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("read hung on an oversized frame")
+	}
+}
+
+// A truncated frame (length prefix promises more body than is delivered before
+// the peer closes) yields a clean read error and no hang.
+func TestReadRejectsTruncatedFrame(t *testing.T) {
+	srv, cli := net.Pipe()
+	c := &Client{conn: cli, nextID: 1}
+	t.Cleanup(func() { _ = cli.Close() })
+
+	go func() {
+		// Promise a 100-byte body but send only a few bytes, then close.
+		_ = binary.Write(srv, binary.LittleEndian, int32(100))
+		_, _ = srv.Write([]byte{1, 2, 3})
+		_ = srv.Close()
+	}()
+
+	done := make(chan error, 1)
+	go func() { _, _, _, err := c.read(); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("read accepted a truncated frame, want error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("read hung on a truncated frame")
+	}
+}
+
 // readPacket reads one RCON packet from the test server side.
 func readPacket(r io.Reader) (id, typ int32, body string, err error) {
 	var length int32
