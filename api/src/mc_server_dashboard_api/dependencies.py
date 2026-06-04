@@ -690,10 +690,17 @@ def get_remove_member(request: Request) -> RemoveMember:
 
 
 def get_list_members(request: Request) -> ListMembers:
-    """Assemble the :class:`ListMembers` use case (member:read)."""
+    """Assemble the :class:`ListMembers` use case (member:read).
+
+    Binds the user-directory seam so the listing is enriched with usernames in one
+    batch lookup against the identity store (issue #78).
+    """
 
     session_factory = create_session_factory(get_engine(request))
-    return ListMembers(uow=CommunityUnitOfWork(session_factory))
+    return ListMembers(
+        uow=CommunityUnitOfWork(session_factory),
+        users=IdentityUserDirectory(SqlAlchemyUnitOfWork(session_factory)),
+    )
 
 
 def get_assign_role(request: Request) -> AssignRole:

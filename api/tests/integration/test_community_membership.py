@@ -289,8 +289,12 @@ async def test_assign_role_in_community_succeeds_and_lists(
         community_id=community.id, user_id=UserId(member_id), role_id=owner_role.id
     )
 
-    members = await ListMembers(uow=SqlAlchemyUnitOfWork(factory))(
-        community_id=community.id
-    )
+    members = await ListMembers(
+        uow=SqlAlchemyUnitOfWork(factory),
+        users=IdentityUserDirectory(IdentityUnitOfWork(factory)),
+    )(community_id=community.id)
     by_user = {view.user_id: view for view in members}
     assert owner_role.name.value in by_user[UserId(member_id)].role_names
+    # Usernames are resolved through the directory seam (issue #78).
+    assert by_user[UserId(owner_id)].username == "alice"
+    assert by_user[UserId(member_id)].username == "bob"

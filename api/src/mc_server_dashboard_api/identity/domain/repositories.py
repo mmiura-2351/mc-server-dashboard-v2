@@ -37,6 +37,15 @@ class UserRepository(abc.ABC):
     async def get_by_email(self, email: EmailAddress) -> User | None:
         """Return the user with ``email``, or ``None`` if absent."""
 
+    @abc.abstractmethod
+    async def usernames_by_id(self, user_ids: list[UserId]) -> dict[UserId, Username]:
+        """Resolve ``user_ids`` to their usernames in a single indexed query.
+
+        Returns a mapping for the ids that exist; absent ids are omitted. Backs
+        the community context's user-directory seam so member listings can be
+        enriched with usernames without N+1 lookups (issue #78).
+        """
+
 
 class RefreshTokenRepository(abc.ABC):
     """Port: persistence for :class:`RefreshToken` session records."""

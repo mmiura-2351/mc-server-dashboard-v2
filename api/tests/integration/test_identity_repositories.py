@@ -118,6 +118,33 @@ async def test_missing_user_returns_none(engine: AsyncEngine) -> None:
         assert await uow.users.get_by_id(UserId.new()) is None
 
 
+async def test_usernames_by_id_resolves_known_and_omits_unknown(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    alice = _user(username="alice", email="alice@example.com")
+    bob = _user(username="bob", email="bob@example.com")
+    missing = UserId.new()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(alice)
+        await uow.users.add(bob)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        resolved = await uow.users.usernames_by_id([alice.id, bob.id, missing])
+
+    assert resolved == {alice.id: alice.username, bob.id: bob.username}
+
+
+async def test_usernames_by_id_empty_input_returns_empty(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.users.usernames_by_id([]) == {}
+
+
 async def test_rollback_when_block_not_committed(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     user = _user()

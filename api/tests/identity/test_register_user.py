@@ -57,6 +57,9 @@ class _FakeUserRepository(UserRepository):
     async def get_by_email(self, email: EmailAddress) -> User | None:
         return self._by_email.get(email.value)
 
+    async def usernames_by_id(self, user_ids: list[UserId]) -> dict[UserId, Username]:
+        raise NotImplementedError
+
 
 class _FakeRefreshTokenRepository(RefreshTokenRepository):
     async def add(self, token: RefreshToken) -> None:
