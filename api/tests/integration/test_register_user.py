@@ -8,32 +8,38 @@ translation to domain errors on the race path — are exercised end-to-end.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mc_server_dashboard_api.core.adapters.database import (
-    Base,
     create_engine,
     create_session_factory,
 )
-
-# Import the identity models so their tables register on Base.metadata.
-from mc_server_dashboard_api.identity.adapters import models  # noqa: F401
 from mc_server_dashboard_api.identity.adapters.clock import SystemClock
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
 )
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
+from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
     UsernameAlreadyExistsError,
 )
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    EmailAddress,
+    UserId,
+    Username,
+)
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 _VALID_PASSWORD = "Wm7!qz#Lp2vT"
@@ -55,19 +61,32 @@ def _policy() -> PasswordPolicy:
     )
 
 
+_ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
+
+
+def _alembic_config() -> Config:
+    # migrations/env.py reads MCD_API_DATABASE__URL; the conftest fixture points
+    # it at the test database, so the migrations build the real schema there.
+    cfg = Config(str(_ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(_ALEMBIC_INI.parent / "migrations"))
+    return cfg
+
+
 @pytest_asyncio.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
+async def engine(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncEngine]:
     assert _DB_URL is not None
+    # Build the production schema via the migrations (not metadata.create_all),
+    # so constraint names and DDL match what the app runs against.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", _DB_URL)
+    config = _alembic_config()
+    command.downgrade(config, "base")
+    command.upgrade(config, "head")
     eng = create_engine(_DB_URL)
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
     try:
         yield eng
     finally:
-        async with eng.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
         await eng.dispose()
+        command.downgrade(config, "base")
 
 
 def _register(engine: AsyncEngine) -> RegisterUser:
@@ -114,15 +133,6 @@ async def test_unit_of_work_translates_username_constraint_violation(
     # Insert directly through the unit of work, skipping the use case's pre-check,
     # so the DB unique constraint (not the pre-check) is what trips — the race
     # path. The constraint violation must surface as the domain error.
-    import datetime as dt
-
-    from mc_server_dashboard_api.identity.domain.entities import User
-    from mc_server_dashboard_api.identity.domain.value_objects import (
-        EmailAddress,
-        UserId,
-        Username,
-    )
-
     factory = create_session_factory(engine)
     now = dt.datetime.now(tz=dt.timezone.utc)
 
