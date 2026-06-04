@@ -206,6 +206,11 @@ class BruteForceSettings(_Section):
     lockout_base_seconds: int = 900
     lockout_max_seconds: int = 86400
     delay_ms: int = 200
+    # How often the background loop prunes ``login_attempt`` rows older than the
+    # longest sliding window, independent of login events (SECURITY.md Section 3).
+    # A failures-only attack never triggers the on-success prune, so this keeps
+    # the append-only table bounded. Defaults to one hour.
+    prune_interval_seconds: int = Field(default=3600, gt=0)
 
 
 class ProxySettings(_Section):

@@ -36,6 +36,7 @@ from mc_server_dashboard_api.identity.domain.brute_force import (
     BruteForceConfig,
     backoff_duration,
     is_locked,
+    prune_horizon,
 )
 from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.errors import InvalidCredentialsError
@@ -173,5 +174,6 @@ class Login:
     async def _prune(self, *, now: dt.datetime) -> None:
         """Drop attempt rows older than the longest sliding window (Section 3)."""
 
-        longest = max(self.brute_force.username_window, self.brute_force.ip_window)
-        await self.attempts.prune_attempts(older_than=now - longest)
+        await self.attempts.prune_attempts(
+            older_than=now - prune_horizon(self.brute_force)
+        )

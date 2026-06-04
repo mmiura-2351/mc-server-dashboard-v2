@@ -376,6 +376,7 @@ enumeration (REQUIREMENTS.md FR-AUTH-4).
 | `auth.brute_force.lockout_base_seconds` | `900` | Initial lockout duration; doubles on repeat (exponential back-off). |
 | `auth.brute_force.lockout_max_seconds` | `86400` | Cap on the backed-off lockout duration. |
 | `auth.brute_force.delay_ms` | `200` | Artificial delay added on a failed attempt to deny timing enumeration. |
+| `auth.brute_force.prune_interval_seconds` | `3600` | How often the background loop prunes `login_attempt` rows older than the longest window, independent of logins (SECURITY.md Section 3). Must be positive. |
 
 ### 7.3 Reverse-proxy trust
 

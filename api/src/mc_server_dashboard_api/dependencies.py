@@ -445,7 +445,7 @@ def _build_token_service(token: TokenSettings, clock: SystemClock) -> TokenServi
     )
 
 
-def _build_brute_force_config(brute_force: BruteForceSettings) -> BruteForceConfig:
+def build_brute_force_config(brute_force: BruteForceSettings) -> BruteForceConfig:
     """Map the ``auth.brute_force.*`` knobs to the domain config value."""
 
     return BruteForceConfig(
@@ -466,7 +466,7 @@ def get_login(request: Request) -> Login:
     settings = get_settings(request)
     clock = SystemClock()
     session_factory = create_session_factory(get_engine(request))
-    brute_force = _build_brute_force_config(settings.auth.brute_force)
+    brute_force = build_brute_force_config(settings.auth.brute_force)
     return Login(
         uow=SqlAlchemyUnitOfWork(session_factory),
         attempts=SqlAlchemyLoginAttemptStore(session_factory),

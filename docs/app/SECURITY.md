@@ -118,8 +118,21 @@ when the schema is implemented; this document fixes only their existence, purpos
 and the Port seam.
 
 **Cleanup.** `login_attempt` is append-only and grows without bound otherwise, so
-the adapter prunes rows older than the longest configured window (a periodic
-delete). `account_lockout` is bounded (one row per user) and needs no TTL; expired
+rows older than the longest configured sliding window are pruned through two
+triggers, both using that same bound:
+
+- **On a successful login** — the login use case prunes after clearing the
+  lockout. Cheap and bounded, but it only fires for accounts that eventually
+  succeed.
+- **A periodic background loop** — a lifespan task on the API runs the prune on a
+  fixed cadence (`auth.brute_force.prune_interval_seconds`,
+  [`CONFIGURATION.md`](CONFIGURATION.md) Section 7.2), independent of any login.
+  This closes the gap the on-success trigger leaves: a failures-only attack
+  against an account that never logs in would otherwise grow the table unbounded.
+  The loop drives only the database, so it runs on every API process regardless of
+  the control plane.
+
+`account_lockout` is bounded (one row per user) and needs no TTL; expired
 lockouts are recognised by `locked_until` in the past and need not be deleted
 eagerly.
 

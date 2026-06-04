@@ -105,6 +105,31 @@ def test_brute_force_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert bf.lockout_base_seconds == 900
     assert bf.lockout_max_seconds == 86400
     assert bf.delay_ms == 200
+    assert bf.prune_interval_seconds == 3600
+
+
+def test_brute_force_prune_interval_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.brute_force]\nprune_interval_seconds = 60\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.auth.brute_force.prune_interval_seconds == 60
+
+
+def test_brute_force_prune_interval_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.brute_force]\nprune_interval_seconds = 0\n",
+    )
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
 
 
 def test_snapshot_cadence_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

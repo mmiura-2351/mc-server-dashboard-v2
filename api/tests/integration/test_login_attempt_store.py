@@ -20,6 +20,10 @@ from mc_server_dashboard_api.core.adapters.database import create_session_factor
 from mc_server_dashboard_api.identity.adapters.login_attempt_store import (
     SqlAlchemyLoginAttemptStore,
 )
+from mc_server_dashboard_api.identity.application.prune_login_attempts import (
+    PruneLoginAttempts,
+)
+from tests.identity.fakes import FakeClock, make_brute_force_config
 from tests.integration.migrate import downgrade_base, upgrade_head
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -170,3 +174,33 @@ async def test_prune_deletes_only_old_attempts(engine: AsyncEngine) -> None:
 async def test_missing_lockout_returns_none(engine: AsyncEngine) -> None:
     store = _store(engine)
     assert await store.get_lockout("nobody") is None
+
+
+async def test_prune_loop_tick_drops_old_keeps_in_window(engine: AsyncEngine) -> None:
+    # The periodic prune use case, driven by a faked clock against the real store:
+    # one tick deletes rows past the longest window and keeps in-window rows
+    # (SECURITY.md Section 3), with no login event involved.
+    store = _store(engine)
+    bf = make_brute_force_config()  # longest window: 15 minutes (username).
+    await _record(
+        store,
+        username="alice",
+        ip="10.0.0.1",
+        success=False,
+        at=_NOW - dt.timedelta(minutes=20),
+    )
+    await _record(
+        store,
+        username="alice",
+        ip="10.0.0.1",
+        success=False,
+        at=_NOW - dt.timedelta(minutes=1),
+    )
+
+    pruner = PruneLoginAttempts(attempts=store, brute_force=bf, clock=FakeClock(_NOW))
+    await pruner.tick()
+
+    everything = await store.count_username_failures(
+        "alice", since=_NOW - dt.timedelta(days=10)
+    )
+    assert everything == 1
