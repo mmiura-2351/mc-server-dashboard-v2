@@ -1,0 +1,290 @@
+"""Use-case tests for server CRUD against in-memory fakes (TESTING.md Section 4).
+
+Covers create (+ backend/type validation), community-scoped read/list,
+cross-community not-found, update editability rules (backend immutable, at-rest
+gate, name clash), and delete (at-rest gate + grant sweep atomicity).
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import uuid
+
+import pytest
+
+from mc_server_dashboard_api.servers.application.manage_server import (
+    CreateServer,
+    DeleteServer,
+    ListServers,
+    ReadServer,
+    UpdateServer,
+)
+from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    ExecutionBackendImmutableError,
+    ServerNameAlreadyExistsError,
+    ServerNotFoundError,
+    ServerNotStoppedError,
+    UnknownExecutionBackendError,
+    UnknownServerTypeError,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
+    DesiredState,
+    ExecutionBackend,
+    ObservedState,
+    ServerId,
+    ServerName,
+    ServerType,
+)
+from tests.servers.fakes import FakeClock, FakeUnitOfWork
+
+_NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+_LATER = dt.datetime(2026, 6, 4, 13, 0, tzinfo=dt.timezone.utc)
+
+
+def _server(
+    *,
+    community_id: CommunityId,
+    name: str = "survival",
+    desired: DesiredState = DesiredState.STOPPED,
+    observed: ObservedState = ObservedState.STOPPED,
+    backend: ExecutionBackend = ExecutionBackend.HOST_PROCESS,
+) -> Server:
+    return Server(
+        id=ServerId.new(),
+        community_id=community_id,
+        name=ServerName(name),
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type=ServerType.VANILLA,
+        execution_backend=backend,
+        config={"motd": "hi"},
+        desired_state=desired,
+        observed_state=observed,
+        observed_at=None,
+        assigned_worker_id=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+# --- create ----------------------------------------------------------------
+
+
+async def test_create_defaults_to_stopped_and_commits() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = await CreateServer(uow=uow, clock=FakeClock(_NOW))(
+        community_id=community,
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="paper",
+        execution_backend="container",
+        config={"motd": "hi"},
+    )
+    assert server.desired_state is DesiredState.STOPPED
+    assert server.observed_state is ObservedState.STOPPED
+    assert server.observed_at is None
+    assert server.assigned_worker_id is None
+    assert server.server_type is ServerType.PAPER
+    assert server.execution_backend is ExecutionBackend.CONTAINER
+    assert uow.commits == 1
+    assert uow.servers.by_id[server.id] is server
+
+
+async def test_create_rejects_unknown_server_type() -> None:
+    uow = FakeUnitOfWork()
+    with pytest.raises(UnknownServerTypeError):
+        await CreateServer(uow=uow, clock=FakeClock(_NOW))(
+            community_id=CommunityId(uuid.uuid4()),
+            name="s",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="bedrock-not-supported",
+            execution_backend="host_process",
+            config={},
+        )
+    assert uow.commits == 0
+
+
+async def test_create_rejects_unknown_execution_backend() -> None:
+    uow = FakeUnitOfWork()
+    with pytest.raises(UnknownExecutionBackendError):
+        await CreateServer(uow=uow, clock=FakeClock(_NOW))(
+            community_id=CommunityId(uuid.uuid4()),
+            name="s",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="kubernetes",
+            config={},
+        )
+    assert uow.commits == 0
+
+
+# --- read / list -----------------------------------------------------------
+
+
+async def test_read_returns_server_in_its_community() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    got = await ReadServer(uow=uow)(community_id=community, server_id=server.id)
+    assert got.id == server.id
+
+
+async def test_read_other_communitys_server_is_not_found() -> None:
+    uow = FakeUnitOfWork()
+    community_a = CommunityId(uuid.uuid4())
+    community_b = CommunityId(uuid.uuid4())
+    server = _server(community_id=community_a)
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotFoundError):
+        await ReadServer(uow=uow)(community_id=community_b, server_id=server.id)
+
+
+async def test_list_is_scoped_to_the_community() -> None:
+    uow = FakeUnitOfWork()
+    community_a = CommunityId(uuid.uuid4())
+    community_b = CommunityId(uuid.uuid4())
+    uow.servers.seed(_server(community_id=community_a, name="a1"))
+    uow.servers.seed(_server(community_id=community_a, name="a2"))
+    uow.servers.seed(_server(community_id=community_b, name="b1"))
+    listed = await ListServers(uow=uow)(community_id=community_a)
+    assert {s.name.value for s in listed} == {"a1", "a2"}
+
+
+# --- update ----------------------------------------------------------------
+
+
+async def test_update_edits_name_and_config_while_at_rest() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    updated = await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+        community_id=community,
+        server_id=server.id,
+        name="creative",
+        config={"motd": "bye"},
+    )
+    assert updated.name == ServerName("creative")
+    assert updated.config == {"motd": "bye"}
+    assert updated.updated_at == _LATER
+    assert uow.commits == 1
+
+
+async def test_update_rejects_backend_change_as_immutable() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, backend=ExecutionBackend.HOST_PROCESS)
+    uow.servers.seed(server)
+    with pytest.raises(ExecutionBackendImmutableError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+            community_id=community,
+            server_id=server.id,
+            execution_backend="container",
+        )
+    assert uow.commits == 0
+
+
+async def test_update_allows_same_backend_value() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, backend=ExecutionBackend.HOST_PROCESS)
+    uow.servers.seed(server)
+    updated = await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+        community_id=community,
+        server_id=server.id,
+        execution_backend="host_process",
+        config={"k": "v"},
+    )
+    assert updated.config == {"k": "v"}
+
+
+async def test_update_rejects_while_running() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotStoppedError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+            community_id=community,
+            server_id=server.id,
+            name="creative",
+        )
+    assert uow.commits == 0
+
+
+async def test_update_rejects_name_clash_in_community() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    uow.servers.seed(_server(community_id=community, name="taken"))
+    target = _server(community_id=community, name="survival")
+    uow.servers.seed(target)
+    with pytest.raises(ServerNameAlreadyExistsError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+            community_id=community,
+            server_id=target.id,
+            name="taken",
+        )
+
+
+async def test_update_other_communitys_server_is_not_found() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(community_id=CommunityId(uuid.uuid4()))
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotFoundError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+            community_id=CommunityId(uuid.uuid4()),
+            server_id=server.id,
+            name="x",
+        )
+
+
+# --- delete ----------------------------------------------------------------
+
+
+async def test_delete_removes_server_and_sweeps_grants() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    await DeleteServer(uow=uow)(community_id=community, server_id=server.id)
+    assert server.id not in uow.servers.by_id
+    assert uow.resource_grants.swept == [("server", server.id.value)]
+    assert uow.commits == 1
+
+
+async def test_delete_rejects_while_running() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotStoppedError):
+        await DeleteServer(uow=uow)(community_id=community, server_id=server.id)
+    assert server.id in uow.servers.by_id
+    assert uow.resource_grants.swept == []
+    assert uow.commits == 0
+
+
+async def test_delete_other_communitys_server_is_not_found() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(community_id=CommunityId(uuid.uuid4()))
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotFoundError):
+        await DeleteServer(uow=uow)(
+            community_id=CommunityId(uuid.uuid4()), server_id=server.id
+        )
+    assert uow.resource_grants.swept == []

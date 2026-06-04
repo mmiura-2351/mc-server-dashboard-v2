@@ -255,3 +255,44 @@ forbidden_modules = [
     "grpc",
     "mcsd",
 ]
+
+# --- servers context -------------------------------------------------------
+# Mirrors the other contexts' shape (ARCHITECTURE.md Section 2.2): a layered
+# contract pins domain <- application <- api, and the forbidden contracts keep
+# adapters at the edge and the domain dependency-free — including no import of
+# any other context (the owning community and the assigned worker are referenced
+# by id value only, DATABASE.md Section 7; the backend enum is duplicated rather
+# than imported from fleet). The server-delete grant sweep is composed at the
+# adapter layer (the servers UnitOfWork reuses the community resource-grant
+# adapter on one session), so the domain never reaches across.
+[[tool.importlinter.contracts]]
+name = "servers context layers (domain <- application <- api; adapters at the edge)"
+type = "layers"
+layers = [
+    "mc_server_dashboard_api.servers.api",
+    "mc_server_dashboard_api.servers.application",
+    "mc_server_dashboard_api.servers.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "servers domain and application do not import adapters"
+type = "forbidden"
+source_modules = [
+    "mc_server_dashboard_api.servers.domain",
+    "mc_server_dashboard_api.servers.application",
+]
+forbidden_modules = ["mc_server_dashboard_api.servers.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "servers domain and application import no other context"
+type = "forbidden"
+source_modules = [
+    "mc_server_dashboard_api.servers.domain",
+    "mc_server_dashboard_api.servers.application",
+]
+forbidden_modules = [
+    "mc_server_dashboard_api.community",
+    "mc_server_dashboard_api.identity",
+    "mc_server_dashboard_api.fleet",
+    "mc_server_dashboard_api.core",
+]
