@@ -55,12 +55,16 @@ class CommandOutcome:
 
     ``status`` is ``OK`` on success; any other value carries the Worker's failure
     classification. ``message`` is the human-readable detail; ``output`` is the
-    console/RCON text of a ``server_command`` (empty otherwise).
+    console/RCON text of a ``server_command`` (empty otherwise); ``file_content``
+    is the bytes read by a ``read_file`` (empty otherwise). The two payload fields
+    are mutually exclusive per command, mirroring the wire ``CommandResult``
+    ``result`` oneof.
     """
 
     status: CommandStatus
     message: str = ""
     output: str = ""
+    file_content: bytes = b""
 
     @property
     def success(self) -> bool:
@@ -142,3 +146,25 @@ class ControlPlane(abc.ABC):
         self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
     ) -> CommandOutcome:
         """Trigger a working-set snapshot and await it (FR-DATA-4, FR-DATA-7)."""
+
+    @abc.abstractmethod
+    async def read_file(
+        self, *, worker_id: WorkerId, server_id: ServerId, rel_path: str
+    ) -> CommandOutcome:
+        """Read ``rel_path`` from a running server's live working set (Section 6.9).
+
+        The bytes ride the result's ``file_content``; path-traversal protection is
+        enforced on the Worker side (FR-FILE-4), so a rejected path comes back as
+        a ``FILE_ACCESS_DENIED`` outcome rather than an exception.
+        """
+
+    @abc.abstractmethod
+    async def edit_file(
+        self,
+        *,
+        worker_id: WorkerId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> CommandOutcome:
+        """Write ``content`` to ``rel_path`` in a running server's working set."""

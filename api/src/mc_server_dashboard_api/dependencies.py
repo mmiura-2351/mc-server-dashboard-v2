@@ -131,8 +131,18 @@ from mc_server_dashboard_api.servers.adapters.clock import (
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.file_store import (
+    StorageFileStoreAdapter,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
+)
+from mc_server_dashboard_api.servers.application.files import (
+    ListDir,
+    ListFileVersions,
+    ReadFile,
+    RollbackFile,
+    WriteFile,
 )
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
@@ -149,6 +159,9 @@ from mc_server_dashboard_api.servers.application.manage_server import (
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane as ServersControlPlane,
+)
+from mc_server_dashboard_api.servers.domain.file_store import (
+    FileStore as ServersFileStore,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage
 
@@ -699,6 +712,83 @@ def get_send_server_command(
     return SendServerCommand(
         uow=ServersUnitOfWork(session_factory),
         control_plane=control_plane,
+    )
+
+
+def get_servers_file_store(
+    storage: Annotated[Storage, Depends(get_storage)],
+) -> ServersFileStore:
+    """Bind the servers file seam to the authoritative Storage file slices."""
+
+    return StorageFileStoreAdapter(storage=storage)
+
+
+def get_read_file(
+    request: Request,
+    control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> ReadFile:
+    """Assemble the :class:`ReadFile` use case (file:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ReadFile(
+        uow=ServersUnitOfWork(session_factory),
+        control_plane=control_plane,
+        file_store=file_store,
+    )
+
+
+def get_list_dir(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> ListDir:
+    """Assemble the :class:`ListDir` use case (file:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListDir(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+    )
+
+
+def get_write_file(
+    request: Request,
+    control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> WriteFile:
+    """Assemble the :class:`WriteFile` use case (file:edit)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return WriteFile(
+        uow=ServersUnitOfWork(session_factory),
+        control_plane=control_plane,
+        file_store=file_store,
+    )
+
+
+def get_list_file_versions(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> ListFileVersions:
+    """Assemble the :class:`ListFileVersions` use case (file:history)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListFileVersions(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+    )
+
+
+def get_rollback_file(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> RollbackFile:
+    """Assemble the :class:`RollbackFile` use case (file:rollback)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RollbackFile(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
     )
 
 

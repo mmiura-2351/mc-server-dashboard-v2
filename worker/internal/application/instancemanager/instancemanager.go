@@ -17,7 +17,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
@@ -106,6 +108,10 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 		return m.handleHydrate(ctx, cmd)
 	case "SnapshotTrigger":
 		return m.handleSnapshot(ctx, cmd)
+	case "ReadFile":
+		return m.handleReadFile(cmd)
+	case "EditFile":
+		return m.handleEditFile(cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
@@ -277,6 +283,154 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 			fmt.Sprintf("instancemanager: server command: %v", err))
 	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true, Output: out}
+}
+
+// MaxFileBytes bounds a ReadFile response and an EditFile payload. File access
+// rides the control plane for small, interactive files (ARCHITECTURE.md
+// Section 7.2), not bulk world data — that moves on the data plane. 4 MiB matches
+// the API edge cap; an oversized read or edit is refused with a coded
+// FILE_ACCESS_DENIED error rather than streaming megabytes onto the stream.
+const MaxFileBytes = 4 * 1024 * 1024
+
+// handleReadFile reads a working-set-relative file and returns its bytes
+// (Section 6.9, 7.2). The path is sanitized against traversal (FR-FILE-4); a
+// missing file maps to SERVER_NOT_FOUND (the API turns it into a 404) and an
+// oversized file to FILE_ACCESS_DENIED. It runs inline on the receive loop: a
+// small file read is fast, unlike the off-loop bulk transfers.
+func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
+	target, err := safeJoin(filepath.Join(m.scratchDir, cmd.ServerID), cmd.Path)
+	if err != nil {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: read file: %v", err))
+	}
+
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+				fmt.Sprintf("instancemanager: read file: %q not found", cmd.Path))
+		}
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: read file: %v", err))
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		// A symlink is the classic escape vector; refuse it outright rather than
+		// following it out of the working set (FR-FILE-4).
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
+	}
+	if info.IsDir() {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
+	}
+	if info.Size() > MaxFileBytes {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: %q exceeds the %d-byte read cap", cmd.Path, MaxFileBytes))
+	}
+
+	content, err := os.ReadFile(target)
+	if err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: read file: %v", err))
+	}
+	// Use a non-nil empty slice so an empty file still rides the file_content arm
+	// of the result oneof (the transport distinguishes nil from empty).
+	if content == nil {
+		content = []byte{}
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true, FileContent: content}
+}
+
+// handleEditFile writes bytes to a working-set-relative file (Section 6.9, 7.2).
+// The path is sanitized against traversal and the payload is size-bounded; the
+// write is atomic (temp sibling + rename) so a concurrent reader never sees a
+// torn file. It runs inline on the receive loop (a small, interactive edit).
+func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
+	if len(cmd.Content) > MaxFileBytes {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: edit exceeds the %d-byte cap", MaxFileBytes))
+	}
+
+	target, err := safeJoin(filepath.Join(m.scratchDir, cmd.ServerID), cmd.Path)
+	if err != nil {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: edit file: %v", err))
+	}
+
+	// Refuse to overwrite through an existing symlink (escape vector); a fresh
+	// regular file or a missing path is fine.
+	if info, statErr := os.Lstat(target); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+				fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
+		}
+		if info.IsDir() {
+			return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+				fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: edit file: %v", err))
+	}
+	if err := atomicWrite(target, cmd.Content); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: edit file: %v", err))
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// safeJoin joins name under root and verifies the result stays inside root.
+// Absolute paths and any ".." component are rejected outright (not clamped),
+// mirroring the data-plane extractor's discipline (FR-FILE-4). The string-level
+// check below does not resolve symlinks; the handlers Lstat the final component
+// and refuse a symlink so an in-path link cannot redirect the access.
+func safeJoin(root, name string) (string, error) {
+	slashed := filepath.ToSlash(name)
+	if path.IsAbs(slashed) {
+		return "", fmt.Errorf("refusing absolute path %q", name)
+	}
+	for _, part := range strings.Split(slashed, "/") {
+		if part == ".." {
+			return "", fmt.Errorf("refusing path escape %q", name)
+		}
+	}
+	joined := filepath.Join(root, filepath.FromSlash(slashed))
+	if joined != root && !strings.HasPrefix(joined, root+string(os.PathSeparator)) {
+		return "", fmt.Errorf("refusing path escape %q", name)
+	}
+	if joined == root {
+		// The working-set root itself is a directory, never a readable/writable
+		// file; reject "." / "" so the caller gets a coded error, not an EISDIR.
+		return "", fmt.Errorf("refusing working-set root as a file path")
+	}
+	return joined, nil
+}
+
+// atomicWrite writes data to a temp sibling, fsyncs it, and renames it over the
+// target so a concurrent reader sees either the old or the complete new content,
+// never a partial write (mirrors the Storage adapter's write discipline).
+func atomicWrite(target string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".edit-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, target)
 }
 
 // take removes and returns the instance and its StartServer command for

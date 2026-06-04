@@ -259,3 +259,18 @@ class FakeControlPlane(ControlPlane):
         self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
     ) -> CommandOutcome:
         return await self._record("snapshot", worker_id, server_id)
+
+    async def read_file(
+        self, *, worker_id: WorkerId, server_id: ServerId, rel_path: str
+    ) -> CommandOutcome:
+        return await self._record("read_file", worker_id, server_id)
+
+    async def edit_file(
+        self,
+        *,
+        worker_id: WorkerId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> CommandOutcome:
+        return await self._record("edit_file", worker_id, server_id)

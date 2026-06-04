@@ -66,13 +66,15 @@ class CommandResult:
 
     ``code`` is ``OK`` on success; any other value carries the Worker's failure
     classification. ``message`` is the human-readable detail (empty on success).
-    ``output`` carries the console/RCON text of a ``ServerCommand`` (empty
-    otherwise).
+    ``output`` carries the console/RCON text of a ``ServerCommand``; ``file_content``
+    carries the bytes read by a ``ReadFile`` (both empty otherwise, and mutually
+    exclusive, mirroring the wire ``CommandResult`` ``result`` oneof).
     """
 
     code: CommandResultCode
     message: str = ""
     output: str = ""
+    file_content: bytes = b""
 
     @property
     def success(self) -> bool:
@@ -127,8 +129,28 @@ class SnapshotCommand:
     transfer_token: str
 
 
+@dataclass(frozen=True)
+class ReadFileCommand:
+    """Read ``path`` from a running server's live working set (Section 6.9, 7.2).
+
+    The bytes ride the result's ``file_content``; the small, latency-sensitive
+    read stays on the control-plane stream (ARCHITECTURE.md Section 7.2), not the
+    bulk data plane. Path-traversal protection is enforced on the Worker side.
+    """
+
+    path: str
+
+
+@dataclass(frozen=True)
+class EditFileCommand:
+    """Write ``content`` to ``path`` in a running server's live working set."""
+
+    path: str
+    content: bytes
+
+
 # The union of commands the lifecycle layer dispatches. File access (ReadFile /
-# EditFile) is deferred to epic #9 and intentionally not modelled here.
+# EditFile) rides this stream for running servers (ARCHITECTURE.md Section 7.2).
 Command = (
     StartServerCommand
     | StopServerCommand
@@ -136,6 +158,8 @@ Command = (
     | ServerCommandCommand
     | HydrateCommand
     | SnapshotCommand
+    | ReadFileCommand
+    | EditFileCommand
 )
 
 
