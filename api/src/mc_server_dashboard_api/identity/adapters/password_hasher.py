@@ -8,10 +8,14 @@ stays a single ``hash`` call. Both libraries use their own secure defaults.
 
 from __future__ import annotations
 
+import logging
+
 import argon2
 import bcrypt
 
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
+
+_LOG = logging.getLogger(__name__)
 
 # bcrypt ignores bytes past 72, so two passwords sharing a 72-byte prefix would
 # verify identically. The password policy rejects >72-byte input when bcrypt is
@@ -33,6 +37,15 @@ class Argon2PasswordHasher(PasswordHasher):
         try:
             return self._hasher.verify(password_hash, plaintext)
         except argon2.exceptions.VerifyMismatchError:
+            return False
+        except (argon2.exceptions.Argon2Error, argon2.exceptions.InvalidHash):
+            # A wrong password raises VerifyMismatchError (handled above). Any
+            # other argon2 failure means the stored hash is malformed/corrupt
+            # (InvalidHash is not an Argon2Error subclass in the pinned version,
+            # so it is caught explicitly). Return False for a uniform 401 rather
+            # than a 500, and warn — corrupt stored data is worth surfacing, not
+            # swallowing silently.
+            _LOG.warning("argon2 verify failed on a malformed stored hash")
             return False
 
 

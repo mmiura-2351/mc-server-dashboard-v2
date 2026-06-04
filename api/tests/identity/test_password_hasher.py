@@ -28,6 +28,19 @@ def test_argon2_salts_each_hash() -> None:
     assert hasher.hash("Wm7!qz#Lp2vT") != hasher.hash("Wm7!qz#Lp2vT")
 
 
+def test_argon2_verify_returns_false_on_malformed_stored_hash(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A corrupted/garbage stored hash makes argon2 raise InvalidHash (not a
+    # VerifyMismatchError); verify() must return False so the auth route keeps a
+    # uniform 401 instead of a 500, and the data-corruption signal is logged.
+    hasher = Argon2PasswordHasher()
+    with caplog.at_level("WARNING"):
+        result = hasher.verify("Wm7!qz#Lp2vT", "not-a-valid-argon2-hash")
+    assert result is False
+    assert any(record.levelname == "WARNING" for record in caplog.records)
+
+
 def test_bcrypt_hash_is_not_plaintext_and_verifies() -> None:
     hasher = BcryptPasswordHasher()
     hashed = hasher.hash("Wm7!qz#Lp2vT")
