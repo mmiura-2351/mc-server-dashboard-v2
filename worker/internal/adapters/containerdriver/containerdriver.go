@@ -160,7 +160,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		Labels:     d.labels(spec.ServerID),
 	}
 
-	id, err := d.docker.Create(ctx, create)
+	id, err := d.createContainer(ctx, create)
 	if err != nil {
 		return nil, fmt.Errorf("containerdriver: create container: %w", err)
 	}
@@ -196,6 +196,33 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 
 	go inst.supervise()
 	return inst, nil
+}
+
+// createContainer creates the container, healing the create name conflict that a
+// back-to-back restart hits when the exit-watcher's async removal of the exited
+// container has not yet won the race (issue #226). On a 409 name conflict it
+// inspects the conflicting container: if it carries THIS Worker's label and is
+// not running it is a stale leftover (the just-exited container or a name the
+// startup sweep missed), so the driver removes it and retries the create exactly
+// once. A foreign label or a running container is left untouched and the conflict
+// is returned. A second conflict after the retry is returned as-is.
+func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string, error) {
+	id, err := d.docker.Create(ctx, create)
+	if !errors.Is(err, errNameConflict) {
+		return id, err
+	}
+
+	info, inspectErr := d.docker.Inspect(ctx, create.Name)
+	if inspectErr != nil {
+		return "", err
+	}
+	if info.Labels[labelWorkerID] != d.workerID || info.Running {
+		return "", err
+	}
+	if removeErr := d.docker.Remove(ctx, info.ID); removeErr != nil {
+		return "", err
+	}
+	return d.docker.Create(ctx, create)
 }
 
 // logBufferLines bounds the per-instance captured-log buffer; matches the

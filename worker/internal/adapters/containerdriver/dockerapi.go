@@ -3,11 +3,19 @@ package containerdriver
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
 	"time"
 )
+
+// errNameConflict is the error Create returns when the daemon answers 409
+// Conflict because the deterministic container name is already in use. The
+// driver matches it with errors.Is to drive the remove-on-conflict retry (issue
+// #226); any other Create failure is returned unwrapped and never triggers the
+// retry.
+var errNameConflict = errors.New("containerdriver: container name already in use")
 
 // Container label keys. The worker-id label scopes the startup orphan sweep to
 // this Worker's containers; the server-id label identifies which server a
@@ -43,6 +51,12 @@ type dockerAPI interface {
 	Wait(ctx context.Context, id string) (int64, error)
 	// Remove deletes the container (force).
 	Remove(ctx context.Context, id string) error
+	// Inspect returns the labels and running state of the container with the given
+	// name (the deterministic mcsd-<server-id> name). It is used to resolve a
+	// create name conflict (issue #226): the driver only removes the conflicting
+	// container when it carries this Worker's label and is not running. A container
+	// that no longer exists returns an error.
+	Inspect(ctx context.Context, name string) (ContainerInfo, error)
 	// List returns the containers carrying the given label key/value pair,
 	// including stopped ones.
 	List(ctx context.Context, labelKey, labelValue string) ([]Container, error)
@@ -93,6 +107,15 @@ type PortMapping struct {
 type Container struct {
 	ID   string
 	Name string
+}
+
+// ContainerInfo is the subset of a container inspection the driver needs to
+// resolve a create name conflict (issue #226): the id to remove it, the labels
+// to confirm it is this Worker's, and whether it is running.
+type ContainerInfo struct {
+	ID      string
+	Labels  map[string]string
+	Running bool
 }
 
 // readProperties parses a Java .properties file into a map, returning an empty

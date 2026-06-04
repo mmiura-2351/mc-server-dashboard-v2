@@ -3,6 +3,7 @@ package containerdriver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -292,5 +293,65 @@ func TestEngineClientSurfacesDaemonError(t *testing.T) {
 
 	if err := c.Start(context.Background(), "missing"); err == nil {
 		t.Fatal("expected an error on a non-2xx daemon response")
+	}
+}
+
+// A 409 from /containers/create is surfaced as errNameConflict so the driver can
+// run its remove-on-conflict retry (issue #226).
+func TestEngineClientCreateConflictIsTyped(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"Conflict. The container name \"/mcsd-s1\" is already in use"}`))
+	})
+	c := d.client(t)
+
+	_, err := c.Create(context.Background(), CreateSpec{Name: "mcsd-s1", Image: "img"})
+	if !errors.Is(err, errNameConflict) {
+		t.Fatalf("Create err = %v, want errNameConflict", err)
+	}
+}
+
+// A non-409 create failure is not reported as a name conflict.
+func TestEngineClientCreateNonConflictIsNotTyped(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"boom"}`))
+	})
+	c := d.client(t)
+
+	_, err := c.Create(context.Background(), CreateSpec{Name: "mcsd-s1", Image: "img"})
+	if err == nil {
+		t.Fatal("expected Create to fail")
+	}
+	if errors.Is(err, errNameConflict) {
+		t.Fatalf("Create err = %v, want a plain error (not a name conflict)", err)
+	}
+}
+
+// Inspect decodes the container id, labels, and running state used to resolve a
+// create name conflict (issue #226).
+func TestEngineClientInspectDecodesLabelsAndState(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"Id": "abc123",
+			"State": {"Running": false},
+			"Config": {"Labels": {"mcsd.worker.id": "w1", "mcsd.server.id": "s1"}}
+		}`))
+	})
+	c := d.client(t)
+
+	info, err := c.Inspect(context.Background(), "mcsd-s1")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if info.ID != "abc123" || info.Running {
+		t.Fatalf("info = %+v, want id abc123, not running", info)
+	}
+	if info.Labels[labelWorkerID] != "w1" || info.Labels[labelServerID] != "s1" {
+		t.Fatalf("Labels = %v", info.Labels)
+	}
+	req := d.requests[0]
+	if req.method != http.MethodGet || req.path != "/v1.43/containers/mcsd-s1/json" {
+		t.Fatalf("request = %s %s", req.method, req.path)
 	}
 }

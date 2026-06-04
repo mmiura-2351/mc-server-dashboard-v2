@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,20 @@ import (
 	"net/url"
 	"time"
 )
+
+// statusError carries a non-2xx Engine response so callers can branch on the
+// HTTP status code (e.g. Create distinguishing a 409 name conflict) while still
+// surfacing the daemon's message via Error().
+type statusError struct {
+	method  string
+	path    string
+	code    int
+	message string
+}
+
+func (e statusError) Error() string {
+	return fmt.Sprintf("containerdriver: %s %s: status %d: %s", e.method, e.path, e.code, e.message)
+}
 
 // defaultDockerHost is the Docker Engine unix socket used when no host is
 // configured.
@@ -116,9 +131,33 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 	}
 	q := url.Values{"name": {spec.Name}}
 	if err := c.do(ctx, http.MethodPost, "/containers/create", q, body, &resp); err != nil {
+		var status statusError
+		if errors.As(err, &status) && status.code == http.StatusConflict {
+			// Surface a typed conflict so the driver can run its remove-on-conflict
+			// retry (issue #226); keep the daemon message for diagnostics.
+			return "", fmt.Errorf("%w: %v", errNameConflict, err)
+		}
 		return "", err
 	}
 	return resp.ID, nil
+}
+
+// Inspect returns the labels and running state of the named container, used to
+// resolve a create name conflict (issue #226).
+func (c *EngineClient) Inspect(ctx context.Context, name string) (ContainerInfo, error) {
+	var resp struct {
+		ID    string `json:"Id"`
+		State struct {
+			Running bool `json:"Running"`
+		} `json:"State"`
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/containers/"+name+"/json", nil, nil, &resp); err != nil {
+		return ContainerInfo{}, err
+	}
+	return ContainerInfo{ID: resp.ID, Labels: resp.Config.Labels, Running: resp.State.Running}, nil
 }
 
 // Start starts a created container.
@@ -300,7 +339,7 @@ func (c *EngineClient) do(ctx context.Context, method, path string, query url.Va
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("containerdriver: %s %s: status %d: %s", method, path, resp.StatusCode, bytes.TrimSpace(msg))
+		return statusError{method: method, path: path, code: resp.StatusCode, message: string(bytes.TrimSpace(msg))}
 	}
 
 	if out != nil {
