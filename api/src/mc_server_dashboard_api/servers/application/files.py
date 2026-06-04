@@ -57,6 +57,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
     ServerId,
 )
+from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
+from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 
 # The edit-size cap. File access rides the control plane for small, interactive
 # edits (server.properties, ops.json, a datapack file), not bulk world data —
@@ -81,6 +83,21 @@ def _is_running(server: Server) -> bool:
         and server.observed_state is ObservedState.RUNNING
         and server.assigned_worker_id is not None
     )
+
+
+def _validate_rel_path(rel_path: str) -> None:
+    """Reject a traversal-unsafe path at the API edge before a Worker dispatch.
+
+    The at-rest path validates the same way inside the FileStore seam (``RelPath``
+    construction). The running path forwards the raw rel_path to the Worker, so we
+    apply the identical string-level rejection here to avoid a doomed round-trip
+    (the Worker would refuse it anyway). Raises :class:`InvalidFilePathError`.
+    """
+
+    try:
+        RelPath(rel_path)
+    except PathTraversalError as exc:
+        raise InvalidFilePathError(rel_path) from exc
 
 
 def _map_file_status(server_id: ServerId, status: CommandStatus, message: str) -> None:
@@ -114,6 +131,7 @@ class ReadFile:
                 community_id=community_id, server_id=server_id, rel_path=rel_path
             )
         if _is_running(server):
+            _validate_rel_path(rel_path)
             outcome = await self.control_plane.read_file(
                 worker_id=server.assigned_worker_id,  # type: ignore[arg-type]
                 server_id=server_id,
@@ -177,6 +195,7 @@ class WriteFile:
             )
             return
         if _is_running(server):
+            _validate_rel_path(rel_path)
             outcome = await self.control_plane.edit_file(
                 worker_id=server.assigned_worker_id,  # type: ignore[arg-type]
                 server_id=server_id,
@@ -186,6 +205,13 @@ class WriteFile:
             if not outcome.success:
                 _map_file_status(server_id, outcome.status, outcome.message)
             return
+        # A crashed server (desired=RUNNING, observed=CRASHED) lands here -> 409,
+        # not an at-rest Storage edit. Rationale: every (re)start hydrates the
+        # working set from the authoritative copy, but a subsequent Stop dispatches
+        # a final snapshot of the crashed working set, which would CLOBBER any
+        # authoritative edit made while crashed. Requiring stop-first guarantees
+        # that final snapshot lands before any at-rest edit. (A smarter crashed-edit
+        # flow is possible post-M1.)
         raise ServerFilesUnsettledError(str(server_id.value))
 
 

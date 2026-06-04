@@ -110,6 +110,89 @@ func TestReadFileSymlinkEscapeIsDenied(t *testing.T) {
 	}
 }
 
+func TestReadFileIntermediateSymlinkEscapeIsDenied(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	workingDir := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(workingDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// An intermediate directory component is a symlink pointing outside the
+	// working set; the MC process could create such a link inside its own dir.
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "secret"), []byte("top-secret"), 0o640); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workingDir, "sub")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "sub/secret",
+	})
+	if res.Success {
+		t.Fatal("ReadFile through an intermediate symlink should be denied")
+	}
+	if res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("ErrorCode = %v, want FileAccessDenied", res.ErrorCode)
+	}
+}
+
+func TestEditFileIntermediateSymlinkEscapeIsDenied(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	workingDir := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(workingDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outsideDir := t.TempDir()
+	if err := os.Symlink(outsideDir, filepath.Join(workingDir, "sub")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		Path: "sub/escape", Content: []byte("pwned"),
+	})
+	if res.Success {
+		t.Fatal("EditFile through an intermediate symlink should be denied")
+	}
+	if res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("ErrorCode = %v, want FileAccessDenied", res.ErrorCode)
+	}
+	// MkdirAll must not have created anything through the link, and the write
+	// must not have landed outside the working set.
+	if _, err := os.Stat(filepath.Join(outsideDir, "escape")); !os.IsNotExist(err) {
+		t.Fatal("a file escaped the working dir through an intermediate symlink")
+	}
+}
+
+func TestEditFileIntermediateSymlinkViaNewDirsIsDenied(t *testing.T) {
+	// The escaping symlink is itself a deeper intermediate component that
+	// MkdirAll would have to create part of the path through.
+	m := newManager(t, &fakeDriver{}, nil)
+	workingDir := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(filepath.Join(workingDir, "a"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outsideDir := t.TempDir()
+	if err := os.Symlink(outsideDir, filepath.Join(workingDir, "a", "b")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		Path: "a/b/c/escape", Content: []byte("pwned"),
+	})
+	if res.Success {
+		t.Fatal("EditFile through a deeper intermediate symlink should be denied")
+	}
+	if res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("ErrorCode = %v, want FileAccessDenied", res.ErrorCode)
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "c")); !os.IsNotExist(err) {
+		t.Fatal("MkdirAll created dirs outside the working set through a symlink")
+	}
+}
+
 func TestReadFileOversizedIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	writeWorkingFile(t, m, "s1", "big.bin", make([]byte, MaxFileBytes+1))

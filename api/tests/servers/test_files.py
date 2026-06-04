@@ -314,6 +314,30 @@ async def test_read_running_file_access_denied_maps_to_invalid_path() -> None:
         )
 
 
+async def test_read_running_traversal_rejected_before_dispatch() -> None:
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    cp = FakeControlPlane()
+    use_case = ReadFile(uow=uow, control_plane=cp, file_store=FakeFileStore())
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="../escape",
+        )
+    assert cp.dispatched == []  # rejected at the edge; never reached the worker
+
+
 async def test_read_running_server_not_found_maps_to_file_not_found() -> None:
     community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     uow = FakeUnitOfWork()
@@ -438,6 +462,31 @@ async def test_write_over_cap_is_rejected_before_dispatch() -> None:
             content=b"x" * (MAX_EDIT_BYTES + 1),
         )
     assert store.writes == []  # never reached the store
+
+
+async def test_write_running_traversal_rejected_before_dispatch() -> None:
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    cp = FakeControlPlane()
+    use_case = WriteFile(uow=uow, control_plane=cp, file_store=FakeFileStore())
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="../escape",
+            content=b"x",
+        )
+    assert cp.dispatched == []  # rejected at the edge; never reached the worker
 
 
 async def test_write_transitional_state_is_unsettled() -> None:
