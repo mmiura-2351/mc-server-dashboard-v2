@@ -61,20 +61,47 @@ class CommandResultCode(enum.Enum):
 
 
 @dataclass(frozen=True)
+class FileEntry:
+    """One child of a listed directory in a running server's working set.
+
+    The shape mirrors the API's authoritative-Storage listing (name / is_dir /
+    size) so a running-server listing unifies with an at-rest one.
+    """
+
+    name: str
+    is_dir: bool
+    size: int
+
+
+@dataclass(frozen=True)
+class FileListing:
+    """A directory listing returned by a ``ListFiles`` command.
+
+    ``truncated`` is set when the directory held more entries than the Worker's
+    per-listing cap and ``entries`` was clipped to that cap.
+    """
+
+    entries: tuple[FileEntry, ...] = ()
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
 class CommandResult:
     """The Worker's answer to a dispatched command.
 
     ``code`` is ``OK`` on success; any other value carries the Worker's failure
     classification. ``message`` is the human-readable detail (empty on success).
     ``output`` carries the console/RCON text of a ``ServerCommand``; ``file_content``
-    carries the bytes read by a ``ReadFile`` (both empty otherwise, and mutually
-    exclusive, mirroring the wire ``CommandResult`` ``result`` oneof).
+    carries the bytes read by a ``ReadFile``; ``file_listing`` carries the directory
+    listing of a ``ListFiles`` (all empty/None otherwise, and mutually exclusive,
+    mirroring the wire ``CommandResult`` ``result`` oneof).
     """
 
     code: CommandResultCode
     message: str = ""
     output: str = ""
     file_content: bytes = b""
+    file_listing: FileListing | None = None
 
     @property
     def success(self) -> bool:
@@ -149,8 +176,21 @@ class EditFileCommand:
     content: bytes
 
 
+@dataclass(frozen=True)
+class ListFilesCommand:
+    """List a directory in a running server's live working set (Section 6.9, 7.2).
+
+    The listing rides the result's ``file_listing``; ``path == "."`` lists the
+    working-set root. Path-traversal protection is enforced on the Worker side
+    (FR-FILE-4), and the listing is read-only.
+    """
+
+    path: str
+
+
 # The union of commands the lifecycle layer dispatches. File access (ReadFile /
-# EditFile) rides this stream for running servers (ARCHITECTURE.md Section 7.2).
+# EditFile / ListFiles) rides this stream for running servers (ARCHITECTURE.md
+# Section 7.2).
 Command = (
     StartServerCommand
     | StopServerCommand
@@ -160,6 +200,7 @@ Command = (
     | SnapshotCommand
     | ReadFileCommand
     | EditFileCommand
+    | ListFilesCommand
 )
 
 

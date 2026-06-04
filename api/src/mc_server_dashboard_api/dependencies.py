@@ -951,6 +951,7 @@ def get_read_file(
 
 def get_list_dir(
     request: Request,
+    control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
     file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
 ) -> ListDir:
     """Assemble the :class:`ListDir` use case (file:read)."""
@@ -958,6 +959,7 @@ def get_list_dir(
     session_factory = create_session_factory(get_engine(request))
     return ListDir(
         uow=ServersUnitOfWork(session_factory),
+        control_plane=control_plane,
         file_store=file_store,
     )
 

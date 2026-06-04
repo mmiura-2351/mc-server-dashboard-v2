@@ -57,15 +57,34 @@ type Command struct {
 }
 
 // CommandResult answers a Command. A failure carries an ErrorCode and message;
-// a ServerCommand success carries Output, and a ReadFile success carries
-// FileContent (CONTROL_PLANE.md Section 7).
+// a ServerCommand success carries Output, a ReadFile success carries
+// FileContent, and a ListFiles success carries FileListing
+// (CONTROL_PLANE.md Section 7).
 type CommandResult struct {
 	CommandID    string
 	Success      bool
 	Output       string
 	FileContent  []byte
+	FileListing  *FileListing
 	ErrorCode    CommandErrorCode
 	ErrorMessage string
+}
+
+// FileListing is a directory listing returned by a ListFiles command. Truncated
+// is set when the directory held more entries than the per-listing cap and
+// Entries was clipped to that cap.
+type FileListing struct {
+	Entries   []FileEntry
+	Truncated bool
+}
+
+// FileEntry is one child of a listed directory. The shape mirrors the API's
+// authoritative-Storage listing (name / is_dir / size) so a running-server
+// listing unifies with an at-rest one.
+type FileEntry struct {
+	Name  string
+	IsDir bool
+	Size  uint64
 }
 
 // CommandErrorCode mirrors the wire CommandErrorCode classes the session can

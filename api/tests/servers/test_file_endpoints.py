@@ -47,6 +47,7 @@ from mc_server_dashboard_api.dependencies import (
     get_rollback_file,
     get_write_file,
 )
+from mc_server_dashboard_api.servers.application.files import DirListing
 from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailableError
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
@@ -168,14 +169,59 @@ def test_read_returns_base64_content() -> None:
 
 
 def test_list_returns_entries() -> None:
-    use_case = _FakeUseCase(result=[FileEntry(name="world", is_dir=True, size=0)])
+    use_case = _FakeUseCase(
+        result=DirListing(entries=[FileEntry(name="world", is_dir=True, size=0)])
+    )
     app = _app(member=True, allow=True, list_=use_case)
     client = next(_client(app))
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
     )
     assert resp.status_code == 200
-    assert resp.json()["entries"] == [{"name": "world", "is_dir": True, "size": 0}]
+    body = resp.json()
+    assert body["entries"] == [{"name": "world", "is_dir": True, "size": 0}]
+    assert body["truncated"] is False
+
+
+def test_list_surfaces_truncated_flag() -> None:
+    use_case = _FakeUseCase(
+        result=DirListing(
+            entries=[FileEntry(name="world", is_dir=True, size=0)], truncated=True
+        )
+    )
+    app = _app(member=True, allow=True, list_=use_case)
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["truncated"] is True
+
+
+def test_list_disconnected_worker_is_503() -> None:
+    app = _app(
+        member=True, allow=True, list_=_FakeUseCase(error=WorkerUnavailableError("x"))
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["reason"] == "worker_unavailable"
+
+
+def test_list_transitional_server_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        list_=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
 
 
 def test_write_decodes_base64_and_passes_bytes() -> None:

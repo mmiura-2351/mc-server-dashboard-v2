@@ -412,6 +412,7 @@ class ApiCommand(_message.Message):
     SNAPSHOT_FIELD_NUMBER: _builtins.int
     READ_FILE_FIELD_NUMBER: _builtins.int
     EDIT_FILE_FIELD_NUMBER: _builtins.int
+    LIST_FILES_FIELD_NUMBER: _builtins.int
     command_id: _builtins.str
     """command_id correlates this command with its CommandResult
     (REQUIREMENTS.md NFR-OBS-1).
@@ -451,6 +452,12 @@ class ApiCommand(_message.Message):
     def edit_file(self) -> Global___EditFile:
         """EditFile writes to a running server's live working set (Section 7.2)."""
 
+    @_builtins.property
+    def list_files(self) -> Global___ListFiles:
+        """ListFiles browses a directory in a running server's live working set
+        (Section 6.9, Section 7.2).
+        """
+
     def __init__(
         self,
         *,
@@ -464,12 +471,13 @@ class ApiCommand(_message.Message):
         snapshot: Global___SnapshotTrigger | None = ...,
         read_file: Global___ReadFile | None = ...,
         edit_file: Global___EditFile | None = ...,
+        list_files: Global___ListFiles | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "edit_file", b"edit_file", "hydrate", b"hydrate", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "hydrate", b"hydrate", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_command: _TypeAlias = _typing.Literal["start", "stop", "restart", "server_command", "hydrate", "snapshot", "read_file", "edit_file"]  # noqa: Y015
+    _WhichOneofReturnType_command: _TypeAlias = _typing.Literal["start", "stop", "restart", "server_command", "hydrate", "snapshot", "read_file", "edit_file", "list_files"]  # noqa: Y015
     _WhichOneofArgType_command: _TypeAlias = _typing.Literal["command", b"command"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_command) -> _WhichOneofReturnType_command | None: ...
 
@@ -686,6 +694,34 @@ class EditFile(_message.Message):
 Global___EditFile: _TypeAlias = EditFile  # noqa: Y015
 
 @_typing.final
+class ListFiles(_message.Message):
+    """ListFiles lists the entries of a directory in a running server's live working
+    set (Section 6.9, Section 7.2). The listing comes back in the CommandResult's
+    file_listing. Path-traversal protection is enforced on the Worker side
+    (FR-FILE-4); the listing is read-only.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    PATH_FIELD_NUMBER: _builtins.int
+    path: _builtins.str
+    """path is the directory relative to the server's working-set root; "." (or
+    empty) lists the root itself.
+    """
+    def __init__(
+        self,
+        *,
+        path: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["path", b"path"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___ListFiles: _TypeAlias = ListFiles  # noqa: Y015
+
+@_typing.final
 class CommandResult(_message.Message):
     """---------------------------------------------------------------------------
     Command results: Worker -> API
@@ -701,6 +737,7 @@ class CommandResult(_message.Message):
     ERROR_FIELD_NUMBER: _builtins.int
     COMMAND_OUTPUT_FIELD_NUMBER: _builtins.int
     FILE_CONTENT_FIELD_NUMBER: _builtins.int
+    FILE_LISTING_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     """success is true when the command was applied without error."""
     command_output: _builtins.str
@@ -711,6 +748,10 @@ class CommandResult(_message.Message):
     def error(self) -> Global___CommandError:
         """error describes the failure; absent when success is true."""
 
+    @_builtins.property
+    def file_listing(self) -> Global___FileListing:
+        """file_listing is the directory listing for a ListFiles."""
+
     def __init__(
         self,
         *,
@@ -718,16 +759,83 @@ class CommandResult(_message.Message):
         error: Global___CommandError | None = ...,
         command_output: _builtins.str = ...,
         file_content: _builtins.bytes = ...,
+        file_listing: Global___FileListing | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["command_output", b"command_output", "error", b"error", "file_content", b"file_content", "result", b"result"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["command_output", b"command_output", "error", b"error", "file_content", b"file_content", "file_listing", b"file_listing", "result", b"result"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["command_output", b"command_output", "error", b"error", "file_content", b"file_content", "result", b"result", "success", b"success"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["command_output", b"command_output", "error", b"error", "file_content", b"file_content", "file_listing", b"file_listing", "result", b"result", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_result: _TypeAlias = _typing.Literal["command_output", "file_content"]  # noqa: Y015
+    _WhichOneofReturnType_result: _TypeAlias = _typing.Literal["command_output", "file_content", "file_listing"]  # noqa: Y015
     _WhichOneofArgType_result: _TypeAlias = _typing.Literal["result", b"result"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_result) -> _WhichOneofReturnType_result | None: ...
 
 Global___CommandResult: _TypeAlias = CommandResult  # noqa: Y015
+
+@_typing.final
+class FileListing(_message.Message):
+    """FileListing is the directory listing returned for a ListFiles command. Entries
+    are unordered; the API sorts for display.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    ENTRIES_FIELD_NUMBER: _builtins.int
+    TRUNCATED_FIELD_NUMBER: _builtins.int
+    truncated: _builtins.bool
+    """truncated is true when the directory held more than the Worker's per-listing
+    cap and entries was clipped to that cap. The browse view shows a partial
+    listing rather than refusing an enormous directory.
+    """
+    @_builtins.property
+    def entries(self) -> _containers.RepeatedCompositeFieldContainer[Global___FileEntry]:
+        """entries are the directory's immediate children (not recursive)."""
+
+    def __init__(
+        self,
+        *,
+        entries: _abc.Iterable[Global___FileEntry] | None = ...,
+        truncated: _builtins.bool = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["entries", b"entries", "truncated", b"truncated"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___FileListing: _TypeAlias = FileListing  # noqa: Y015
+
+@_typing.final
+class FileEntry(_message.Message):
+    """FileEntry is one child of a listed directory. The shape mirrors the API's
+    authoritative-Storage listing (name, is_dir, size) so a running-server listing
+    and an at-rest listing unify into one response shape.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    NAME_FIELD_NUMBER: _builtins.int
+    IS_DIR_FIELD_NUMBER: _builtins.int
+    SIZE_FIELD_NUMBER: _builtins.int
+    name: _builtins.str
+    """name is the entry's base name (no path separators)."""
+    is_dir: _builtins.bool
+    """is_dir is true for a subdirectory, false for a regular file."""
+    size: _builtins.int
+    """size is the file size in bytes; 0 for a directory."""
+    def __init__(
+        self,
+        *,
+        name: _builtins.str = ...,
+        is_dir: _builtins.bool = ...,
+        size: _builtins.int = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["is_dir", b"is_dir", "name", b"name", "size", b"size"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___FileEntry: _TypeAlias = FileEntry  # noqa: Y015
 
 @_typing.final
 class CommandError(_message.Message):

@@ -50,13 +50,39 @@ class CommandStatus(enum.Enum):
 
 
 @dataclass(frozen=True)
+class FileEntry:
+    """One child of a running server's directory listing (file:read).
+
+    The shape mirrors the authoritative-Storage listing (name / is_dir / size) so
+    a running-server listing unifies with an at-rest one (Section 6.9).
+    """
+
+    name: str
+    is_dir: bool
+    size: int
+
+
+@dataclass(frozen=True)
+class FileListing:
+    """A directory listing returned by a ``list_files`` dispatch.
+
+    ``truncated`` is set when the directory held more entries than the Worker's
+    per-listing cap and ``entries`` was clipped to that cap.
+    """
+
+    entries: tuple[FileEntry, ...] = ()
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
 class CommandOutcome:
     """The Worker's answer to a dispatched command.
 
     ``status`` is ``OK`` on success; any other value carries the Worker's failure
     classification. ``message`` is the human-readable detail; ``output`` is the
     console/RCON text of a ``server_command`` (empty otherwise); ``file_content``
-    is the bytes read by a ``read_file`` (empty otherwise). The two payload fields
+    is the bytes read by a ``read_file`` (empty otherwise); ``listing`` is the
+    directory listing of a ``list_files`` (``None`` otherwise). The payload fields
     are mutually exclusive per command, mirroring the wire ``CommandResult``
     ``result`` oneof.
     """
@@ -65,6 +91,7 @@ class CommandOutcome:
     message: str = ""
     output: str = ""
     file_content: bytes = b""
+    listing: FileListing | None = None
 
     @property
     def success(self) -> bool:
@@ -168,3 +195,15 @@ class ControlPlane(abc.ABC):
         content: bytes,
     ) -> CommandOutcome:
         """Write ``content`` to ``rel_path`` in a running server's working set."""
+
+    @abc.abstractmethod
+    async def list_files(
+        self, *, worker_id: WorkerId, server_id: ServerId, rel_path: str
+    ) -> CommandOutcome:
+        """List ``rel_path`` in a running server's live working set (Section 6.9).
+
+        The entries ride the outcome's ``listing``; path-traversal protection is
+        enforced on the Worker side (FR-FILE-4), so a rejected path comes back as
+        a ``FILE_ACCESS_DENIED`` outcome rather than an exception. The listing is
+        read-only.
+        """

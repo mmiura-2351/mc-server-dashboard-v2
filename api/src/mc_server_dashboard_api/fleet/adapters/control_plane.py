@@ -30,7 +30,10 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandTimedOutError,
     ControlPlane,
     EditFileCommand,
+    FileEntry,
+    FileListing,
     HydrateCommand,
+    ListFilesCommand,
     ReadFileCommand,
     RestartServerCommand,
     ServerCommandCommand,
@@ -208,6 +211,8 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
         api.read_file.CopyFrom(pb.ReadFile(path=command.path))
     elif isinstance(command, EditFileCommand):
         api.edit_file.CopyFrom(pb.EditFile(path=command.path, content=command.content))
+    elif isinstance(command, ListFilesCommand):
+        api.list_files.CopyFrom(pb.ListFiles(path=command.path))
     else:  # pragma: no cover - exhaustive over the Command union
         raise TypeError(f"unsupported command type: {type(command)!r}")
     return api
@@ -215,15 +220,31 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
 
 def _to_result(message: pb.CommandResult) -> CommandResult:
     if message.success:
-        # command_output and file_content share the result oneof; reading the
-        # unset one yields the proto default (empty), so passing both is safe.
+        # command_output / file_content / file_listing share the result oneof;
+        # the scalar arms read back as the proto default (empty) when unset, so
+        # passing both is safe. file_listing is a message, so map it only when it
+        # is the arm actually set.
+        listing = None
+        if message.WhichOneof("result") == "file_listing":
+            listing = _to_listing(message.file_listing)
         return CommandResult(
             code=CommandResultCode.OK,
             output=message.command_output,
             file_content=message.file_content,
+            file_listing=listing,
         )
     code = _CODE_FROM_PROTO.get(message.error.code, CommandResultCode.INTERNAL)
     return CommandResult(code=code, message=message.error.message)
+
+
+def _to_listing(message: pb.FileListing) -> FileListing:
+    return FileListing(
+        entries=tuple(
+            FileEntry(name=e.name, is_dir=e.is_dir, size=e.size)
+            for e in message.entries
+        ),
+        truncated=message.truncated,
+    )
 
 
 class GrpcControlPlane(ControlPlane):
