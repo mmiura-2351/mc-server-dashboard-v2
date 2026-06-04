@@ -8,6 +8,7 @@ translation to domain errors on the race path — are exercised end-to-end.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 from collections.abc import AsyncIterator
@@ -76,17 +77,19 @@ def _alembic_config() -> Config:
 async def engine(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncEngine]:
     assert _DB_URL is not None
     # Build the production schema via the migrations (not metadata.create_all),
-    # so constraint names and DDL match what the app runs against.
+    # so constraint names and DDL match what the app runs against. The alembic
+    # env runs its own asyncio.run, so drive it in a worker thread to avoid
+    # nesting it inside the test's running event loop.
     monkeypatch.setenv("MCD_API_DATABASE__URL", _DB_URL)
     config = _alembic_config()
-    command.downgrade(config, "base")
-    command.upgrade(config, "head")
+    await asyncio.to_thread(command.downgrade, config, "base")
+    await asyncio.to_thread(command.upgrade, config, "head")
     eng = create_engine(_DB_URL)
     try:
         yield eng
     finally:
         await eng.dispose()
-        command.downgrade(config, "base")
+        await asyncio.to_thread(command.downgrade, config, "base")
 
 
 def _register(engine: AsyncEngine) -> RegisterUser:
