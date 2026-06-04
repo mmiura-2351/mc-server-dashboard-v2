@@ -8,7 +8,9 @@ framework-free domain entities here.
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+import datetime as dt
+
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.identity.adapters.models import (
@@ -111,3 +113,24 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_refresh_token(row) if row is not None else None
+
+    async def revoke(self, token_hash: str, *, revoked_at: dt.datetime) -> None:
+        stmt = (
+            update(RefreshTokenModel)
+            .where(RefreshTokenModel.token_hash == token_hash)
+            .values(revoked_at=revoked_at)
+        )
+        await self._session.execute(stmt)
+
+    async def revoke_all_for_user(
+        self, user_id: UserId, *, revoked_at: dt.datetime
+    ) -> None:
+        stmt = (
+            update(RefreshTokenModel)
+            .where(
+                RefreshTokenModel.user_id == user_id.value,
+                RefreshTokenModel.revoked_at.is_(None),
+            )
+            .values(revoked_at=revoked_at)
+        )
+        await self._session.execute(stmt)

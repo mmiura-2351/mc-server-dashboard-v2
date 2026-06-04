@@ -116,3 +116,25 @@ def test_unknown_key_in_toml_fails_fast(
     cfg = _write_toml(tmp_path, "[server]\nbogus_key = 1\n")
     with pytest.raises(ValueError):
         load_settings(config_file=cfg)
+
+
+def test_token_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.delenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", raising=False)
+    settings = load_settings(config_file=None)
+    assert settings.auth.token.algorithm == "HS256"
+    assert settings.auth.token.signing_key is None
+    assert settings.auth.token.access_ttl_seconds == 900
+    assert settings.auth.token.refresh_ttl_seconds == 1209600
+
+
+def test_token_signing_key_from_env_is_masked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", "top-secret-key")
+    settings = load_settings(config_file=None)
+    assert settings.auth.token.signing_key == "top-secret-key"
+    dump = settings.masked_dump()
+    assert "top-secret-key" not in repr(dump)
+    assert dump["auth"]["token"]["signing_key"] == "***"
