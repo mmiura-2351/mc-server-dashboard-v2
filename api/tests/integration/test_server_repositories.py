@@ -54,7 +54,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId
 from tests.integration.migrate import downgrade_base, upgrade_head
-from tests.servers.fakes import FakeClock
+from tests.servers.fakes import FakeClock, FakeVersionValidator
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
@@ -108,7 +108,11 @@ async def _seed_community(engine: AsyncEngine) -> uuid.UUID:
 async def test_create_then_read_back(engine: AsyncEngine) -> None:
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
-    create = CreateServer(uow=ServersUnitOfWork(factory), clock=FakeClock(_NOW))
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+    )
     created = await create(
         community_id=CommunityId(community_id),
         name="survival",
@@ -134,7 +138,11 @@ async def test_create_then_read_back(engine: AsyncEngine) -> None:
 async def test_duplicate_name_in_community_conflicts(engine: AsyncEngine) -> None:
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
-    create = CreateServer(uow=ServersUnitOfWork(factory), clock=FakeClock(_NOW))
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+    )
     await create(
         community_id=CommunityId(community_id),
         name="survival",
@@ -163,7 +171,11 @@ async def test_delete_sweeps_resource_grants(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
 
     # Create the server first so we have its id for the grant's resource_id.
-    create = CreateServer(uow=ServersUnitOfWork(factory), clock=FakeClock(_NOW))
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+    )
     server = await create(
         community_id=CommunityId(community_id),
         name="survival",
@@ -213,7 +225,11 @@ async def test_delete_sweeps_resource_grants(engine: AsyncEngine) -> None:
 async def test_server_id_isolation_across_communities(engine: AsyncEngine) -> None:
     community_a = await _seed_community(engine)
     factory = create_session_factory(engine)
-    create = CreateServer(uow=ServersUnitOfWork(factory), clock=FakeClock(_NOW))
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+    )
     server = await create(
         community_id=CommunityId(community_a),
         name="survival",

@@ -16,6 +16,14 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.errors import InvalidServerNameError
 
+# The reserved ``config`` key under which a server's resolved JAR content address
+# (its SHA-256, the storage ``JarKey``) is recorded (issue #118). DATABASE.md
+# Section 7 has no dedicated JAR column, so the resolved reference lives in the
+# ``config`` JSONB blob, which the doc designates for server configuration. Start
+# writes it after ensuring the JAR is pooled; the hydrate data plane reads it to
+# inject ``server.jar`` into the working-set tar.
+JAR_KEY_CONFIG_FIELD = "resolved_jar_sha256"
+
 
 @dataclass(frozen=True)
 class ServerId:

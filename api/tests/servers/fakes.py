@@ -19,6 +19,10 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.jar_provisioner import (
+    JarProvisioner,
+    JarProvisioningError,
+)
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
@@ -33,6 +37,62 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     WorkerId,
 )
+from mc_server_dashboard_api.servers.domain.version_validator import (
+    UnknownVersionError,
+    UnsupportedServerTypeError,
+    VersionValidator,
+)
+
+
+class FakeJarProvisioner(JarProvisioner):
+    """Start-path JAR provisioning double.
+
+    Returns a fixed content key by default; pass ``fail=True`` to raise
+    :class:`JarProvisioningError` (the download/verify-failure path). Records each
+    ensure call so a test can assert it ran before placement.
+    """
+
+    def __init__(self, *, key: str = "f" * 64, fail: bool = False) -> None:
+        self._key = key
+        self._fail = fail
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    async def ensure(
+        self, *, server_type: str, version: str, known_key: str | None
+    ) -> str:
+        self.calls.append((server_type, version, known_key))
+        if self._fail:
+            raise JarProvisioningError("forced provisioning failure")
+        return self._key
+
+
+class FakeVersionValidator(VersionValidator):
+    """Catalog seam double for create tests.
+
+    Accepts any ``(server_type, version)`` by default; pass ``offered`` to restrict
+    the accepted versions per type, or ``unsupported`` to mark a type unsupported
+    (the forge-at-M1 case). Anything outside the offered set raises the matching
+    domain error, mirroring the real catalog-backed adapter.
+    """
+
+    def __init__(
+        self,
+        *,
+        offered: dict[str, set[str]] | None = None,
+        unsupported: set[str] | None = None,
+    ) -> None:
+        self._offered = offered
+        self._unsupported = unsupported or set()
+        self.calls: list[tuple[str, str]] = []
+
+    async def validate(self, *, server_type: str, version: str) -> None:
+        self.calls.append((server_type, version))
+        if server_type in self._unsupported:
+            raise UnsupportedServerTypeError(server_type)
+        if self._offered is None:
+            return
+        if version not in self._offered.get(server_type, set()):
+            raise UnknownVersionError(f"{server_type} {version}")
 
 
 class FakeClock(Clock):

@@ -44,6 +44,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     ServerType,
 )
+from mc_server_dashboard_api.servers.domain.version_validator import VersionValidator
 
 # The resource type a server grant is keyed by (DATABASE.md Sections 6, 10). The
 # delete sweep removes grants for ``(resource_type='server', resource_id=<id>)``.
@@ -66,10 +67,17 @@ def _parse_execution_backend(value: str) -> ExecutionBackend:
 
 @dataclass(frozen=True)
 class CreateServer:
-    """Create a server within a community (server:create, FR-SRV-1)."""
+    """Create a server within a community (server:create, FR-SRV-1).
+
+    Create validates the requested ``(server_type, mc_version)`` against the global
+    version catalog (cheap, no download — the JAR is fetched on first start, the
+    ensure-on-start ruling). The check rejects an unsupported type (forge at M1)
+    and an unoffered version before the row is staged (FR-VER-1).
+    """
 
     uow: UnitOfWork
     clock: Clock
+    version_validator: VersionValidator
 
     async def __call__(
         self,
@@ -84,6 +92,9 @@ class CreateServer:
     ) -> Server:
         parsed_type = _parse_server_type(server_type)
         parsed_backend = _parse_execution_backend(execution_backend)
+        await self.version_validator.validate(
+            server_type=server_type, version=mc_version
+        )
         now = self.clock.now()
         server = Server(
             id=ServerId.new(),

@@ -19,7 +19,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
-from mc_server_dashboard_api.dependencies import get_storage
+from mc_server_dashboard_api.dependencies import (
+    get_resolved_jar_lookup,
+    get_storage,
+)
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
@@ -55,10 +58,17 @@ def _read_tar(blob: bytes) -> dict[str, bytes]:
     return out
 
 
-def _setup(tmp_path: Path) -> tuple[TestClient, FsStorage]:
+def _setup(
+    tmp_path: Path, *, resolved_jar: str | None = None
+) -> tuple[TestClient, FsStorage]:
     storage = FsStorage(tmp_path)
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: storage
+
+    async def _lookup(_c: uuid.UUID, _s: uuid.UUID) -> str | None:
+        return resolved_jar
+
+    app.dependency_overrides[get_resolved_jar_lookup] = lambda: _lookup
     client = TestClient(app)
     return client, storage
 
@@ -133,6 +143,64 @@ def test_hydrate_unpublished_server_is_204(tmp_path: Path) -> None:
     with client:
         resp = client.get(_url(community, server, "working-set"), headers=_auth())
     assert resp.status_code == 204
+
+
+async def _store_jar(storage: FsStorage, data: bytes) -> str:
+    async def _stream() -> object:
+        yield data
+
+    key = await storage.put_jar(_stream())  # type: ignore[arg-type]
+    return key.sha256
+
+
+def test_hydrate_injects_resolved_jar_into_working_set(tmp_path: Path) -> None:
+    import asyncio
+
+    jar_bytes = b"PK\x03\x04 resolved server jar"
+    sha256 = asyncio.run(_store_jar(FsStorage(tmp_path), jar_bytes))
+
+    client, storage = _setup(tmp_path, resolved_jar=sha256)
+    community, server = _scope()
+    files = {"server.properties": b"motd=hi", "world/level.dat": b"\x00\x01"}
+    asyncio.run(_publish(storage, community, server, files))
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    members = _read_tar(resp.content)
+    # The working set members AND the injected server.jar are present.
+    assert members == {**files, "server.jar": jar_bytes}
+
+
+def test_hydrate_with_jar_but_no_snapshot_sends_jar_only_tar(tmp_path: Path) -> None:
+    import asyncio
+
+    jar_bytes = b"PK\x03\x04 jar only"
+    sha256 = asyncio.run(_store_jar(FsStorage(tmp_path), jar_bytes))
+
+    client, _ = _setup(tmp_path, resolved_jar=sha256)
+    community, server = _scope()
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert _read_tar(resp.content) == {"server.jar": jar_bytes}
+
+
+def test_hydrate_resolved_jar_absent_from_pool_sends_working_set_alone(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    # A recorded key whose JAR is not actually in the pool: the endpoint falls back
+    # to sending the working set alone (the prior posture), not an error.
+    missing = "0" * 64
+    client, storage = _setup(tmp_path, resolved_jar=missing)
+    community, server = _scope()
+    files = {"server.properties": b"motd=hi"}
+    asyncio.run(_publish(storage, community, server, files))
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert _read_tar(resp.content) == files
 
 
 def test_snapshot_publishes_atomically(tmp_path: Path) -> None:

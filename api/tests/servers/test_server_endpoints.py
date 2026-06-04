@@ -67,6 +67,12 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     ServerType,
 )
+from mc_server_dashboard_api.servers.domain.version_validator import (
+    UnknownVersionError as CatalogUnknownVersionError,
+)
+from mc_server_dashboard_api.servers.domain.version_validator import (
+    UnsupportedServerTypeError,
+)
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeUnitOfWork
@@ -244,6 +250,30 @@ def test_create_unknown_backend_is_422() -> None:
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["detail"]["reason"] == "invalid_execution_backend"
+
+
+def test_create_unsupported_type_forge_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=UnsupportedServerTypeError("forge")),
+    )
+    client = next(_client(app))
+    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "unsupported_server_type"
+
+
+def test_create_unknown_version_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=CatalogUnknownVersionError("vanilla 9.9.9")),
+    )
+    client = next(_client(app))
+    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "unknown_version"
 
 
 def test_update_backend_immutable_is_409() -> None:

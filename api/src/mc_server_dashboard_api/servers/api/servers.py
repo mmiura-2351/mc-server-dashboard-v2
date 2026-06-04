@@ -68,7 +68,14 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownExecutionBackendError,
     UnknownServerTypeError,
 )
+from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
+from mc_server_dashboard_api.servers.domain.version_validator import (
+    UnknownVersionError as CatalogUnknownVersionError,
+)
+from mc_server_dashboard_api.servers.domain.version_validator import (
+    UnsupportedServerTypeError,
+)
 
 router = APIRouter()
 
@@ -164,6 +171,12 @@ async def create_server(
         raise _unprocessable("invalid_server_type") from exc
     except UnknownExecutionBackendError as exc:
         raise _unprocessable("invalid_execution_backend") from exc
+    except UnsupportedServerTypeError as exc:
+        # A schema-valid type the catalog cannot resolve at M1 (forge): rejected
+        # as unsupported, distinct from a wholly invalid type (FR-VER-1).
+        raise _unprocessable("unsupported_server_type") from exc
+    except CatalogUnknownVersionError as exc:
+        raise _unprocessable("unknown_version") from exc
     except InvalidServerNameError as exc:
         raise _unprocessable("invalid_server_name") from exc
     except ServerNameAlreadyExistsError as exc:
@@ -310,6 +323,11 @@ async def start_server(
         raise _service_unavailable("no_eligible_worker") from exc
     except WorkerUnavailableError as exc:
         raise _service_unavailable("worker_unavailable") from exc
+    except JarProvisioningError as exc:
+        # The resolved JAR could not be fetched/verified/stored: the start failed
+        # before placement (FR-VER-3). Transient (source down) or integrity
+        # (hash mismatch); surfaced as a typed 503 so a retry is invited.
+        raise _service_unavailable("jar_unavailable") from exc
     except CommandDispatchError as exc:
         raise _conflict("command_failed") from exc
     return ServerResponse.from_entity(server)

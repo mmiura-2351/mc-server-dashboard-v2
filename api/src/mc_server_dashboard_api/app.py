@@ -13,6 +13,7 @@ import datetime as dt
 import inspect
 import logging
 import os
+import random
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -66,6 +67,16 @@ from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.versions.adapters.composite import CompositeCatalog
+from mc_server_dashboard_api.versions.adapters.http_fetcher import HttpxJsonFetcher
+from mc_server_dashboard_api.versions.adapters.paper import PaperCatalog
+from mc_server_dashboard_api.versions.adapters.retry_cache import RetryCachingFetcher
+from mc_server_dashboard_api.versions.adapters.vanilla import VanillaCatalog
+from mc_server_dashboard_api.versions.api import versions as versions_api
+from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
+from mc_server_dashboard_api.versions.domain.value_objects import (
+    ServerType as CatalogServerType,
+)
 
 # Optional TOML config file location, overridable per deployment.
 _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
@@ -116,6 +127,30 @@ def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
     )
 
 
+def _build_version_catalog() -> VersionCatalog:
+    """Build the process-wide :class:`VersionCatalog` (ARCHITECTURE.md Section 7.3).
+
+    One httpx fetcher wrapped in the retry + in-process TTL-cache fallback
+    (FR-VER-2), shared by the vanilla (Mojang) and Paper (PaperMC) catalogs so the
+    last-good manifest cache is process-wide. A jittered, asyncio-backed backoff
+    spaces retries; the cache TTL keeps the catalog serving through a transient
+    source outage. The cache lives for the process lifetime, so this is built once
+    and stored on app state.
+    """
+
+    fetcher = RetryCachingFetcher(
+        inner=HttpxJsonFetcher(),
+        sleep=asyncio.sleep,
+        jitter=lambda: random.uniform(0.5, 1.5),
+    )
+    return CompositeCatalog(
+        by_type={
+            CatalogServerType.VANILLA: VanillaCatalog(fetcher=fetcher),
+            CatalogServerType.PAPER: PaperCatalog(fetcher=fetcher),
+        }
+    )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = load_settings(_resolve_config_file())
@@ -139,6 +174,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # than on first use (CONFIGURATION.md Section 3; STORAGE.md Section 7).
     storage = _build_storage(settings)
 
+    # Build the process-wide version catalog now so its in-process manifest cache
+    # is shared across requests (FR-VER-2). No external secret is required, so it
+    # cannot fail at boot; it is stored on app state below.
+    version_catalog = _build_version_catalog()
+
     configure_logging(settings.log.level, settings.log.format)
 
     heartbeat_timeout = dt.timedelta(seconds=settings.control.heartbeat_timeout_seconds)
@@ -149,6 +189,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = engine
         app.state.settings = settings
         app.state.storage = storage
+        app.state.version_catalog = version_catalog
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
         # note): reclaim any staging dir/prefix or superseded snapshot left by a
         # crash before this process serves. Idempotent and keyed off the live
@@ -250,4 +291,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(server_files.router)
     app.include_router(workers.router)
     app.include_router(transfers.router)
+    app.include_router(versions_api.router)
     return app
