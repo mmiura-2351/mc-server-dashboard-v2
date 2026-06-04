@@ -51,3 +51,16 @@ class MembershipAlreadyExistsError(CommunityError):
 
 class ResourceGrantAlreadyExistsError(CommunityError):
     """A grant already exists for the ``(user, resource_type, resource_id)`` triple."""
+
+
+class OwnerUserNotFoundError(CommunityError):
+    """The initial owner named for a community provisioning is not a known user.
+
+    Provisioning validates the owner against the :class:`UserDirectory` Port
+    (FR-COMM-2); an unknown user id raises this rather than violating the
+    ``membership.user_id`` foreign key.
+    """
+
+
+class CommunityNotFoundError(CommunityError):
+    """The targeted community does not exist (read/update/delete on a missing id)."""

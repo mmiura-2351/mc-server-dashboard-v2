@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.community.adapters.models import (
@@ -116,6 +116,14 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_community(row) if row is not None else None
 
+    async def update(self, community: Community) -> None:
+        stmt = (
+            update(CommunityModel)
+            .where(CommunityModel.id == community.id.value)
+            .values(name=community.name.value, updated_at=community.updated_at)
+        )
+        await self._session.execute(stmt)
+
     async def delete(self, community_id: CommunityId) -> None:
         stmt = delete(CommunityModel).where(CommunityModel.id == community_id.value)
         await self._session.execute(stmt)
@@ -150,6 +158,11 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_membership(row) if row is not None else None
+
+    async def list_for_user(self, user_id: UserId) -> list[Membership]:
+        stmt = select(MembershipModel).where(MembershipModel.user_id == user_id.value)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_membership(row) for row in rows]
 
     async def delete(self, membership_id: MembershipId) -> None:
         stmt = delete(MembershipModel).where(MembershipModel.id == membership_id.value)

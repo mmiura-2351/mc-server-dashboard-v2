@@ -16,6 +16,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from mc_server_dashboard_api.community.api import communities
 from mc_server_dashboard_api.config import Settings, load_settings
 from mc_server_dashboard_api.core.adapters.database import create_engine
 from mc_server_dashboard_api.core.api import health
@@ -62,4 +63,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(users.router)
     app.include_router(auth.router)
+    app.include_router(communities.router)
     return app

@@ -18,12 +18,29 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from mc_server_dashboard_api.community.adapters.clock import (
+    SystemClock as CommunitySystemClock,
+)
 from mc_server_dashboard_api.community.adapters.permission_checker import (
     RepositoryMembershipVisibility,
     RoleGrantPermissionChecker,
 )
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as CommunityUnitOfWork,
+)
+from mc_server_dashboard_api.community.adapters.user_directory import (
+    IdentityUserDirectory,
+)
+from mc_server_dashboard_api.community.application.list_my_communities import (
+    ListMyCommunities,
+)
+from mc_server_dashboard_api.community.application.manage_community import (
+    DeleteCommunity,
+    ReadCommunity,
+    RenameCommunity,
+)
+from mc_server_dashboard_api.community.application.provision_community import (
+    ProvisionCommunity,
 )
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
@@ -318,6 +335,48 @@ def get_permission_checker(request: Request) -> PermissionChecker:
 
     session_factory = create_session_factory(get_engine(request))
     return RoleGrantPermissionChecker(CommunityUnitOfWork(session_factory))
+
+
+def get_provision_community(request: Request) -> ProvisionCommunity:
+    """Assemble the :class:`ProvisionCommunity` use case (platform-admin only)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ProvisionCommunity(
+        uow=CommunityUnitOfWork(session_factory),
+        users=IdentityUserDirectory(SqlAlchemyUnitOfWork(session_factory)),
+        clock=CommunitySystemClock(),
+    )
+
+
+def get_read_community(request: Request) -> ReadCommunity:
+    """Assemble the :class:`ReadCommunity` use case."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ReadCommunity(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_rename_community(request: Request) -> RenameCommunity:
+    """Assemble the :class:`RenameCommunity` use case."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RenameCommunity(
+        uow=CommunityUnitOfWork(session_factory),
+        clock=CommunitySystemClock(),
+    )
+
+
+def get_delete_community(request: Request) -> DeleteCommunity:
+    """Assemble the :class:`DeleteCommunity` use case."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteCommunity(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_list_my_communities(request: Request) -> ListMyCommunities:
+    """Assemble the :class:`ListMyCommunities` use case (FR-MEM-4)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListMyCommunities(uow=CommunityUnitOfWork(session_factory))
 
 
 def _to_auth_user(user: User) -> AuthUser:

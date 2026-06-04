@@ -67,6 +67,11 @@ ALL_PERMISSIONS: frozenset[Permission] = (
     COMMUNITY_PERMISSIONS | PLATFORM_ADMIN_PERMISSIONS
 )
 
+# The seeded preset role granting every community-scoped permission (FR-COMM-4).
+# Its permission set is derived from :data:`COMMUNITY_PERMISSIONS`, never a
+# hand-written list, so the catalog stays the single source of truth.
+OWNER_ROLE_NAME = "Owner"
+
 
 def is_known_permission(permission: Permission) -> bool:
     """Return whether ``permission`` is in the authoritative catalog."""

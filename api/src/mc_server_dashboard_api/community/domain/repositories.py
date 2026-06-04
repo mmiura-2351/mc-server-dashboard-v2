@@ -47,6 +47,10 @@ class CommunityRepository(abc.ABC):
         """Return the community with ``name``, or ``None`` if absent."""
 
     @abc.abstractmethod
+    async def update(self, community: Community) -> None:
+        """Persist mutable fields of ``community`` (M1: its name, FR-COMM-1)."""
+
+    @abc.abstractmethod
     async def delete(self, community_id: CommunityId) -> None:
         """Delete the community, cascading to its dependent rows (Section 10)."""
 
@@ -67,6 +71,10 @@ class MembershipRepository(abc.ABC):
         self, user_id: UserId, community_id: CommunityId
     ) -> Membership | None:
         """Return the membership for ``(user_id, community_id)``, or ``None``."""
+
+    @abc.abstractmethod
+    async def list_for_user(self, user_id: UserId) -> list[Membership]:
+        """Return all of ``user_id``'s memberships (FR-MEM-4 view scoping)."""
 
     @abc.abstractmethod
     async def delete(self, membership_id: MembershipId) -> None:
