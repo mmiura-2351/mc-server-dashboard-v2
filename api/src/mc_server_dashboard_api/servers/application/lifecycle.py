@@ -515,6 +515,26 @@ class StopServer:
         outcome = await self.control_plane.stop(
             worker_id=worker_id, server_id=server_id
         )
+        if outcome.status is CommandStatus.SERVER_NOT_FOUND:
+            # The Worker has no live instance to stop (e.g. the process crashed on
+            # the EULA, issue #197): stopping a not-running server is a no-op, not a
+            # failure. The Worker's handleStop returns SERVER_NOT_FOUND (no live
+            # instance on this Worker), never INVALID_STATE, for this case
+            # (worker/internal/application/instancemanager/instancemanager.go:308-312).
+            # The stop intent already landed (desired=stopped committed above);
+            # converge the observed cache to stopped and report success. No final
+            # snapshot: there is no live working set to capture.
+            observed_at = self.clock.now()
+            async with self.uow:
+                await self.uow.servers.record_observed_state(
+                    server_id,
+                    observed_state=ObservedState.STOPPED,
+                    observed_at=observed_at,
+                )
+                await self.uow.commit()
+            server.observed_state = ObservedState.STOPPED
+            server.observed_at = observed_at
+            return server
         if not outcome.success:
             raise _dispatch_failure(
                 server_id=server_id, kind="StopServer", outcome=outcome
