@@ -33,7 +33,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotRunningError,
 )
+from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    JAR_KEY_CONFIG_FIELD,
     CommunityId,
     DesiredState,
     ExecutionBackend,
@@ -46,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
+    FakeJarProvisioner,
     FakeServerRepository,
     FakeUnitOfWork,
 )
@@ -112,7 +115,12 @@ async def test_start_places_sets_running_and_dispatches() -> None:
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
     cp = FakeControlPlane(place_to=WorkerId(worker))
-    use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
 
     result = await use_case(
         community_id=CommunityId(community), server_id=ServerId(server_id)
@@ -129,6 +137,53 @@ async def test_start_places_sets_running_and_dispatches() -> None:
     assert cp.decremented == []
 
 
+async def test_start_records_resolved_jar_key_in_config() -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    provisioner = FakeJarProvisioner(key="a" * 64)
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    # The ensure ran (before placement), and the resolved key is persisted.
+    assert provisioner.calls == [("vanilla", "1.21.1", None)]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.config[JAR_KEY_CONFIG_FIELD] == "a" * 64
+
+
+async def test_start_fails_before_placement_when_jar_provisioning_fails() -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(fail=True),
+    )
+
+    with pytest.raises(JarProvisioningError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # No placement, no dispatch, no desired-state flip: the start failed cleanly.
+    assert cp.dispatched == []
+    assert cp.incremented == []
+    survivor = uow.servers.by_id[ServerId(server_id)]
+    assert survivor.desired_state is DesiredState.STOPPED
+    assert survivor.assigned_worker_id is None
+    assert JAR_KEY_CONFIG_FIELD not in survivor.config
+
+
 async def test_start_when_already_running_is_conflict() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
@@ -142,7 +197,10 @@ async def test_start_when_already_running_is_conflict() -> None:
         )
     )
     use_case = StartServer(
-        uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+        uow=uow,
+        control_plane=FakeControlPlane(),
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
     )
 
     with pytest.raises(InvalidLifecycleTransitionError):
@@ -156,7 +214,12 @@ async def test_start_with_no_eligible_worker_is_typed_error() -> None:
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
     cp = FakeControlPlane(place_to=None)
-    use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
 
     with pytest.raises(NoEligibleWorkerError):
         await use_case(
@@ -175,7 +238,12 @@ async def test_start_hydrate_failure_compensates_without_dispatching_start() -> 
     # the working set must be in place before the process starts).
     busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
     cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": busy})
-    use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
 
     with pytest.raises(CommandDispatchError):
         await use_case(
@@ -199,7 +267,12 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
     # committed intent must still be compensated.
     busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
     cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": busy})
-    use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
 
     with pytest.raises(CommandDispatchError):
         await use_case(
@@ -230,7 +303,12 @@ async def test_start_lost_race_is_conflict_without_dispatch_or_count() -> None:
     uow = FakeUnitOfWork(servers=_RacingServerRepository(winner=winner))
     uow.servers.seed(_server(community_id=community, server_id=server_id))
     cp = FakeControlPlane(place_to=WorkerId(placed_worker))
-    use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
 
     with pytest.raises(LifecycleTransitionConflictError):
         await use_case(
@@ -253,7 +331,12 @@ async def test_two_sequential_starts_second_is_conflict() -> None:
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
     cp = FakeControlPlane(place_to=WorkerId(worker))
-    use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
 
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
     with pytest.raises(InvalidLifecycleTransitionError):
@@ -288,7 +371,12 @@ async def test_start_compensation_failure_preserves_both_errors() -> None:
         place_to=WorkerId(worker),
         outcome=CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy"),
     )
-    use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
 
     with pytest.raises(RuntimeError, match="compensation commit failed") as excinfo:
         await use_case(
@@ -302,7 +390,10 @@ async def test_start_compensation_failure_preserves_both_errors() -> None:
 async def test_start_missing_server_is_not_found() -> None:
     community, server_id, _ = _ids()
     use_case = StartServer(
-        uow=FakeUnitOfWork(), control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+        uow=FakeUnitOfWork(),
+        control_plane=FakeControlPlane(),
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
     )
     with pytest.raises(ServerNotFoundError):
         await use_case(
@@ -315,7 +406,10 @@ async def test_start_cross_community_is_not_found() -> None:
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=other, server_id=server_id))
     use_case = StartServer(
-        uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+        uow=uow,
+        control_plane=FakeControlPlane(),
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
     )
     with pytest.raises(ServerNotFoundError):
         await use_case(

@@ -138,6 +138,11 @@ class SqlAlchemyServerRepository(ServerRepository):
                     if server.assigned_worker_id is None
                     else server.assigned_worker_id.value
                 ),
+                # Persist config alongside the flip so StartServer's resolved-JAR
+                # reference (issue #118) lands atomically with the desired-state
+                # change. Other callers (stop/restart) pass an unchanged config, so
+                # this is a no-op write for them.
+                config=server.config,
                 updated_at=server.updated_at,
             )
         )

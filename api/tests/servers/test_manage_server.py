@@ -28,6 +28,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
     UnknownExecutionBackendError,
     UnknownServerTypeError,
+    UnsupportedEditionError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -38,7 +39,15 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     ServerType,
 )
-from tests.servers.fakes import FakeClock, FakeUnitOfWork
+from mc_server_dashboard_api.servers.domain.version_validator import (
+    UnknownVersionError,
+    UnsupportedServerTypeError,
+)
+from tests.servers.fakes import (
+    FakeClock,
+    FakeUnitOfWork,
+    FakeVersionValidator,
+)
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _LATER = dt.datetime(2026, 6, 4, 13, 0, tzinfo=dt.timezone.utc)
@@ -76,7 +85,11 @@ def _server(
 async def test_create_defaults_to_stopped_and_commits() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
-    server = await CreateServer(uow=uow, clock=FakeClock(_NOW))(
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+    )(
         community_id=community,
         name="survival",
         mc_edition="java",
@@ -95,10 +108,56 @@ async def test_create_defaults_to_stopped_and_commits() -> None:
     assert uow.servers.by_id[server.id] is server
 
 
+async def test_create_accepts_java_edition() -> None:
+    uow = FakeUnitOfWork()
+    validator = FakeVersionValidator()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=validator,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+    assert server.mc_edition == "java"
+    assert uow.commits == 1
+
+
+async def test_create_rejects_non_java_edition() -> None:
+    uow = FakeUnitOfWork()
+    validator = FakeVersionValidator()
+    with pytest.raises(UnsupportedEditionError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=validator,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="s",
+            mc_edition="bedrock",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={},
+        )
+    # Rejected before staging or even consulting the catalog (Java-only at M1).
+    assert uow.commits == 0
+    assert validator.calls == []
+
+
 async def test_create_rejects_unknown_server_type() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(UnknownServerTypeError):
-        await CreateServer(uow=uow, clock=FakeClock(_NOW))(
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+        )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
             mc_edition="java",
@@ -113,13 +172,55 @@ async def test_create_rejects_unknown_server_type() -> None:
 async def test_create_rejects_unknown_execution_backend() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(UnknownExecutionBackendError):
-        await CreateServer(uow=uow, clock=FakeClock(_NOW))(
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+        )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
             execution_backend="kubernetes",
+            config={},
+        )
+    assert uow.commits == 0
+
+
+async def test_create_rejects_unsupported_type_forge() -> None:
+    uow = FakeUnitOfWork()
+    with pytest.raises(UnsupportedServerTypeError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(unsupported={"forge"}),
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="s",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="forge",
+            execution_backend="host_process",
+            config={},
+        )
+    assert uow.commits == 0
+
+
+async def test_create_rejects_unknown_version() -> None:
+    uow = FakeUnitOfWork()
+    with pytest.raises(UnknownVersionError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(offered={"vanilla": {"1.21.1"}}),
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="s",
+            mc_edition="java",
+            mc_version="9.9.9",
+            server_type="vanilla",
+            execution_backend="host_process",
             config={},
         )
     assert uow.commits == 0

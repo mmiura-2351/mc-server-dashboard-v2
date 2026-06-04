@@ -45,7 +45,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 from tests.integration.migrate import downgrade_base, upgrade_head
-from tests.servers.fakes import FakeClock
+from tests.servers.fakes import FakeClock, FakeVersionValidator
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
@@ -87,7 +87,11 @@ async def _create_server(
     engine: AsyncEngine, community_id: uuid.UUID, name: str
 ) -> ServerId:
     factory = create_session_factory(engine)
-    create = CreateServer(uow=ServersUnitOfWork(factory), clock=FakeClock(_NOW))
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+    )
     server = await create(
         community_id=CommunityId(community_id),
         name=name,

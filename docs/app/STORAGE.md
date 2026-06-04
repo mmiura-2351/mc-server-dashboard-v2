@@ -458,15 +458,27 @@ Section 7.1). No compression at M1.
 
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
-| `GET /data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar. | `200` tar body | `204` no published snapshot (Worker starts from an empty dir); `401` |
+| `GET /data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present, #118). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir); `401` |
 | `POST /data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. | `204` | `400` length mismatch / incomplete; `411` no `Content-Length`; `413` over the size cap; `401` |
 
 **JAR posture (M1).** ARCHITECTURE.md Section 7.3 says the resolved server JAR
-reaches the Worker as part of hydrate. At M1 no JAR is resolved into the pool yet
-(epic #9 resolves real JARs), and the `server` record carries no JAR reference,
-so the hydrate stream is the working set **alone** — the JAR is *omitted when not
-present*. Once epic #9 lands, the resolved JAR is added to the hydrate tar at its
-conventional relpath; the contract above is unchanged.
+reaches the Worker as part of hydrate. As of issue #118 (version catalog + JAR
+resolution) this is realised: `StartServer` ensures the resolved JAR is in the
+content-addressed pool before placement and records its content key on the
+`server` record (in the `config` JSONB blob, key `resolved_jar_sha256` — DATABASE.md
+Section 7 has no dedicated JAR column), and the hydrate endpoint **injects** that
+JAR into the working-set tar at the conventional `server.jar` relpath. The JAR is
+still *omitted when not present* (no resolved JAR recorded, or the recorded JAR not
+in the pool), so a working set with no resolved JAR is sent alone — the contract
+above is unchanged. The injection prepends a single tar member to the working
+set's members; when there is a resolved JAR but no published snapshot, the body is
+a tar carrying just `server.jar` (a `200`, not the `204` of the nothing-to-send
+case) so the Worker can still launch.
+
+forge is **not** resolved at M1: the version catalog lists/resolves only vanilla
+(Mojang manifest) and Paper (PaperMC API). The `server_type` CHECK enum still
+permits `forge`, but server create-validation rejects it as unsupported — the
+catalog has no source for it.
 
 **Proven-complete gate (FR-DATA-6).** `commit_snapshot` only publishes a staged
 transfer the data plane signalled complete (Section 4.1). The signal is the HTTP

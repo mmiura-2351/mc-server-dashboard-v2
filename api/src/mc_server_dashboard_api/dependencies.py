@@ -134,8 +134,14 @@ from mc_server_dashboard_api.servers.adapters.control_plane import (
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.jar_provisioner import (
+    CatalogJarProvisioner,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
+)
+from mc_server_dashboard_api.servers.adapters.version_validator import (
+    CatalogVersionValidator,
 )
 from mc_server_dashboard_api.servers.application.files import (
     ListDir,
@@ -164,6 +170,14 @@ from mc_server_dashboard_api.servers.domain.file_store import (
     FileStore as ServersFileStore,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage
+from mc_server_dashboard_api.versions.adapters.http_jar_fetcher import HttpxJarFetcher
+from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
+from mc_server_dashboard_api.versions.application.ensure_jar import EnsureJar
+from mc_server_dashboard_api.versions.application.list_versions import (
+    ListServerTypes,
+    ListVersions,
+)
+from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 
 
 def get_engine(request: Request) -> AsyncEngine:
@@ -189,6 +203,82 @@ def get_storage(request: Request) -> Storage:
 
     storage: Storage = request.app.state.storage
     return storage
+
+
+def get_version_catalog(request: Request) -> VersionCatalog:
+    """Return the process-wide :class:`VersionCatalog` from app state.
+
+    Built once by the app factory (with its in-process manifest cache, FR-VER-2);
+    the catalog endpoints and the ensure-on-start use case read it.
+    """
+
+    catalog: VersionCatalog = request.app.state.version_catalog
+    return catalog
+
+
+def get_list_versions(
+    catalog: Annotated[VersionCatalog, Depends(get_version_catalog)],
+) -> ListVersions:
+    """Assemble the :class:`ListVersions` use case (catalog read, FR-VER-1)."""
+
+    return ListVersions(catalog=catalog)
+
+
+def get_list_server_types() -> ListServerTypes:
+    """Assemble the :class:`ListServerTypes` use case (catalog read, FR-VER-1)."""
+
+    return ListServerTypes()
+
+
+def get_ensure_jar(
+    request: Request,
+    catalog: Annotated[VersionCatalog, Depends(get_version_catalog)],
+) -> EnsureJar:
+    """Assemble the :class:`EnsureJar` use case (ensure-on-start, FR-VER-3).
+
+    Binds the catalog, the httpx JAR downloader, and the versions ``JarPool`` seam
+    bound to the process-wide storage ``JarStore`` (content-addressed reuse).
+    """
+
+    return EnsureJar(
+        catalog=catalog,
+        fetcher=HttpxJarFetcher(),
+        pool=StorageJarPool(jars=get_storage(request)),
+    )
+
+
+# An async lookup of a server's recorded resolved-JAR content key (SHA-256), or
+# None if unset. The data-plane hydrate endpoint uses it to inject ``server.jar``
+# into the working-set tar (issue #118).
+ResolvedJarLookup = Callable[[uuid.UUID, uuid.UUID], Awaitable[str | None]]
+
+
+def get_resolved_jar_lookup(request: Request) -> ResolvedJarLookup:
+    """Provide a lookup of a server's recorded resolved-JAR content key (#118).
+
+    Reads the server row's ``config`` blob for the JAR reference StartServer
+    recorded (``JAR_KEY_CONFIG_FIELD``). Returns ``None`` when the server is unknown
+    or has no resolved JAR yet, so the hydrate endpoint sends the working set alone.
+    """
+
+    from mc_server_dashboard_api.servers.domain.value_objects import (
+        JAR_KEY_CONFIG_FIELD,
+    )
+    from mc_server_dashboard_api.servers.domain.value_objects import (
+        ServerId as ServersServerId,
+    )
+
+    session_factory = create_session_factory(get_engine(request))
+
+    async def _lookup(community_id: uuid.UUID, server_id: uuid.UUID) -> str | None:
+        async with ServersUnitOfWork(session_factory) as uow:
+            server = await uow.servers.get_by_id(ServersServerId(server_id))
+        if server is None or server.community_id.value != community_id:
+            return None
+        value = server.config.get(JAR_KEY_CONFIG_FIELD)
+        return value if isinstance(value, str) else None
+
+    return _lookup
 
 
 def get_worker_registry(request: Request) -> WorkerRegistry:
@@ -585,13 +675,21 @@ def get_revoke_grant(request: Request) -> RevokeGrant:
     return RevokeGrant(uow=CommunityUnitOfWork(session_factory))
 
 
-def get_create_server(request: Request) -> CreateServer:
-    """Assemble the :class:`CreateServer` use case (server:create)."""
+def get_create_server(
+    request: Request,
+    catalog: Annotated[VersionCatalog, Depends(get_version_catalog)],
+) -> CreateServer:
+    """Assemble the :class:`CreateServer` use case (server:create).
+
+    Binds the version-validation seam to the global catalog so create rejects an
+    unsupported type / unoffered version before staging the row (FR-VER-1).
+    """
 
     session_factory = create_session_factory(get_engine(request))
     return CreateServer(
         uow=ServersUnitOfWork(session_factory),
         clock=ServersSystemClock(),
+        version_validator=CatalogVersionValidator(catalog=catalog),
     )
 
 
@@ -663,14 +761,20 @@ def get_servers_control_plane(
 def get_start_server(
     request: Request,
     control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
+    ensure_jar: Annotated[EnsureJar, Depends(get_ensure_jar)],
 ) -> StartServer:
-    """Assemble the :class:`StartServer` use case (server:start)."""
+    """Assemble the :class:`StartServer` use case (server:start).
+
+    Binds the JAR-provisioning seam to the versions ``EnsureJar`` use case so start
+    ensures the resolved JAR is pooled before placement (FR-VER-3).
+    """
 
     session_factory = create_session_factory(get_engine(request))
     return StartServer(
         uow=ServersUnitOfWork(session_factory),
         control_plane=control_plane,
         clock=ServersSystemClock(),
+        jar_provisioner=CatalogJarProvisioner(ensure_jar=ensure_jar),
     )
 
 

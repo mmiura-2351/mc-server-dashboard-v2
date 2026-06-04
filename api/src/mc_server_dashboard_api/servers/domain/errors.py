@@ -24,6 +24,15 @@ class UnknownServerTypeError(ServerError):
     """The ``server_type`` is outside the supported M1 catalog (CHECK enum)."""
 
 
+class UnsupportedEditionError(ServerError):
+    """The ``mc_edition`` is not supported at M1.
+
+    The version catalog is Java-edition-only at M1 (Bedrock has no catalogued
+    source), so create accepts ``mc_edition == 'java'`` and rejects anything else.
+    The edge maps this to a 422.
+    """
+
+
 class UnknownExecutionBackendError(ServerError):
     """The ``execution_backend`` is not a known driver kind (CHECK enum, FR-EXE-2)."""
 

@@ -57,8 +57,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotRunningError,
 )
+from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioner
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    JAR_KEY_CONFIG_FIELD,
     CommunityId,
     DesiredState,
     ObservedState,
@@ -84,11 +86,20 @@ async def _load(
 
 @dataclass(frozen=True)
 class StartServer:
-    """Place and start a server (server:start, FR-SRV-2)."""
+    """Place and start a server (server:start, FR-SRV-2).
+
+    Ensure-on-start (FR-VER-3): before placement, the resolved server JAR is made
+    present in the content-addressed pool (download + verify + store on first need)
+    and its content key recorded on the server. The ensure runs *before* the
+    placement/dispatch path and outside the lifecycle transaction (it crosses the
+    network), so a download/verify failure fails the start cleanly with the server
+    untouched — no Worker placed, no desired-state flip.
+    """
 
     uow: UnitOfWork
     control_plane: ControlPlane
     clock: Clock
+    jar_provisioner: JarProvisioner
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -97,11 +108,18 @@ class StartServer:
             server = await _load(self.uow, community_id, server_id)
             if server.desired_state is DesiredState.RUNNING:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
+            # Ensure the resolved JAR is pooled BEFORE placement/dispatch (FR-VER-3):
+            # a download/verify failure fails the start here, before a Worker is
+            # placed or the desired state flipped. The ensure skips the download when
+            # the recorded content key is still pooled, so the steady-state cost is a
+            # presence check, not a fetch.
+            jar_key = await self._ensure_jar(server)
             worker_id = await self.control_plane.place(backend=server.execution_backend)
             if worker_id is None:
                 raise NoEligibleWorkerError(str(server_id.value))
             server.desired_state = DesiredState.RUNNING
             server.assigned_worker_id = worker_id
+            server.config = {**server.config, JAR_KEY_CONFIG_FIELD: jar_key}
             server.updated_at = self.clock.now()
             applied = await self.uow.servers.update_lifecycle(
                 server,
@@ -150,6 +168,21 @@ class StartServer:
             await self._compensate(community_id, server_id, worker_id, original=failure)
             raise failure
         return server
+
+    async def _ensure_jar(self, server: Server) -> str:
+        """Ensure the resolved JAR is pooled; return its content key (FR-VER-3).
+
+        Reuses the recorded content key (``config[JAR_KEY_CONFIG_FIELD]``) to skip a
+        re-download when the JAR is still pooled. A provisioning failure surfaces
+        before placement so the start fails cleanly.
+        """
+
+        known_key = server.config.get(JAR_KEY_CONFIG_FIELD)
+        return await self.jar_provisioner.ensure(
+            server_type=server.server_type.value,
+            version=server.mc_version,
+            known_key=known_key if isinstance(known_key, str) else None,
+        )
 
     async def _compensate(
         self,
