@@ -761,8 +761,12 @@ func TestStartLeavesForeignConflict(t *testing.T) {
 	docker.inspectInfo = ContainerInfo{ID: "foreign-1", Labels: map[string]string{labelWorkerID: "other"}, Running: false}
 	d := newTestDriver(docker, nil, errors.New("no rcon"))
 
-	if _, err := d.Start(context.Background(), spec()); err == nil {
+	_, err := d.Start(context.Background(), spec())
+	if err == nil {
 		t.Fatal("expected Start to fail on a foreign-labelled conflict")
+	}
+	if !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("err = %v, want the decline reason in the message", err)
 	}
 	docker.mu.Lock()
 	calls, removed := docker.createCalls, docker.removed
@@ -783,8 +787,12 @@ func TestStartLeavesRunningOwnConflict(t *testing.T) {
 	docker.inspectInfo = ContainerInfo{ID: "live-1", Labels: map[string]string{labelWorkerID: "w1"}, Running: true}
 	d := newTestDriver(docker, nil, errors.New("no rcon"))
 
-	if _, err := d.Start(context.Background(), spec()); err == nil {
+	_, err := d.Start(context.Background(), spec())
+	if err == nil {
 		t.Fatal("expected Start to fail on a running own conflict")
+	}
+	if !strings.Contains(err.Error(), "running") {
+		t.Fatalf("err = %v, want the decline reason in the message", err)
 	}
 	docker.mu.Lock()
 	calls, removed := docker.createCalls, docker.removed
@@ -816,5 +824,60 @@ func TestStartPersistentConflictFailsAfterOneRetry(t *testing.T) {
 	}
 	if len(removed) != 1 {
 		t.Fatalf("removed = %v, want exactly one removal", removed)
+	}
+}
+
+// The async exit-watcher remover wins the race: between the create's 409 and the
+// inspect, the conflicting container is gone, so the inspect returns 404. The
+// name is now free, so the driver skips removal and retries the create directly,
+// and Start reaches running (issue #229).
+func TestStartRetriesWhenConflictAlreadyRemoved(t *testing.T) {
+	docker := newFakeDocker()
+	docker.conflictsLeft = 1
+	docker.inspectErr = errNotFound
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	docker.mu.Lock()
+	calls, removed := docker.createCalls, docker.removed
+	docker.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("createCalls = %d, want 2 (conflict then retry)", calls)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v, want none (the container was already gone)", removed)
+	}
+}
+
+// A non-404 inspect failure during conflict resolution keeps the conservative
+// fallback: the driver cannot confirm the conflict is its own stale leftover, so
+// it does not retry and surfaces the conflict with the decline reason (issue
+// #229).
+func TestStartLeavesConflictOnInspectError(t *testing.T) {
+	docker := newFakeDocker()
+	docker.conflictsLeft = 1
+	docker.inspectErr = errors.New("inspect boom")
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	_, err := d.Start(context.Background(), spec())
+	if err == nil {
+		t.Fatal("expected Start to fail when the conflict inspect errors")
+	}
+	if !strings.Contains(err.Error(), "inspect") {
+		t.Fatalf("err = %v, want the decline reason in the message", err)
+	}
+	docker.mu.Lock()
+	calls, removed := docker.createCalls, docker.removed
+	docker.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("createCalls = %d, want 1 (no retry)", calls)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v, want none when inspect failed", removed)
 	}
 }

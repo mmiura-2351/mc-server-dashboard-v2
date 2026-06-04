@@ -204,8 +204,12 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 // inspects the conflicting container: if it carries THIS Worker's label and is
 // not running it is a stale leftover (the just-exited container or a name the
 // startup sweep missed), so the driver removes it and retries the create exactly
-// once. A foreign label or a running container is left untouched and the conflict
-// is returned. A second conflict after the retry is returned as-is.
+// once. If the inspect returns 404 the async remover already won the race — the
+// name is free — so the driver retries the create directly (issue #229). A
+// foreign label, a running container, or a non-404 inspect failure is left
+// untouched and the conflict is returned, wrapped with the decline reason so a
+// field diagnosis does not require code reading. A second conflict after the
+// retry is returned as-is.
 func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string, error) {
 	id, err := d.docker.Create(ctx, create)
 	if !errors.Is(err, errNameConflict) {
@@ -213,14 +217,22 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 	}
 
 	info, inspectErr := d.docker.Inspect(ctx, create.Name)
-	if inspectErr != nil {
-		return "", err
+	if errors.Is(inspectErr, errNotFound) {
+		// The conflicting container is already gone (the async remover won the
+		// race); the name is free, so retry the create directly.
+		return d.docker.Create(ctx, create)
 	}
-	if info.Labels[labelWorkerID] != d.workerID || info.Running {
-		return "", err
+	if inspectErr != nil {
+		return "", fmt.Errorf("declined conflict resolution: inspect failed: %v: %w", inspectErr, err)
+	}
+	if info.Labels[labelWorkerID] != d.workerID {
+		return "", fmt.Errorf("declined conflict resolution: conflicting container not owned by this worker: %w", err)
+	}
+	if info.Running {
+		return "", fmt.Errorf("declined conflict resolution: conflicting container is running: %w", err)
 	}
 	if removeErr := d.docker.Remove(ctx, info.ID); removeErr != nil {
-		return "", err
+		return "", fmt.Errorf("declined conflict resolution: remove failed: %v: %w", removeErr, err)
 	}
 	return d.docker.Create(ctx, create)
 }
