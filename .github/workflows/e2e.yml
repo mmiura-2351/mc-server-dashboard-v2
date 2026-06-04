@@ -1,0 +1,129 @@
+name: e2e
+
+# Cross-language data-plane integration harness (issue #111): the REAL Go
+# data-plane client driven against the REAL Python API. Boots the API with
+# uvicorn (fs storage in a tmpdir, control plane disabled — the data-plane
+# endpoints need only Storage + the Worker credential, not the gRPC server),
+# migrates a Postgres service (the hydrate path's resolved-JAR lookup reads the
+# servers table), waits for /healthz, then runs the env-gated, e2e-tagged Go
+# test against it.
+
+on:
+  pull_request:
+    paths:
+      # The two surfaces the harness wires together, plus the workflow itself.
+      - "worker/internal/adapters/datatransfer/**"
+      - "worker/test/e2e/**"
+      - "api/src/mc_server_dashboard_api/dataplane/**"
+      - "api/src/mc_server_dashboard_api/storage/**"
+      - "api/src/mc_server_dashboard_api/app.py"
+      - ".github/workflows/e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "worker/internal/adapters/datatransfer/**"
+      - "worker/test/e2e/**"
+      - "api/src/mc_server_dashboard_api/dataplane/**"
+      - "api/src/mc_server_dashboard_api/storage/**"
+      - "api/src/mc_server_dashboard_api/app.py"
+      - ".github/workflows/e2e.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    # The hydrate endpoint's resolved-JAR lookup reads the servers table, so the
+    # API needs a migrated database to boot a working data plane. Image digest is
+    # pinned per docs/dev/DEPENDENCIES.md, reusing the api.yml-vetted digest.
+    services:
+      postgres:
+        # postgres:17.6-alpine (pushed 2025-10-24, outside the cooldown).
+        image: postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_USER: mcsd
+          POSTGRES_PASSWORD: mcsd
+          POSTGRES_DB: mcsd_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mcsd"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # The full data-plane boot config in one place. The control plane is
+      # disabled (no gRPC/snapshot/backup loops); the Worker credential is still
+      # required to authenticate the data-plane requests.
+      MCD_API_DATABASE__URL: postgresql+asyncpg://mcsd:mcsd@localhost:5432/mcsd_e2e
+      MCD_API_CONTROL__ENABLED: "false"
+      MCD_API_CONTROL__WORKER_CREDENTIAL: e2e-worker-credential
+      MCD_API_AUTH__TOKEN__SIGNING_KEY: e2e-signing-key-0123456789abcdef0123
+      MCD_API_STORAGE__BACKEND: fs
+      MCD_API_LOG__FORMAT: text
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown), reusing the
+      # api.yml/worker.yml-vetted pins.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up uv (caches the uv-managed toolchain)
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: api/uv.lock
+
+      - name: Set up Go (caches the module + build cache)
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: worker/go.mod
+
+      - name: Sync API (pinned Python + deps from uv.lock)
+        working-directory: api
+        run: uv sync --locked
+
+      - name: Migrate the database
+        working-directory: api
+        run: uv run alembic upgrade head
+
+      - name: Boot the API and run the cross-language e2e test
+        run: |
+          set -euo pipefail
+          export MCD_API_STORAGE__FS__ROOT="$(mktemp -d)"
+
+          # Boot uvicorn in the background; capture logs for diagnosis.
+          (cd api && uv run uvicorn mc_server_dashboard_api.app:create_app \
+            --factory --host 127.0.0.1 --port 8000 >/tmp/uvicorn.log 2>&1) &
+          uvicorn_pid=$!
+
+          cleanup() { kill "$uvicorn_pid" 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          # Wait for readiness. /healthz returns 200 even when the DB is
+          # degraded (with ok=false), so assert the body reports ok=true.
+          ready=
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/healthz 2>/dev/null | grep -q '"ok":true'; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            echo "API did not become ready; uvicorn log:" >&2
+            cat /tmp/uvicorn.log >&2
+            exit 1
+          fi
+          echo "healthz: $(curl -fsS http://127.0.0.1:8000/healthz)"
+
+          # Run the real Go client against the real API.
+          cd worker
+          MCD_E2E_API_URL=http://127.0.0.1:8000 \
+          MCD_E2E_CREDENTIAL="$MCD_API_CONTROL__WORKER_CREDENTIAL" \
+            go test -tags e2e -v ./test/e2e/...
+
+      - name: API log on failure
+        if: failure()
+        run: cat /tmp/uvicorn.log || true
