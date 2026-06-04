@@ -62,12 +62,15 @@ def test_env_overrides_toml_file(
 
 
 def test_database_url_masked_in_dump(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A distinct sentinel password so the assertion checks the URL's secret value
+    # is absent, not a config-key name that merely contains "secret" (e.g. the
+    # storage.object.secret_key field name).
     monkeypatch.setenv(
-        "MCD_API_DATABASE__URL", "postgresql+asyncpg://user:secret@host/db"
+        "MCD_API_DATABASE__URL", "postgresql+asyncpg://user:hunter2pw@host/db"
     )
     settings = load_settings(config_file=None)
     dump = settings.masked_dump()
-    assert "secret" not in repr(dump)
+    assert "hunter2pw" not in repr(dump)
     assert dump["database"]["url"] == "***"
 
 

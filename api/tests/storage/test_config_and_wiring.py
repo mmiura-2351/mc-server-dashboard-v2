@@ -64,13 +64,48 @@ def test_app_factory_builds_fs_storage(tmp_path: Path) -> None:
     assert app is not None
 
 
-def test_app_factory_fails_fast_on_unimplemented_backend(
+def test_app_factory_fails_fast_on_object_without_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The object backend is implemented (#105) but requires its endpoint/bucket/
+    # credentials; a missing one fails fast at boot (CONFIGURATION.md Section 3).
     cfg = _write_toml(tmp_path, '[storage]\nbackend = "object"\n')
     settings = load_settings(config_file=cfg)
-    with pytest.raises(ValueError, match="storage.backend"):
+    with pytest.raises(ValueError, match="storage.object"):
         create_app(settings)
+
+
+def test_app_factory_builds_object_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mc_server_dashboard_api.app import _build_storage
+    from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "object")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__ENDPOINT", "https://s3.example:9000")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__BUCKET", "mcsd")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__ACCESS_KEY", "ak")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__SECRET_KEY", "sk")
+    settings = load_settings(config_file=None)
+    # Building the adapter does not open a connection (aioboto3 is lazy), so the
+    # wiring is exercised without any real cloud.
+    assert isinstance(_build_storage(settings), ObjectStorage)
+
+
+def test_object_keys_from_toml_and_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _write_toml(
+        tmp_path,
+        '[storage]\nbackend = "object"\n'
+        '[storage.object]\nendpoint = "https://s3.example:9000"\nbucket = "mcsd"\n',
+    )
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__ACCESS_KEY", "ak")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__SECRET_KEY", "sk")
+    settings = load_settings(config_file=cfg)
+    assert settings.storage.object.endpoint == "https://s3.example:9000"
+    assert settings.storage.object.bucket == "mcsd"
+    assert settings.storage.object.access_key == "ak"
 
 
 def test_storage_keys_in_masked_dump(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,3 +113,17 @@ def test_storage_keys_in_masked_dump(monkeypatch: pytest.MonkeyPatch) -> None:
     dump = settings.masked_dump()
     assert dump["storage"]["backend"] == "fs"
     assert dump["storage"]["fs"]["root"] == "./data"
+
+
+def test_object_secret_keys_masked_in_dump(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__ENDPOINT", "https://s3.example:9000")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__BUCKET", "mcsd")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__ACCESS_KEY", "ak-secret")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__SECRET_KEY", "sk-secret")
+    dump = load_settings(config_file=None).masked_dump()
+    obj = dump["storage"]["object"]
+    # Endpoint/bucket are not secrets; access/secret keys are masked (Section 5.2).
+    assert obj["endpoint"] == "https://s3.example:9000"
+    assert obj["bucket"] == "mcsd"
+    assert obj["access_key"] == "***"
+    assert obj["secret_key"] == "***"

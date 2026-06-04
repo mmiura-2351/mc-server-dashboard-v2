@@ -55,9 +55,11 @@ def tar_bytes(files: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-async def tar_stream(files: dict[str, bytes]) -> AsyncIterator[bytes]:
-    async for chunk in stream_of(tar_bytes(files)):
-        yield chunk
+async def tar_stream(
+    files: dict[str, bytes], *, chunk: int = 7
+) -> AsyncIterator[bytes]:
+    async for piece in stream_of(tar_bytes(files), chunk=chunk):
+        yield piece
 
 
 def read_tar(blob: bytes) -> dict[str, bytes]:
