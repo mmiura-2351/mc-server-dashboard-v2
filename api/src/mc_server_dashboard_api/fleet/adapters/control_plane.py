@@ -39,6 +39,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     StopServerCommand,
     WorkerNotConnectedError,
 )
+from mc_server_dashboard_api.fleet.domain.registry import SessionToken
 from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, WorkerId
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 
@@ -72,20 +73,29 @@ class ControlPlaneState:
 
     def __init__(self) -> None:
         self._outbound: dict[WorkerId, asyncio.Queue[pb.ApiMessage]] = {}
+        # worker -> the SessionToken that currently owns its outbound stream. A
+        # reconnect replaces it, so a stale session's delayed teardown can be
+        # told apart from the current one (mirrors close_session's queue-identity
+        # guard; CONTROL_PLANE.md Section 4.4).
+        self._sessions: dict[WorkerId, SessionToken] = {}
         # command_id -> (owning worker, result future). The worker is tracked so a
         # disconnect can fail exactly that worker's in-flight commands fast,
         # instead of letting them wait out the full command timeout.
         self._pending: dict[str, tuple[WorkerId, asyncio.Future[pb.CommandResult]]] = {}
 
-    def open_session(self, worker_id: WorkerId) -> asyncio.Queue[pb.ApiMessage]:
+    def open_session(
+        self, worker_id: WorkerId, session: SessionToken
+    ) -> asyncio.Queue[pb.ApiMessage]:
         """Register a fresh outbound queue for ``worker_id`` and return it.
 
         A reconnect replaces any prior queue, so the latest session owns the
-        Worker's outbound stream.
+        Worker's outbound stream. ``session`` is recorded as the current owner so
+        :meth:`fail_worker_pending` can ignore a stale session's teardown.
         """
 
         queue: asyncio.Queue[pb.ApiMessage] = asyncio.Queue()
         self._outbound[worker_id] = queue
+        self._sessions[worker_id] = session
         return queue
 
     def close_session(
@@ -100,6 +110,7 @@ class ControlPlaneState:
 
         if self._outbound.get(worker_id) is queue:
             del self._outbound[worker_id]
+            self._sessions.pop(worker_id, None)
 
     def register_pending(
         self, command_id: str, worker_id: WorkerId
@@ -134,15 +145,24 @@ class ControlPlaneState:
             if not future.done():
                 future.set_result(result)
 
-    def fail_worker_pending(self, worker_id: WorkerId, error: BaseException) -> None:
+    def fail_worker_pending(
+        self, worker_id: WorkerId, session: SessionToken, error: BaseException
+    ) -> None:
         """Fail every in-flight command awaiting ``worker_id`` with ``error``.
 
         Invoked when the worker's session ends: its outbound stream is gone, so a
         pending command can never be answered. Failing fast (rather than waiting
         out the command timeout) unblocks awaiters with a typed
         :class:`WorkerNotConnectedError` immediately (CONTROL_PLANE.md 4.4).
+
+        Guarded by ``session`` like :meth:`close_session`: a delayed teardown of a
+        stale session that no longer owns ``worker_id``'s outbound stream is
+        ignored, so it cannot spuriously fail a NEW session's in-flight futures
+        after a reconnect (CONTROL_PLANE.md Section 4.4, reconnect race).
         """
 
+        if self._sessions.get(worker_id) != session:
+            return
         for command_id in [
             cid for cid, (wid, _) in self._pending.items() if wid == worker_id
         ]:

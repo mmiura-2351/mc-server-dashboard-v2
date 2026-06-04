@@ -10,6 +10,7 @@ running), and the placement-load increment/decrement bookkeeping.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 
 import pytest
@@ -287,6 +288,83 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
+async def test_start_compensation_decrements_only_when_revert_applies() -> None:
+    # Dispatch fails, so the committed start intent is compensated. The revert
+    # compare-and-set matches the still-running row, so the placement-load
+    # decrement runs exactly once, symmetric with the increment.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": busy})
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_start_compensation_skips_decrement_when_revert_loses_race() -> None:
+    # Dispatch fails, so the committed start intent is compensated. But a
+    # concurrent stop already reverted the row to stopped before compensation
+    # ran, so the revert compare-and-set matches no row. That concurrent stop
+    # owns the placement-load decrement; compensation must NOT decrement again,
+    # or the count would fall below the true running tally.
+    community, server_id, worker = _ids()
+
+    class _StopRacesCompensation(FakeServerRepository):
+        """A concurrent stop reverts the row right before compensation reads it.
+
+        The start commits running+assigned; on the compensation's read the row
+        is mutated to stopped/unassigned, so the revert CAS (expected_from=
+        running) matches no row — the lost-race signal for compensation.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._reads = 0
+
+        async def get_by_id(self, server_id: ServerId) -> Server | None:
+            loaded = await super().get_by_id(server_id)
+            self._reads += 1
+            # Reads: 1 = start's load, 2 = compensation's load. On the
+            # compensation read, simulate the concurrent stop having already
+            # reverted the stored row.
+            if self._reads == 2:
+                stored = self.by_id[server_id]
+                stored.desired_state = DesiredState.STOPPED
+                stored.assigned_worker_id = None
+            return loaded
+
+    uow = FakeUnitOfWork(servers=_StopRacesCompensation())
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": busy})
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == []
+
+
 async def test_start_lost_race_is_conflict_without_dispatch_or_count() -> None:
     # The in-memory check passes (loaded as stopped/unassigned), but a concurrent
     # start commits running+assigned before our compare-and-set runs. The CAS
@@ -353,10 +431,13 @@ async def test_two_sequential_starts_second_is_conflict() -> None:
     assert cp.incremented == [WorkerId(worker)]
 
 
-async def test_start_compensation_failure_preserves_both_errors() -> None:
+async def test_start_compensation_failure_preserves_both_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     # Dispatch fails, then the compensation commit also fails. The compensation
     # error must propagate chained from the original dispatch failure so neither
-    # is masked.
+    # is masked, both errors are logged, and the placement-load decrement is
+    # skipped: the DB state is unknown, so a reconnect rebuild reconciles.
     community, server_id, worker = _ids()
 
     class _FailOnSecondCommit(FakeUnitOfWork):
@@ -378,13 +459,23 @@ async def test_start_compensation_failure_preserves_both_errors() -> None:
         jar_provisioner=FakeJarProvisioner(),
     )
 
-    with pytest.raises(RuntimeError, match="compensation commit failed") as excinfo:
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(RuntimeError, match="compensation commit failed") as excinfo,
+    ):
         await use_case(
             community_id=CommunityId(community), server_id=ServerId(server_id)
         )
 
     # The original dispatch failure is preserved as the chained cause.
     assert isinstance(excinfo.value.__cause__, CommandDispatchError)
+    # DB state is unknown after the failed commit: do not decrement.
+    assert cp.decremented == []
+    # Both the compensation error and the original dispatch failure are logged.
+    record = next(r for r in caplog.records if r.levelno == logging.ERROR)
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], RuntimeError)
+    assert "busy" in record.getMessage()
 
 
 async def test_start_missing_server_is_not_found() -> None:
@@ -555,6 +646,40 @@ async def test_restart_dispatches_and_keeps_running() -> None:
 
     assert result.desired_state is DesiredState.RUNNING
     assert cp.dispatched == [("restart", WorkerId(worker), ServerId(server_id))]
+
+
+async def test_restart_lost_race_is_conflict_without_dispatch() -> None:
+    # The in-memory check passes (loaded as running/assigned), but a concurrent
+    # stop commits stopped before our compare-and-set runs. The CAS
+    # (expected_from=running) matches no row, so we must 409 without dispatching
+    # the restart (FR-SRV-2).
+    community, server_id, worker = _ids()
+    stopped = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+    )
+    uow = FakeUnitOfWork(servers=_RacingServerRepository(winner=stopped))
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane()
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.dispatched == []
+    assert uow.commits == 0
 
 
 async def test_restart_when_stopped_is_conflict() -> None:

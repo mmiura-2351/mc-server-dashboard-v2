@@ -172,7 +172,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # rebuild it from the authoritative running-server tally so placement is
         # correct after a reconnect (epic #7 reconciliation obligation).
         await self._rebuild_assignments(worker_id)
-        outbound = self._control_plane.open_session(worker_id)
+        outbound = self._control_plane.open_session(worker_id, session)
         # Read inbound events/results in a background task while this generator
         # yields the Worker's outbound commands; both share the one stream.
         reader = asyncio.ensure_future(self._read_inbound(worker_id, request_iterator))
@@ -195,13 +195,17 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # logged as an unretrieved task exception; a cancellation is expected.
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reader
-            self._control_plane.close_session(worker_id, outbound)
             # Fail this worker's in-flight commands immediately: its outbound
             # stream is gone, so they can never be answered. Awaiters get a typed
             # WorkerNotConnectedError now instead of riding the full timeout.
+            # Guarded by this Session's token so a stale teardown after a
+            # reconnect does not fail the NEW session's in-flight futures
+            # (CONTROL_PLANE.md Section 4.4). Runs before close_session, which
+            # drops this worker's session record.
             self._control_plane.fail_worker_pending(
-                worker_id, WorkerNotConnectedError(worker_id.value)
+                worker_id, session, WorkerNotConnectedError(worker_id.value)
             )
+            self._control_plane.close_session(worker_id, outbound)
             # Pass this Session's token so a delayed teardown only offlines the
             # Worker if it has not reconnected on a newer Session (Section 4.4).
             self._registry.mark_disconnected(worker_id, session)
