@@ -106,9 +106,10 @@ than from a checked-in constant.
    from the PRs merged since the previous tag (Section 3).
 3. *(forthcoming)* A release builds and publishes both components (`api/`,
    `worker/`) from the same tagged commit, so the `api/` and `worker/` artifacts
-   of a release come from one source revision. This stays aspirational until a
-   packaging/deployment design lands (no Dockerfiles or publish targets exist
-   yet); the workflow in Section 4.3 only publishes the GitHub Release.
+   of a release come from one source revision. Both components now have
+   Dockerfiles and a single-host compose stack
+   ([`DEPLOYMENT.md`](DEPLOYMENT.md)), but no registry-publish target exists yet;
+   the workflow in Section 4.3 only publishes the GitHub Release.
 
 ### 4.3 Cutting a release (operator steps)
 
