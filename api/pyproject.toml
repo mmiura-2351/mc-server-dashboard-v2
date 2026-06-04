@@ -171,3 +171,26 @@ forbidden_modules = [
     "mc_server_dashboard_api.identity.api",
     "mc_server_dashboard_api.core",
 ]
+
+# --- community context -----------------------------------------------------
+# Mirrors the identity context's shape (ARCHITECTURE.md Section 2.2). This
+# sub-issue lands only the domain and adapters quadrants, so the layered
+# (domain <- application <- api) contract is deferred until those quadrants
+# arrive (#69+); the forbidden contracts below already pin adapters at the edge
+# and keep the domain dependency-free — including no import of the identity
+# domain (the user is referenced by id value only; DATABASE.md Section 5).
+[[tool.importlinter.contracts]]
+name = "community domain does not import adapters"
+type = "forbidden"
+source_modules = ["mc_server_dashboard_api.community.domain"]
+forbidden_modules = ["mc_server_dashboard_api.community.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "community domain imports nothing internal (incl. other contexts)"
+type = "forbidden"
+source_modules = ["mc_server_dashboard_api.community.domain"]
+forbidden_modules = [
+    "mc_server_dashboard_api.community.adapters",
+    "mc_server_dashboard_api.identity",
+    "mc_server_dashboard_api.core",
+]
