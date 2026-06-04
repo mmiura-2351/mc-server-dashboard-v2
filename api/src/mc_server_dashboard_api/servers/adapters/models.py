@@ -19,6 +19,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     String,
     UniqueConstraint,
 )
@@ -67,6 +68,8 @@ class ServerModel(Base):
             _in_clause("observed_state", _OBSERVED_STATES),
             name="ck_server_observed_state",
         ),
+        # Index on (assigned_worker_id) for "all servers on Worker X" (FR-WRK-4).
+        Index("ix_server_assigned_worker_id", "assigned_worker_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
