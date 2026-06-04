@@ -184,6 +184,15 @@ class ObjectStorage(Storage):
         self._version_retention = version_retention
         self._seam = failure_seam or FailureSeam()
         self._leases: dict[str, int] = {}
+        # Active-staging handles: the ``incoming/<transfer>/`` prefix of each
+        # in-flight transfer is held here for the life of its handle (begin ->
+        # commit/abort) so a concurrently scheduled sweep does not GC its staging
+        # objects out from under the active stream (issue #160). Unlike the fs
+        # adapter, object staging has no on-store marker, so this in-process set is
+        # the pin; a crash leftover has no in-process handle by definition, so a
+        # fresh process's sweep still reclaims it. Guarded by ``_lease_lock``
+        # alongside the reader leases.
+        self._active_staging: set[str] = set()
         self._lease_lock = threading.Lock()
 
     # --- key-prefix layout helpers (Section 2 as a key scheme) -------------
@@ -239,6 +248,20 @@ class ObjectStorage(Storage):
     def _is_leased(self, prefix: str) -> bool:
         with self._lease_lock:
             return self._leases.get(prefix, 0) > 0
+
+    # --- active-staging leases (issue #160) --------------------------------
+
+    def _register_staging(self, incoming_prefix: str) -> None:
+        with self._lease_lock:
+            self._active_staging.add(incoming_prefix)
+
+    def _release_staging(self, incoming_prefix: str) -> None:
+        with self._lease_lock:
+            self._active_staging.discard(incoming_prefix)
+
+    def _is_staging_active(self, incoming_prefix: str) -> bool:
+        with self._lease_lock:
+            return incoming_prefix in self._active_staging
 
     # --- pointer object (the publish pointer, Section 4.2) -----------------
 
@@ -300,11 +323,15 @@ class ObjectStorage(Storage):
         now names it. This narrows the window to the gap between that re-read and
         the delete; it does not eliminate it, so the sweep remains safest run when
         no publisher is concurrent (today: API startup only — Section 8.5 leaves
-        scheduling open). The ``incoming/`` window is not closed: a transfer staged
-        but not yet committed has no live pointer to re-read against, so a sweep
-        scheduled concurrently with an in-flight stage could still delete its
-        staging objects (the fs adapter pins staging with a lease; the object
-        adapter does not, so this residual window is documented, not closed).
+        scheduling open).
+
+        In-flight staging (issue #160): a transfer staged but not yet committed has
+        no live pointer to re-read against, so it is pinned instead by an in-process
+        active-staging lease taken at ``begin_snapshot`` and released at
+        commit/abort. The ``incoming/`` branch below skips any prefix whose lease is
+        still active, so a sweep scheduled concurrently with an in-flight stage
+        leaves its staging objects intact. A crash leftover has no in-process handle
+        by definition, so a fresh process's sweep still reclaims it.
         """
 
         async with self._client_factory() as client:
@@ -322,7 +349,12 @@ class ObjectStorage(Storage):
         for key in keys:
             rest = key[len(server_prefix) :]
             if rest.startswith("incoming/"):
-                await client.delete_object(key)
+                # Skip an in-flight transfer's staging objects: the prefix is pinned
+                # by an active-staging lease until commit/abort (issue #160). A crash
+                # leftover has no in-process handle, so it is not skipped.
+                incoming_prefix = server_prefix + "/".join(rest.split("/")[:2]) + "/"
+                if not self._is_staging_active(incoming_prefix):
+                    await client.delete_object(key)
             elif rest.startswith("snapshots/"):
                 snap_prefix = server_prefix + "/".join(rest.split("/")[:2]) + "/"
                 if snap_prefix not in delete_prefix:
@@ -372,7 +404,13 @@ class ObjectStorage(Storage):
         self, community_id: CommunityId, server_id: ServerId
     ) -> SnapshotHandle:
         # No prefix to pre-create on object storage; objects appear on first PUT.
-        return _ObjectSnapshotHandle(community_id, server_id, uuid.uuid4().hex)
+        # Register the staging prefix as active so a concurrent sweep skips its
+        # incoming/ objects until commit/abort releases it (issue #160).
+        transfer_id = uuid.uuid4().hex
+        self._register_staging(
+            self._incoming_prefix(community_id, server_id, transfer_id)
+        )
+        return _ObjectSnapshotHandle(community_id, server_id, transfer_id)
 
     async def write_snapshot(self, handle: SnapshotHandle, stream: ByteStream) -> None:
         h = _as_object_handle(handle)
@@ -409,6 +447,9 @@ class ObjectStorage(Storage):
                 # is the gate that will host it.
                 raise IncompleteTransferError("no staged objects to publish")
             await self._publish(client, h.community_id, h.server_id, incoming, staged)
+        # Publish reclaimed the staging prefix; release its active-staging lease so
+        # a later sweep is not blocked by a now-dead handle (issue #160).
+        self._release_staging(incoming)
         h.consumed = True
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
@@ -416,6 +457,7 @@ class ObjectStorage(Storage):
         incoming = self._incoming_prefix(h.community_id, h.server_id, h.transfer_id)
         async with self._client_factory() as client:
             await _delete_prefix(client, incoming)
+        self._release_staging(incoming)
         h.consumed = True
 
     async def _publish(
@@ -547,26 +589,34 @@ class ObjectStorage(Storage):
         backup_key = self._backup_key(community_id, server_id, key)
         transfer_id = f"restore-{key.value}-{uuid.uuid4().hex}"
         incoming = self._incoming_prefix(community_id, server_id, transfer_id)
-        async with self._client_factory() as client:
-            if await client.head_object(backup_key) is None:
-                raise NotFoundError(f"backup not found: {key.value}")
-            # Stage the extracted archive under the incoming prefix, then publish it
-            # through the same pointer-flip path as a snapshot (Section 4.1).
-            spool = await _spool_object(client, backup_key, ".restore.", ".tar.gz")
-            try:
-                for name in await asyncio.to_thread(
-                    _safe_archive_members, spool, "r:gz"
-                ):
-                    await client.upload_multipart(
-                        incoming + name, _archive_member_parts(spool, name, "r:gz")
+        # A restore stages under incoming/ exactly like a snapshot, so pin it with
+        # the same active-staging lease for the life of the operation (issue #160).
+        self._register_staging(incoming)
+        try:
+            async with self._client_factory() as client:
+                if await client.head_object(backup_key) is None:
+                    raise NotFoundError(f"backup not found: {key.value}")
+                # Stage the extracted archive under the incoming prefix, then publish
+                # it through the same pointer-flip path as a snapshot (Section 4.1).
+                spool = await _spool_object(client, backup_key, ".restore.", ".tar.gz")
+                try:
+                    for name in await asyncio.to_thread(
+                        _safe_archive_members, spool, "r:gz"
+                    ):
+                        await client.upload_multipart(
+                            incoming + name, _archive_member_parts(spool, name, "r:gz")
+                        )
+                    staged = await client.list_objects(incoming)
+                    await self._publish(
+                        client, community_id, server_id, incoming, staged
                     )
-                staged = await client.list_objects(incoming)
-                await self._publish(client, community_id, server_id, incoming, staged)
-            except BaseException:
-                await _delete_prefix(client, incoming)
-                raise
-            finally:
-                await asyncio.to_thread(spool.unlink, missing_ok=True)
+                except BaseException:
+                    await _delete_prefix(client, incoming)
+                    raise
+                finally:
+                    await asyncio.to_thread(spool.unlink, missing_ok=True)
+        finally:
+            self._release_staging(incoming)
 
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
