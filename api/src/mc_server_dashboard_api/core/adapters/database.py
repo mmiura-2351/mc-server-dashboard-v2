@@ -21,13 +21,16 @@ from mc_server_dashboard_api.core.domain.health import DatabasePing
 
 # Deterministic constraint/index names so a model with no explicit name renders
 # the same name the hand-written migrations created, keeping a future Alembic
-# autogenerate diff quiet (issue #60). The ``ck`` template prefixes the bare
-# name passed to ``CheckConstraint(name=...)`` -- e.g. ``name="type"`` on
-# ``server`` becomes ``ck_server_type``, matching the migration.
+# autogenerate diff quiet (issue #60). No ``ck`` template on purpose: the ``ck``
+# convention interpolates ``%(constraint_name)s``, so it re-prefixes any
+# *explicitly* named CheckConstraint -- and because this metadata is also
+# Alembic's ``target_metadata``, ``op.create_table`` would apply it during a
+# migration too, turning the migration's ``name="ck_server_type"`` into
+# ``ck_server_ck_server_type`` in the database. CheckConstraints are always
+# named explicitly here (models and migrations alike), so they need no template.
 _NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",
-    "ck": "ck_%(table_name)s_%(constraint_name)s",
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }

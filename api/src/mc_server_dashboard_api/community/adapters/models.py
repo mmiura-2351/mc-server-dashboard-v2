@@ -132,10 +132,10 @@ class ResourceGrantModel(Base):
             "resource_id",
             name="uq_resource_grant_user_resource",
         ),
-        # ``resource_type`` is a CHECK-constrained enum; ``server`` in M1. Bare
-        # name; the ``ck`` naming convention renders
-        # ``ck_resource_grant_resource_type`` (issue #60), matching the migration.
-        CheckConstraint("resource_type IN ('server')", name="resource_type"),
+        # ``resource_type`` is a CHECK-constrained enum; ``server`` in M1.
+        CheckConstraint(
+            "resource_type IN ('server')", name="ck_resource_grant_resource_type"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)

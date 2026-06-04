@@ -52,21 +52,20 @@ class ServerModel(Base):
     __table_args__ = (
         # A server name is unique within its community (DATABASE.md Section 7).
         UniqueConstraint("community_id", "name", name="uq_server_community_name"),
-        # Bare names; the ``ck`` naming convention prefixes the table to render
-        # ``ck_server_type`` etc. (issue #60), matching the migration-created
-        # names.
-        CheckConstraint(_in_clause("server_type", _SERVER_TYPES), name="type"),
+        CheckConstraint(
+            _in_clause("server_type", _SERVER_TYPES), name="ck_server_type"
+        ),
         CheckConstraint(
             _in_clause("execution_backend", _EXECUTION_BACKENDS),
-            name="execution_backend",
+            name="ck_server_execution_backend",
         ),
         CheckConstraint(
             _in_clause("desired_state", _DESIRED_STATES),
-            name="desired_state",
+            name="ck_server_desired_state",
         ),
         CheckConstraint(
             _in_clause("observed_state", _OBSERVED_STATES),
-            name="observed_state",
+            name="ck_server_observed_state",
         ),
     )
 
