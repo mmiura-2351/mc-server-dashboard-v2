@@ -38,6 +38,19 @@ def is_locked(locked_until: dt.datetime | None, *, now: dt.datetime) -> bool:
     return locked_until is not None and locked_until > now
 
 
+def prune_horizon(config: BruteForceConfig) -> dt.timedelta:
+    """Oldest age a ``login_attempt`` row can still be relevant (Section 3).
+
+    The sliding-window counts never look further back than the longest window, so
+    a row older than that can never affect a decision. Both prune triggers — the
+    on-success prune in the login use case and the periodic prune loop — delete
+    rows older than ``now - prune_horizon(config)``; sharing this one computation
+    keeps the bound identical between them.
+    """
+
+    return max(config.username_window, config.ip_window)
+
+
 def backoff_duration(
     lockout_count: int, *, base: dt.timedelta, maximum: dt.timedelta
 ) -> dt.timedelta:

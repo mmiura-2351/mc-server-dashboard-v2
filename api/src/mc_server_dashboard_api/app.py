@@ -34,6 +34,7 @@ from mc_server_dashboard_api.core.adapters.database import (
 )
 from mc_server_dashboard_api.core.api import health
 from mc_server_dashboard_api.dataplane.api import transfers
+from mc_server_dashboard_api.dependencies import build_brute_force_config
 from mc_server_dashboard_api.fleet.adapters.clock import SystemClock as FleetSystemClock
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
@@ -46,7 +47,19 @@ from mc_server_dashboard_api.fleet.adapters.real_time_events import (
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
+from mc_server_dashboard_api.identity.adapters.clock import (
+    SystemClock as IdentitySystemClock,
+)
+from mc_server_dashboard_api.identity.adapters.login_attempt_store import (
+    SqlAlchemyLoginAttemptStore,
+)
+from mc_server_dashboard_api.identity.adapters.prune_login_attempts_loop import (
+    run_prune_login_attempts_loop,
+)
 from mc_server_dashboard_api.identity.api import auth, users
+from mc_server_dashboard_api.identity.application.prune_login_attempts import (
+    PruneLoginAttempts,
+)
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.middleware import correlation_id_middleware
 from mc_server_dashboard_api.servers.adapters.backup_loop import run_backup_loop
@@ -243,6 +256,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         grpc_server = None
         snapshot_task: asyncio.Task[None] | None = None
         backup_task: asyncio.Task[None] | None = None
+        # Periodic login_attempt prune (SECURITY.md Section 3). Ungated on the
+        # control plane: unlike the snapshot/backup loops it drives only the
+        # database, so it must run on every API process to keep the append-only
+        # table bounded against a failures-only attack — which never triggers the
+        # on-success prune in the login use case (FR-AUTH-4).
+        prune_attempts_task = asyncio.create_task(
+            run_prune_login_attempts_loop(
+                PruneLoginAttempts(
+                    attempts=SqlAlchemyLoginAttemptStore(
+                        create_session_factory(engine)
+                    ),
+                    brute_force=build_brute_force_config(settings.auth.brute_force),
+                    clock=IdentitySystemClock(),
+                ),
+                tick_seconds=settings.auth.brute_force.prune_interval_seconds,
+            )
+        )
+        logging.getLogger(__name__).info("login_attempt prune loop started")
         if settings.control.enabled:
             # Run the control-plane gRPC server as a lifespan task on the same
             # asyncio event loop as FastAPI (grpc.aio): one process, one loop,
@@ -327,6 +358,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            prune_attempts_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await prune_attempts_task
             if backup_task is not None:
                 backup_task.cancel()
                 with suppress(asyncio.CancelledError):
