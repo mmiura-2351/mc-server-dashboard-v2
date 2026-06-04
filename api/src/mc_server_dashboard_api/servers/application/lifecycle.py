@@ -523,22 +523,48 @@ class StopServer:
             # (worker/internal/application/instancemanager/instancemanager.go:308-312).
             # The stop intent already landed (desired=stopped committed above);
             # converge the observed cache to stopped and report success. No final
-            # snapshot: there is no live working set to capture.
+            # snapshot: there is no live working set to capture. No live instance
+            # remains, so clear the assignment too (issue #206) — otherwise a
+            # later start's require_unassigned compare-and-set 409s forever.
             observed_at = self.clock.now()
             async with self.uow:
                 await self.uow.servers.record_observed_state(
                     server_id,
                     observed_state=ObservedState.STOPPED,
                     observed_at=observed_at,
+                    unassign=True,
                 )
                 await self.uow.commit()
             server.observed_state = ObservedState.STOPPED
             server.observed_at = observed_at
+            server.assigned_worker_id = None
             return server
         if not outcome.success:
             raise _dispatch_failure(
                 server_id=server_id, kind="StopServer", outcome=outcome
             )
+        # The graceful stop returned only once the Worker reported the process
+        # gone, so record observed=stopped and clear the assignment in one
+        # transaction (issue #206). The unassign cannot wait on the later
+        # StatusChange(stopped) event: a start blocked on require_unassigned must
+        # be unblocked the moment the stop confirms. Recording observed=stopped
+        # here is safe — a subsequent late StatusChange(stopped) from the
+        # now-unassigned Worker is dropped by the sink's ownership guard
+        # (server_state_sink.py:85, "dropping status report from non-owning
+        # worker"), which is the acceptable outcome since this write already
+        # converged the cache.
+        observed_at = self.clock.now()
+        async with self.uow:
+            await self.uow.servers.record_observed_state(
+                server_id,
+                observed_state=ObservedState.STOPPED,
+                observed_at=observed_at,
+                unassign=True,
+            )
+            await self.uow.commit()
+        server.observed_state = ObservedState.STOPPED
+        server.observed_at = observed_at
+        server.assigned_worker_id = None
         # Final snapshot AFTER the process has exited (the graceful stop above
         # only returns once the Worker reports the process gone), so the captured
         # working set is quiescent (FR-DATA-4, FR-DATA-7). A snapshot failure is
@@ -580,6 +606,11 @@ class StopServer:
         to the crash and is rebuilt from the authoritative tally on reconnect — so
         decrementing again would drive the count below the true running total. A
         failed dispatch raises so the caller retries on a later tick.
+
+        On a CONFIRMED stop (success, or SERVER_NOT_FOUND meaning no live instance
+        remains) the assignment is cleared so a later start can re-place under
+        require_unassigned (issue #206). A failed dispatch keeps the assignment for
+        a same-Worker retry.
         """
 
         async with self.uow:
@@ -594,10 +625,22 @@ class StopServer:
         outcome = await self.control_plane.stop(
             worker_id=worker_id, server_id=server_id
         )
-        if not outcome.success:
+        if not outcome.success and outcome.status is not CommandStatus.SERVER_NOT_FOUND:
             raise _dispatch_failure(
                 server_id=server_id, kind="StopServer", outcome=outcome
             )
+        observed_at = self.clock.now()
+        async with self.uow:
+            await self.uow.servers.record_observed_state(
+                server_id,
+                observed_state=ObservedState.STOPPED,
+                observed_at=observed_at,
+                unassign=True,
+            )
+            await self.uow.commit()
+        server.observed_state = ObservedState.STOPPED
+        server.observed_at = observed_at
+        server.assigned_worker_id = None
         return server
 
 

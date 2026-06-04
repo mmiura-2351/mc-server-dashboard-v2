@@ -156,14 +156,21 @@ class SqlAlchemyServerRepository(ServerRepository):
         server_id: ServerId,
         observed_state: ObservedState,
         observed_at: dt.datetime,
+        *,
+        unassign: bool = False,
     ) -> None:
+        values: dict[str, Any] = {
+            "observed_state": observed_state.value,
+            "observed_at": observed_at,
+        }
+        # On a CONFIRMED stop, clear the assignment in the same write so a later
+        # start can re-place under require_unassigned (issue #206).
+        if unassign:
+            values["assigned_worker_id"] = None
         stmt = (
             update(ServerModel)
             .where(ServerModel.id == server_id.value)
-            .values(
-                observed_state=observed_state.value,
-                observed_at=observed_at,
-            )
+            .values(**values)
         )
         await self._session.execute(stmt)
 
