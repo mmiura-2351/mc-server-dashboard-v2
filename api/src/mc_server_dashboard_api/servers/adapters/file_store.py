@@ -62,6 +62,12 @@ class StorageFileStoreAdapter(FileStore):
     def __init__(self, *, storage: Storage) -> None:
         self._storage = storage
 
+    def validate_rel_path(self, rel_path: str) -> None:
+        # Apply the storage string-level traversal rule (RelPath construction)
+        # at the seam, so the running branch can pre-reject without importing
+        # the storage value object into the servers layer.
+        _rel_path(rel_path)
+
     async def read_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> bytes:

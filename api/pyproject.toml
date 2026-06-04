@@ -316,6 +316,7 @@ forbidden_modules = [
     "mc_server_dashboard_api.community",
     "mc_server_dashboard_api.identity",
     "mc_server_dashboard_api.fleet",
+    "mc_server_dashboard_api.storage",
     "mc_server_dashboard_api.core",
 ]
 
