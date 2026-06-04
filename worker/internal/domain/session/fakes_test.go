@@ -66,6 +66,7 @@ type fakeTransport struct {
 	registers   int
 	heartbeats  int
 	results     []CommandResult
+	statuses    []StatusEvent
 	closed      bool
 	commands    chan Command
 	recvErr     error // returned by RecvCommand once commands drains
@@ -111,6 +112,13 @@ func (t *fakeTransport) SendCommandResult(_ context.Context, result CommandResul
 	return nil
 }
 
+func (t *fakeTransport) SendStatusChange(_ context.Context, event StatusEvent) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.statuses = append(t.statuses, event)
+	return nil
+}
+
 func (t *fakeTransport) RecvCommand(ctx context.Context) (Command, error) {
 	select {
 	case <-ctx.Done():
@@ -140,6 +148,42 @@ func (t *fakeTransport) resultsCopy() []CommandResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return append([]CommandResult(nil), t.results...)
+}
+
+func (t *fakeTransport) statusesCopy() []StatusEvent {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]StatusEvent(nil), t.statuses...)
+}
+
+// fakeHandler is an in-memory CommandHandler: it records dispatched commands,
+// returns a canned result, and pushes status events on demand.
+type fakeHandler struct {
+	mu      sync.Mutex
+	handled []Command
+	result  CommandResult
+	events  chan StatusEvent
+}
+
+func newFakeHandler(result CommandResult) *fakeHandler {
+	return &fakeHandler{result: result, events: make(chan StatusEvent, 8)}
+}
+
+func (h *fakeHandler) Handle(_ context.Context, cmd Command) CommandResult {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.handled = append(h.handled, cmd)
+	res := h.result
+	res.CommandID = cmd.CommandID
+	return res
+}
+
+func (h *fakeHandler) Events() <-chan StatusEvent { return h.events }
+
+func (h *fakeHandler) handledCopy() []Command {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]Command(nil), h.handled...)
 }
 
 // fakeDialer hands out a queue of transports, one per Dial; once exhausted it

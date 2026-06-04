@@ -22,38 +22,79 @@ type RegisterAck struct {
 	RejectionReason   string
 }
 
-// Command is an inbound API command, reduced to the fields the session needs to
-// acknowledge its protocol shape. Real command handling is epic #7; this
-// milestone only replies with an "unsupported" CommandResult (CONTROL_PLANE.md
-// Section 5), never silently dropping a command.
+// Command is an inbound API command, reduced to the fields the session and its
+// CommandHandler need (CONTROL_PLANE.md Section 5). The lifecycle commands
+// (StartServer/StopServer/RestartServer/ServerCommand) are dispatched to the
+// handler; the remaining commands (Hydrate/Snapshot/ReadFile/EditFile) are still
+// answered with an "unsupported" CommandResult (epics #8/#9), never silently
+// dropped.
 type Command struct {
 	CommandID string
 	ServerID  string
-	// Kind is a human-readable command name for the log line and the error
-	// message (e.g. "StartServer"); empty when the command oneof is unset.
+	// Kind is the command name, both for logging and for dispatch
+	// (e.g. "StartServer"); empty when the command oneof is unset.
 	Kind string
+	// Driver is the requested execution backend for StartServer.
+	Driver string
+	// JarRelpath is the server JAR path for StartServer (relative to the working
+	// set).
+	JarRelpath string
+	// MinecraftVersion drives Java runtime selection for StartServer.
+	MinecraftVersion string
+	// Force skips the graceful path for StopServer.
+	Force bool
+	// Line is the console/RCON line for ServerCommand.
+	Line string
 }
 
-// CommandResult answers a Command. Until epic #7 every result is an
-// "unsupported" error keyed to the originating CommandID (CONTROL_PLANE.md
-// Section 7).
+// CommandResult answers a Command. A failure carries an ErrorCode and message;
+// a ServerCommand success carries Output (CONTROL_PLANE.md Section 7).
 type CommandResult struct {
 	CommandID    string
 	Success      bool
+	Output       string
 	ErrorCode    CommandErrorCode
 	ErrorMessage string
 }
 
 // CommandErrorCode mirrors the wire CommandErrorCode classes the session can
-// emit. This milestone only emits Internal for the not-yet-supported commands;
-// the adapter maps it to the generated enum.
+// emit (CONTROL_PLANE.md Section 7); the adapter maps each to the generated enum.
 type CommandErrorCode int
 
 const (
-	// CommandErrorInternal is the unclassified-failure code used for commands
-	// this milestone does not yet implement (CONTROL_PLANE.md Section 7).
+	// CommandErrorInternal is the unclassified-failure code (also used for the
+	// not-yet-supported commands).
 	CommandErrorInternal CommandErrorCode = iota
+	// CommandErrorServerNotFound marks a command targeting a server unknown to
+	// this Worker.
+	CommandErrorServerNotFound
+	// CommandErrorInvalidState marks a command invalid for the current state.
+	CommandErrorInvalidState
+	// CommandErrorDriverUnavailable marks a requested driver this Worker does not
+	// offer.
+	CommandErrorDriverUnavailable
 )
+
+// StatusEvent is an observed server-state transition the session emits as a
+// StatusChange event (CONTROL_PLANE.md Section 6). State is the wire state name
+// (e.g. "running"); the adapter maps it to the generated ServerState enum.
+type StatusEvent struct {
+	ServerID string
+	State    string
+	Detail   string
+}
+
+// CommandHandler executes the lifecycle/console commands and surfaces observed
+// state transitions. It is the application-layer instance manager; the session
+// stays transport-neutral and forwards its results and events onto the stream.
+type CommandHandler interface {
+	// Handle executes cmd and returns the result keyed to cmd.CommandID. It must
+	// not block on long-running work beyond the command's own semantics.
+	Handle(ctx context.Context, cmd Command) CommandResult
+	// Events streams observed state transitions for all managed servers. The
+	// session forwards each as a StatusChange event.
+	Events() <-chan StatusEvent
+}
 
 // Transport is the Port over a single live control-plane stream. One Transport
 // value corresponds to one open Session stream; the run loop discards it on any
@@ -69,6 +110,8 @@ type Transport interface {
 	SendHeartbeat(ctx context.Context) error
 	// SendCommandResult replies to an inbound command.
 	SendCommandResult(ctx context.Context, result CommandResult) error
+	// SendStatusChange emits one StatusChange event (CONTROL_PLANE.md Section 6).
+	SendStatusChange(ctx context.Context, event StatusEvent) error
 	// RecvCommand blocks for the next inbound API command. It returns an error
 	// when the stream ends (clean close or transport failure).
 	RecvCommand(ctx context.Context) (Command, error)

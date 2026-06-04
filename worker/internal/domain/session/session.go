@@ -32,6 +32,7 @@ type Runner struct {
 	clock   Clock
 	backoff Backoff
 	logger  *slog.Logger
+	handler CommandHandler
 	// randFloat yields a value in [0,1) for backoff jitter; injectable for
 	// deterministic tests.
 	randFloat func() float64
@@ -45,6 +46,11 @@ func WithBackoff(b Backoff) Option { return func(r *Runner) { r.backoff = b } }
 
 // WithRandFloat overrides the jitter source (tests inject a deterministic one).
 func WithRandFloat(f func() float64) Option { return func(r *Runner) { r.randFloat = f } }
+
+// WithCommandHandler wires the command handler (the instance manager) that
+// executes lifecycle/console commands and emits status events. Without it the
+// Runner answers every command with an "unsupported" CommandResult.
+func WithCommandHandler(h CommandHandler) Option { return func(r *Runner) { r.handler = h } }
 
 // NewRunner builds a Runner. dialer, clock, and logger are required Ports.
 func NewRunner(dialer Dialer, caps Capabilities, clock Clock, logger *slog.Logger, opts ...Option) *Runner {
@@ -157,12 +163,21 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 		recvErr <- r.receiveLoop(serveCtx, transport)
 	}()
 
+	var events <-chan StatusEvent
+	if r.handler != nil {
+		events = r.handler.Events()
+	}
+
 	for {
 		select {
 		case <-serveCtx.Done():
 			return serveCtx.Err()
 		case err := <-recvErr:
 			return err
+		case event := <-events:
+			if err := transport.SendStatusChange(serveCtx, event); err != nil {
+				return fmt.Errorf("send status change: %w", err)
+			}
 		case <-r.clock.After(interval):
 			if err := transport.SendHeartbeat(serveCtx); err != nil {
 				return fmt.Errorf("send heartbeat: %w", err)
@@ -171,10 +186,11 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 	}
 }
 
-// receiveLoop reads inbound commands and answers each with an "unsupported"
-// CommandResult (epic #7 implements real handling; this milestone only
-// acknowledges the protocol shape, never silently dropping a command —
-// CONTROL_PLANE.md Section 5).
+// receiveLoop reads inbound commands and answers each. Lifecycle/console commands
+// (StartServer/StopServer/RestartServer/ServerCommand) dispatch to the handler;
+// the rest (Hydrate/Snapshot/ReadFile/EditFile) get an "unsupported" result
+// pending epics #8/#9. A command is never silently dropped (CONTROL_PLANE.md
+// Section 5).
 func (r *Runner) receiveLoop(ctx context.Context, transport Transport) error {
 	for {
 		cmd, err := transport.RecvCommand(ctx)
@@ -182,20 +198,38 @@ func (r *Runner) receiveLoop(ctx context.Context, transport Transport) error {
 			return err
 		}
 
-		r.logger.Info("received unsupported command; replying with error",
-			"command_id", cmd.CommandID,
-			"server_id", cmd.ServerID,
-			"kind", cmd.Kind,
-		)
-
-		result := CommandResult{
-			CommandID:    cmd.CommandID,
-			Success:      false,
-			ErrorCode:    CommandErrorInternal,
-			ErrorMessage: fmt.Sprintf("command %q not supported by this Worker yet", cmd.Kind),
-		}
+		result := r.handle(ctx, cmd)
 		if err := transport.SendCommandResult(ctx, result); err != nil {
 			return fmt.Errorf("send command result: %w", err)
 		}
+	}
+}
+
+// handle dispatches a command to the handler when it is a lifecycle/console
+// command and a handler is wired; otherwise it returns the "unsupported" result.
+func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
+	if r.handler != nil && isHandledKind(cmd.Kind) {
+		r.logger.Info("dispatching command",
+			"command_id", cmd.CommandID, "server_id", cmd.ServerID, "kind", cmd.Kind)
+		return r.handler.Handle(ctx, cmd)
+	}
+
+	r.logger.Info("received unsupported command; replying with error",
+		"command_id", cmd.CommandID, "server_id", cmd.ServerID, "kind", cmd.Kind)
+	return CommandResult{
+		CommandID:    cmd.CommandID,
+		Success:      false,
+		ErrorCode:    CommandErrorInternal,
+		ErrorMessage: fmt.Sprintf("command %q not supported by this Worker yet", cmd.Kind),
+	}
+}
+
+// isHandledKind reports whether a command kind is dispatched to the handler.
+func isHandledKind(kind string) bool {
+	switch kind {
+	case "StartServer", "StopServer", "RestartServer", "ServerCommand":
+		return true
+	default:
+		return false
 	}
 }

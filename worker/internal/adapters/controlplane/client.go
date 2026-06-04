@@ -114,23 +114,49 @@ func (t *transport) SendHeartbeat(_ context.Context) error {
 }
 
 func (t *transport) SendCommandResult(_ context.Context, result session.CommandResult) error {
+	cr := &controlplanev1.CommandResult{Success: result.Success}
+	if result.Success {
+		// A successful ServerCommand carries its console output; other successes
+		// have no payload (CONTROL_PLANE.md Section 5).
+		if result.Output != "" {
+			cr.Result = &controlplanev1.CommandResult_CommandOutput{CommandOutput: result.Output}
+		}
+	} else {
+		cr.Error = &controlplanev1.CommandError{
+			Code:    mapErrorCode(result.ErrorCode),
+			Message: result.ErrorMessage,
+		}
+	}
 	msg := &controlplanev1.WorkerMessage{
 		// correlation_id MUST equal the originating command_id (CONTROL_PLANE.md
 		// Section 3) so the API pairs the result to its command.
 		CorrelationId: result.CommandID,
 		EmittedAt:     timestamppb.New(t.clock.Now()),
-		Payload: &controlplanev1.WorkerMessage_CommandResult{
-			CommandResult: &controlplanev1.CommandResult{
-				Success: result.Success,
-				Error: &controlplanev1.CommandError{
-					Code:    mapErrorCode(result.ErrorCode),
-					Message: result.ErrorMessage,
+		Payload:       &controlplanev1.WorkerMessage_CommandResult{CommandResult: cr},
+	}
+	if err := t.stream.Send(msg); err != nil {
+		return fmt.Errorf("controlplane: send command result: %w", err)
+	}
+	return nil
+}
+
+func (t *transport) SendStatusChange(_ context.Context, event session.StatusEvent) error {
+	msg := &controlplanev1.WorkerMessage{
+		EmittedAt: timestamppb.New(t.clock.Now()),
+		Payload: &controlplanev1.WorkerMessage_Event{
+			Event: &controlplanev1.Event{
+				ServerId: event.ServerID,
+				Event: &controlplanev1.Event_StatusChange{
+					StatusChange: &controlplanev1.StatusChange{
+						State:  mapServerState(event.State),
+						Detail: event.Detail,
+					},
 				},
 			},
 		},
 	}
 	if err := t.stream.Send(msg); err != nil {
-		return fmt.Errorf("controlplane: send command result: %w", err)
+		return fmt.Errorf("controlplane: send status change: %w", err)
 	}
 	return nil
 }
@@ -147,11 +173,7 @@ func (t *transport) RecvCommand(_ context.Context) (session.Command, error) {
 			// today); keep reading rather than treating it as a stream error.
 			continue
 		}
-		return session.Command{
-			CommandID: cmd.GetCommandId(),
-			ServerID:  cmd.GetServerId(),
-			Kind:      commandKind(cmd),
-		}, nil
+		return toCommand(cmd), nil
 	}
 }
 
@@ -202,11 +224,74 @@ func mapDrivers(names []string) []controlplanev1.ExecutionDriverKind {
 	return out
 }
 
-// mapErrorCode translates a domain error code to the wire enum. This milestone
-// only emits the internal/unsupported code.
-func mapErrorCode(_ session.CommandErrorCode) controlplanev1.CommandErrorCode {
-	// This milestone only emits the internal/unsupported code.
-	return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
+// mapErrorCode translates a domain error code to the wire enum (CONTROL_PLANE.md
+// Section 7).
+func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode {
+	switch code {
+	case session.CommandErrorServerNotFound:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_SERVER_NOT_FOUND
+	case session.CommandErrorInvalidState:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INVALID_STATE
+	case session.CommandErrorDriverUnavailable:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE
+	default:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
+	}
+}
+
+// mapServerState translates a domain status name to the wire ServerState enum
+// (CONTROL_PLANE.md Section 6).
+func mapServerState(state string) controlplanev1.ServerState {
+	switch state {
+	case "starting":
+		return controlplanev1.ServerState_SERVER_STATE_STARTING
+	case "running":
+		return controlplanev1.ServerState_SERVER_STATE_RUNNING
+	case "stopping":
+		return controlplanev1.ServerState_SERVER_STATE_STOPPING
+	case "stopped":
+		return controlplanev1.ServerState_SERVER_STATE_STOPPED
+	case "restarting":
+		return controlplanev1.ServerState_SERVER_STATE_RESTARTING
+	case "crashed":
+		return controlplanev1.ServerState_SERVER_STATE_CRASHED
+	default:
+		return controlplanev1.ServerState_SERVER_STATE_UNSPECIFIED
+	}
+}
+
+// toCommand maps a wire ApiCommand to the domain Command, extracting the
+// payload fields the handled commands need.
+func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
+	out := session.Command{
+		CommandID: cmd.GetCommandId(),
+		ServerID:  cmd.GetServerId(),
+		Kind:      commandKind(cmd),
+	}
+	switch c := cmd.GetCommand().(type) {
+	case *controlplanev1.ApiCommand_Start:
+		out.Driver = driverName(c.Start.GetDriver())
+		out.JarRelpath = c.Start.GetJarRelpath()
+		out.MinecraftVersion = c.Start.GetMinecraftVersion()
+	case *controlplanev1.ApiCommand_Stop:
+		out.Force = c.Stop.GetForce()
+	case *controlplanev1.ApiCommand_ServerCommand:
+		out.Line = c.ServerCommand.GetLine()
+	}
+	return out
+}
+
+// driverName maps the wire driver enum to the configured driver name used by the
+// handler and capability config.
+func driverName(kind controlplanev1.ExecutionDriverKind) string {
+	switch kind {
+	case controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_HOST_PROCESS:
+		return "host-process"
+	case controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER:
+		return "container"
+	default:
+		return ""
+	}
 }
 
 // commandKind names the command oneof for logging and the unsupported-error

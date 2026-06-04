@@ -13,7 +13,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -22,6 +24,11 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/clock"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/config"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/hostprocess"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/javaruntime"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -65,7 +72,8 @@ func run(ctx context.Context) error {
 		Drivers:       cfg.Worker.Drivers,
 		MaxServers:    cfg.Worker.MaxServers,
 	}
-	runner := session.NewRunner(dialer, caps, sysClock, logger)
+	manager := buildInstanceManager(cfg.Worker, logger)
+	runner := session.NewRunner(dialer, caps, sysClock, logger, session.WithCommandHandler(manager))
 
 	// Cancel the run context on SIGINT/SIGTERM for a clean stream shutdown.
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -73,6 +81,30 @@ func run(ctx context.Context) error {
 
 	logger.Info("starting control-plane session", "endpoint", cfg.API.GRPCEndpoint)
 	return runner.Run(sigCtx)
+}
+
+// buildInstanceManager wires the execution drivers and the instance manager that
+// handles lifecycle/console commands (issue #89). RCON for both graceful stop and
+// ServerCommand forwarding is opened from the server's working-dir
+// server.properties. Only the host-process driver lands here; the container
+// driver is the next sub-issue.
+func buildInstanceManager(wc config.WorkerConfig, logger *slog.Logger) *instancemanager.Manager {
+	selector := javaruntime.New(wc.Java.Runtimes)
+
+	hostDriver := hostprocess.New(
+		selector,
+		hostprocess.RealSpawn,
+		func(ctx context.Context, spec execution.InstanceSpec) (execution.ServerControl, error) {
+			return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir)
+		},
+		hostprocess.Options{StopTimeout: 30 * time.Second},
+	)
+
+	drivers := map[string]execution.ExecutionDriver{"host-process": hostDriver}
+	openControl := func(ctx context.Context, serverID string) (execution.ServerControl, error) {
+		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID))
+	}
+	return instancemanager.New(drivers, wc.ScratchDir, openControl).WithLogger(logger)
 }
 
 // newLogger builds the structured logger from the log configuration. Secrets are

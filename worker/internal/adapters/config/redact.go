@@ -31,6 +31,7 @@ func (c Config) LogValue() slog.Value {
 			slog.Any("drivers", c.Worker.Drivers),
 			slog.Uint64("max_servers", uint64(c.Worker.MaxServers)),
 			slog.String("scratch_dir", c.Worker.ScratchDir),
+			slog.Any("java_runtimes", c.Worker.Java.Runtimes),
 		),
 		slog.Group("log",
 			slog.String("level", c.Log.Level),
