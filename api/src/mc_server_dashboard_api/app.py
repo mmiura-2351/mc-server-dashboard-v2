@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from mc_server_dashboard_api.config import Settings, load_settings
 from mc_server_dashboard_api.core.adapters.database import create_engine
 from mc_server_dashboard_api.core.api import health
+from mc_server_dashboard_api.identity.api import users
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.middleware import correlation_id_middleware
 
@@ -41,6 +42,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_engine(settings.database.url)
         app.state.engine = engine
+        app.state.settings = settings
         logging.getLogger(__name__).info(
             "api starting", extra={"config": settings.masked_dump()}
         )
@@ -52,4 +54,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="mc-server-dashboard API", lifespan=lifespan)
     app.middleware("http")(correlation_id_middleware)
     app.include_router(health.router)
+    app.include_router(users.router)
     return app

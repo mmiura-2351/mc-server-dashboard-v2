@@ -10,13 +10,24 @@ from __future__ import annotations
 
 from types import TracebackType
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from mc_server_dashboard_api.identity.adapters.repositories import (
     SqlAlchemyRefreshTokenRepository,
     SqlAlchemyUserRepository,
 )
+from mc_server_dashboard_api.identity.domain.errors import (
+    EmailAlreadyExistsError,
+    UsernameAlreadyExistsError,
+)
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
+
+# Unique constraints/indexes on ``user`` (migration 0002) mapped to the domain
+# error to raise when a concurrent insert violates them, so the duplicate race
+# surfaces as the same error as the use case's pre-check.
+_USERNAME_CONSTRAINTS = frozenset({"uq_user_username", "uq_user_username_lower"})
+_EMAIL_CONSTRAINTS = frozenset({"uq_user_email"})
 
 
 class SqlAlchemyUnitOfWork(UnitOfWork):
@@ -47,8 +58,39 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
 
     async def commit(self) -> None:
         assert self._session is not None
-        await self._session.commit()
+        try:
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            _translate_integrity_error(exc)
+            raise
 
     async def rollback(self) -> None:
         assert self._session is not None
         await self._session.rollback()
+
+
+def _translate_integrity_error(exc: IntegrityError) -> None:
+    """Raise the matching domain error for a known unique violation, else return.
+
+    The constraint name lives on the asyncpg ``UniqueViolationError`` underneath
+    the SQLAlchemy wrapper (``exc.orig`` is the DBAPI shim; its ``__cause__`` is
+    the asyncpg error). An unrecognised violation is left to the caller to
+    re-raise as-is.
+    """
+
+    constraint = _constraint_name(exc)
+    if constraint in _USERNAME_CONSTRAINTS:
+        raise UsernameAlreadyExistsError(str(constraint)) from exc
+    if constraint in _EMAIL_CONSTRAINTS:
+        raise EmailAlreadyExistsError(str(constraint)) from exc
+
+
+def _constraint_name(exc: IntegrityError) -> str | None:
+    """Extract the violated constraint name from the wrapped driver error."""
+
+    for candidate in (exc.orig, getattr(exc.orig, "__cause__", None)):
+        name = getattr(candidate, "constraint_name", None)
+        if name:
+            return str(name)
+    return None

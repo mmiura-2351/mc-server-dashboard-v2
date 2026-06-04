@@ -78,6 +78,37 @@ def test_settings_is_immutable(monkeypatch: pytest.MonkeyPatch) -> None:
         settings.server.http_port = 1234
 
 
+def test_password_policy_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.auth.password.hash == "argon2"
+    assert settings.auth.password.min_length == 12
+    assert settings.auth.password.max_length == 128
+    assert settings.auth.password.require_complexity is True
+    assert settings.auth.password.check_common_list is True
+    assert settings.auth.password.forbid_user_info is True
+    assert settings.auth.password.forbid_simple_patterns is True
+
+
+def test_password_hash_selector_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, '[auth.password]\nhash = "bcrypt"\nmin_length = 10\n')
+    settings = load_settings(config_file=cfg)
+    assert settings.auth.password.hash == "bcrypt"
+    assert settings.auth.password.min_length == 10
+
+
+def test_unknown_password_hash_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, '[auth.password]\nhash = "scrypt"\n')
+    with pytest.raises(ValueError):
+        load_settings(config_file=cfg)
+
+
 def test_unknown_key_in_toml_fails_fast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
