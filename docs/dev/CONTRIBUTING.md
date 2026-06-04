@@ -68,6 +68,10 @@ runs the full `make check` (lint + typecheck + test for both ecosystems).
 - In this monorepo, a PR that changes the `proto/` contract updates `api/` and
   `worker/` together; never merge a contract change that leaves one side
   uncompiled or unimplemented.
+- An intentional contract break carries the `breaking` label, which both drives
+  the release-notes group and skips the buf-breaking CI gate (see
+  [`../../proto/README.md`](../../proto/README.md)); the version bump follows
+  [`RELEASING.md`](RELEASING.md) Section 1.
 - PR descriptions and issues are written in English.
 
 ## 6. Review

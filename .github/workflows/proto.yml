@@ -2,6 +2,11 @@ name: proto
 
 on:
   pull_request:
+    # `labeled`/`unlabeled` are added to the default
+    # opened/synchronize/reopened set so applying or removing the `breaking`
+    # label re-runs this gate (label changes don't re-trigger the workflow by
+    # default). See proto/README.md, breaking-change section.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - "proto/**"
       - "worker/internal/controlplane/**"
@@ -60,7 +65,17 @@ jobs:
       - name: Lint (buf)
         run: make proto-lint
 
+      # Skipped when the PR carries the `breaking` label: that label marks an
+      # intentional contract break that drives a MAJOR (0.x: MINOR) bump per
+      # docs/dev/RELEASING.md Section 1. On push-to-main the expression is false
+      # (no pull_request payload), so the gate still self-compares (harmless).
+      - name: Breaking-change check skipped (breaking label)
+        if: contains(github.event.pull_request.labels.*.name, 'breaking')
+        run: |
+          echo "::notice title=buf-breaking skipped::PR carries the 'breaking' label — intentional contract break, skipping the buf-breaking gate (version bump per docs/dev/RELEASING.md Section 1)."
+
       - name: Breaking-change check (against origin/main)
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'breaking') }}
         run: make proto-breaking
 
       - name: Drift check (regenerate and diff)

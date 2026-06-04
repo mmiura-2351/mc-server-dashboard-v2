@@ -66,13 +66,28 @@ MAJOR version bump per [`../docs/dev/RELEASING.md`](../docs/dev/RELEASING.md)).
 Run it locally from the repo root before pushing:
 
 ```
-make proto-breaking   # needs origin/main fetched (git fetch origin main)
+make proto-breaking   # needs the origin/main tracking ref updated (git fetch origin)
 ```
+
+(`git fetch origin` updates the `origin/main` tracking ref the Make target
+reads; `git fetch origin main` only updates `FETCH_HEAD`.)
 
 It is **not** part of `make check`: `check` is meant to be fast and depend only
 on local state, whereas this needs network/git refs to resolve the baseline.
 The enforced gate is the proto CI workflow (`.github/workflows/proto.yml`),
 which runs `make proto-breaking` on every PR that touches the contract.
+
+#### Intentional breaking changes
+
+A backwards-incompatible contract change is sometimes intended — it drives a
+MAJOR (during `0.x`: MINOR) version bump per
+[`../docs/dev/RELEASING.md`](../docs/dev/RELEASING.md) Section 1. To let such a
+PR land with green CI, apply the `breaking` label to the PR. The same label
+that groups the change under **Breaking Changes** in the release notes also
+skips the buf-breaking gate (the step logs a loud notice saying why). Because
+label changes don't re-trigger PR workflows by default, the proto workflow
+listens for `labeled`/`unlabeled` events, so applying the label re-runs the
+gate — which then skips.
 
 ## Regeneration
 
