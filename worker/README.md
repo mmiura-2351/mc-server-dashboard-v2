@@ -85,7 +85,7 @@ underscores, e.g. `api.grpc_endpoint` → `MCD_WORKER_API_GRPC_ENDPOINT`.
 | `api.tls.ca_file` | `MCD_WORKER_API_TLS_CA_FILE` | yes¹ | CA bundle verifying the API's TLS. |
 | `api.tls.insecure` | `MCD_WORKER_API_TLS_INSECURE` | no | `true` opts in to a plaintext (no-TLS) dial for local dev; default `false`. |
 | `api.tls.client_cert_file` / `api.tls.client_key_file` | `…_CLIENT_CERT_FILE` / `…_CLIENT_KEY_FILE` | no | mTLS client cert/key pair. |
-| `worker.id` | `MCD_WORKER_WORKER_ID` | no | Registration id; defaults to the host name. |
+| `worker.id` | `MCD_WORKER_WORKER_ID` | no | Registration id; **must be a UUID** (the API rejects a non-UUID id with `INVALID_ARGUMENT`). Defaults to the host name, so set this explicitly unless the host name is a UUID. |
 | `worker.drivers` | `MCD_WORKER_WORKER_DRIVERS` | no | Comma-separated `host-process` / `container`; default `host-process`. |
 | `worker.max_servers` | `MCD_WORKER_WORKER_MAX_SERVERS` | no | Capacity hint; default `0` (no cap). |
 | `worker.scratch_dir` | `MCD_WORKER_WORKER_SCRATCH_DIR` | yes | Local working-set root. |

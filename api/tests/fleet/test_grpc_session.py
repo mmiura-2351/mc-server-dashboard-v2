@@ -41,9 +41,12 @@ from tests.fleet.fakes import (
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _TIMEOUT = dt.timedelta(seconds=30)
 _CREDENTIAL = "shared-worker-secret"
+# The API persists assigned_worker_id as a UUID column, so a Worker must
+# register with a UUID-format id (CONFIGURATION.md Section 6.1, issue #99).
+_WORKER_ID = "22222222-2222-2222-2222-222222222222"
 
 
-def _register_message() -> pb.WorkerMessage:
+def _register_message(worker_id: str = _WORKER_ID) -> pb.WorkerMessage:
     caps = pb.WorkerCapabilities(
         drivers=[pb.EXECUTION_DRIVER_KIND_HOST_PROCESS],
         max_servers=4,
@@ -52,7 +55,7 @@ def _register_message() -> pb.WorkerMessage:
     return pb.WorkerMessage(
         correlation_id="reg-1",
         register=pb.Register(
-            worker_id="worker-1", worker_version="1.0.0", capabilities=caps
+            worker_id=worker_id, worker_version="1.0.0", capabilities=caps
         ),
     )
 
@@ -170,6 +173,20 @@ async def test_non_register_first_message_is_rejected(harness: _Harness) -> None
     assert exc.value.code() == grpc.StatusCode.FAILED_PRECONDITION
 
 
+async def test_non_uuid_worker_id_is_rejected(harness: _Harness) -> None:
+    # assigned_worker_id is a UUID column, so a non-UUID worker id is rejected
+    # at registration (issue #99) instead of silently breaking downstream.
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message(worker_id="worker-1"))
+
+    with pytest.raises(aio.AioRpcError) as exc:
+        await call.read()
+    assert exc.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert "uuid" in exc.value.details().lower()
+    assert harness.registry.list_workers() == []
+
+
 async def test_heartbeat_refreshes_liveness(harness: _Harness) -> None:
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))
@@ -207,7 +224,7 @@ async def test_disconnect_marks_offline(harness: _Harness) -> None:
 async def test_stale_session_teardown_keeps_reconnected_worker_online(
     harness: _Harness,
 ) -> None:
-    # Session A registers worker-1; a real client reconnect (PR #84 backoff)
+    # Session A registers the worker; a real client reconnect (PR #84 backoff)
     # re-registers the same id on Session B while A's teardown is still pending.
     stub = await harness.start()
     call_a = stub.Session(metadata=_auth(_CREDENTIAL))
@@ -250,7 +267,7 @@ async def test_status_change_reconciles_observed_state(harness: _Harness) -> Non
             break
         await __import__("asyncio").sleep(0.01)
 
-    assert harness.state_sink.observed == [(server_id, "worker-1", "running")]
+    assert harness.state_sink.observed == [(server_id, _WORKER_ID, "running")]
     await call.done_writing()
 
 
@@ -264,13 +281,13 @@ async def test_disconnect_marks_worker_servers_unknown(harness: _Harness) -> Non
     while await call.read() is not aio.EOF:
         pass
 
-    assert harness.state_sink.unknown_for == ["worker-1"]
+    assert harness.state_sink.unknown_for == [_WORKER_ID]
 
 
 async def test_reregister_rebuilds_assignment_count_from_tally() -> None:
     # The Worker is reported (via the authoritative tally) to be running 2 servers;
     # on (re)register the registry must rebuild its load to 2, not the reset 0.
-    sink = FakeServerStateSink(running_counts={"worker-1": 2})
+    sink = FakeServerStateSink(running_counts={_WORKER_ID: 2})
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
         FakeClock(_T0),
@@ -288,7 +305,7 @@ async def test_reregister_rebuilds_assignment_count_from_tally() -> None:
                 break
             await __import__("asyncio").sleep(0.01)
 
-        assert sink.counted_for == ["worker-1"]
+        assert sink.counted_for == [_WORKER_ID]
         assert h.registry.list_workers()[0].assigned_count == 2
         await call.done_writing()
     finally:

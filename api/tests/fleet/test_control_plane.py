@@ -55,7 +55,9 @@ from tests.fleet.fakes import (
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _TIMEOUT = dt.timedelta(seconds=30)
 _CREDENTIAL = "shared-worker-secret"
-_WORKER = "worker-1"
+# Registers through the real gRPC servicer, which requires a UUID worker id
+# (issue #99); the fleet WorkerId value object itself stays free-form.
+_WORKER = "22222222-2222-2222-2222-222222222222"
 
 
 def _register_message() -> pb.WorkerMessage:
