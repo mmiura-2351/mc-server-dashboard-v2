@@ -178,6 +178,9 @@ class FakeAuthzUnitOfWork(UnitOfWork):
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         return None
 
+    async def flush(self) -> None:
+        return None
+
     async def commit(self) -> None:
         self.commits += 1
 

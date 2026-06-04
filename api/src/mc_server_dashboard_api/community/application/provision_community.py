@@ -85,6 +85,10 @@ class ProvisionCommunity:
             await self.uow.communities.add(community)
             await self.uow.roles.add(owner_role)
             await self.uow.memberships.add(membership)
+            # Flush so the role/membership rows exist before the membership_role
+            # row that FKs them is staged (the join has no ORM relationship to
+            # order the inserts). Still one transaction — commit makes it durable.
+            await self.uow.flush()
             await self.uow.memberships.assign_role(membership.id, owner_role.id)
             await self.uow.commit()
         return community
