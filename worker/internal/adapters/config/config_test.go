@@ -45,6 +45,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.Driver.Container.GameBindIP != "127.0.0.1" {
 		t.Errorf("Driver.Container.GameBindIP = %q, want default 127.0.0.1", cfg.Driver.Container.GameBindIP)
 	}
+	if cfg.Driver.Container.Network != "" {
+		t.Errorf("Driver.Container.Network = %q, want default empty", cfg.Driver.Container.Network)
+	}
 }
 
 func TestLoadFailsFastOnMissingRequired(t *testing.T) {
@@ -398,6 +401,62 @@ func TestLoadGameBindIPFromEnv(t *testing.T) {
 	}
 	if cfg.Driver.Container.GameBindIP != "0.0.0.0" {
 		t.Fatalf("GameBindIP = %q, want 0.0.0.0 from env", cfg.Driver.Container.GameBindIP)
+	}
+}
+
+func TestLoadNetworkFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "worker.toml")
+	body := `
+[api]
+grpc_endpoint = "api:50051"
+data_plane_url = "https://api/data"
+credential = "secret"
+
+[api.tls]
+insecure = true
+
+[worker]
+scratch_dir = "` + t.TempDir() + `"
+drivers = ["container"]
+
+[driver.container]
+network = "mcsd"
+
+[driver.container.images]
+21 = "eclipse-temurin:21-jre"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path, emptyEnv)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Driver.Container.Network != "mcsd" {
+		t.Fatalf("Network = %q, want mcsd from file", cfg.Driver.Container.Network)
+	}
+}
+
+func TestLoadNetworkFromEnv(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":        "api:50051",
+		"MCD_WORKER_API_DATA_PLANE_URL":       "https://api/data",
+		"MCD_WORKER_API_CREDENTIAL":           "secret",
+		"MCD_WORKER_API_TLS_INSECURE":         "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":       t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":           "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":  "21=eclipse-temurin:21-jre",
+		"MCD_WORKER_DRIVER_CONTAINER_NETWORK": "mcsd",
+	})
+
+	cfg, err := Load("", env)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Driver.Container.Network != "mcsd" {
+		t.Fatalf("Network = %q, want mcsd from env", cfg.Driver.Container.Network)
 	}
 }
 

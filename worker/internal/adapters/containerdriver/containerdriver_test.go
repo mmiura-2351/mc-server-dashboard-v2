@@ -233,7 +233,7 @@ func images() *ImageSelector {
 }
 
 func newTestDriver(docker *fakeDocker, ctrl execution.ServerControl, ctrlErr error) *Driver {
-	return New(docker, images(), func(context.Context, execution.InstanceSpec) (execution.ServerControl, error) {
+	return New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 		return ctrl, ctrlErr
 	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, GameBindIP: "0.0.0.0"})
 }
@@ -334,6 +334,91 @@ func TestStartGamePortBindIP(t *testing.T) {
 	if rcon.HostIP != "127.0.0.1" {
 		t.Errorf("rcon HostIP = %q, want loopback 127.0.0.1", rcon.HostIP)
 	}
+}
+
+// When driver.container.network is unset the driver attaches no network and
+// publishes RCON on the host loopback (current behavior); RconHost is empty so
+// the RCON dial falls back to loopback.
+func TestStartNoNetworkPublishesRCON(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	if _, err := d.Start(context.Background(), spec()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if docker.createSpec.Network != "" {
+		t.Errorf("Network = %q, want empty when unset", docker.createSpec.Network)
+	}
+	if !hasPort(docker.createSpec.Ports, defaultRCONPort) {
+		t.Errorf("Ports = %v, want an RCON publication when no network", docker.createSpec.Ports)
+	}
+	if got := d.RconHost("s1"); got != "" {
+		t.Errorf("RconHost = %q, want empty (loopback) when no network", got)
+	}
+}
+
+// When driver.container.network is set the driver attaches the container to that
+// network, DROPS the RCON host publication (RCON never leaves the docker
+// network), keeps the game-port publication, and surfaces the RCON dial host as
+// the container name (issue #218).
+func TestStartWithNetworkDropsRCONPublication(t *testing.T) {
+	docker := newFakeDocker()
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, GameBindIP: "0.0.0.0", Network: "mcsd"})
+
+	if _, err := d.Start(context.Background(), spec()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if docker.createSpec.Network != "mcsd" {
+		t.Errorf("Network = %q, want mcsd", docker.createSpec.Network)
+	}
+	if hasPort(docker.createSpec.Ports, defaultRCONPort) {
+		t.Errorf("Ports = %v, want NO RCON publication when network is set", docker.createSpec.Ports)
+	}
+	if !hasPort(docker.createSpec.Ports, defaultGamePort) {
+		t.Errorf("Ports = %v, want the game-port publication kept", docker.createSpec.Ports)
+	}
+	if got := d.RconHost("s1"); got != "mcsd-s1" {
+		t.Errorf("RconHost = %q, want container name mcsd-s1", got)
+	}
+}
+
+// A graceful stop with a network configured opens RCON at the container name, not
+// the loopback, so the in-band stop reaches the MC container across the network.
+func TestGracefulStopUsesContainerRconHost(t *testing.T) {
+	docker := newFakeDocker()
+	var gotHost string
+	d := New(docker, images(), func(_ context.Context, _ execution.InstanceSpec, rconHost string) (execution.ServerControl, error) {
+		gotHost = rconHost
+		return &fakeControl{}, nil
+	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, Network: "mcsd"})
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+	go drainClosed(inst.Events())
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if gotHost != "mcsd-s1" {
+		t.Errorf("graceful-stop rcon host = %q, want mcsd-s1", gotHost)
+	}
+}
+
+// hasPort reports whether ports publishes the given container port.
+func hasPort(ports []PortMapping, containerPort string) bool {
+	for _, p := range ports {
+		if p.ContainerPort == containerPort {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCrashEmitsCrashed(t *testing.T) {
@@ -540,7 +625,7 @@ func TestStopOnCrashedIsPromptNoOp(t *testing.T) {
 func TestStartImageSelectFailure(t *testing.T) {
 	docker := newFakeDocker()
 	// No image configured for the version's Java major.
-	d := New(docker, NewImageSelector(map[int]string{8: "old"}), func(context.Context, execution.InstanceSpec) (execution.ServerControl, error) {
+	d := New(docker, NewImageSelector(map[int]string{8: "old"}), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 		return nil, errors.New("no rcon")
 	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond})
 

@@ -111,6 +111,55 @@ func TestEngineClientCreateEncodesSpec(t *testing.T) {
 	}
 }
 
+// A configured network is encoded as a NetworkingConfig endpoint so the daemon
+// attaches the container to that user-defined network at create time (issue
+// #218). An empty network omits it, keeping the default bridge.
+func TestEngineClientCreateEncodesNetwork(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
+	})
+	c := d.client(t)
+
+	if _, err := c.Create(context.Background(), CreateSpec{
+		Name:    "mcsd-s1",
+		Image:   "eclipse-temurin:21-jre",
+		Network: "mcsd",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var body createBody
+	if err := json.Unmarshal([]byte(d.requests[0].body), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.NetworkingConfig == nil {
+		t.Fatal("NetworkingConfig = nil, want mcsd endpoint")
+	}
+	if _, ok := body.NetworkingConfig.EndpointsConfig["mcsd"]; !ok {
+		t.Fatalf("EndpointsConfig = %v, want an mcsd endpoint", body.NetworkingConfig.EndpointsConfig)
+	}
+}
+
+// An empty network omits NetworkingConfig entirely, preserving the default-bridge
+// behavior.
+func TestEngineClientCreateOmitsNetworkWhenEmpty(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
+	})
+	c := d.client(t)
+
+	if _, err := c.Create(context.Background(), CreateSpec{Name: "mcsd-s1", Image: "img"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var body createBody
+	if err := json.Unmarshal([]byte(d.requests[0].body), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.NetworkingConfig != nil {
+		t.Fatalf("NetworkingConfig = %v, want nil when no network configured", body.NetworkingConfig)
+	}
+}
+
 func TestEngineClientWaitDecodesStatusCode(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]int{"StatusCode": 137})

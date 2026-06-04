@@ -118,6 +118,15 @@ type ContainerConfig struct {
 	// historical behavior); set 0.0.0.0 to accept players from outside the host.
 	// RCON always stays on loopback regardless of this value.
 	GameBindIP string
+	// Network is the user-defined Docker network the driver attaches each MC
+	// container to. Empty (the default) keeps the historical behavior: containers
+	// run on the default bridge and RCON is published to the host loopback. When
+	// set — the shipped compose topology, where the Worker itself is a container —
+	// the driver attaches MC containers to this network, drops the host RCON
+	// publication, and dials RCON at the container's name on the network (the
+	// network's container-name DNS resolves it). The game-port publication is
+	// unchanged either way.
+	Network string
 }
 
 // LogConfig is the observability surface (CONFIGURATION.md Section 6.4).
@@ -157,6 +166,7 @@ type fileConfig struct {
 		Container struct {
 			DockerHost *string `toml:"docker_host"`
 			GameBindIP *string `toml:"game_bind_ip"`
+			Network    *string `toml:"network"`
 			// Images maps a Java major (string key, e.g. "21") to the base image
 			// ref. TOML table keys are strings; they are parsed to ints.
 			Images map[string]string `toml:"images"`
@@ -261,6 +271,7 @@ func applyFile(cfg *Config, path string) error {
 	}
 	setString(&cfg.Driver.Container.DockerHost, fc.Driver.Container.DockerHost)
 	setString(&cfg.Driver.Container.GameBindIP, fc.Driver.Container.GameBindIP)
+	setString(&cfg.Driver.Container.Network, fc.Driver.Container.Network)
 	if fc.Driver.Container.Images != nil {
 		images, err := parseMajorMap("driver.container.images", fc.Driver.Container.Images)
 		if err != nil {
@@ -325,6 +336,7 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 
 	setEnvString(&cfg.Driver.Container.DockerHost, getenv, "DRIVER_CONTAINER_DOCKER_HOST")
 	setEnvString(&cfg.Driver.Container.GameBindIP, getenv, "DRIVER_CONTAINER_GAME_BIND_IP")
+	setEnvString(&cfg.Driver.Container.Network, getenv, "DRIVER_CONTAINER_NETWORK")
 
 	// DRIVER_CONTAINER_IMAGES is a comma-separated list of major=image pairs, e.g.
 	// "17=eclipse-temurin:17-jre,21=eclipse-temurin:21-jre".

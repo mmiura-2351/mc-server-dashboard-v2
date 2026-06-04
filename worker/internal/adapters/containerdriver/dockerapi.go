@@ -75,6 +75,9 @@ type CreateSpec struct {
 	Binds []string
 	// Ports are the container→host port publications.
 	Ports []PortMapping
+	// Network is the user-defined Docker network the container attaches to. Empty
+	// leaves the container on the default bridge (issue #218).
+	Network string
 	// Labels are attached for identification and the orphan sweep.
 	Labels map[string]string
 }
