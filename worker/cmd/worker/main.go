@@ -79,6 +79,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	manager.WithMetrics(sysClock, time.Duration(cfg.Worker.MetricsIntervalSeconds)*time.Second)
 	transferClient, err := buildTransferClient(cfg.API)
 	if err != nil {
 		return err

@@ -174,8 +174,12 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 	}()
 
 	var events <-chan StatusEvent
+	var logs <-chan LogEvent
+	var metrics <-chan MetricsEvent
 	if r.handler != nil {
 		events = r.handler.Events()
+		logs = r.handler.Logs()
+		metrics = r.handler.Metrics()
 	}
 
 	for {
@@ -191,6 +195,14 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 		case event := <-events:
 			if err := transport.SendStatusChange(serveCtx, event); err != nil {
 				return fmt.Errorf("send status change: %w", err)
+			}
+		case logEvent := <-logs:
+			if err := transport.SendLogLine(serveCtx, logEvent); err != nil {
+				return fmt.Errorf("send log line: %w", err)
+			}
+		case metricsEvent := <-metrics:
+			if err := transport.SendMetrics(serveCtx, metricsEvent); err != nil {
+				return fmt.Errorf("send metrics: %w", err)
 			}
 		case <-r.clock.After(interval):
 			if err := transport.SendHeartbeat(serveCtx); err != nil {

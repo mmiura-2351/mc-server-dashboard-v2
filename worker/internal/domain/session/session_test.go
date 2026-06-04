@@ -301,7 +301,9 @@ func (h *blockingHandler) Handle(ctx context.Context, cmd Command) CommandResult
 	return CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-func (h *blockingHandler) Events() <-chan StatusEvent { return h.events }
+func (h *blockingHandler) Events() <-chan StatusEvent   { return h.events }
+func (h *blockingHandler) Logs() <-chan LogEvent        { return nil }
+func (h *blockingHandler) Metrics() <-chan MetricsEvent { return nil }
 
 // A slow snapshot for one server must not block a fast command (e.g. a stop of
 // another server) — the long-running transfer runs off the serial receive loop
@@ -378,6 +380,66 @@ func TestStatusEventsForwardedAsStatusChange(t *testing.T) {
 	got := transport.statusesCopy()[0]
 	if got.ServerID != "srv-1" || got.State != "running" {
 		t.Fatalf("forwarded status = %+v, want srv-1 running", got)
+	}
+
+	cancel()
+	<-done
+}
+
+func TestLogEventsForwardedAsLogLine(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool {
+		transport.mu.Lock()
+		defer transport.mu.Unlock()
+		return transport.registers == 1
+	})
+
+	handler.logs <- LogEvent{ServerID: "srv-1", Line: "hello", Stream: LogStreamStderr}
+
+	waitFor(t, func() bool { return len(transport.logLinesCopy()) == 1 })
+	got := transport.logLinesCopy()[0]
+	if got.ServerID != "srv-1" || got.Line != "hello" || got.Stream != LogStreamStderr {
+		t.Fatalf("forwarded log = %+v, want srv-1 hello stderr", got)
+	}
+
+	cancel()
+	<-done
+}
+
+func TestMetricsEventsForwardedAsMetrics(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool {
+		transport.mu.Lock()
+		defer transport.mu.Unlock()
+		return transport.registers == 1
+	})
+
+	handler.metrics <- MetricsEvent{ServerID: "srv-1", CPUMillis: 250, MemoryBytes: 4096}
+
+	waitFor(t, func() bool { return len(transport.metricsCopy()) == 1 })
+	got := transport.metricsCopy()[0]
+	if got.ServerID != "srv-1" || got.CPUMillis != 250 || got.MemoryBytes != 4096 {
+		t.Fatalf("forwarded metrics = %+v", got)
 	}
 
 	cancel()

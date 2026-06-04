@@ -166,6 +166,49 @@ func (t *transport) SendStatusChange(_ context.Context, event session.StatusEven
 	return nil
 }
 
+func (t *transport) SendLogLine(_ context.Context, event session.LogEvent) error {
+	msg := &controlplanev1.WorkerMessage{
+		EmittedAt: timestamppb.New(t.clock.Now()),
+		Payload: &controlplanev1.WorkerMessage_Event{
+			Event: &controlplanev1.Event{
+				ServerId: event.ServerID,
+				Event: &controlplanev1.Event_LogLine{
+					LogLine: &controlplanev1.LogLine{
+						Line:   event.Line,
+						Stream: mapLogStream(event.Stream),
+					},
+				},
+			},
+		},
+	}
+	if err := t.stream.Send(msg); err != nil {
+		return fmt.Errorf("controlplane: send log line: %w", err)
+	}
+	return nil
+}
+
+func (t *transport) SendMetrics(_ context.Context, event session.MetricsEvent) error {
+	msg := &controlplanev1.WorkerMessage{
+		EmittedAt: timestamppb.New(t.clock.Now()),
+		Payload: &controlplanev1.WorkerMessage_Event{
+			Event: &controlplanev1.Event{
+				ServerId: event.ServerID,
+				Event: &controlplanev1.Event_Metrics{
+					Metrics: &controlplanev1.Metrics{
+						CpuMillis:   event.CPUMillis,
+						MemoryBytes: event.MemoryBytes,
+						PlayerCount: event.PlayerCount,
+					},
+				},
+			},
+		},
+	}
+	if err := t.stream.Send(msg); err != nil {
+		return fmt.Errorf("controlplane: send metrics: %w", err)
+	}
+	return nil
+}
+
 func (t *transport) RecvCommand(_ context.Context) (session.Command, error) {
 	for {
 		msg, err := t.recvClassified()
@@ -266,6 +309,16 @@ func mapServerState(state string) controlplanev1.ServerState {
 		return controlplanev1.ServerState_SERVER_STATE_CRASHED
 	default:
 		return controlplanev1.ServerState_SERVER_STATE_UNSPECIFIED
+	}
+}
+
+// mapLogStream translates a domain log stream to the wire LogStream enum.
+func mapLogStream(stream session.LogStream) controlplanev1.LogStream {
+	switch stream {
+	case session.LogStreamStderr:
+		return controlplanev1.LogStream_LOG_STREAM_STDERR
+	default:
+		return controlplanev1.LogStream_LOG_STREAM_STDOUT
 	}
 }
 

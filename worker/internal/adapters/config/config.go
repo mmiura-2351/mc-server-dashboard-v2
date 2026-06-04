@@ -77,6 +77,9 @@ type WorkerConfig struct {
 	MaxServers uint32
 	// ScratchDir is the local working-set root.
 	ScratchDir string
+	// MetricsIntervalSeconds is the cadence for periodic per-server Metrics events
+	// (FR-MON-3). 0 keeps the in-code default.
+	MetricsIntervalSeconds uint32
 	// Java holds the Java-runtime selection inputs.
 	Java JavaConfig
 }
@@ -131,11 +134,12 @@ type fileConfig struct {
 		} `toml:"tls"`
 	} `toml:"api"`
 	Worker struct {
-		ID         *string  `toml:"id"`
-		Drivers    []string `toml:"drivers"`
-		MaxServers *uint32  `toml:"max_servers"`
-		ScratchDir *string  `toml:"scratch_dir"`
-		Java       struct {
+		ID                     *string  `toml:"id"`
+		Drivers                []string `toml:"drivers"`
+		MaxServers             *uint32  `toml:"max_servers"`
+		ScratchDir             *string  `toml:"scratch_dir"`
+		MetricsIntervalSeconds *uint32  `toml:"metrics_interval_seconds"`
+		Java                   struct {
 			// Runtimes maps a Java major (as a string key, e.g. "21") to the java
 			// binary path. TOML table keys are strings; they are parsed to ints.
 			Runtimes map[string]string `toml:"runtimes"`
@@ -230,6 +234,9 @@ func applyFile(cfg *Config, path string) error {
 	if fc.Worker.MaxServers != nil {
 		cfg.Worker.MaxServers = *fc.Worker.MaxServers
 	}
+	if fc.Worker.MetricsIntervalSeconds != nil {
+		cfg.Worker.MetricsIntervalSeconds = *fc.Worker.MetricsIntervalSeconds
+	}
 	setString(&cfg.Worker.ScratchDir, fc.Worker.ScratchDir)
 	if fc.Worker.Java.Runtimes != nil {
 		runtimes, err := parseMajorMap("worker.java.runtimes", fc.Worker.Java.Runtimes)
@@ -282,6 +289,13 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 			return fmt.Errorf("config: %sWORKER_MAX_SERVERS: %w", EnvPrefix, err)
 		}
 		cfg.Worker.MaxServers = uint32(n)
+	}
+	if v := getenv(EnvPrefix + "WORKER_METRICS_INTERVAL_SECONDS"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return fmt.Errorf("config: %sWORKER_METRICS_INTERVAL_SECONDS: %w", EnvPrefix, err)
+		}
+		cfg.Worker.MetricsIntervalSeconds = uint32(n)
 	}
 
 	// WORKER_JAVA_RUNTIMES is a comma-separated list of major=path pairs, e.g.

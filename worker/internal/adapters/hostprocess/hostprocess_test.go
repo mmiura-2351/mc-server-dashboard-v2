@@ -3,7 +3,9 @@ package hostprocess
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -22,11 +24,33 @@ type fakeProcess struct {
 	killed    bool
 	startErr  error
 	startedAt bool
+	stdout    io.Reader
+	stderr    io.Reader
 }
 
 func newFakeProcess() *fakeProcess {
-	return &fakeProcess{done: make(chan struct{})}
+	return &fakeProcess{
+		done:   make(chan struct{}),
+		stdout: strings.NewReader(""),
+		stderr: strings.NewReader(""),
+	}
 }
+
+func (p *fakeProcess) Stdout() io.Reader {
+	if p.stdout == nil {
+		return strings.NewReader("")
+	}
+	return p.stdout
+}
+
+func (p *fakeProcess) Stderr() io.Reader {
+	if p.stderr == nil {
+		return strings.NewReader("")
+	}
+	return p.stderr
+}
+
+func (p *fakeProcess) Pid() int { return 0 }
 
 func (p *fakeProcess) Wait() error {
 	<-p.done
@@ -322,6 +346,68 @@ func TestStartSpawnFailure(t *testing.T) {
 	_, err := d.Start(context.Background(), spec())
 	if err == nil {
 		t.Fatal("expected Start to fail when spawn fails")
+	}
+}
+
+// Captured stdout/stderr flow through to the Logs() stream as LogEvents tagged
+// with the originating stream; the log channel closes when the process exits.
+func TestLogCaptureFlowsToLogs(t *testing.T) {
+	proc := newFakeProcess()
+	proc.stdout = strings.NewReader("hello world\nsecond line\n")
+	proc.stderr = strings.NewReader("a warning\n")
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	src, ok := inst.(execution.LogSource)
+	if !ok {
+		t.Fatal("host-process instance should be a LogSource")
+	}
+
+	// The readers reach EOF immediately; exit the process so supervise closes the
+	// log pump after the scan goroutines drain.
+	proc.exit(nil)
+
+	var stdout, stderr []string
+	for ev := range src.Logs() {
+		if ev.ServerID != "s1" {
+			t.Fatalf("ServerID = %q", ev.ServerID)
+		}
+		switch ev.Stream {
+		case execution.LogStreamStdout:
+			stdout = append(stdout, ev.Line)
+		case execution.LogStreamStderr:
+			stderr = append(stderr, ev.Line)
+		}
+	}
+	if len(stdout) != 2 || stdout[0] != "hello world" || stdout[1] != "second line" {
+		t.Fatalf("stdout lines = %v", stdout)
+	}
+	if len(stderr) != 1 || stderr[0] != "a warning" {
+		t.Fatalf("stderr lines = %v", stderr)
+	}
+}
+
+// Sample errors for a non-existent pid; the manager treats this as "no
+// measurement" and emits an up-only sample. (Pid 0 / process-less fake has no
+// /proc entry.)
+func TestSampleErrorsForUnknownPid(t *testing.T) {
+	proc := newFakeProcess()
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer proc.exit(nil)
+
+	stats, ok := inst.(execution.StatsSource)
+	if !ok {
+		t.Fatal("host-process instance should be a StatsSource")
+	}
+	if _, err := stats.Sample(context.Background()); err == nil {
+		t.Fatal("expected Sample to error for an unknown pid")
 	}
 }
 

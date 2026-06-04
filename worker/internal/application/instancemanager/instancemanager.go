@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -44,6 +45,19 @@ type Transfer interface {
 	Snapshot(ctx context.Context, url, token, workingDir string) error
 }
 
+// systemClock is the default wall-clock used for the metrics ticker when
+// WithMetrics injects no other clock. It satisfies session.Clock with stdlib
+// time so the application layer stays adapter-free (ARCHITECTURE.md Section 2).
+type systemClock struct{}
+
+func (systemClock) Now() time.Time                         { return time.Now() }
+func (systemClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
+// defaultMetricsInterval is the metrics-sampling cadence when WithMetrics is not
+// wired (or given a non-positive interval). It mirrors a typical heartbeat
+// cadence so a server's resource picture stays roughly fresh (FR-MON-3).
+const defaultMetricsInterval = 15 * time.Second
+
 // Manager tracks running instances and dispatches commands to their drivers.
 type Manager struct {
 	drivers     map[string]execution.ExecutionDriver
@@ -52,6 +66,9 @@ type Manager struct {
 	transfer    Transfer
 	logger      *slog.Logger
 
+	clock           session.Clock
+	metricsInterval time.Duration
+
 	mu        sync.Mutex
 	instances map[string]execution.Instance
 	// startCmds remembers the StartServer command per running server so a
@@ -59,9 +76,11 @@ type Manager struct {
 	// spec.
 	startCmds map[string]session.Command
 
-	// events is the merged status stream the session forwards. Per-instance
-	// event pumps fan their events into it.
-	events chan session.StatusEvent
+	// events/logs/metrics are the merged streams the session forwards. Per-instance
+	// pumps fan their events into them (FR-MON-2, FR-MON-3).
+	events  chan session.StatusEvent
+	logs    chan session.LogEvent
+	metrics chan session.MetricsEvent
 }
 
 // New builds a Manager. drivers maps an advertised driver name to its adapter;
@@ -69,13 +88,17 @@ type Manager struct {
 // for ServerCommand forwarding.
 func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openControl controlFunc) *Manager {
 	return &Manager{
-		drivers:     drivers,
-		scratchDir:  scratchDir,
-		openControl: openControl,
-		logger:      slog.Default(),
-		instances:   map[string]execution.Instance{},
-		startCmds:   map[string]session.Command{},
-		events:      make(chan session.StatusEvent, 32),
+		drivers:         drivers,
+		scratchDir:      scratchDir,
+		openControl:     openControl,
+		logger:          slog.Default(),
+		clock:           systemClock{},
+		metricsInterval: defaultMetricsInterval,
+		instances:       map[string]execution.Instance{},
+		startCmds:       map[string]session.Command{},
+		events:          make(chan session.StatusEvent, 32),
+		logs:            make(chan session.LogEvent, 256),
+		metrics:         make(chan session.MetricsEvent, 32),
 	}
 }
 
@@ -92,8 +115,25 @@ func (m *Manager) WithTransfer(t Transfer) *Manager {
 	return m
 }
 
+// WithMetrics sets the clock and sampling interval for periodic Metrics events
+// (FR-MON-3, worker.metrics_interval_seconds). A non-positive interval keeps the
+// default; the clock is injectable for deterministic tests.
+func (m *Manager) WithMetrics(clock session.Clock, interval time.Duration) *Manager {
+	m.clock = clock
+	if interval > 0 {
+		m.metricsInterval = interval
+	}
+	return m
+}
+
 // Events streams observed state transitions for all managed servers.
 func (m *Manager) Events() <-chan session.StatusEvent { return m.events }
+
+// Logs streams captured console output for all managed servers (FR-MON-2).
+func (m *Manager) Logs() <-chan session.LogEvent { return m.logs }
+
+// Metrics streams periodic runtime samples for all running servers (FR-MON-3).
+func (m *Manager) Metrics() <-chan session.MetricsEvent { return m.metrics }
 
 // Handle dispatches one command (session.CommandHandler).
 func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.CommandResult {
@@ -220,9 +260,24 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 	m.instances[cmd.ServerID] = inst
 	m.startCmds[cmd.ServerID] = cmd
 	m.mu.Unlock()
-	go m.pump(cmd.ServerID, inst)
+	m.startPumps(cmd.ServerID, inst)
 
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// startPumps launches the per-instance fan-in goroutines for an instance:
+// status events, captured logs (if the instance is a LogSource), and periodic
+// metrics (always; up-only when the instance is not a StatsSource). The status
+// pump owns a done channel it closes when the instance reaches a terminal state;
+// the log and metrics pumps watch it so all three tear down cleanly on
+// stop/crash/eviction without leaking goroutines (FR-MON-2, FR-MON-3).
+func (m *Manager) startPumps(serverID string, inst execution.Instance) {
+	done := make(chan struct{})
+	go m.pump(serverID, inst, done)
+	if src, ok := inst.(execution.LogSource); ok {
+		go m.logPump(serverID, src)
+	}
+	go m.metricsPump(serverID, inst, done)
 }
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
@@ -540,8 +595,10 @@ func (m *Manager) take(serverID string) (execution.Instance, session.Command, bo
 
 // pump forwards an instance's status events onto the merged stream, mapping the
 // domain state to its wire name. It also forgets a crashed instance so the server
-// id can be started again. It exits when the instance closes its event channel.
-func (m *Manager) pump(serverID string, inst execution.Instance) {
+// id can be started again. It exits when the instance closes its event channel,
+// closing done to release the log/metrics pumps for the same instance.
+func (m *Manager) pump(serverID string, inst execution.Instance, done chan struct{}) {
+	defer close(done)
 	for ev := range inst.Events() {
 		if ev.State == execution.StateCrashed {
 			m.forgetIf(serverID, inst)
@@ -552,6 +609,62 @@ func (m *Manager) pump(serverID string, inst execution.Instance) {
 			m.logger.Warn("dropped status event; sink full", "server_id", serverID, "state", ev.State.String())
 		}
 	}
+}
+
+// logPump forwards an instance's captured log lines onto the merged log stream
+// (FR-MON-2). It exits when the instance closes its log channel (terminal
+// state). Under sink backpressure it drops the line with a warning, consistent
+// with the status-event posture (issue #96); the per-instance LogPump already
+// bounds and marks drops at the capture edge.
+func (m *Manager) logPump(serverID string, src execution.LogSource) {
+	for ev := range src.Logs() {
+		select {
+		case m.logs <- session.LogEvent{ServerID: ev.ServerID, Line: ev.Line, Stream: mapLogStream(ev.Stream)}:
+		default:
+			m.logger.Warn("dropped log line; sink full", "server_id", serverID)
+		}
+	}
+}
+
+// metricsPump samples the instance on the configured interval and forwards a
+// Metrics event per tick until the instance terminates (done closed). When the
+// instance is not a StatsSource, or a sample errors, it emits an up-only sample
+// (server id with zero stats) so the API still learns the server is running
+// (FR-MON-3). A full sink drops the sample with a warning (issue #96 posture).
+func (m *Manager) metricsPump(serverID string, inst execution.Instance, done chan struct{}) {
+	stats, _ := inst.(execution.StatsSource)
+	for {
+		select {
+		case <-done:
+			return
+		case <-m.clock.After(m.metricsInterval):
+		}
+
+		sample := session.MetricsEvent{ServerID: serverID}
+		if stats != nil {
+			if s, err := stats.Sample(context.Background()); err == nil {
+				sample.CPUMillis = s.CPUMillis
+				sample.MemoryBytes = s.MemoryBytes
+				sample.PlayerCount = s.PlayerCount
+			} else {
+				m.logger.Debug("metrics sample failed; emitting up-only", "server_id", serverID, "error", err)
+			}
+		}
+
+		select {
+		case m.metrics <- sample:
+		default:
+			m.logger.Warn("dropped metrics sample; sink full", "server_id", serverID)
+		}
+	}
+}
+
+// mapLogStream maps a domain log stream onto the session log stream.
+func mapLogStream(s execution.LogStream) session.LogStream {
+	if s == execution.LogStreamStderr {
+		return session.LogStreamStderr
+	}
+	return session.LogStreamStdout
 }
 
 // forgetIf removes serverID's instance only if it is still the given inst, so a

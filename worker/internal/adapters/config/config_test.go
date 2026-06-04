@@ -72,6 +72,7 @@ insecure = true
 scratch_dir = "/file/scratch"
 drivers = ["host-process", "container"]
 max_servers = 4
+metrics_interval_seconds = 30
 
 [driver.container.images]
 21 = "eclipse-temurin:21-jre"
@@ -108,6 +109,9 @@ level = "debug"
 	}
 	if cfg.Worker.MaxServers != 4 {
 		t.Errorf("MaxServers = %d, want 4", cfg.Worker.MaxServers)
+	}
+	if cfg.Worker.MetricsIntervalSeconds != 30 {
+		t.Errorf("MetricsIntervalSeconds = %d, want 30 from file", cfg.Worker.MetricsIntervalSeconds)
 	}
 	if len(cfg.Worker.Drivers) != 2 {
 		t.Errorf("Drivers = %v, want two entries", cfg.Worker.Drivers)
@@ -151,6 +155,21 @@ func TestLoadRejectsMalformedMaxServers(t *testing.T) {
 
 	if _, err := Load("", env); err == nil {
 		t.Fatal("Load() with malformed max_servers: want error, got nil")
+	}
+}
+
+func TestLoadRejectsMalformedMetricsInterval(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":               "api:50051",
+		"MCD_WORKER_API_DATA_PLANE_URL":              "https://api/data",
+		"MCD_WORKER_API_CREDENTIAL":                  "secret",
+		"MCD_WORKER_API_TLS_INSECURE":                "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":              "/scratch",
+		"MCD_WORKER_WORKER_METRICS_INTERVAL_SECONDS": "not-a-number",
+	})
+
+	if _, err := Load("", env); err == nil {
+		t.Fatal("Load() with malformed metrics_interval_seconds: want error, got nil")
 	}
 }
 

@@ -82,6 +82,58 @@ type StatusEvent struct {
 	Detail string
 }
 
+// LogStream identifies which output stream a LogLine came from (mirrors the wire
+// LogStream enum, proto LogLine).
+type LogStream int
+
+const (
+	// LogStreamStdout is the process's standard output.
+	LogStreamStdout LogStream = iota
+	// LogStreamStderr is the process's standard error.
+	LogStreamStderr
+)
+
+// LogEvent is one captured line of a server's console output (FR-MON-2). The
+// instance manager forwards these onto the control plane as LogLine events.
+// Logs are transient relay-only at M1: the Worker streams them and does not
+// store them (REQUIREMENTS.md Section 6.13).
+type LogEvent struct {
+	ServerID string
+	Line     string
+	Stream   LogStream
+}
+
+// MetricsSample is a best-effort runtime measurement for a running server
+// (FR-MON-3). Fields a driver cannot measure cheaply are left zero; emitting a
+// sample at all signals the server is up. The instance manager forwards these
+// as Metrics events.
+type MetricsSample struct {
+	ServerID    string
+	CPUMillis   uint32
+	MemoryBytes uint64
+	PlayerCount uint32
+}
+
+// LogSource is an optional capability an Instance may implement to stream its
+// captured console output. The instance manager type-asserts it; a driver that
+// cannot capture logs simply does not implement it (keeping the core Instance
+// interface unchanged, FR-EXE-4). The channel closes when the instance
+// terminates and no further lines will arrive.
+type LogSource interface {
+	Logs() <-chan LogEvent
+}
+
+// StatsSource is an optional capability an Instance may implement to report a
+// one-shot metrics sample on demand. The instance manager polls it on the
+// configured interval while the instance runs. A driver that cannot measure a
+// given stat cheaply leaves it zero; one that cannot measure any returns an
+// error and the manager emits an up-only sample.
+type StatsSource interface {
+	// Sample reads the instance's current resource usage. An error means no
+	// honest measurement was available this tick.
+	Sample(ctx context.Context) (MetricsSample, error)
+}
+
 // ExecutionDriver realizes logical lifecycle operations for one execution
 // backend (FR-EXE-1). Start launches an instance and returns a handle; the
 // handle owns stop, status, and the crash-notification stream. Keeping per-

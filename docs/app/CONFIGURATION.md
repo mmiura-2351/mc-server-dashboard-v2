@@ -318,6 +318,25 @@ limits (CPU/memory quotas) are deferred to M2+ (REQUIREMENTS.md Section 2.2).
 |---|---|---|---|
 | `log.level` | `info` | | Log verbosity. |
 | `log.format` | `json` | | Structured-log format (REQUIREMENTS.md NFR-OBS-1). |
+| `worker.metrics_interval_seconds` | `15` | | Cadence at which the Worker samples each running server and emits a `Metrics` event (REQUIREMENTS.md FR-MON-3). `0` keeps the built-in default. |
+
+The Worker captures each running server's console output and streams it to the
+API as `LogLine` events (FR-MON-2), and samples basic per-server runtime metrics
+(CPU and resident memory; CPU in thousandths of a core) on the
+`worker.metrics_interval_seconds` cadence (FR-MON-3). The host-process driver
+reads metrics from `/proc/<pid>` (Linux only); the container driver reads the
+Docker Engine stats endpoint. When a metric source is unavailable (a non-Linux
+host, an unreachable daemon, an exited process) the Worker emits an *up-only*
+sample — the server id with zero stats — so the API still learns the server is
+running.
+
+Log streaming is **transient relay-only** at M1 (REQUIREMENTS.md Section 6.13):
+the Worker streams lines as they are produced and does not persist them. To keep
+log volume from backing up the control-plane stream, each server's capture uses a
+bounded per-server buffer; under sustained backpressure the Worker drops the
+oldest buffered line and emits a single marker line reporting how many lines were
+dropped (consistent with the best-effort status-event posture, FR-MON-4). Lines
+longer than 8 KiB are truncated with a marker.
 
 ---
 
