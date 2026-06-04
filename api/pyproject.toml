@@ -74,6 +74,11 @@ dev = [
     # below it. 1.3.0 (2025-11-10) is outside. Lift the cap once it ages out
     # (Section 3).
     "pytest-asyncio>=1.3.0,<1.4.0",
+    # Suite-wide timeout safety net (#158): an unbounded await (e.g. a
+    # wrongly-accepted gRPC session hanging call.code() forever, PR #153 review)
+    # would otherwise hang the whole run. 2.4.0 (2025-05-05) is well outside the
+    # 7-day cooldown (Section 3); cap the next major (dev tooling, Section 1).
+    "pytest-timeout>=2.4.0,<3",
 ]
 
 [build-system]
@@ -124,6 +129,17 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Suite-wide timeout safety net (#158, pytest-timeout). A per-test cap turns an
+# unbounded await (a wrongly-accepted gRPC session hanging call.code() forever,
+# PR #153 review) into a loud failure instead of a hung run. 120s is generous:
+# the full suite runs ~75s in CI and the slowest DB-gated test is well under the
+# cap, so this only fires on genuine hangs. The default "signal" method (SIGALRM
+# on the main thread) is used deliberately: it interrupts the running coroutine
+# and dumps a real traceback at the hang point. The "thread" method is avoided —
+# it abandons the event loop from a watchdog thread, masking async-cleanup bugs.
+# signal is the default on Linux (CI) and the main thread runs the asyncio loop,
+# so SIGALRM lands where we want it.
+addopts = "--timeout=120 --timeout-method=signal"
 
 [tool.importlinter]
 root_packages = ["mc_server_dashboard_api"]
