@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import inspect
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -49,6 +50,10 @@ from mc_server_dashboard_api.servers.adapters.server_state_sink import (
 )
 from mc_server_dashboard_api.servers.api import servers
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.object_client import (
+    make_s3_client_factory,
+)
+from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 
 # Optional TOML config file location, overridable per deployment.
 _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
@@ -59,13 +64,13 @@ def _resolve_config_file() -> Path | None:
     return Path(raw) if raw else None
 
 
-def _build_storage(settings: Settings) -> FsStorage:
+def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
     """Bind the :class:`Storage` Port to the config-selected adapter (STORAGE.md §7).
 
-    Only ``fs`` is implemented in M1 (and ``remote-fs`` reuses it via a POSIX
-    mount, Section 7.2). The ``object`` backend lands in a later sub-issue (#105);
-    selecting an unimplemented backend fails fast at boot rather than starting with
-    no working store (CONFIGURATION.md Section 3).
+    ``fs`` is the M1 default and ``remote-fs`` reuses it via a POSIX mount
+    (Section 7.2). ``object`` binds the S3-compatible adapter (Section 7.3); its
+    endpoint/bucket/credentials are required and a missing one fails fast at boot
+    rather than starting with an unusable store (CONFIGURATION.md Section 3).
     """
 
     if settings.storage.backend in ("fs", "remote-fs"):
@@ -73,9 +78,29 @@ def _build_storage(settings: Settings) -> FsStorage:
             Path(settings.storage.fs.root),
             version_retention=settings.storage.version_retention,
         )
-    raise ValueError(
-        f"storage.backend {settings.storage.backend!r} has no adapter yet "
-        "(only 'fs'/'remote-fs' are implemented in M1)"
+    obj = settings.storage.object
+    missing = [
+        name
+        for name in ("endpoint", "bucket", "access_key", "secret_key")
+        if getattr(obj, name) is None
+    ]
+    if missing:
+        raise ValueError(
+            "storage.backend 'object' requires "
+            + ", ".join(f"storage.object.{name}" for name in missing)
+        )
+    assert obj.endpoint is not None
+    assert obj.bucket is not None
+    assert obj.access_key is not None
+    assert obj.secret_key is not None
+    return ObjectStorage(
+        make_s3_client_factory(
+            endpoint=obj.endpoint,
+            bucket=obj.bucket,
+            access_key=obj.access_key,
+            secret_key=obj.secret_key,
+        ),
+        version_retention=settings.storage.version_retention,
     )
 
 
@@ -113,10 +138,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.storage = storage
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
-        # note): reclaim any staging dir or superseded snapshot left by a crash
-        # before this process serves. Idempotent and keyed off the live ``current``
-        # target, so it never reclaims authoritative data. Runs off the event loop.
-        await asyncio.to_thread(storage.sweep)
+        # note): reclaim any staging dir/prefix or superseded snapshot left by a
+        # crash before this process serves. Idempotent and keyed off the live
+        # pointer, so it never reclaims authoritative data. The fs sweep is
+        # blocking I/O run off the event loop; the object sweep is async (S3 calls).
+        if inspect.iscoroutinefunction(storage.sweep):
+            await storage.sweep()
+        else:
+            await asyncio.to_thread(storage.sweep)
         registry = InMemoryWorkerRegistry(
             clock=FleetSystemClock(), heartbeat_timeout=heartbeat_timeout
         )

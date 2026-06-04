@@ -90,19 +90,36 @@ class StorageFsSettings(_Section):
     root: str = "./data"
 
 
+class StorageObjectSettings(_Section):
+    """Object-storage-backend settings (CONFIGURATION.md Section 5.2).
+
+    The S3-compatible endpoint/bucket and the access-key/secret-key credentials
+    behind the ``object`` adapter (STORAGE.md Section 7.3). Only read when
+    ``storage.backend = object``; all four are required in that case, enforced at
+    the edge. ``access_key`` / ``secret_key`` are secrets sourced from the
+    environment and masked in any dump (Section 5.2 marks them secret).
+    """
+
+    endpoint: str | None = None
+    bucket: str | None = None
+    access_key: str | None = None
+    secret_key: str | None = None
+
+
 class StorageSettings(_Section):
     """Storage adapter selection + tuning (CONFIGURATION.md Section 5.2).
 
-    ``backend`` selects the :class:`Storage` Port adapter; ``fs`` is the M1 default
-    and the only one implemented here. ``remote-fs`` and ``object`` are admitted by
-    the selector so their adapters can be bound without a config-schema change
-    (#105+); choosing one before its adapter lands fails fast at the edge.
-    ``version_retention`` bounds per-file retained versions (STORAGE.md Section 5,
-    the count-bounded retention knob).
+    ``backend`` selects the :class:`Storage` Port adapter; ``fs`` is the M1 default.
+    ``object`` binds the S3-compatible adapter (STORAGE.md Section 7.3); ``remote-fs``
+    reuses the ``fs`` adapter over a POSIX mount (Section 7.2). Choosing a backend
+    before its adapter lands, or without the keys it requires, fails fast at the
+    edge. ``version_retention`` bounds per-file retained versions (STORAGE.md
+    Section 5, the count-bounded retention knob).
     """
 
     backend: Literal["fs", "remote-fs", "object"] = "fs"
     fs: StorageFsSettings = Field(default_factory=StorageFsSettings)
+    object: StorageObjectSettings = Field(default_factory=StorageObjectSettings)
     version_retention: int = 10
 
 
@@ -232,12 +249,19 @@ class Settings(BaseSettings):
         # it whenever present. ``None`` (control plane disabled) is not a secret.
         if control["worker_credential"] is not None:
             control["worker_credential"] = _MASK
+        storage = self.storage.model_dump()
+        # The object-store access/secret keys are secrets (CONFIGURATION.md
+        # Section 5.2); mask each whenever present. ``None`` (object backend
+        # unused) is not a secret.
+        for secret_key in ("access_key", "secret_key"):
+            if storage["object"][secret_key] is not None:
+                storage["object"][secret_key] = _MASK
         return {
             "server": self.server.model_dump(),
             "control": control,
             "log": self.log.model_dump(),
             "database": {"url": _MASK},
-            "storage": self.storage.model_dump(),
+            "storage": storage,
             "auth": auth,
         }
 
