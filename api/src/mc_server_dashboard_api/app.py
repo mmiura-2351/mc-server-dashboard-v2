@@ -8,6 +8,7 @@ adapters (ARCHITECTURE.md Section 2.1, CONFIGURATION.md Section 1).
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -25,6 +26,10 @@ from mc_server_dashboard_api.community.api import (
 from mc_server_dashboard_api.config import Settings, load_settings
 from mc_server_dashboard_api.core.adapters.database import create_engine
 from mc_server_dashboard_api.core.api import health
+from mc_server_dashboard_api.fleet.adapters.clock import SystemClock as FleetSystemClock
+from mc_server_dashboard_api.fleet.adapters.grpc_server import make_grpc_server
+from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.api import workers
 from mc_server_dashboard_api.identity.api import auth, users
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.middleware import correlation_id_middleware
@@ -48,19 +53,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.auth.token.signing_key is None:
         raise ValueError("auth.token.signing_key is required to mount auth endpoints")
 
+    # The Worker credential is a required secret whenever the control plane is
+    # enabled (CONFIGURATION.md Section 5.1); fail fast rather than starting a
+    # control-plane server that would admit any Worker (Section 3, NFR-SEC-1).
+    if settings.control.enabled and not settings.control.worker_credential:
+        raise ValueError(
+            "control.worker_credential is required when control.enabled is true"
+        )
+
     configure_logging(settings.log.level, settings.log.format)
+
+    heartbeat_timeout = dt.timedelta(seconds=settings.control.heartbeat_timeout_seconds)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_engine(settings.database.url)
         app.state.engine = engine
         app.state.settings = settings
+        registry = InMemoryWorkerRegistry(
+            clock=FleetSystemClock(), heartbeat_timeout=heartbeat_timeout
+        )
+        app.state.worker_registry = registry
         logging.getLogger(__name__).info(
             "api starting", extra={"config": settings.masked_dump()}
         )
+        grpc_server = None
+        if settings.control.enabled:
+            # Run the control-plane gRPC server as a lifespan task on the same
+            # asyncio event loop as FastAPI (grpc.aio): one process, one loop,
+            # the registry shared in-memory between the two surfaces.
+            assert settings.control.worker_credential is not None
+            grpc_server = make_grpc_server(
+                registry=registry,
+                clock=FleetSystemClock(),
+                worker_credential=settings.control.worker_credential,
+                heartbeat_timeout=heartbeat_timeout,
+                host=settings.server.host,
+                port=settings.server.grpc_port,
+            )
+            await grpc_server.start()
+            app.state.grpc_server = grpc_server
+            logging.getLogger(__name__).info(
+                "control-plane gRPC server started",
+                extra={"port": settings.server.grpc_port},
+            )
         try:
             yield
         finally:
+            if grpc_server is not None:
+                await grpc_server.stop(grace=None)
             await engine.dispose()
 
     app = FastAPI(title="mc-server-dashboard API", lifespan=lifespan)
@@ -72,4 +113,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(members.router)
     app.include_router(roles.router)
     app.include_router(grants.router)
+    app.include_router(workers.router)
     return app

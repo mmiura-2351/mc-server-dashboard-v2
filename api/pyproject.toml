@@ -91,12 +91,24 @@ exclude = ["^src/mcsd/"]
 module = "mcsd.*"
 follow_imports = "skip"
 
+# grpcio ships no type stubs (the generated .pyi above type the messages; grpcio
+# itself does not). Treat its imports as untyped so the control-plane adapter,
+# which is the only module touching grpcio at the transport edge, type-checks
+# without third-party stub packages.
+[[tool.mypy.overrides]]
+module = "grpc.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 
 [tool.importlinter]
 root_packages = ["mc_server_dashboard_api"]
+# The fleet domain forbids importing external transport packages (grpc, the
+# generated mcsd stubs); enforcing a forbidden contract on external modules
+# requires graphing them.
+include_external_packages = true
 
 # Import-direction enforcement (ARCHITECTURE.md Section 2.2). Each bounded
 # context owns a domain / application / adapters / api quadrant; the layered
@@ -205,4 +217,41 @@ forbidden_modules = [
     "mc_server_dashboard_api.community.adapters",
     "mc_server_dashboard_api.identity",
     "mc_server_dashboard_api.core",
+]
+
+# --- fleet context ---------------------------------------------------------
+# Mirrors the other contexts' shape (ARCHITECTURE.md Section 2.2): a layered
+# contract pins domain <- application <- api, and the forbidden contracts keep
+# adapters at the edge (the gRPC server + in-memory registry are bound to Ports
+# only in the wiring module) and the domain dependency-free — including no
+# import of grpcio, which lives only in the adapter at the transport edge.
+[[tool.importlinter.contracts]]
+name = "fleet context layers (domain <- application <- api; adapters at the edge)"
+type = "layers"
+layers = [
+    "mc_server_dashboard_api.fleet.api",
+    "mc_server_dashboard_api.fleet.application",
+    "mc_server_dashboard_api.fleet.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "fleet domain and application do not import adapters"
+type = "forbidden"
+source_modules = [
+    "mc_server_dashboard_api.fleet.domain",
+    "mc_server_dashboard_api.fleet.application",
+]
+forbidden_modules = ["mc_server_dashboard_api.fleet.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "fleet domain imports nothing internal (incl. other contexts) and no grpcio"
+type = "forbidden"
+source_modules = ["mc_server_dashboard_api.fleet.domain"]
+forbidden_modules = [
+    "mc_server_dashboard_api.fleet.adapters",
+    "mc_server_dashboard_api.community",
+    "mc_server_dashboard_api.identity",
+    "mc_server_dashboard_api.core",
+    "grpc",
+    "mcsd",
 ]

@@ -85,6 +85,8 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_session_factory,
 )
 from mc_server_dashboard_api.core.domain.health import DatabasePing
+from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
+from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
 from mc_server_dashboard_api.identity.adapters.client_ip import (
     forwarded_for_header,
     resolve_client_ip,
@@ -133,6 +135,25 @@ def get_settings(request: Request) -> Settings:
 
     settings: Settings = request.app.state.settings
     return settings
+
+
+def get_worker_registry(request: Request) -> WorkerRegistry:
+    """Return the process-wide WorkerRegistry stored on application state.
+
+    The same instance is fed by the control-plane gRPC server and read by the
+    platform-admin endpoint, so both observe one live view of the fleet.
+    """
+
+    registry: WorkerRegistry = request.app.state.worker_registry
+    return registry
+
+
+def get_list_workers(
+    registry: Annotated[WorkerRegistry, Depends(get_worker_registry)],
+) -> ListWorkers:
+    """Assemble the :class:`ListWorkers` use case (platform-admin only)."""
+
+    return ListWorkers(registry=registry)
 
 
 def get_database_ping(request: Request) -> DatabasePing:

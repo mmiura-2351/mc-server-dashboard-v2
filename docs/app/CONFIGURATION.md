@@ -150,6 +150,8 @@ marks keys with no default.
 | `server.http_port` | `8000` | | Port for the HTTP API. |
 | `server.grpc_port` | `50051` | | Port the control-plane gRPC server listens on for Worker-initiated streams (REQUIREMENTS.md Section 5.1). |
 | `server.public_base_url` | *required* | | Externally reachable base URL of the API's data-plane HTTP endpoint, handed to Workers for hydrate/snapshot transfer (REQUIREMENTS.md Section 5.2). |
+| `control.enabled` | `true` | | Whether the API hosts the control-plane gRPC server in this process (REQUIREMENTS.md Section 5.1). When `true`, `control.worker_credential` is required (fail-fast). |
+| `control.worker_credential` | *required when enabled* | secret | Shared credential a Worker must present (`authorization: Bearer <credential>` metadata) to authenticate its stream (REQUIREMENTS.md NFR-SEC-1); the API-side counterpart of the Worker's `api.credential` (Section 6.1). |
 | `control.tls.cert_file` | *required* | | Path to the control-channel TLS certificate (REQUIREMENTS.md NFR-SEC-1). |
 | `control.tls.key_file` | *required* | secret | Path to the control-channel TLS private key. |
 | `control.heartbeat_timeout_seconds` | `30` | | Liveness window: a Worker missing heartbeats past this is marked disconnected (REQUIREMENTS.md FR-WRK-2). |
