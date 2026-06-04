@@ -1,22 +1,30 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"strings"
 	"testing"
 )
 
-// Placeholder test that verifies the test runner is wired up by exercising the
-// stub entry point's only observable behavior.
-func TestRunPrintsBanner(t *testing.T) {
-	var buf bytes.Buffer
-
-	if err := run(&buf); err != nil {
-		t.Fatalf("run() returned error: %v", err)
+// TestRunFailsFastOnMissingConfig verifies the wiring surfaces a fatal config
+// error at boot when required keys are absent (CONFIGURATION.md Section 2). The
+// test clears the relevant env so Load sees nothing.
+func TestRunFailsFastOnMissingConfig(t *testing.T) {
+	for _, k := range []string{
+		"MCD_WORKER_CONFIG",
+		"MCD_WORKER_API_GRPC_ENDPOINT",
+		"MCD_WORKER_API_DATA_PLANE_URL",
+		"MCD_WORKER_API_CREDENTIAL",
+		"MCD_WORKER_WORKER_SCRATCH_DIR",
+	} {
+		t.Setenv(k, "")
 	}
 
-	got := strings.TrimSpace(buf.String())
-	if got != banner {
-		t.Errorf("run() wrote %q, want %q", got, banner)
+	err := run(context.Background())
+	if err == nil {
+		t.Fatal("run() with no config returned nil, want a fatal config error")
+	}
+	if !strings.Contains(err.Error(), "config") {
+		t.Errorf("run() error = %v, want a config error", err)
 	}
 }
