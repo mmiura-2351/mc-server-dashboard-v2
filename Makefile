@@ -9,7 +9,7 @@
 #   make check          # full gate: lint + test (what CI and pre-push run)
 #   make hooks-install  # install the git hooks (one-time)
 
-.PHONY: all check lint format test \
+.PHONY: all check lint format test docs-check \
 	api-lint api-format api-test \
 	worker-lint worker-format worker-test \
 	proto-lint proto-gen proto-check proto-breaking \
@@ -31,13 +31,18 @@ PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
-check: lint test proto-check
+check: lint test proto-check docs-check
 
 lint: api-lint worker-lint proto-lint
 
 format: api-format worker-format
 
 test: api-test worker-test
+
+# docs/ convention gate (docs/README.md Conventions): relative links resolve,
+# no section-mark glyph, no 'v1' versioning term. Pure stdlib python3, no deps.
+docs-check:
+	python3 scripts/check_docs.py
 
 # ---------------------------------------------------------------------------
 # api/ (Python via uv)

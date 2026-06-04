@@ -1,0 +1,31 @@
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "scripts/check_docs.py"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "scripts/check_docs.py"
+      - ".github/workflows/docs.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # The checker is pure stdlib python3 (ubuntu-latest ships it); no setup
+      # action or dependency install is needed.
+      - name: Docs conventions (links, section-mark glyph, v1 term)
+        run: python3 scripts/check_docs.py
