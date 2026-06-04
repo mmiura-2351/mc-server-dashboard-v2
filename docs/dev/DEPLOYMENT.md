@@ -40,7 +40,7 @@ cp .env.example .env
 | `MCD_API_CONTROL__WORKER_CREDENTIAL` | Shared secret authenticating the worker | `openssl rand -base64 48` |
 | `MCSD_SCRATCH_DIR` | Absolute host path for the worker scratch dir | choose a path, e.g. `/opt/mcsd/scratch` |
 | `DOCKER_GID` | GID of the host `docker` group | `getent group docker \| cut -d: -f3` |
-| `API_HTTP_PORT` / `API_GRPC_PORT` | Published host ports | defaults `8000` / `50051` |
+| `API_HTTP_PORT` | Published host port for the API HTTP surface | default `8000` |
 
 `POSTGRES_USER` and `POSTGRES_DB` default to `mcsd`; `MCD_API_CONTROL__WORKER_CREDENTIAL`
 is reused by the worker as its `MCD_WORKER_API_CREDENTIAL` (wired in
@@ -125,14 +125,21 @@ gRPC control listener is not published to the host and the traffic stays on the
 internal Docker network.
 
 A **multi-host** worker (a worker on a different machine dialing this API over a
-real network) must not use the insecure posture. In that case:
+real network) must not use the insecure posture, and the gRPC control plane must
+not be exposed off-host while it is still plaintext. Reaching a cross-host worker
+requires **both** of the following together — never publish the gRPC port
+without first putting TLS on the listener:
 
-- On the API, serve the control listener over TLS: set
-  `MCD_API_CONTROL__TLS__CERT_FILE` and `MCD_API_CONTROL__TLS__KEY_FILE` (both
-  are required together) and drop `MCD_API_CONTROL__TLS__INSECURE`. Publish or
-  route the gRPC port to the remote worker.
-- On the remote worker, set `MCD_WORKER_API_TLS_CA_FILE` to the CA bundle that
-  verifies the API's certificate, and drop `MCD_WORKER_API_TLS_INSECURE`.
+1. Configure control-plane TLS:
+   - On the API, serve the control listener over TLS: set
+     `MCD_API_CONTROL__TLS__CERT_FILE` and `MCD_API_CONTROL__TLS__KEY_FILE`
+     (both are required together) and drop `MCD_API_CONTROL__TLS__INSECURE`.
+   - On the remote worker, set `MCD_WORKER_API_TLS_CA_FILE` to the CA bundle
+     that verifies the API's certificate, and drop `MCD_WORKER_API_TLS_INSECURE`.
+2. Only then publish or route the gRPC port to the remote worker by adding a
+   `50051` entry to the `api` service's `ports` in `compose.yaml` (the single-host
+   stack deliberately omits it). With TLS in place this exposes an authenticated,
+   encrypted listener rather than the plaintext one.
 
 Mount the certificate, key, and CA files into the respective containers and point
 the variables at the in-container paths.

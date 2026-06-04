@@ -24,7 +24,10 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/worker ./cmd/worker
 
 # ---------------------------------------------------------------------------
-# Runtime: slim base with CA certificates for the API's TLS data-plane dials.
+# Runtime: slim base with CA certificates. The in-compose deployment dials the
+# API in plaintext, so these are unused there; they are provisioned for the
+# cross-host path, where the worker verifies the API's TLS cert (see
+# docs/dev/DEPLOYMENT.md).
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
