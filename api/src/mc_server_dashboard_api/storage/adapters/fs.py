@@ -113,6 +113,15 @@ class FsStorage(Storage):
         # leases are taken/released across worker threads (Section 4.2 reader
         # safety). Keyed by the resolved snapshot path.
         self._leases: dict[Path, int] = {}
+        # Active-staging handles: the ``incoming/<transfer>/`` dir of each in-flight
+        # transfer is held here for the life of its handle (begin -> commit/abort)
+        # so a concurrently scheduled sweep does not reclaim its staging dir out
+        # from under the active stream (issue #183). fs staging also has an on-disk
+        # dir, but the dir alone cannot tell an in-flight transfer from a crash
+        # leftover; this in-process set is the pin. A crash leftover has no
+        # in-process handle by definition, so a fresh process's sweep still reclaims
+        # it. Guarded by ``_lease_lock`` alongside the reader leases.
+        self._active_staging: set[Path] = set()
         self._lease_lock = threading.Lock()
 
     # --- layout helpers ----------------------------------------------------
@@ -171,6 +180,20 @@ class FsStorage(Storage):
         with self._lease_lock:
             return self._leases.get(snapshot, 0) > 0
 
+    # --- active-staging leases (issue #183) --------------------------------
+
+    def _register_staging(self, staging: Path) -> None:
+        with self._lease_lock:
+            self._active_staging.add(staging)
+
+    def _release_staging(self, staging: Path) -> None:
+        with self._lease_lock:
+            self._active_staging.discard(staging)
+
+    def _is_staging_active(self, staging: Path) -> bool:
+        with self._lease_lock:
+            return staging in self._active_staging
+
     # --- path-traversal containment (Section 6) ----------------------------
 
     def _safe_target(self, base: Path, rel_path: RelPath) -> Path:
@@ -198,9 +221,16 @@ class FsStorage(Storage):
 
         Keyed off the live ``current`` target (Section 4.3): for every server, every
         ``snapshots/<id>/`` not pointed at by ``current`` is unreferenced and is
-        removed, and every ``incoming/`` staging dir is leftover and is removed.
+        removed, and every leftover ``incoming/`` staging dir is removed.
         Safe to re-run; never touches the snapshot ``current`` resolves to. Exposed
         for the API startup lifespan hook and manual invocation.
+
+        In-flight staging (issue #183): a transfer staged but not yet committed is
+        pinned by an in-process active-staging lease taken at ``begin_snapshot`` (and
+        at ``restore_backup``) and released at commit/abort, so a sweep scheduled
+        concurrently with an in-flight stage leaves its staging dir intact. A crash
+        leftover has no in-process handle by definition, so a fresh process's sweep
+        still reclaims it.
         """
 
         communities = self._root / "communities"
@@ -226,7 +256,11 @@ class FsStorage(Storage):
         incoming = server_root / "incoming"
         if incoming.is_dir():
             for staging in incoming.iterdir():
-                _rmtree(staging)
+                # Skip an in-flight transfer's staging dir: it is pinned by an
+                # active-staging lease until commit/abort (issue #183). A crash
+                # leftover has no in-process handle, so it is not skipped.
+                if not self._is_staging_active(staging):
+                    _rmtree(staging)
 
     def _live_snapshot_name(self, server_root: Path) -> str | None:
         link = server_root / "current"
@@ -259,6 +293,9 @@ class FsStorage(Storage):
         transfer_id = uuid.uuid4().hex
         staging = self._staging_dir(community_id, server_id, transfer_id)
         await asyncio.to_thread(staging.mkdir, parents=True, exist_ok=False)
+        # Pin the staging dir so a concurrent sweep skips it until commit/abort
+        # releases it (issue #183).
+        self._register_staging(staging)
         return _FsSnapshotHandle(community_id, server_id, transfer_id)
 
     def _staging_dir(
@@ -313,6 +350,9 @@ class FsStorage(Storage):
         await asyncio.to_thread(
             self._publish, fs_handle.community_id, fs_handle.server_id, staging
         )
+        # Publish moved the staging dir into snapshots/; release its active-staging
+        # lease so a later sweep is not blocked by a now-dead handle (issue #183).
+        self._release_staging(staging)
         fs_handle.consumed = True
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
@@ -321,6 +361,7 @@ class FsStorage(Storage):
             fs_handle.community_id, fs_handle.server_id, fs_handle.transfer_id
         )
         await asyncio.to_thread(_rmtree, staging)
+        self._release_staging(staging)
         fs_handle.consumed = True
 
     def _publish(
@@ -453,12 +494,17 @@ class FsStorage(Storage):
             / f"restore-{key.value}-{uuid.uuid4().hex}"
         )
         await asyncio.to_thread(staging.mkdir, parents=True, exist_ok=False)
+        # A restore stages under incoming/ exactly like a snapshot, so pin it with
+        # the same active-staging lease for the life of the operation (issue #183).
+        self._register_staging(staging)
         try:
             await asyncio.to_thread(_extract_tar_gz_into, archive, staging)
             await asyncio.to_thread(self._publish, community_id, server_id, staging)
         except BaseException:
             await asyncio.to_thread(_rmtree, staging)
             raise
+        finally:
+            self._release_staging(staging)
 
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey

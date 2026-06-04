@@ -74,19 +74,81 @@ async def test_sweep_never_reclaims_live_snapshot(tmp_path: Path) -> None:
     assert read_tar(blob) == {"f": b"LIVE"}
 
 
-async def test_sweep_clears_leftover_staging(tmp_path: Path) -> None:
+async def test_active_staging_survives_concurrent_sweep(tmp_path: Path) -> None:
+    """An in-flight transfer's staging dir must survive a concurrent sweep.
+
+    The fs adapter pins the staging dir with an in-process active-staging lease for
+    the life of the handle (begin -> commit/abort), so a sweep scheduled while the
+    transfer is mid-flight skips its incoming/ staging dir (issue #183).
+    """
+
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     await publish(storage, community, server, {"f": b"LIVE"})
 
-    # Begin a transfer but never commit/abort -> leftover staging (a crash mid-stage).
+    # Begin + stage an in-flight transfer, but do NOT commit/abort yet.
     handle = await storage.begin_snapshot(community, server)
-    await storage.write_snapshot(handle, tar_stream({"f": b"PARTIAL"}))
+    await storage.write_snapshot(handle, tar_stream({"f": b"INFLIGHT"}))
     server_root = snapshot_dir(tmp_path, community, server).parent.parent
-    assert any((server_root / "incoming").iterdir())
+    incoming = server_root / "incoming"
+    assert any(incoming.iterdir())
+
+    # A concurrent sweep must NOT delete the active staging dir.
+    storage.sweep()
+    assert any(incoming.iterdir()), "active staging must survive a concurrent sweep"
+
+    # The transfer still commits and publishes its staged bytes.
+    await storage.commit_snapshot(handle)
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"INFLIGHT"}
+
+
+async def test_sweep_reclaims_released_staging_after_abort(tmp_path: Path) -> None:
+    """Once a transfer is aborted the staging lease is released; a sweep that finds
+    any residual incoming/ dir (here re-seeded) reclaims it — the lease only protects
+    in-flight, not released, staging (issue #183)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"LIVE"})
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"INFLIGHT"}))
+    server_root = snapshot_dir(tmp_path, community, server).parent.parent
+    incoming = server_root / "incoming"
+
+    await storage.abort_snapshot(handle)
+    # Re-seed a leftover under the (now released) incoming dir to prove the sweep
+    # reclaims it now that the lease is gone.
+    leftover = incoming / "leftover"
+    leftover.mkdir(parents=True, exist_ok=True)
+    (leftover / "f").write_bytes(b"x")
 
     storage.sweep()
-    incoming = server_root / "incoming"
     assert not incoming.exists() or not any(incoming.iterdir())
-    blob = await drain(storage.open_hydrate_source(community, server))
+
+
+async def test_sweep_reclaims_crash_leftover_staging_with_no_handle(
+    tmp_path: Path,
+) -> None:
+    """Crash leftovers have no in-process handle by definition, so a fresh adapter's
+    sweep reclaims them — the lease lives only in the process that began the transfer
+    (issue #183)."""
+
+    seeded = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(seeded, community, server, {"f": b"LIVE"})
+
+    # Simulate a crash mid-stage: a staging dir with no live handle (a fresh adapter
+    # has an empty active-staging set).
+    server_root = snapshot_dir(tmp_path, community, server).parent.parent
+    incoming = server_root / "incoming"
+    orphan = incoming / "orphan-transfer"
+    orphan.mkdir(parents=True, exist_ok=True)
+    (orphan / "f").write_bytes(b"PARTIAL")
+
+    recovered = FsStorage(tmp_path)
+    recovered.sweep()
+    assert not incoming.exists() or not any(incoming.iterdir())
+    blob = await drain(recovered.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"LIVE"}
