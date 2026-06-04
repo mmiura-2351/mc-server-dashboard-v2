@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -191,6 +193,79 @@ func TestEditFileIntermediateSymlinkViaNewDirsIsDenied(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outsideDir, "c")); !os.IsNotExist(err) {
 		t.Fatal("MkdirAll created dirs outside the working set through a symlink")
 	}
+}
+
+// TestOpenParentBeneathWriteRidesDirfd is the resolved-dirfd regression for the
+// residual TOCTOU (issue #122). A truly concurrent symlink swap is inherently
+// racy to test; instead it deterministically swaps the lexical parent for an
+// escaping symlink *after* the parent is resolved, then writes through the
+// resolved fd. If the write rode the lexical path it would escape; riding the fd,
+// it lands on the original (now-renamed) inode and never touches the outside dir.
+func TestOpenParentBeneathWriteRidesDirfd(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	root := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(root, "sub", "f.txt")
+
+	parentFd, leaf, err := openParentBeneath(root, target, false)
+	if err != nil {
+		t.Fatalf("openParentBeneath: %v", err)
+	}
+	defer func() { _ = unix.Close(parentFd) }()
+
+	// Swap the lexical parent for a symlink pointing outside the working set,
+	// simulating the concurrent attacker between resolve and act.
+	outside := t.TempDir()
+	if err := os.Rename(filepath.Join(root, "sub"), filepath.Join(root, "sub_real")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "sub")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := atomicWriteAt(parentFd, leaf, []byte("safe")); err != nil {
+		t.Fatalf("atomicWriteAt: %v", err)
+	}
+
+	// The write rode the resolved fd: it landed on the original inode (now
+	// sub_real), not through the freshly planted escaping symlink.
+	if got, err := os.ReadFile(filepath.Join(root, "sub_real", "f.txt")); err != nil || string(got) != "safe" {
+		t.Fatalf("file did not land on the resolved dirfd inode: got=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "f.txt")); !os.IsNotExist(err) {
+		t.Fatal("write escaped through the post-resolve symlink swap")
+	}
+}
+
+// TestOpenParentBeneathResolvesCleanPath pins the happy path (openat2 fast path
+// on Linux, the component walk elsewhere): a clean nested path resolves to a
+// dirfd under which the leaf opens.
+func TestOpenParentBeneathResolvesCleanPath(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	root := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(filepath.Join(root, "a", "b"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a", "b", "leaf"), []byte("x"), 0o640); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	parentFd, leaf, err := openParentBeneath(root, filepath.Join(root, "a", "b", "leaf"), false)
+	if err != nil {
+		t.Fatalf("openParentBeneath: %v", err)
+	}
+	defer func() { _ = unix.Close(parentFd) }()
+
+	if leaf != "leaf" {
+		t.Fatalf("leaf = %q, want %q", leaf, "leaf")
+	}
+	fd, err := unix.Openat(parentFd, leaf, unix.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		t.Fatalf("openat leaf via resolved fd: %v", err)
+	}
+	_ = unix.Close(fd)
 }
 
 func TestReadFileOversizedIsDenied(t *testing.T) {
