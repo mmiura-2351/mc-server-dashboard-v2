@@ -219,6 +219,87 @@ func TestMetricsPumpStopsAfterInstanceExit(t *testing.T) {
 	}
 }
 
+// blockingStatsInstance is a richInstance whose Sample blocks until its context
+// is cancelled, recording that it observed the cancellation. It exercises the
+// hung-Engine-stats teardown: when the instance terminates, the metrics pump
+// must cancel the in-flight Sample and exit promptly rather than leaking on the
+// stuck call.
+type blockingStatsInstance struct {
+	*richInstance
+	entered   chan struct{}
+	sampleMu  sync.Mutex
+	cancelled bool
+}
+
+func (i *blockingStatsInstance) Sample(ctx context.Context) (execution.MetricsSample, error) {
+	select {
+	case i.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	i.sampleMu.Lock()
+	i.cancelled = true
+	i.sampleMu.Unlock()
+	return execution.MetricsSample{}, ctx.Err()
+}
+
+// blockingDriver hands out a blockingStatsInstance.
+type blockingDriver struct{ inst *blockingStatsInstance }
+
+func (d *blockingDriver) Start(_ context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
+	d.inst = &blockingStatsInstance{
+		richInstance: newRichInstance(spec.ServerID),
+		entered:      make(chan struct{}, 1),
+	}
+	return d.inst, nil
+}
+
+// A Sample that hangs is cancelled when the instance terminates: the metrics
+// pump derives the sample context from its done signal, so teardown unblocks the
+// stuck call instead of leaking the goroutine.
+func TestMetricsSampleCancelledOnTeardown(t *testing.T) {
+	d := &blockingDriver{}
+	clk := &fakeClock{}
+	m := New(map[string]execution.ExecutionDriver{"host-process": d}, t.TempDir(),
+		func(context.Context, string) (execution.ServerControl, error) { return nil, nil }).
+		WithMetrics(clk, time.Hour)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v", res)
+	}
+	drainStatus(m)
+
+	// Drive one tick so the pump calls Sample, which then blocks on ctx.
+	waitFor(t, func() bool {
+		clk.mu.Lock()
+		defer clk.mu.Unlock()
+		return len(clk.chs) > 0
+	})
+	clk.tick()
+
+	select {
+	case <-d.inst.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Sample was never called")
+	}
+
+	// Terminate the instance: this closes the status pump's done channel, which
+	// must cancel the in-flight Sample.
+	stop := session.Command{CommandID: "c2", ServerID: "s1", Kind: "StopServer"}
+	if res := m.Handle(context.Background(), stop); !res.Success {
+		t.Fatalf("stop = %+v", res)
+	}
+
+	// Teardown must cancel the hung Sample: cancelled flips true only because the
+	// pump derived the sample context from its done signal. Without the fix the
+	// Sample would block forever and the pump goroutine would leak.
+	waitFor(t, func() bool {
+		d.inst.sampleMu.Lock()
+		defer d.inst.sampleMu.Unlock()
+		return d.inst.cancelled
+	})
+}
+
 // drainStatus consumes the merged status stream so the status pump never blocks.
 func drainStatus(m *Manager) {
 	go func() {
