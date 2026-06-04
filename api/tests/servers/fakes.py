@@ -120,6 +120,14 @@ class FakeServerRepository(ServerRepository):
             and server.desired_state is DesiredState.RUNNING
         )
 
+    async def list_running_assigned(self) -> list[Server]:
+        return [
+            replace(server)
+            for server in self.by_id.values()
+            if server.desired_state is DesiredState.RUNNING
+            and server.assigned_worker_id is not None
+        ]
+
     async def delete(self, server_id: ServerId) -> None:
         self.by_id.pop(server_id, None)
 
@@ -177,6 +185,7 @@ class FakeControlPlane(ControlPlane):
         outcome: CommandOutcome | None = None,
         outcomes: dict[str, CommandOutcome] | None = None,
         raise_unavailable: bool = False,
+        connected: dict[WorkerId, bool] | None = None,
     ) -> None:
         self._place_to = place_to
         self._outcome = outcome or CommandOutcome(status=CommandStatus.OK)
@@ -184,12 +193,18 @@ class FakeControlPlane(ControlPlane):
         # succeeds (e.g. hydrate); kinds absent here fall back to ``outcome``.
         self._outcomes = outcomes or {}
         self._raise_unavailable = raise_unavailable
+        # Worker-connectivity map for the scheduler's skip-disconnected path; a
+        # worker absent here is treated as connected.
+        self._connected = connected or {}
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
         self.incremented: list[WorkerId] = []
         self.decremented: list[WorkerId] = []
 
     async def place(self, *, backend: ExecutionBackend) -> WorkerId | None:
         return self._place_to
+
+    def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
+        return self._connected.get(worker_id, True)
 
     def increment_assignment(self, *, worker_id: WorkerId) -> None:
         self.incremented.append(worker_id)

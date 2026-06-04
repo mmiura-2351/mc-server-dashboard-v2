@@ -107,6 +107,26 @@ def test_brute_force_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert bf.delay_ms == 200
 
 
+def test_snapshot_cadence_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.snapshot.default_interval_seconds == 3600
+    assert settings.snapshot.min_interval_seconds == 300
+
+
+def test_snapshot_cadence_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[snapshot]\ndefault_interval_seconds = 1800\nmin_interval_seconds = 60\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.snapshot.default_interval_seconds == 1800
+    assert settings.snapshot.min_interval_seconds == 60
+
+
 def test_proxy_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)

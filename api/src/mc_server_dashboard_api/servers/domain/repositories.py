@@ -108,6 +108,16 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def list_running_assigned(self) -> list[Server]:
+        """Return every server with desired=running and an assigned Worker.
+
+        The candidate set the periodic snapshot scheduler iterates (FR-DATA-7):
+        servers the operator wants running that have a Worker to snapshot. It
+        spans all communities — the scheduler is a process-wide background task,
+        not a request scoped to one community.
+        """
+
+    @abc.abstractmethod
     async def delete(self, server_id: ServerId) -> None:
         """Delete the server row (its grants are swept separately, Section 10)."""
 

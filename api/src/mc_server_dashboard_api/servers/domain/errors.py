@@ -49,6 +49,16 @@ class ExecutionBackendImmutableError(ServerError):
     """
 
 
+class InvalidSnapshotIntervalError(ServerError):
+    """A per-server snapshot-interval override was invalid (FR-DATA-7).
+
+    The override (``config['snapshot_interval_seconds']``) must be a positive
+    integer at least ``snapshot.min_interval_seconds`` (the thrash floor,
+    CONFIGURATION.md Section 5.4). A non-integer or below-floor value is rejected;
+    the edge maps this to 422.
+    """
+
+
 class ServerNotStoppedError(ServerError):
     """An operation requiring a fully stopped server ran against a live one.
 
