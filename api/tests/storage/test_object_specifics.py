@@ -224,6 +224,77 @@ async def test_sweep_skips_leased_superseded_prefix_then_reclaims() -> None:
     assert not any(k.startswith(old_prefix) for k in store.objects)
 
 
+async def test_sweep_reread_skips_prefix_made_live_after_pointer_read() -> None:
+    """A publish whose new-prefix objects were already listed but whose pointer
+    flip lands after the sweep read the pointer must not delete the now-live
+    prefix (issue #113).
+
+    The sweep lists once, then per server reads the pointer and deletes every
+    snapshot prefix that pointer does not name. The guard re-reads the pointer
+    immediately before deleting each candidate prefix: if it now names the
+    candidate, the prefix is live and is skipped.
+    """
+
+    import json as _json
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    from mc_server_dashboard_api.storage.adapters.object_store import S3Client
+    from tests.storage.fake_s3 import FakeS3Client
+
+    store = FakeS3Store()
+    community, server = new_scope()
+    seeded = ObjectStorage(fake_s3_factory(store))
+    await _publish(seeded, community, server, {"f": b"OLD"})
+
+    pointer_key = _server_prefix(community, server) + _POINTER
+    old_prefix = _json.loads(store.objects[pointer_key])["snapshot"]
+
+    # Simulate a concurrent publisher that has already copied its objects under a
+    # fresh prefix (so they are in the sweep's listing) but has not yet flipped the
+    # pointer. The name sorts after the live OLD prefix, so the sweep re-reads the
+    # pointer for OLD first; the flip lands then, and the guard's re-read for this
+    # NEW candidate sees it live and keeps it (issue #113).
+    new_prefix = _server_prefix(community, server) + "snapshots/zzz-concurrent-new/"
+    store.objects[new_prefix + "f"] = b"NEW"
+
+    # The flip lands during the sweep's very first pointer re-read: the first read
+    # returns the pre-flip value (OLD live), and the publisher flips the pointer to
+    # NEW immediately after. This models the flip landing after the listing but
+    # before the guard re-reads for the NEW candidate (issue #113).
+    reads = {"n": 0}
+
+    class _FlipAfterFirstReadClient(FakeS3Client):
+        async def get_object(self, key: str) -> AsyncIterator[bytes]:
+            result = await super().get_object(key)
+            if key == pointer_key:
+                reads["n"] += 1
+                if reads["n"] == 1:
+                    store.objects[pointer_key] = _json.dumps(
+                        {"snapshot": new_prefix}
+                    ).encode()
+            return result
+
+    @asynccontextmanager
+    async def _factory() -> AsyncIterator[S3Client]:
+        yield _FlipAfterFirstReadClient(store)
+
+    storage = ObjectStorage(_factory)
+    await storage.sweep()
+
+    assert reads["n"] >= 2, "the guard must re-read the pointer per candidate prefix"
+    # The just-made-live prefix survived the race; the pointer now resolves to it.
+    assert store.objects.get(new_prefix + "f") == b"NEW"
+    assert _json.loads(store.objects[pointer_key])["snapshot"] == new_prefix
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"NEW"}
+
+    # The now-superseded OLD prefix (kept this pass because it read live before the
+    # flip) is reclaimed by a later sweep with no concurrent publisher.
+    await ObjectStorage(fake_s3_factory(store)).sweep()
+    assert not any(k.startswith(old_prefix) for k in store.objects)
+
+
 async def test_subkey_traversal_is_confined_to_server_prefix() -> None:
     # RelPath blocks .. at construction; assert the adapter's read path rejects it
     # too (defence in depth at the key-derivation step, Section 6).
