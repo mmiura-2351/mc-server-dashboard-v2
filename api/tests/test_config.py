@@ -132,6 +132,153 @@ def test_brute_force_prune_interval_must_be_positive(
         load_settings(config_file=cfg)
 
 
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("username_threshold", 0),
+        ("username_window_seconds", 0),
+        ("ip_threshold", 0),
+        ("ip_window_seconds", 0),
+        ("lockout_base_seconds", 0),
+        ("lockout_max_seconds", 0),
+        ("delay_ms", -1),
+    ],
+)
+def test_brute_force_field_rejects_out_of_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, bad_value: int
+) -> None:
+    # Windows/lockouts/intervals must be > 0; thresholds >= 1; delay_ms >= 0. A
+    # value below the bound silently weakens or breaks brute-force protection
+    # (e.g. window=0 means thresholds never trip), so the loader rejects it
+    # (issue #140, SECURITY.md Section 2).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        f"[auth.brute_force]\n{field} = {bad_value}\n",
+    )
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+@pytest.mark.parametrize(
+    ("field", "ok_value"),
+    [
+        ("username_threshold", 1),
+        ("username_window_seconds", 1),
+        ("ip_threshold", 1),
+        ("ip_window_seconds", 1),
+        ("lockout_base_seconds", 1),
+        ("lockout_max_seconds", 1),
+        ("delay_ms", 0),
+    ],
+)
+def test_brute_force_field_accepts_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, ok_value: int
+) -> None:
+    # delay_ms = 0 is the explicit disable of the artificial failure delay
+    # (CONFIGURATION.md Section 7.2); the rest accept their lowest legal value.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        f"[auth.brute_force]\n{field} = {ok_value}\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert getattr(settings.auth.brute_force, field) == ok_value
+
+
+def test_token_algorithm_accepts_rs256(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, '[auth.token]\nalgorithm = "RS256"\n')
+    settings = load_settings(config_file=cfg)
+    assert settings.auth.token.algorithm == "RS256"
+
+
+def test_token_algorithm_rejects_miscased_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A miscased "hs256" must be rejected at load rather than slipping past the
+    # HS256 key-length floor and only failing at first JWT use (issue #140).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, '[auth.token]\nalgorithm = "hs256"\n')
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+@pytest.mark.parametrize("field", ["access_ttl_seconds", "refresh_ttl_seconds"])
+def test_token_ttl_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f"[auth.token]\n{field} = 0\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "bad_value"),
+    [
+        ("server", "http_port", -1),
+        ("server", "http_port", 65536),
+        ("server", "grpc_port", -1),
+        ("server", "grpc_port", 65536),
+        ("control", "heartbeat_timeout_seconds", 0),
+        ("control", "command_timeout_seconds", 0),
+        ("storage", "version_retention", -1),
+        ("snapshot", "default_interval_seconds", 0),
+        ("snapshot", "min_interval_seconds", 0),
+        ("backup", "schedule_tick_seconds", 0),
+    ],
+)
+def test_numeric_setting_rejects_out_of_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    section: str,
+    field: str,
+    bad_value: int,
+) -> None:
+    # A zero/negative port, timeout, retention or interval would break behavior
+    # silently; the loader rejects it at boot (issue #140).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f"[{section}]\n{field} = {bad_value}\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+@pytest.mark.parametrize("field", ["min_length", "max_length"])
+def test_password_length_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f"[auth.password]\n{field} = 0\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+@pytest.mark.parametrize("field", ["http_port", "grpc_port"])
+def test_port_zero_is_accepted_as_ephemeral(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    # 0 is the conventional "bind an OS-assigned ephemeral port" value (the gRPC
+    # lifespan test relies on it); it must not be rejected.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f"[server]\n{field} = 0\n")
+    settings = load_settings(config_file=cfg)
+    assert getattr(settings.server, field) == 0
+
+
+def test_version_retention_zero_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 0 retained versions is a legitimate "keep none" choice, distinct from a
+    # negative count which is meaningless.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[storage]\nversion_retention = 0\n")
+    settings = load_settings(config_file=cfg)
+    assert settings.storage.version_retention == 0
+
+
 def test_snapshot_cadence_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)

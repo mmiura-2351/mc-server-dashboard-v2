@@ -8,6 +8,7 @@ from mc_server_dashboard_api.servers.domain.config_bounds import (
     MAX_CONFIG_BYTES,
     MAX_CONFIG_DEPTH,
     ConfigInvalidShapeError,
+    ConfigNullValueError,
     ConfigTooLargeError,
     validate_config,
 )
@@ -53,3 +54,20 @@ def test_over_size_bound_is_too_large() -> None:
     value = "a" * (MAX_CONFIG_BYTES + 1)
     with pytest.raises(ConfigTooLargeError):
         validate_config({"k": value})
+
+
+def test_top_level_null_value_is_rejected() -> None:
+    # A null value is the shape that enabled the key-presence smuggle (issue #140,
+    # PR #148); the bounds validator rejects it outright.
+    with pytest.raises(ConfigNullValueError):
+        validate_config({"motd": None})
+
+
+def test_nested_null_value_is_rejected() -> None:
+    with pytest.raises(ConfigNullValueError):
+        validate_config({"outer": {"inner": None}})
+
+
+def test_null_inside_list_is_rejected() -> None:
+    with pytest.raises(ConfigNullValueError):
+        validate_config({"items": [1, None]})

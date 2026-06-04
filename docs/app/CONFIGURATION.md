@@ -147,15 +147,15 @@ marks keys with no default.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `server.host` | `0.0.0.0` | | Bind address for the HTTP API (REST + data-plane endpoint). |
-| `server.http_port` | `8000` | | Port for the HTTP API. |
-| `server.grpc_port` | `50051` | | Port the control-plane gRPC server listens on for Worker-initiated streams (REQUIREMENTS.md Section 5.1). |
+| `server.http_port` | `8000` | | Port for the HTTP API. Must be 0..65535; `0` binds an OS-assigned ephemeral port. |
+| `server.grpc_port` | `50051` | | Port the control-plane gRPC server listens on for Worker-initiated streams (REQUIREMENTS.md Section 5.1). Must be 0..65535; `0` binds an OS-assigned ephemeral port. |
 | `server.public_base_url` | *required for hydrate/snapshot* | | Externally reachable base URL of the API's data-plane HTTP endpoint, handed to Workers for hydrate/snapshot transfer (REQUIREMENTS.md Section 5.2, STORAGE.md Section 8). Optional in code so a process that never dispatches a transfer need not set it; a lifecycle command that needs it fails fast when it is unset. |
 | `control.enabled` | `true` | | Whether the API hosts the control-plane gRPC server in this process (REQUIREMENTS.md Section 5.1). When `true`, `control.worker_credential` is required (fail-fast). |
 | `control.worker_credential` | *required when enabled* | secret | Shared credential a Worker must present (`authorization: Bearer <credential>` metadata) to authenticate its stream (REQUIREMENTS.md NFR-SEC-1); the API-side counterpart of the Worker's `api.credential` (Section 6.1). |
 | `control.tls.cert_file` | *required* | | Path to the control-channel TLS certificate (REQUIREMENTS.md NFR-SEC-1). |
 | `control.tls.key_file` | *required* | secret | Path to the control-channel TLS private key. |
-| `control.heartbeat_timeout_seconds` | `30` | | Liveness window: a Worker missing heartbeats past this is marked disconnected (REQUIREMENTS.md FR-WRK-2). |
-| `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). |
+| `control.heartbeat_timeout_seconds` | `30` | | Liveness window: a Worker missing heartbeats past this is marked disconnected (REQUIREMENTS.md FR-WRK-2). Must be positive. |
+| `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). Must be positive. |
 
 ### 5.2 Persistence and Storage adapter
 
@@ -164,7 +164,7 @@ marks keys with no default.
 | `database.url` | *required* | secret | Connection string for the persistence adapter (may embed credentials). Model owned by DATABASE.md (#15). |
 | `storage.backend` | `fs` | | Selector for the `Storage` Port (Section 4): `fs` / `remote-fs` / `object`. |
 | `storage.fs.root` | `./data` | | Root directory when `storage.backend = fs`. |
-| `storage.version_retention` | `10` | | Maximum per-file prior versions retained for rollback; the oldest beyond this count are pruned (STORAGE.md Section 5). |
+| `storage.version_retention` | `10` | | Maximum per-file prior versions retained for rollback; the oldest beyond this count are pruned (STORAGE.md Section 5). Must be non-negative; `0` retains no prior versions. |
 | `storage.remote_fs.*` | — | partly | Mount/endpoint settings when `storage.backend = remote-fs`; secret members masked. Detail in STORAGE.md (#17). |
 | `storage.object.endpoint` | — | | Object-store endpoint when `storage.backend = object`. |
 | `storage.object.bucket` | — | | Object-store bucket/container. |
@@ -179,10 +179,10 @@ publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md (#17).
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `auth.token.algorithm` | `HS256` | | Signing algorithm of the `TokenService` JWT adapter (REQUIREMENTS.md FR-AUTH-2), e.g. `HS256` / `RS256`. A parameter of the adapter, not an adapter selector (Section 4). |
+| `auth.token.algorithm` | `HS256` | | Signing algorithm of the `TokenService` JWT adapter (REQUIREMENTS.md FR-AUTH-2). One of `HS256` / `RS256` (case-sensitive); any other value fails fast at load. A parameter of the adapter, not an adapter selector (Section 4). |
 | `auth.token.signing_key` | *required* | secret | Signing key/secret for access & refresh tokens (REQUIREMENTS.md FR-AUTH-2). For an asymmetric algorithm this is the private key (path or value). Under `HS256` the key is shared-secret entropy and **must be at least 32 bytes** (the 256-bit digest length); a shorter key fails fast at load. |
-| `auth.token.access_ttl_seconds` | `900` | | Short-lived access-token lifetime. |
-| `auth.token.refresh_ttl_seconds` | `1209600` | | Long-lived refresh-token lifetime (14 days). |
+| `auth.token.access_ttl_seconds` | `900` | | Short-lived access-token lifetime. Must be positive. |
+| `auth.token.refresh_ttl_seconds` | `1209600` | | Long-lived refresh-token lifetime (14 days). Must be positive. |
 | `auth.password.hash` | `argon2` | | `PasswordHasher` selector (Section 4): `argon2` / `bcrypt`. |
 
 Password **policy** (strength, brute-force, proxy trust) is configured
@@ -195,8 +195,8 @@ for the full cadence model.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `snapshot.default_interval_seconds` | `3600` | | Global default periodic snapshot interval applied to every running server. |
-| `snapshot.min_interval_seconds` | `300` | | Lower bound a per-server override may not go below (guards against snapshot thrash). |
+| `snapshot.default_interval_seconds` | `3600` | | Global default periodic snapshot interval applied to every running server. Must be positive. |
+| `snapshot.min_interval_seconds` | `300` | | Lower bound a per-server override may not go below (guards against snapshot thrash). Must be positive. |
 
 ### 5.5 Backup cadence
 
@@ -207,7 +207,7 @@ background scheduler wakes to check which servers are due.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `backup.schedule_tick_seconds` | `300` | | Loop resolution of the scheduled-backup scheduler: how often it wakes to check which servers are due. Coarse, since backup cadence is measured in hours. |
+| `backup.schedule_tick_seconds` | `300` | | Loop resolution of the scheduled-backup scheduler: how often it wakes to check which servers are due. Coarse, since backup cadence is measured in hours. Must be positive. |
 
 ### 5.6 Observability
 
@@ -353,8 +353,8 @@ spec.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `auth.password.min_length` | `12` | Minimum password length (characters). |
-| `auth.password.max_length` | `128` | Maximum length (bcrypt 72-byte cap plus a DoS guard). |
+| `auth.password.min_length` | `12` | Minimum password length (characters). Must be positive. |
+| `auth.password.max_length` | `128` | Maximum length (bcrypt 72-byte cap plus a DoS guard). Must be positive. |
 | `auth.password.require_complexity` | `true` | Enforce the complexity-or-length rule: at least 3 of {upper, lower, digit, symbol} **or** at least 16 characters. |
 | `auth.password.check_common_list` | `true` | Reject passwords on a common-password blocklist (legacy baseline: SecLists xato-net top-10,000). |
 | `auth.password.forbid_user_info` | `true` | Reject a password containing the username or the email local-part. |
@@ -369,13 +369,13 @@ enumeration (REQUIREMENTS.md FR-AUTH-4).
 | Key | Default | Meaning |
 |---|---|---|
 | `auth.brute_force.enabled` | `true` | Master switch for brute-force protection. |
-| `auth.brute_force.username_threshold` | `5` | Failures per username before lockout. |
-| `auth.brute_force.username_window_seconds` | `900` | Sliding window for the per-username count. |
-| `auth.brute_force.ip_threshold` | `20` | Failures per source IP before throttling. |
-| `auth.brute_force.ip_window_seconds` | `300` | Sliding window for the per-IP count. |
-| `auth.brute_force.lockout_base_seconds` | `900` | Initial lockout duration; doubles on repeat (exponential back-off). |
-| `auth.brute_force.lockout_max_seconds` | `86400` | Cap on the backed-off lockout duration. |
-| `auth.brute_force.delay_ms` | `200` | Artificial delay added on a failed attempt to deny timing enumeration. |
+| `auth.brute_force.username_threshold` | `5` | Failures per username before lockout. Must be at least 1. |
+| `auth.brute_force.username_window_seconds` | `900` | Sliding window for the per-username count. Must be positive. |
+| `auth.brute_force.ip_threshold` | `20` | Failures per source IP before throttling. Must be at least 1. |
+| `auth.brute_force.ip_window_seconds` | `300` | Sliding window for the per-IP count. Must be positive. |
+| `auth.brute_force.lockout_base_seconds` | `900` | Initial lockout duration; doubles on repeat (exponential back-off). Must be positive. |
+| `auth.brute_force.lockout_max_seconds` | `86400` | Cap on the backed-off lockout duration. Must be positive. |
+| `auth.brute_force.delay_ms` | `200` | Artificial delay added on a failed attempt to deny timing enumeration. Must be non-negative; `0` explicitly disables the delay (forgoing the timing-uniformity guarantee). |
 | `auth.brute_force.prune_interval_seconds` | `3600` | How often the background loop prunes `login_attempt` rows older than the longest window, independent of logins (SECURITY.md Section 3). Must be positive. |
 
 ### 7.3 Reverse-proxy trust

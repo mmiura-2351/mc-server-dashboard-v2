@@ -10,7 +10,10 @@ standard-library-only checks before staging:
   storage;
 - a shape sanity rule: the top level must be a JSON object, and the structure may
   not nest deeper than :data:`MAX_CONFIG_DEPTH` — a flat-ish settings blob never
-  approaches that, while a pathologically nested payload is rejected.
+  approaches that, while a pathologically nested payload is rejected;
+- a no-null rule: a JSON ``null`` is never a meaningful ``server.properties``-style
+  value, and a null value is the shape that enabled the key-presence smuggle fixed
+  in PR #148, so any ``null`` (at any depth) is rejected.
 
 Pure (no I/O, no framework types) so the bound is deterministic and unit-testable
 in isolation (TESTING.md Section 4). The edge maps the errors to a typed 422.
@@ -40,11 +43,16 @@ class ConfigInvalidShapeError(ServerError):
     """The ``config`` is not a top-level object or nests beyond the depth cap."""
 
 
+class ConfigNullValueError(ServerError):
+    """The ``config`` contains a JSON ``null`` value (at any depth)."""
+
+
 def validate_config(config: Any) -> dict[str, Any]:
     """Validate a client-supplied config blob, returning it unchanged if sound.
 
     Raises :class:`ConfigInvalidShapeError` when the top level is not an object or
-    the structure nests beyond :data:`MAX_CONFIG_DEPTH`, and
+    the structure nests beyond :data:`MAX_CONFIG_DEPTH`,
+    :class:`ConfigNullValueError` when any value is ``null``, and
     :class:`ConfigTooLargeError` when its JSON serialization exceeds
     :data:`MAX_CONFIG_BYTES`.
     """
@@ -53,12 +61,26 @@ def validate_config(config: Any) -> dict[str, Any]:
         raise ConfigInvalidShapeError("config must be a JSON object")
     if _depth(config) > MAX_CONFIG_DEPTH:
         raise ConfigInvalidShapeError("config nests too deeply")
+    if _has_null(config):
+        raise ConfigNullValueError("config may not contain a null value")
     # ``ensure_ascii=False`` so multibyte values are sized by their real UTF-8
     # byte length rather than escaped ASCII, matching what the column stores.
     size = len(json.dumps(config, ensure_ascii=False).encode("utf-8"))
     if size > MAX_CONFIG_BYTES:
         raise ConfigTooLargeError("config exceeds the size limit")
     return config
+
+
+def _has_null(value: Any) -> bool:
+    """True if ``value`` is ``None`` or contains a ``None`` at any depth."""
+
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        return any(_has_null(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_null(v) for v in value)
+    return False
 
 
 def _depth(value: Any) -> int:

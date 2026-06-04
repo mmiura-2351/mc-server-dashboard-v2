@@ -443,6 +443,16 @@ def test_create_non_object_config_is_422_invalid_shape() -> None:
     assert resp.json()["detail"]["reason"] == "config_invalid_shape"
 
 
+def test_create_null_config_value_is_422_null_value() -> None:
+    app = _app(member=True, allow=True, create=_FakeUseCase())
+    client = next(_client(app))
+    body = _create_body()
+    body["config"] = {"motd": None}
+    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "config_null_value"
+
+
 def test_update_over_size_bound_is_422_too_large() -> None:
     app = _app(member=True, allow=True, update=_FakeUseCase())
     client = next(_client(app))
@@ -477,6 +487,17 @@ def test_update_non_object_config_is_422_invalid_shape() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["reason"] == "config_invalid_shape"
+
+
+def test_update_null_config_value_is_422_null_value() -> None:
+    app = _app(member=True, allow=True, update=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": {"motd": None}},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "config_null_value"
 
 
 def test_update_at_size_bound_is_accepted() -> None:
