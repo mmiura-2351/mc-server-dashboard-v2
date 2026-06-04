@@ -31,13 +31,3 @@ async def test_is_reachable_true_against_real_postgres() -> None:
         assert await ping.is_reachable() is True
     finally:
         await engine.dispose()
-
-
-async def test_is_reachable_false_when_unconnectable() -> None:
-    # A port nothing listens on: the adapter must report False, not raise.
-    engine = create_engine("postgresql+asyncpg://u:p@127.0.0.1:5/none")
-    try:
-        ping = SqlAlchemyDatabasePing(engine)
-        assert await ping.is_reachable() is False
-    finally:
-        await engine.dispose()

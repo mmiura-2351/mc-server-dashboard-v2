@@ -15,9 +15,21 @@ from typing import Any
 
 correlation_id: ContextVar[str | None] = ContextVar("correlation_id", default=None)
 
+# Attributes always present on a stdlib LogRecord; anything beyond these on a
+# record's __dict__ was passed by a caller via ``extra=`` and is surfaced in the
+# JSON output. Built once via a throwaway record so it tracks the stdlib.
+_RESERVED_KEYS = frozenset(
+    vars(logging.LogRecord("", 0, "", 0, "", (), None)).keys()
+) | {"taskName"}
+
 
 class JsonFormatter(logging.Formatter):
-    """Render a log record as a single-line JSON object."""
+    """Render a log record as a single-line JSON object.
+
+    Caller-supplied ``extra=`` fields are merged into the output. Masking is the
+    caller's responsibility: pass pre-masked data (e.g. ``Settings.masked_dump``)
+    — this formatter does not and cannot redact secrets it is handed.
+    """
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -25,6 +37,9 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        for key, value in record.__dict__.items():
+            if key not in _RESERVED_KEYS:
+                payload[key] = value
         cid = correlation_id.get()
         if cid is not None:
             payload["correlation_id"] = cid

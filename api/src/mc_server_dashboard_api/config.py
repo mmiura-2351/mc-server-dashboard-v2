@@ -54,6 +54,11 @@ class DatabaseSettings(_Section):
 class Settings(BaseSettings):
     """The fully-resolved configuration injected into the wiring layer."""
 
+    # Known, deliberate asymmetry: ``extra="forbid"`` fails fast on unknown TOML
+    # keys, but unknown ``MCD_API_*`` env vars are silently ignored — env sources
+    # in pydantic-settings only feed declared fields, so stray env vars never
+    # reach this check. Accepted: the environment is shared and may legitimately
+    # carry unrelated ``MCD_API_*``-prefixed names.
     model_config = SettingsConfigDict(
         env_prefix="MCD_API_",
         env_nested_delimiter="__",
