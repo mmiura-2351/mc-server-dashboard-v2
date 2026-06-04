@@ -623,9 +623,11 @@ async def test_stop_lost_race_is_conflict_without_dispatch_or_count() -> None:
     assert uow.commits == 0
 
 
-async def test_stop_invalid_state_converges_to_stopped() -> None:
+async def test_stop_server_not_found_converges_to_stopped() -> None:
     # Stopping a server the worker no longer runs (e.g. crashed on the EULA,
-    # issue #197): the worker has no such instance and answers INVALID_STATE.
+    # issue #197): the worker holds no live instance and its handleStop answers
+    # SERVER_NOT_FOUND -- not INVALID_STATE
+    # (worker/internal/application/instancemanager/instancemanager.go:308-312).
     # That is a no-op stop, not a failure -> converge observed to stopped and
     # report success rather than surfacing command_failed.
     community, server_id, worker = _ids()
@@ -640,7 +642,7 @@ async def test_stop_invalid_state_converges_to_stopped() -> None:
         )
     )
     cp = FakeControlPlane(
-        outcomes={"stop": CommandOutcome(status=CommandStatus.INVALID_STATE)}
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
     )
     use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
 
@@ -658,8 +660,21 @@ async def test_stop_invalid_state_converges_to_stopped() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
-async def test_stop_other_failure_still_surfaces_command_error() -> None:
-    # A genuine stop dispatch failure (not INVALID_STATE) must still raise.
+@pytest.mark.parametrize(
+    "status",
+    [
+        # A genuine dispatch failure must raise.
+        CommandStatus.INTERNAL,
+        # INVALID_STATE is NOT a stop-convergence trigger: the Worker's handleStop
+        # never emits it (only handleHydrate and handleStart do), so on stop it must
+        # fail loudly rather than converge silently
+        # (worker/internal/application/instancemanager/instancemanager.go:308-312).
+        CommandStatus.INVALID_STATE,
+    ],
+)
+async def test_stop_other_failure_still_surfaces_command_error(
+    status: CommandStatus,
+) -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -672,7 +687,7 @@ async def test_stop_other_failure_still_surfaces_command_error() -> None:
         )
     )
     cp = FakeControlPlane(
-        outcomes={"stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")}
+        outcomes={"stop": CommandOutcome(status=status, message="boom")}
     )
     use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
 
