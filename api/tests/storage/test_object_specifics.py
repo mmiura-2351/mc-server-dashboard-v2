@@ -295,6 +295,82 @@ async def test_sweep_reread_skips_prefix_made_live_after_pointer_read() -> None:
     assert not any(k.startswith(old_prefix) for k in store.objects)
 
 
+async def test_active_staging_survives_concurrent_sweep() -> None:
+    """An in-flight transfer's incoming/ objects must survive a concurrent sweep.
+
+    The object adapter pins the staging prefix with an in-process active-staging
+    lease for the life of the handle (begin -> commit/abort), so a sweep scheduled
+    while the transfer is mid-flight skips its incoming/ objects (issue #160). The
+    fs adapter pins staging the same way; this gives the object adapter parity.
+    """
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"LIVE"})
+
+    # Begin + stage an in-flight transfer, but do NOT commit/abort yet.
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"INFLIGHT"}))
+    incoming = _server_prefix(community, server) + "incoming/"
+    assert any(k.startswith(incoming) for k in store.objects)
+
+    # A concurrent sweep must NOT delete the active staging objects.
+    await storage.sweep()
+    assert any(k.startswith(incoming) for k in store.objects), (
+        "active staging must survive a concurrent sweep"
+    )
+
+    # The transfer still commits and publishes its staged bytes.
+    await storage.commit_snapshot(handle)
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"INFLIGHT"}
+
+
+async def test_sweep_reclaims_released_staging_after_abort() -> None:
+    """Once a transfer is aborted the staging lease is released; a sweep that finds
+    any residual incoming/ objects (here re-seeded) reclaims them — the lease only
+    protects in-flight, not released, staging (issue #160)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"LIVE"})
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"INFLIGHT"}))
+    incoming = _server_prefix(community, server) + "incoming/"
+
+    await storage.abort_snapshot(handle)
+    # Re-seed a leftover under the (now released) incoming prefix to prove the sweep
+    # reclaims it now that the lease is gone.
+    store.objects[incoming + "leftover/f"] = b"x"
+
+    await storage.sweep()
+    assert not any(k.startswith(incoming) for k in store.objects)
+
+
+async def test_sweep_reclaims_crash_leftover_staging_with_no_handle() -> None:
+    """Crash leftovers have no in-process handle by definition, so a fresh adapter's
+    sweep reclaims them — the lease lives only in the process that began the
+    transfer (issue #160)."""
+
+    store = FakeS3Store()
+    seeded = ObjectStorage(fake_s3_factory(store))
+    community, server = new_scope()
+    await _publish(seeded, community, server, {"f": b"LIVE"})
+
+    # Simulate a crash mid-stage: staged objects with no live handle (a fresh
+    # adapter has an empty active-staging set).
+    incoming = _server_prefix(community, server) + "incoming/orphan-transfer/"
+    store.objects[incoming + "f"] = b"PARTIAL"
+
+    recovered = ObjectStorage(fake_s3_factory(store))
+    await recovered.sweep()
+    assert not any(
+        k.startswith(_server_prefix(community, server) + "incoming/")
+        for k in store.objects
+    )
+
+
 async def test_subkey_traversal_is_confined_to_server_prefix() -> None:
     # RelPath blocks .. at construction; assert the adapter's read path rejects it
     # too (defence in depth at the key-derivation step, Section 6).
