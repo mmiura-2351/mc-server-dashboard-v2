@@ -55,6 +55,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.command_dispatch import (
+    dispatch_failure as _dispatch_failure,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
@@ -64,7 +67,6 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
-    CommandDispatchError,
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
@@ -87,28 +89,6 @@ _LOG = logging.getLogger(__name__)
 # The conventional JAR path inside a hydrated working set. The Worker launches
 # against this relpath once the working set is hydrated (see __call__).
 _DEFAULT_JAR_RELPATH = "server.jar"
-
-
-def _dispatch_failure(
-    *, server_id: ServerId, kind: str, outcome: CommandOutcome
-) -> CommandDispatchError:
-    """Log a failed command outcome at WARN and build the typed dispatch error.
-
-    Every ``CommandDispatchError(outcome.message or outcome.status.value)`` raise
-    flows through here so the Worker's failure detail is recorded once, with
-    server and command-kind context, before the edge maps the error to a generic
-    409 (issue #194). The raw Worker message stays out of the HTTP response — it
-    can leak Worker host paths — so it is logged, not returned.
-    """
-
-    detail = outcome.message or outcome.status.value
-    _LOG.warning(
-        "command %s failed for server %s: %s",
-        kind,
-        server_id.value,
-        detail,
-    )
-    return CommandDispatchError(detail)
 
 
 @dataclass

@@ -39,6 +39,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.command_dispatch import (
+    dispatch_failure,
+)
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
 )
@@ -56,7 +59,6 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupUnsettledError,
-    CommandDispatchError,
     ServerNotFoundError,
     ServerNotStoppedError,
 )
@@ -157,7 +159,7 @@ class CreateBackup:
             line=_SAVE_ALL_LINE,
         )
         if not outcome.success:
-            raise CommandDispatchError(outcome.message or outcome.status.value)
+            raise dispatch_failure(server_id=server.id, kind="SaveAll", outcome=outcome)
         await self.snapshot_server(
             community_id=server.community_id, server_id=server.id
         )

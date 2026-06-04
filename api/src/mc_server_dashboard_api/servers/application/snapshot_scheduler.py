@@ -32,6 +32,9 @@ import datetime as dt
 import logging
 from dataclasses import dataclass, field
 
+from mc_server_dashboard_api.servers.application.command_dispatch import (
+    dispatch_failure,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane,
@@ -39,7 +42,6 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
-    CommandDispatchError,
     InvalidSnapshotIntervalError,
     ServerNotFoundError,
 )
@@ -191,5 +193,7 @@ class SnapshotServer:
             server_id=server_id,
         )
         if not outcome.success:
-            raise CommandDispatchError(outcome.message or outcome.status.value)
+            raise dispatch_failure(
+                server_id=server_id, kind="SnapshotServer", outcome=outcome
+            )
         return server

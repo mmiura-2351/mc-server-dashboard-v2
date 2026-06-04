@@ -15,6 +15,7 @@ plus the edit-size cap, rollback's at-rest-only rule, and the Worker file-status
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 from pathlib import PurePosixPath
 
@@ -396,6 +397,47 @@ async def test_read_running_internal_failure_maps_to_dispatch_error() -> None:
             server_id=ServerId(server_id),
             rel_path="f",
         )
+
+
+async def test_read_running_failure_logs_warning_with_server_and_kind(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An unmapped Worker file-command failure turns into a CommandDispatchError;
+    # the Worker's message is logged at WARN with server_id and command kind
+    # context so the failure is diagnosable, while the raw message stays out of
+    # the HTTP body (issue #200).
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="disk error")
+    )
+    use_case = ReadFile(uow=uow, control_plane=cp, file_store=FakeFileStore())
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(CommandDispatchError),
+    ):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="f",
+        )
+
+    record = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    message = record.getMessage()
+    assert "disk error" in message
+    assert "ReadFile" in message
+    assert str(server_id) in message
 
 
 # --- write: state branching + cap ------------------------------------------
