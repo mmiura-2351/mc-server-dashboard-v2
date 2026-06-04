@@ -154,6 +154,18 @@ git pull
 docker compose up -d --build
 ```
 
+Stacks that were first deployed before the `api` image pre-created the storage
+mount point have an `api-storage` volume owned by root, so the non-root app
+(uid 10001) cannot write to it. Fix the ownership once, then bring the stack up:
+
+```sh
+docker run --rm -v mc-server-dashboard-v2_api-storage:/fix \
+  debian:bookworm-slim chown 10001:10001 /fix
+```
+
+(The volume name is `<project>_api-storage`; `docker volume ls` shows the exact
+names for your project directory.)
+
 ## 9. Backups
 
 Two pieces of persistent state matter, both Docker named volumes:
