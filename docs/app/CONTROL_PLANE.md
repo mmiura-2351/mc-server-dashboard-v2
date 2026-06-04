@@ -195,6 +195,31 @@ Notes:
   `ReadFile` / `EditFile` file-access commands above (ARCHITECTURE.md
   Section 7.2).
 
+### 5.1 Trigger completion semantics
+
+A `HydrateTrigger` / `SnapshotTrigger` `CommandResult` reports the outcome of the
+**whole data-plane transfer**, not just the dispatch of the trigger. The Worker
+runs the transfer off the session's receive loop and emits the result only after
+the bytes have moved (STORAGE.md Section 8):
+
+- **Hydrate** — `success` means the working set is fully unpacked into the
+  server's working dir. A `204` "no published working set" still counts as
+  success: the Worker launches against an empty dir.
+- **Snapshot** — `success` means the archive was uploaded **and** atomically
+  published by the API. The Worker's upload returns only on the data plane's
+  `204`, which the API sends after its proven-complete gate commits the staged
+  transfer (STORAGE.md Section 8); a partial upload is aborted and surfaces as a
+  failed result, never a success.
+
+API-side orchestrations rely on this ordering. Hydrate-then-start (the API issues
+`HydrateTrigger`, awaits its result, then `StartServer`) relies on the working
+set being present before launch; the running-backup chain
+(save-all → `SnapshotTrigger` → archive) relies on the snapshot being published
+before it archives from authoritative Storage. A worker change that emitted the
+trigger result before the transfer completed would silently break both flows —
+the API would proceed against an unhydrated or unpublished working set with no
+error.
+
 ---
 
 ## 6. Events (Worker to API)
