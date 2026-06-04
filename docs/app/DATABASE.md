@@ -122,9 +122,9 @@ it lands with epic #3.
    └───┬────┘   │            │ (membership_id, role_id)│   roles per membership)
        │ N ─────┴────────────┴────────────────────────┘
        │
-   ┌───┴────┐ 1      N ┌──────────┐ N      1 ┌──────────┐
-   │community│────────▶│  server  │─────────▶│  worker  │ (assigned, nullable)
-   └────────┘          └────┬─────┘          └──────────┘
+   ┌───┴────┐ 1      N ┌──────────┐    server.assigned_worker_id: nullable uuid,
+   │community│────────▶│  server  │    a soft reference to the in-memory fleet
+   └────────┘          └────┬─────┘    registry (no `worker` table at M1, Section 7)
                             │ 1
                 ┌───────────┼────────────────┐
                 │ N         │ N
@@ -142,7 +142,9 @@ Reading aids:
 - **Roles are Community-scoped** (FR-AUTHZ-4): a `role` belongs to exactly one
   `community`; the same name in two Communities is two independent rows.
 - **A `server` belongs to one `community`** (FR-SRV-3) and is optionally assigned
-  to one `worker` (FR-WRK-3, nullable — unassigned when stopped/unplaced).
+  to one Worker (FR-WRK-3, nullable — unassigned when stopped/unplaced). At M1 the
+  assignment is a plain `assigned_worker_id` uuid with no FK; there is no durable
+  `worker` table (Section 7).
 - **`resource_grant`** ties a `user` to a specific resource with an extra
   permission set (FR-AUTHZ-2); in M1 the resource is a server (or a
   community-level resource).
@@ -329,7 +331,7 @@ assigned Worker.
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
-| `assigned_worker_id` | uuid FK → `worker.id` nullable | `ON DELETE SET NULL` (FR-WRK-4) |
+| `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK at M1** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; cleared by the API on Worker disconnect (FR-WRK-4) |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(community_id, name)`. Index on `(assigned_worker_id)` for
@@ -357,34 +359,49 @@ policy in the update use case, not by the schema — keeping it a normal column
 means a future milestone can lift the policy to a supported relocation operation
 without a schema change.
 
-**`assigned_worker_id` nullability.** A server is not permanently pinned to a
-Worker (FR-WRK-6). It is null when stopped/unplaced, set on placement (FR-WRK-3),
-and cleared (`ON DELETE SET NULL`) if its Worker disconnects/decommissions so the
-server can be re-placed after hydrate (FR-WRK-4). The server row survives the
-Worker; the Worker holds no authoritative state.
+**`assigned_worker_id` nullability and the missing FK.** A server is not
+permanently pinned to a Worker (FR-WRK-6). The column is null when stopped/unplaced,
+set on placement (FR-WRK-3), and cleared by the API if its Worker
+disconnects/decommissions so the server can be re-placed after hydrate (FR-WRK-4).
+The server row survives the Worker; the Worker holds no authoritative state. At M1
+this is a **plain nullable uuid with no foreign key**: there is no durable `worker`
+table to reference (Section 7), so clearing on disconnect is done by the API
+against the in-memory fleet registry, not by a DB `ON DELETE SET NULL`. If a
+`worker` table is added by a later migration, the FK (with `ON DELETE SET NULL`)
+can be introduced alongside it without changing this column's semantics.
 
-### `worker`
+### `worker` — deferred beyond M1 (no table)
 
-A registered execution host (FR-WRK-1): capabilities and liveness. Liveness is
-tracked over the live control stream (FR-WRK-2) and is fundamentally **runtime
-state**, not durable data; this table is the durable registration record, with a
-last-seen cache for observability.
+**Decision: M1 has no durable `worker` table.** Worker registration,
+capabilities, and liveness live **only** in the in-memory `WorkerRegistry`
+([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 5.1), fed by the control stream.
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid PK | |
-| `name` | text | unique; operator-facing identifier |
-| `capabilities` | jsonb | advertised drivers + resources (FR-WRK-1), placement input (FR-WRK-3) |
-| `last_seen_at` | timestamptz nullable | last heartbeat (FR-WRK-2); a cache of live liveness |
-| `created_at` / `updated_at` | timestamptz | |
+*Rationale.* Workers are stateless and **re-register on every connect**
+(FR-WRK-4), so the registry is rebuilt from live connections rather than read
+from the DB on startup. Liveness (FR-WRK-2) is inherently runtime state, not
+durable data. At M1 scale — a single API instance (NFR-SCALE-1) — a durable
+worker table adds nothing the registry does not already provide, while creating a
+DB ↔ registry sync liability (stale rows, write-through on every heartbeat). The
+control plane already ships this way: the registry is in-memory (PRs #83/#86) and
+`server.assigned_worker_id` is a plain nullable uuid with no FK (migration 0005,
+PR #91).
 
-Constraints: `UNIQUE(name)`.
+*Future shape.* If a later milestone needs registrations to survive API restarts
+or wants cross-instance visibility, a `worker` table can be added by a follow-up
+migration **without breaking changes** — the `server.assigned_worker_id` column
+already exists and the FK (`ON DELETE SET NULL`) is layered on at that time. The
+deferred shape would be, roughly:
 
-> The authoritative liveness/least-loaded view used by greedy placement
-> (FR-WRK-3) lives in the in-memory `WorkerRegistry`
-> ([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 5.1), fed by the stream. This
-> table persists registration so a Worker is known across API restarts;
-> `last_seen_at` is a best-effort durable echo, not the placement source of truth.
+> | Column | Type | Notes |
+> |---|---|---|
+> | `id` | uuid PK | |
+> | `name` | text | `UNIQUE`; operator-facing identifier |
+> | `capabilities` | jsonb | advertised drivers + resources (FR-WRK-1), placement input (FR-WRK-3) |
+> | `last_seen_at` | timestamptz nullable | last heartbeat (FR-WRK-2); a durable echo of live liveness, not the placement source of truth |
+> | `created_at` / `updated_at` | timestamptz | |
+>
+> This sketch is **not** part of the M1 schema; it documents the intended future
+> table only.
 
 ---
 
