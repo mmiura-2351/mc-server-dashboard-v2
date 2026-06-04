@@ -33,6 +33,7 @@ from mc_server_dashboard_api.fleet.api import workers
 from mc_server_dashboard_api.identity.api import auth, users
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.middleware import correlation_id_middleware
+from mc_server_dashboard_api.servers.api import servers
 
 # Optional TOML config file location, overridable per deployment.
 _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
@@ -113,5 +114,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(members.router)
     app.include_router(roles.router)
     app.include_router(grants.router)
+    app.include_router(servers.router)
     app.include_router(workers.router)
     return app

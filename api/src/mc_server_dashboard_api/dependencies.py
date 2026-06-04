@@ -122,6 +122,19 @@ from mc_server_dashboard_api.identity.domain.errors import InvalidAccessTokenErr
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
+from mc_server_dashboard_api.servers.adapters.clock import (
+    SystemClock as ServersSystemClock,
+)
+from mc_server_dashboard_api.servers.adapters.unit_of_work import (
+    SqlAlchemyUnitOfWork as ServersUnitOfWork,
+)
+from mc_server_dashboard_api.servers.application.manage_server import (
+    CreateServer,
+    DeleteServer,
+    ListServers,
+    ReadServer,
+    UpdateServer,
+)
 
 
 def get_engine(request: Request) -> AsyncEngine:
@@ -530,6 +543,47 @@ def get_revoke_grant(request: Request) -> RevokeGrant:
 
     session_factory = create_session_factory(get_engine(request))
     return RevokeGrant(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_create_server(request: Request) -> CreateServer:
+    """Assemble the :class:`CreateServer` use case (server:create)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return CreateServer(
+        uow=ServersUnitOfWork(session_factory),
+        clock=ServersSystemClock(),
+    )
+
+
+def get_read_server(request: Request) -> ReadServer:
+    """Assemble the :class:`ReadServer` use case (server:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ReadServer(uow=ServersUnitOfWork(session_factory))
+
+
+def get_list_servers(request: Request) -> ListServers:
+    """Assemble the :class:`ListServers` use case (server:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListServers(uow=ServersUnitOfWork(session_factory))
+
+
+def get_update_server(request: Request) -> UpdateServer:
+    """Assemble the :class:`UpdateServer` use case (server:update)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UpdateServer(
+        uow=ServersUnitOfWork(session_factory),
+        clock=ServersSystemClock(),
+    )
+
+
+def get_delete_server(request: Request) -> DeleteServer:
+    """Assemble the :class:`DeleteServer` use case (server:delete)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteServer(uow=ServersUnitOfWork(session_factory))
 
 
 def _to_auth_user(user: User) -> AuthUser:
