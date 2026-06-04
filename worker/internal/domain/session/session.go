@@ -288,7 +288,7 @@ func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
 // handleCommand produces the CommandResult for a command, dispatching to the
 // handler for a handled kind and answering "unsupported" otherwise.
 func (r *Runner) handleCommand(ctx context.Context, cmd Command) CommandResult {
-	if r.handler != nil && isHandledKind(cmd.Kind) {
+	if r.handler != nil && IsHandledKind(cmd.Kind) {
 		r.logger.Info("dispatching command",
 			"command_id", cmd.CommandID, "server_id", cmd.ServerID, "kind", cmd.Kind)
 		return r.handler.Handle(ctx, cmd)
@@ -304,11 +304,15 @@ func (r *Runner) handleCommand(ctx context.Context, cmd Command) CommandResult {
 	}
 }
 
-// isHandledKind reports whether a command kind is dispatched to the handler.
-func isHandledKind(kind string) bool {
+// IsHandledKind reports whether a command kind is dispatched to the handler.
+// It must stay in lockstep with the handler's own switch (the instance
+// manager's Manager.Handle): a kind the handler accepts but this filter omits
+// is answered with the canned "unsupported" result and never reaches the
+// handler (issue #219). An instancemanager test guards that contract.
+func IsHandledKind(kind string) bool {
 	switch kind {
 	case "StartServer", "StopServer", "RestartServer", "ServerCommand",
-		"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile":
+		"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile", "ListFiles":
 		return true
 	default:
 		return false
