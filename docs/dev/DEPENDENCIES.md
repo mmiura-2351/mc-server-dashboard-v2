@@ -20,8 +20,12 @@ lands and are marked *(forthcoming)*.
     major bump is inherently a separate, explicit change; minor/patch updates
     are selected by the module graph.
 - **Dev / tooling dependencies** (linters, test runners, type checkers, build
-  helpers) are kept current with no upper bound — they do not affect runtime
-  behavior and staying current is cheap.
+  helpers) are kept current with lower-bound-style ranges that still **cap the
+  next major** (e.g. `mypy-protobuf<6`, `pytest-asyncio<2`, `pytest-timeout<3`):
+  staying current is cheap, but a major bump is reviewed explicitly like any
+  other. A range may carry a tighter **temporary cap** when the 7-day cooldown
+  (Section 3) excludes the newest release; that cap is lifted once the release
+  ages out of the cooldown window.
 - **Transitive dependencies** are not declared by hand; they are pinned in the
   lockfile, which is the single source of truth.
 
