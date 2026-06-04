@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mc_server_dashboard_api.servers.domain.backup_schedule import (
+    BACKUP_INTERVAL_CONFIG_KEY,
     schedule_from_config,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
@@ -36,6 +37,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedEditionError,
 )
 from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
+    SNAPSHOT_INTERVAL_CONFIG_KEY,
     override_from_config,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -56,6 +58,29 @@ _SERVER_RESOURCE_TYPE = "server"
 
 # The only MC edition the version catalog can serve at M1 (Java-only; FR-VER-1).
 _SUPPORTED_EDITION = "java"
+
+# Config keys that are *operationally safe* to edit in any server state (issue
+# #115). The criterion is narrow: a key qualifies only if it is read solely by an
+# API-side scheduler that re-reads ``server.config`` each tick, and is never
+# shipped into the running server's working set. Editing such a key changes only
+# the cadence the next tick observes, so it is race-honest under a plain config
+# UPDATE and needs no at-rest gate. Working-set-affecting keys (anything the
+# Worker materialises into the live server) are NOT safe and keep the at-rest
+# requirement. Keep this set minimal; add a key only when it provably meets the
+# criterion.
+_SAFE_CONFIG_KEYS = frozenset(
+    {SNAPSHOT_INTERVAL_CONFIG_KEY, BACKUP_INTERVAL_CONFIG_KEY}
+)
+
+
+def _changed_config_keys(current: dict[str, Any], incoming: dict[str, Any]) -> set[str]:
+    """Return the keys added, removed, or whose value changed between configs."""
+
+    return {
+        key
+        for key in current.keys() | incoming.keys()
+        if current.get(key) != incoming.get(key)
+    }
 
 
 def _parse_server_type(value: str) -> ServerType:
@@ -161,12 +186,21 @@ class ListServers:
 
 @dataclass(frozen=True)
 class UpdateServer:
-    """Edit a server's name/config while it is at rest (server:update).
+    """Edit a server's name/config (server:update).
+
+    The at-rest gate is split by config semantics (issue #115). A config update
+    that touches **only** operationally-safe keys (``_SAFE_CONFIG_KEYS`` — the
+    cadence knobs, read by API-side schedulers and never shipped into the working
+    set) is allowed in any state: the change is a plain config UPDATE the next
+    scheduler tick picks up, so it is race-honest without stopping the server. Any
+    other config change — touching a working-set key, or adding/removing/modifying
+    an unsafe key — keeps the at-rest requirement, as does a name change.
 
     A per-server snapshot-interval override carried on ``config`` is validated
     against ``min_interval_seconds`` (the thrash floor, CONFIGURATION.md Section
     5.4): a below-floor or non-integer value is rejected (FR-DATA-7), surfaced as
-    422 at the edge.
+    422 at the edge. Validation runs **before** the state gate, so a below-floor
+    override on a running server is a 422, not a 409 (the precedence ruling).
     """
 
     uow: UnitOfWork
@@ -199,7 +233,18 @@ class UpdateServer:
             ):
                 # The backend is immutable for the server's lifetime (FR-EXE-3).
                 raise ExecutionBackendImmutableError(execution_backend)
-            if not server.is_at_rest():
+            # The at-rest gate applies unless this is a safe-keys-only config edit
+            # (issue #115): a config update whose changed keys are all in
+            # ``_SAFE_CONFIG_KEYS``, with no name change, may run in any state.
+            changed_keys = (
+                set() if config is None else _changed_config_keys(server.config, config)
+            )
+            safe_only = (
+                new_name is None
+                and config is not None
+                and changed_keys <= _SAFE_CONFIG_KEYS
+            )
+            if not safe_only and not server.is_at_rest():
                 raise ServerNotStoppedError(str(server_id.value))
             if new_name is not None and new_name != server.name:
                 clash = await self.uow.servers.get_by_community_and_name(

@@ -384,6 +384,108 @@ async def test_update_rejects_while_running() -> None:
     assert uow.commits == 0
 
 
+async def test_update_safe_key_only_succeeds_while_running() -> None:
+    # Cadence knobs (snapshot_interval_seconds, backup_interval_hours) are
+    # operationally safe: a change touching only them bypasses the at-rest gate
+    # (issue #115). The incoming config must preserve the existing unsafe keys.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    uow.servers.seed(server)
+    updated = await UpdateServer(
+        uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300
+    )(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hi", "snapshot_interval_seconds": 600},
+    )
+    assert updated.config["snapshot_interval_seconds"] == 600
+    assert uow.commits == 1
+
+
+async def test_update_unsafe_key_rejected_while_running() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotStoppedError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "changed"},
+        )
+    assert uow.commits == 0
+
+
+async def test_update_mixed_safe_and_unsafe_keys_rejected_while_running() -> None:
+    # A safe-key change carried alongside any unsafe-key change keeps the at-rest
+    # requirement: the whole update is gated (issue #115).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotStoppedError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "changed", "snapshot_interval_seconds": 600},
+        )
+    assert uow.commits == 0
+
+
+async def test_update_below_floor_while_running_validates_before_state() -> None:
+    # Precedence: validation errors (below the thrash floor) are raised before the
+    # state gate, so a running server with a below-floor override 422s, not 409s
+    # (issue #115 second ask).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    uow.servers.seed(server)
+    with pytest.raises(InvalidSnapshotIntervalError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "hi", "snapshot_interval_seconds": 60},
+        )
+    assert uow.commits == 0
+
+
+async def test_update_removing_unsafe_key_rejected_while_running() -> None:
+    # Dropping an existing unsafe key counts as touching it: the at-rest gate
+    # still applies even though the only key sent is a safe one (issue #115).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotStoppedError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+            community_id=community,
+            server_id=server.id,
+            config={"snapshot_interval_seconds": 600},
+        )
+    assert uow.commits == 0
+
+
 async def test_update_rejects_name_clash_in_community() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
