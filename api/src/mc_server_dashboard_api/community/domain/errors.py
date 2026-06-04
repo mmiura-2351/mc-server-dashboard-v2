@@ -62,5 +62,43 @@ class OwnerUserNotFoundError(CommunityError):
     """
 
 
+class MemberUserNotFoundError(CommunityError):
+    """The user named for a manual member-add is not a known user.
+
+    Adding a member validates the user against the :class:`UserDirectory` Port
+    (FR-MEM-1); an unknown user id raises this rather than violating the
+    ``membership.user_id`` foreign key.
+    """
+
+
 class CommunityNotFoundError(CommunityError):
     """The targeted community does not exist (read/update/delete on a missing id)."""
+
+
+class MembershipNotFoundError(CommunityError):
+    """The targeted user is not a member of the community.
+
+    Raised by remove-member / role assignment when the named user has no
+    membership in the community.
+    """
+
+
+class RoleNotFoundError(CommunityError):
+    """The targeted role does not exist in the community.
+
+    Raised when assigning/unassigning a role the community does not own — either
+    a wholly unknown role id or, security-critically, a role belonging to a
+    *different* community (cross-community assignment, FR-AUTHZ-4). The
+    ``membership_role`` FK accepts any role id, so the use case must validate the
+    role's ``community_id`` matches; a mismatch is reported as not-found, giving
+    no signal about another community's roles.
+    """
+
+
+class LastOwnerRemovalError(CommunityError):
+    """Removing this member would leave the community with no Owner-role holder.
+
+    The preset Owner role (FR-COMM-4) is what keeps a community administrable; if
+    the member being removed is the only one holding it, the community would be
+    orphaned. The remove-member use case rejects this rather than allow it.
+    """

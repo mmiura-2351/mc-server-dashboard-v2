@@ -77,12 +77,20 @@ class MembershipRepository(abc.ABC):
         """Return all of ``user_id``'s memberships (FR-MEM-4 view scoping)."""
 
     @abc.abstractmethod
+    async def list_for_community(self, community_id: CommunityId) -> list[Membership]:
+        """Return all memberships in ``community_id`` (member listing, member:read)."""
+
+    @abc.abstractmethod
     async def delete(self, membership_id: MembershipId) -> None:
         """Delete the membership, cascading its ``membership_role`` rows (§10)."""
 
     @abc.abstractmethod
     async def assign_role(self, membership_id: MembershipId, role_id: RoleId) -> None:
         """Stage a ``membership_role`` row assigning ``role_id`` to the membership."""
+
+    @abc.abstractmethod
+    async def unassign_role(self, membership_id: MembershipId, role_id: RoleId) -> None:
+        """Delete the ``membership_role`` row assigning ``role_id`` to the member."""
 
     @abc.abstractmethod
     async def list_role_ids(self, membership_id: MembershipId) -> list[RoleId]:

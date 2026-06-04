@@ -86,12 +86,20 @@ class FakeMembershipRepository(MembershipRepository):
     async def list_for_user(self, user_id: UserId) -> list[Membership]:
         return [m for m in self.by_id.values() if m.user_id == user_id]
 
+    async def list_for_community(self, community_id: CommunityId) -> list[Membership]:
+        return [m for m in self.by_id.values() if m.community_id == community_id]
+
     async def delete(self, membership_id: MembershipId) -> None:
         self.by_id.pop(membership_id, None)
         self.role_ids.pop(membership_id, None)
 
     async def assign_role(self, membership_id: MembershipId, role_id: RoleId) -> None:
         self.role_ids.setdefault(membership_id, []).append(role_id)
+
+    async def unassign_role(self, membership_id: MembershipId, role_id: RoleId) -> None:
+        ids = self.role_ids.get(membership_id)
+        if ids is not None and role_id in ids:
+            ids.remove(role_id)
 
     async def list_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
         return list(self.role_ids.get(membership_id, []))
