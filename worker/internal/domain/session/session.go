@@ -150,17 +150,27 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 	return true, r.serve(ctx, transport, interval)
 }
 
-// serve runs the steady state: a heartbeat ticker and an inbound-command
-// receive loop, until the stream errors or ctx is cancelled. The command
-// receive runs in a goroutine so a blocking RecvCommand never starves the
-// heartbeat.
+// maxConcurrentTransfers bounds how many long-running hydrate/snapshot handlers
+// run at once off the receive loop (issue #95). A small cap keeps a burst of
+// transfers from spawning unbounded goroutines while still letting independent
+// servers' transfers proceed in parallel.
+const maxConcurrentTransfers = 4
+
+// serve runs the steady state: a heartbeat ticker, an inbound-command receive
+// loop, and a single serialized transport-send path, until the stream errors or
+// ctx is cancelled. The receive loop runs in a goroutine so a blocking
+// RecvCommand never starves the heartbeat; command results (from both inline and
+// off-loop handlers) flow back through the results channel so all transport
+// Sends happen on this one goroutine (a gRPC stream is not safe for concurrent
+// Send).
 func (r *Runner) serve(ctx context.Context, transport Transport, interval time.Duration) error {
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	results := make(chan CommandResult, maxConcurrentTransfers+1)
 	recvErr := make(chan error, 1)
 	go func() {
-		recvErr <- r.receiveLoop(serveCtx, transport)
+		recvErr <- r.receiveLoop(serveCtx, transport, results)
 	}()
 
 	var events <-chan StatusEvent
@@ -174,6 +184,10 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 			return serveCtx.Err()
 		case err := <-recvErr:
 			return err
+		case result := <-results:
+			if err := transport.SendCommandResult(serveCtx, result); err != nil {
+				return fmt.Errorf("send command result: %w", err)
+			}
 		case event := <-events:
 			if err := transport.SendStatusChange(serveCtx, event); err != nil {
 				return fmt.Errorf("send status change: %w", err)
@@ -186,27 +200,50 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 	}
 }
 
-// receiveLoop reads inbound commands and answers each. Lifecycle/console commands
-// (StartServer/StopServer/RestartServer/ServerCommand) dispatch to the handler;
-// the rest (Hydrate/Snapshot/ReadFile/EditFile) get an "unsupported" result
-// pending epics #8/#9. A command is never silently dropped (CONTROL_PLANE.md
-// Section 5).
-func (r *Runner) receiveLoop(ctx context.Context, transport Transport) error {
+// receiveLoop reads inbound commands and answers each, never blocking on a
+// long-running transfer. Lifecycle/console commands are fast and handled inline;
+// the long-running data-plane triggers (Hydrate/Snapshot) are dispatched off the
+// loop under a bounded semaphore so a slow transfer for one server does not delay
+// commands for another (issue #95). Unhandled commands (ReadFile/EditFile) get an
+// "unsupported" result. A command is never silently dropped (CONTROL_PLANE.md
+// Section 5). Every result is pushed to results, drained by the single sender in
+// serve.
+func (r *Runner) receiveLoop(ctx context.Context, transport Transport, results chan<- CommandResult) error {
+	sem := make(chan struct{}, maxConcurrentTransfers)
 	for {
 		cmd, err := transport.RecvCommand(ctx)
 		if err != nil {
 			return err
 		}
 
-		result := r.handle(ctx, cmd)
-		if err := transport.SendCommandResult(ctx, result); err != nil {
-			return fmt.Errorf("send command result: %w", err)
+		if isLongRunningKind(cmd.Kind) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case sem <- struct{}{}:
+			}
+			go func(cmd Command) {
+				defer func() { <-sem }()
+				r.emitResult(ctx, results, r.handle(ctx, cmd))
+			}(cmd)
+			continue
 		}
+
+		r.emitResult(ctx, results, r.handle(ctx, cmd))
 	}
 }
 
-// handle dispatches a command to the handler when it is a lifecycle/console
-// command and a handler is wired; otherwise it returns the "unsupported" result.
+// emitResult hands a result to the single serialized sender, abandoning it only
+// if the session is tearing down (the stream will be discarded anyway).
+func (r *Runner) emitResult(ctx context.Context, results chan<- CommandResult, result CommandResult) {
+	select {
+	case results <- result:
+	case <-ctx.Done():
+	}
+}
+
+// handle dispatches a command to the handler when it is a handled kind and a
+// handler is wired; otherwise it returns the "unsupported" result.
 func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
 	if r.handler != nil && isHandledKind(cmd.Kind) {
 		r.logger.Info("dispatching command",
@@ -227,7 +264,19 @@ func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
 // isHandledKind reports whether a command kind is dispatched to the handler.
 func isHandledKind(kind string) bool {
 	switch kind {
-	case "StartServer", "StopServer", "RestartServer", "ServerCommand":
+	case "StartServer", "StopServer", "RestartServer", "ServerCommand",
+		"HydrateTrigger", "SnapshotTrigger":
+		return true
+	default:
+		return false
+	}
+}
+
+// isLongRunningKind reports whether a command should run off the serial receive
+// loop (the bulk data-plane transfers, issue #95).
+func isLongRunningKind(kind string) bool {
+	switch kind {
+	case "HydrateTrigger", "SnapshotTrigger":
 		return true
 	default:
 		return false

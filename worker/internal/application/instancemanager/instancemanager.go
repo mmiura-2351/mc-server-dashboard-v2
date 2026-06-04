@@ -4,11 +4,12 @@
 // implements session.CommandHandler. It tracks one running instance per server
 // id and owns the per-server working dir under the scratch root.
 //
-// Working-set posture (M1): the manager only ensures scratchDir/<server_id>
-// exists before a launch; it does not hydrate. The working set stays empty (or
-// whatever an operator pre-seeded) until the hydrate trigger lands with epic #8.
-// A server whose JAR has not been hydrated will fail at the driver/JVM level,
-// which is the expected M1 behaviour.
+// Working-set posture: HydrateTrigger pulls the server's working set from the
+// API data plane into scratchDir/<server_id> before launch; the API issues it
+// before StartServer (FR-DATA-4). A server with no published working set yet
+// hydrates to an empty dir (the endpoint is 204). SnapshotTrigger pushes the
+// working set back. Hydrate/snapshot are long-running and run off the session's
+// serial receive loop (issue #95); the session bounds their concurrency.
 package instancemanager
 
 import (
@@ -27,11 +28,24 @@ import (
 // used by ServerCommand forwarding.
 type controlFunc func(ctx context.Context, serverID string) (execution.ServerControl, error)
 
+// Transfer is the data-plane Port: move a server's working set between the API's
+// authoritative Storage and the local working dir (FR-DATA-3/4). The trigger
+// command carries the URL + token; the bytes ride the HTTP data plane, off the
+// control-plane stream (CONTROL_PLANE.md Section 5.2).
+type Transfer interface {
+	// Hydrate downloads the working set from url into workingDir (an empty/204
+	// response leaves it empty).
+	Hydrate(ctx context.Context, url, token, workingDir string) error
+	// Snapshot packs workingDir and uploads it to url.
+	Snapshot(ctx context.Context, url, token, workingDir string) error
+}
+
 // Manager tracks running instances and dispatches commands to their drivers.
 type Manager struct {
 	drivers     map[string]execution.ExecutionDriver
 	scratchDir  string
 	openControl controlFunc
+	transfer    Transfer
 	logger      *slog.Logger
 
 	mu        sync.Mutex
@@ -67,6 +81,13 @@ func (m *Manager) WithLogger(l *slog.Logger) *Manager {
 	return m
 }
 
+// WithTransfer wires the data-plane Transfer client used by HydrateTrigger /
+// SnapshotTrigger. Without it, those commands fail with a transfer error.
+func (m *Manager) WithTransfer(t Transfer) *Manager {
+	m.transfer = t
+	return m
+}
+
 // Events streams observed state transitions for all managed servers.
 func (m *Manager) Events() <-chan session.StatusEvent { return m.events }
 
@@ -81,9 +102,77 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 		return m.handleRestart(ctx, cmd)
 	case "ServerCommand":
 		return m.handleServerCommand(ctx, cmd)
+	case "HydrateTrigger":
+		return m.handleHydrate(ctx, cmd)
+	case "SnapshotTrigger":
+		return m.handleSnapshot(ctx, cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
+	}
+}
+
+// handleHydrate pulls the working set into the server's working dir. It is only
+// valid when the instance is stopped: hydrating a running server would replace
+// the live working set out from under the process. The API issues this before
+// StartServer, so the not-running precondition holds on the start path.
+func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) session.CommandResult {
+	if m.transfer == nil {
+		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+			"instancemanager: no data-plane transfer client configured")
+	}
+	m.mu.Lock()
+	_, running := m.instances[cmd.ServerID]
+	m.mu.Unlock()
+	if running {
+		return fail(cmd.CommandID, session.CommandErrorInvalidState,
+			"instancemanager: cannot hydrate a running server")
+	}
+
+	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
+	if err := m.transfer.Hydrate(ctx, cmd.TransferURL, cmd.TransferToken, workingDir); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+			fmt.Sprintf("instancemanager: hydrate: %v", err))
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// handleSnapshot packs the server's working dir and uploads it. For a running
+// server it first flushes pending writes with a save-all over RCON (best-effort;
+// a failure is logged, not fatal) so the captured copy is as fresh as possible
+// (CONTROL_PLANE.md Section 6.9).
+func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) session.CommandResult {
+	if m.transfer == nil {
+		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+			"instancemanager: no data-plane transfer client configured")
+	}
+	m.mu.Lock()
+	_, running := m.instances[cmd.ServerID]
+	m.mu.Unlock()
+	if running {
+		m.flushRunning(ctx, cmd.ServerID)
+	}
+
+	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
+	if err := m.transfer.Snapshot(ctx, cmd.TransferURL, cmd.TransferToken, workingDir); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+			fmt.Sprintf("instancemanager: snapshot: %v", err))
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// flushRunning issues a save-all over RCON to flush pending world writes before a
+// snapshot of a running server. Failures are logged, not propagated: a snapshot
+// of a not-quite-flushed working set is still useful and bounded by FR-DATA-5.
+func (m *Manager) flushRunning(ctx context.Context, serverID string) {
+	ctrl, err := m.openControl(ctx, serverID)
+	if err != nil {
+		m.logger.Warn("snapshot save-all: open rcon failed", "server_id", serverID, "error", err)
+		return
+	}
+	defer func() { _ = ctrl.Close() }()
+	if _, err := ctrl.Execute(ctx, "save-all flush"); err != nil {
+		m.logger.Warn("snapshot save-all failed", "server_id", serverID, "error", err)
 	}
 }
 

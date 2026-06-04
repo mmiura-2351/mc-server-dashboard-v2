@@ -23,8 +23,10 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResult,
     CommandResultCode,
     CommandTimedOutError,
+    HydrateCommand,
     RestartServerCommand,
     ServerCommandCommand,
+    SnapshotCommand,
     StartServerCommand,
     StopServerCommand,
     WorkerNotConnectedError,
@@ -43,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
     ExecutionBackend,
     ServerId,
     WorkerId,
@@ -96,9 +99,16 @@ class FleetControlPlaneAdapter(ControlPlane):
         *,
         registry: WorkerRegistry,
         control_plane: FleetControlPlane,
+        data_plane_base_url: str | None = None,
+        worker_credential: str | None = None,
     ) -> None:
         self._registry = registry
         self._control_plane = control_plane
+        # The externally reachable data-plane base URL and the shared Worker
+        # credential (the transfer token) are only needed to dispatch a
+        # hydrate/snapshot; lifecycle-only callers may leave them unset.
+        self._data_plane_base_url = data_plane_base_url
+        self._worker_credential = worker_credential
 
     async def place(self, *, backend: ExecutionBackend) -> WorkerId | None:
         chosen = place(
@@ -153,6 +163,52 @@ class FleetControlPlaneAdapter(ControlPlane):
             worker_id, server_id, ServerCommandCommand(line=line)
         )
 
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        url = self._working_set_url(community_id, server_id)
+        return await self._dispatch(
+            worker_id,
+            server_id,
+            HydrateCommand(transfer_url=url, transfer_token=self._token()),
+        )
+
+    async def snapshot(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        url = self._snapshot_url(community_id, server_id)
+        return await self._dispatch(
+            worker_id,
+            server_id,
+            SnapshotCommand(transfer_url=url, transfer_token=self._token()),
+        )
+
+    def _base(self) -> str:
+        if not self._data_plane_base_url:
+            raise WorkerUnavailableError(
+                "data-plane transfer requested but server.public_base_url is unset"
+            )
+        return self._data_plane_base_url.rstrip("/")
+
+    def _token(self) -> str:
+        if not self._worker_credential:
+            raise WorkerUnavailableError(
+                "data-plane transfer requested but the Worker credential is unset"
+            )
+        return self._worker_credential
+
+    def _working_set_url(self, community_id: CommunityId, server_id: ServerId) -> str:
+        return (
+            f"{self._base()}/data-plane/communities/{community_id.value}"
+            f"/servers/{server_id.value}/working-set"
+        )
+
+    def _snapshot_url(self, community_id: CommunityId, server_id: ServerId) -> str:
+        return (
+            f"{self._base()}/data-plane/communities/{community_id.value}"
+            f"/servers/{server_id.value}/snapshot"
+        )
+
     async def _dispatch(
         self,
         worker_id: WorkerId,
@@ -160,7 +216,9 @@ class FleetControlPlaneAdapter(ControlPlane):
         command: StartServerCommand
         | StopServerCommand
         | RestartServerCommand
-        | ServerCommandCommand,
+        | ServerCommandCommand
+        | HydrateCommand
+        | SnapshotCommand,
     ) -> CommandOutcome:
         try:
             result = await self._control_plane.dispatch(

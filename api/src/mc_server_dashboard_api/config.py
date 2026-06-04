@@ -37,6 +37,12 @@ class ServerSettings(_Section):
     host: str = "0.0.0.0"
     http_port: int = 8000
     grpc_port: int = 50051
+    # Externally reachable base URL of the API's HTTP data plane, advertised to
+    # Workers in the hydrate/snapshot transfer triggers (CONFIGURATION.md
+    # Section 5.1, REQUIREMENTS.md Section 5.2). Declared optional so a process
+    # that never dispatches a transfer (no lifecycle commands) need not supply
+    # it; the lifecycle layer requires it when it builds a transfer URL.
+    public_base_url: str | None = None
 
 
 class ControlSettings(_Section):

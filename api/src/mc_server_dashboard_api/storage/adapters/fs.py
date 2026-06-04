@@ -302,10 +302,11 @@ class FsStorage(Storage):
         if not staging.is_dir():
             raise IncompleteTransferError("no completed staging area to publish")
         # The "proven complete" gate (STORAGE.md Section 4.1): existence of the
-        # staging dir is the only completeness check here. The end-of-stream +
-        # integrity/manifest (size match between what the Worker sent and what
-        # landed) check is part of the data-plane contract and is deferred to the
-        # data-plane sub-issue (#106); this method is where that gate will live.
+        # staging dir is the only completeness check here. The end-of-stream
+        # completeness check (the streamed-byte-count vs. Content-Length match)
+        # lives at the data-plane HTTP edge (STORAGE.md Section 8, issue #106): the
+        # snapshot endpoint verifies the match and aborts the staging area on a
+        # mismatch, so commit is only reached for a transfer proven complete.
         await asyncio.to_thread(
             self._publish, fs_handle.community_id, fs_handle.server_id, staging
         )

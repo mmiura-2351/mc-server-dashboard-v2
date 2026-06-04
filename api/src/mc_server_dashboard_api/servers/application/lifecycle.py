@@ -28,10 +28,13 @@ divergence shows up as ``desired_state`` not matching the Worker-reported
 is a reconciler's job, tracked separately; the in-line compensation above covers
 only the case where the dispatch *ran* and the Worker refused it.
 
-M1 stub posture: ``StartServer`` carries the JAR relpath and MC version the
-contract defines, but hydrate is deferred to epic #8. The Worker's working set is
-the Worker's concern until then; we send a conventional ``server.jar`` relpath and
-the server's recorded MC version (FR-EXE-5: the Worker picks the Java runtime).
+Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
+``StartServer`` first drives the Worker to pull the authoritative working set from
+Storage (a server with no published working set yet hydrates to an empty dir, the
+data-plane endpoint being 204), then dispatches the launch; either step failing
+compensates the committed intent. The launch carries a conventional ``server.jar``
+relpath and the server's recorded MC version (FR-EXE-5: the Worker picks the Java
+runtime).
 """
 
 from __future__ import annotations
@@ -65,8 +68,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 
 _LOG = logging.getLogger(__name__)
 
-# The conventional JAR path inside a hydrated working set. Hydrate is epic #8; at
-# M1 we send this fixed relpath so the command is contract-complete.
+# The conventional JAR path inside a hydrated working set. The Worker launches
+# against this relpath once the working set is hydrated (see __call__).
 _DEFAULT_JAR_RELPATH = "server.jar"
 
 
@@ -113,6 +116,24 @@ class StartServer:
             await self.uow.commit()
 
         self.control_plane.increment_assignment(worker_id=worker_id)
+        # Hydrate the working set BEFORE the launch (FR-DATA-4): the API drives a
+        # pull of the authoritative working set from Storage to the Worker's
+        # scratch, then the Worker launches against it. A server with no published
+        # working set yet hydrates to an empty dir (the data-plane endpoint is 204
+        # and the Worker starts fresh), so this is not an error.
+        try:
+            hydrate = await self.control_plane.hydrate(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
+        except WorkerUnavailableError as exc:
+            await self._compensate(community_id, server_id, worker_id, original=exc)
+            raise
+        if not hydrate.success:
+            failure = CommandDispatchError(hydrate.message or hydrate.status.value)
+            await self._compensate(community_id, server_id, worker_id, original=failure)
+            raise failure
         try:
             outcome = await self.control_plane.start(
                 worker_id=worker_id,
@@ -219,6 +240,31 @@ class StopServer:
         )
         if not outcome.success:
             raise CommandDispatchError(outcome.message or outcome.status.value)
+        # Final snapshot AFTER the process has exited (the graceful stop above
+        # only returns once the Worker reports the process gone), so the captured
+        # working set is quiescent (FR-DATA-4, FR-DATA-7). A snapshot failure is
+        # logged, not raised: the stop itself already succeeded and the server is
+        # down; bounding the loss window is best-effort, and a reconciler/next
+        # interval can re-snapshot. (The Worker self-addresses no Storage; the API
+        # drives the snapshot because only it knows the (community, server) scope.)
+        try:
+            snapshot = await self.control_plane.snapshot(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
+            if not snapshot.success:
+                _LOG.warning(
+                    "final snapshot on graceful stop failed for server %s: %s",
+                    server_id.value,
+                    snapshot.message or snapshot.status.value,
+                )
+        except WorkerUnavailableError:
+            _LOG.warning(
+                "final snapshot on graceful stop could not reach the Worker for "
+                "server %s; the stop succeeded but the working set was not captured",
+                server_id.value,
+            )
         return server
 
 

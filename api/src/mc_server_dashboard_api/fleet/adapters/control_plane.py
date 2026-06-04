@@ -29,8 +29,10 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResultCode,
     CommandTimedOutError,
     ControlPlane,
+    HydrateCommand,
     RestartServerCommand,
     ServerCommandCommand,
+    SnapshotCommand,
     StartServerCommand,
     StopServerCommand,
     WorkerNotConnectedError,
@@ -166,6 +168,20 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
         api.restart.CopyFrom(pb.RestartServer())
     elif isinstance(command, ServerCommandCommand):
         api.server_command.CopyFrom(pb.ServerCommand(line=command.line))
+    elif isinstance(command, HydrateCommand):
+        api.hydrate.CopyFrom(
+            pb.HydrateTrigger(
+                transfer_url=command.transfer_url,
+                transfer_token=command.transfer_token,
+            )
+        )
+    elif isinstance(command, SnapshotCommand):
+        api.snapshot.CopyFrom(
+            pb.SnapshotTrigger(
+                transfer_url=command.transfer_url,
+                transfer_token=command.transfer_token,
+            )
+        )
     else:  # pragma: no cover - exhaustive over the Command union
         raise TypeError(f"unsupported command type: {type(command)!r}")
     return api

@@ -21,8 +21,9 @@
 5. [File version retention](#5-file-version-retention)
 6. [Path-traversal protection](#6-path-traversal-protection)
 7. [Adapter families](#7-adapter-families)
-8. [Design decisions](#8-design-decisions)
-9. [Related documents](#9-related-documents)
+8. [Data plane (HTTP transfer)](#8-data-plane-http-transfer)
+9. [Design decisions](#9-design-decisions)
+10. [Related documents](#10-related-documents)
 
 ---
 
@@ -431,7 +432,71 @@ does not.
 
 ---
 
-## 8. Design decisions
+## 8. Data plane (HTTP transfer)
+
+The control plane only *triggers* a working-set transfer; the bulk bytes ride a
+separate **API-terminated HTTP data plane** so a multi-GB hydrate/snapshot never
+blocks control traffic (REQUIREMENTS.md Section 5.2, ARCHITECTURE.md Section 4,
+CONTROL_PLANE.md Section 5.2). These endpoints are the wire transport the Port's
+Section 3.1 contract deliberately leaves out; Storage guarantees the
+authoritative-side semantics, and this section is the matching transport.
+
+**Auth.** Worker-only, never community-authenticated: a Worker is platform
+infrastructure, not a member. The shared control-plane Worker credential is
+presented as `Authorization: Bearer <credential>` and compared constant-time
+(`control.worker_credential`, NFR-SEC-1) — the same model as the control-plane
+gRPC stream. A missing/wrong credential is `401`. The trigger commands carry the
+credential as their `transfer_token` and the full endpoint URL as
+`transfer_url`, so the Worker treats both opaquely and never needs to know the
+`(community, server)` scope itself.
+
+**Archive format.** A stdlib **tar stream** of the working-set root (the same
+format `open_hydrate_source` / `write_snapshot` already produce/consume,
+Section 7.1). No compression at M1.
+
+**Endpoints** (scoped by `(community_id, server_id)`):
+
+| Method & path | Meaning | Success | Errors |
+|---|---|---|---|
+| `GET /data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar. | `200` tar body | `204` no published snapshot (Worker starts from an empty dir); `401` |
+| `POST /data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. | `204` | `400` length mismatch / incomplete; `411` no `Content-Length`; `413` over the size cap; `401` |
+
+**JAR posture (M1).** ARCHITECTURE.md Section 7.3 says the resolved server JAR
+reaches the Worker as part of hydrate. At M1 no JAR is resolved into the pool yet
+(epic #9 resolves real JARs), and the `server` record carries no JAR reference,
+so the hydrate stream is the working set **alone** — the JAR is *omitted when not
+present*. Once epic #9 lands, the resolved JAR is added to the hydrate tar at its
+conventional relpath; the contract above is unchanged.
+
+**Proven-complete gate (FR-DATA-6).** `commit_snapshot` only publishes a staged
+transfer the data plane signalled complete (Section 4.1). The signal is the HTTP
+`Content-Length`: the snapshot endpoint refuses a body with no length, and after
+streaming the body into staging it verifies the streamed byte count equals
+`Content-Length`. On any mismatch (or a mid-transfer failure / client
+disconnect) it `abort`s the staging area and the prior authoritative copy is
+untouched — a partial upload is **never** published. The Worker sets the length
+from the tar it buffered, so the count matches a complete upload exactly.
+
+**Worker side.** The Worker's `DataTransfer` client (Go) does the byte movement
+off the gRPC stream: hydrate = GET + stream-unpack into the instance working dir
+(members path-sanitized — absolute paths, `..`, and symlink/hardlink members are
+rejected, mirroring the API-side `filter="data"` discipline); snapshot = pack the
+working dir into a tar and POST it with a `Content-Length`. Transport security
+(CA bundle / mTLS / dev-insecure) mirrors the control channel
+(CONFIGURATION.md Section 6.1). Hydrate/snapshot run **off** the session's serial
+receive loop under a bounded concurrency cap, so a slow transfer never delays
+another server's lifecycle command (issue #95).
+
+**Lifecycle wiring (FR-DATA-4).** `StartServer` hydrates before the launch (the
+API issues a hydrate trigger, then `StartServer`); a graceful `StopServer` takes
+a final snapshot after the process exits and before reporting stopped (the API
+issues the stop, then a snapshot trigger; the snapshot is best-effort — its
+failure does not fail the stop). A `HydrateTrigger` is only valid for a stopped
+server (refreshing a running server's working set would corrupt live state).
+
+---
+
+## 9. Design decisions
 
 Each records the decision, alternatives, and rationale, compactly
 (NFR-SCALE-1: thorough, not bloated). Decisions already stated inline — the
@@ -507,7 +572,7 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
 
 ---
 
-## 9. Related documents
+## 10. Related documents
 
 | Doc | Relationship |
 |---|---|
