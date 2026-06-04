@@ -36,10 +36,14 @@ On registration and password change the API rejects a password that fails any
 enabled rule. The rules and their defaults are configured under `auth.password.*`
 ([`CONFIGURATION.md`](CONFIGURATION.md) Section 7.1):
 
-- **Length** — between `min_length` and `max_length`. The upper bound
-  is a DoS guard and respects the bcrypt 72-byte cap.
+- **Length** — between `min_length` and `max_length` characters. When
+  `auth.password.hash=bcrypt` the effective upper bound is the smaller of
+  `max_length` and 72 UTF-8 bytes (bcrypt ignores bytes past 72, so a longer
+  password is rejected at the policy with reason `too_long_for_bcrypt`); the
+  argon2 default has no such byte cap. The upper bound is otherwise a DoS guard.
 - **Complexity-or-length** — at least 3 of {upper, lower, digit, symbol} **or**
-  at least 16 characters (`require_complexity`).
+  at least 16 characters (`require_complexity`). Whitespace counts toward the
+  symbol class, so passphrases with spaces get the credit.
 - **Common-password blocklist** — reject passwords on a published list
   (`check_common_list`; legacy baseline: SecLists xato-net top-10,000).
 - **User-info rejection** — reject a password containing the username or the

@@ -405,9 +405,13 @@ def _build_password_policy(password: PasswordSettings) -> PasswordPolicy:
     """Build the pure :class:`PasswordPolicy` from the configured knobs."""
 
     common = _common_passwords() if password.check_common_list else frozenset()
+    # bcrypt ignores bytes past 72; cap the effective byte length so two passwords
+    # sharing a 72-byte prefix cannot collide. argon2 has no such limit.
+    max_bytes = 72 if password.hash == "bcrypt" else None
     return PasswordPolicy(
         min_length=password.min_length,
         max_length=password.max_length,
+        max_bytes=max_bytes,
         require_complexity=password.require_complexity,
         check_common_list=password.check_common_list,
         forbid_user_info=password.forbid_user_info,

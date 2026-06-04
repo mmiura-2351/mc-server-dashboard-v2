@@ -7,6 +7,7 @@ The use cases are overridden with fakes so no database or JWT lib is touched
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Callable, Iterator
 
 from fastapi.testclient import TestClient
@@ -18,13 +19,31 @@ from mc_server_dashboard_api.dependencies import (
     get_logout,
     get_refresh_session,
 )
+from mc_server_dashboard_api.identity.adapters.password_hasher import (
+    BcryptPasswordHasher,
+)
+from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
+from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidAccessTokenError,
     InvalidCredentialsError,
     InvalidRefreshTokenError,
 )
-from tests.identity.fakes import make_user
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    EmailAddress,
+    UserId,
+    Username,
+)
+from tests.identity.fakes import (
+    FakeClock,
+    FakeLoginAttemptStore,
+    FakeTokenService,
+    FakeUnitOfWork,
+    RecordingFailureDelay,
+    make_brute_force_config,
+    make_user,
+)
 
 
 class _Fake:
@@ -92,6 +111,44 @@ def test_login_invalid_credentials_returns_401() -> None:
     resp = client.post("/auth/login", json={"username": "alice", "password": "bad"})
     assert resp.status_code == 401
     # No detail that distinguishes unknown-user from wrong-password.
+    assert resp.json()["detail"] == "invalid_credentials"
+
+
+def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
+    # Regression: a >72-byte login password under a bcrypt-configured hasher must
+    # not 500 (the bcrypt adapter's verify() returns False instead of raising),
+    # preserving the uniform-401 posture. Wires the real Login + real
+    # BcryptPasswordHasher so the actual verify() path runs end to end.
+    hasher = BcryptPasswordHasher()
+    now = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
+    user = User(
+        id=UserId.new(),
+        username=Username("alice"),
+        email=EmailAddress("alice@example.com"),
+        password_hash=hasher.hash("Wm7!qz#Lp2vT"),
+        created_at=now,
+        updated_at=now,
+    )
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    login = Login(
+        uow=uow,
+        attempts=FakeLoginAttemptStore(),
+        brute_force=make_brute_force_config(),
+        hasher=hasher,
+        dummy_password_hash=hasher.hash("dummy"),
+        tokens=FakeTokenService(),
+        clock=FakeClock(now),
+        failure_delay=RecordingFailureDelay(),
+        refresh_ttl=dt.timedelta(days=14),
+    )
+    client = next(_client(login=login))
+
+    resp = client.post(
+        "/auth/login", json={"username": "alice", "password": "A1!" + "x" * 100}
+    )
+
+    assert resp.status_code == 401
     assert resp.json()["detail"] == "invalid_credentials"
 
 

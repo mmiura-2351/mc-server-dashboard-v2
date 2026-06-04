@@ -132,6 +132,23 @@ def test_register_weak_password_returns_422_with_reason_no_echo() -> None:
     assert weak not in resp.text
 
 
+def test_register_password_over_schema_bound_returns_422() -> None:
+    # A >1024-character password is rejected by the schema before the use case
+    # runs (cheap DoS guard); the use case is never called.
+    fake = _FakeRegisterUser(result=_user())
+    client = next(_client(fake))
+    resp = client.post(
+        "/users",
+        json={
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": "x" * 1025,
+        },
+    )
+    assert resp.status_code == 422
+    assert fake.calls == []
+
+
 @pytest.mark.parametrize("missing", ["username", "email", "password"])
 def test_register_missing_field_returns_422(missing: str) -> None:
     fake = _FakeRegisterUser(result=_user())

@@ -54,6 +54,7 @@ def _policy() -> PasswordPolicy:
     return PasswordPolicy(
         min_length=12,
         max_length=128,
+        max_bytes=None,
         require_complexity=True,
         check_common_list=False,
         forbid_user_info=True,
