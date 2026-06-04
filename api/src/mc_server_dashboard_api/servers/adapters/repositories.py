@@ -187,6 +187,31 @@ class SqlAlchemyServerRepository(ServerRepository):
         )
         await self._session.execute(stmt)
 
+    async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
+        # Assigned rows whose observed state is non-terminal (an in-flight cache
+        # of a worker report). Terminal/cache-stable states (stopped, crashed,
+        # unknown) stay truthful across a restart, so they are excluded.
+        stmt = (
+            update(ServerModel)
+            .where(
+                ServerModel.assigned_worker_id.is_not(None),
+                ServerModel.observed_state.in_(
+                    [
+                        ObservedState.STARTING.value,
+                        ObservedState.RUNNING.value,
+                        ObservedState.STOPPING.value,
+                        ObservedState.RESTARTING.value,
+                    ]
+                ),
+            )
+            .values(
+                observed_state=ObservedState.UNKNOWN.value,
+                observed_at=observed_at,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return cast("CursorResult[Any]", result).rowcount
+
     async def count_running_for_worker(self, worker_id: WorkerId) -> int:
         stmt = select(func.count()).where(
             ServerModel.assigned_worker_id == worker_id.value,

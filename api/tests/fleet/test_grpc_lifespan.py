@@ -15,10 +15,22 @@ import pytest
 from grpc import aio
 from grpc.aio._server import Server as ConcreteAioServer
 
+import mc_server_dashboard_api.app as app_module
 from mc_server_dashboard_api.app import create_app
 from mcsd.controlplane.v1.control_plane_pb2_grpc import WorkerServiceStub
 
 _CREDENTIAL = "shared-worker-secret"
+
+
+class _NoopReset:
+    """Stand-in for the startup observed-state reset that performs no DB write."""
+
+    def __init__(self, **_: object) -> None:
+        pass
+
+    async def __call__(self) -> int:
+        return 0
+
 
 # Connection-level statuses that mean "the transport went away", not "the
 # server made a per-call decision". Under full-suite load a channel can emit a
@@ -75,6 +87,12 @@ async def test_lifespan_starts_and_stops_grpc_server(
         return port
 
     monkeypatch.setattr(ConcreteAioServer, "add_insecure_port", _spy_add_insecure_port)
+
+    # The startup observed-state reset (issue #224) runs an inline DB write before
+    # the reconciler starts; this smoke test has only the dummy DB URL and covers
+    # the gRPC start/stop path, not the reset (the integration tests own that).
+    # Stub it to a no-op so the lifespan does not dial Postgres.
+    monkeypatch.setattr(app_module, "ResetUnverifiableObservedStates", _NoopReset)
 
     app = create_app()
     async with app.router.lifespan_context(app):
