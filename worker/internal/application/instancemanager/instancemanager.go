@@ -32,8 +32,12 @@ import (
 )
 
 // controlFunc opens an execution.ServerControl (RCON) for a running server,
-// used by ServerCommand forwarding.
-type controlFunc func(ctx context.Context, serverID string) (execution.ServerControl, error)
+// used by ServerCommand forwarding. driver is the execution driver that runs the
+// server (the one recorded on its StartServer command), so the dial host can be
+// resolved per the driver's topology — a container driver with a configured
+// network reaches RCON over the network, every other driver over the host
+// loopback (issue #218).
+type controlFunc func(ctx context.Context, serverID, driver string) (execution.ServerControl, error)
 
 // Transfer is the data-plane Port: move a server's working set between the API's
 // authoritative Storage and the local working dir (FR-DATA-3/4). The trigger
@@ -238,7 +242,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 // snapshot of a running server. Failures are logged, not propagated: a snapshot
 // of a not-quite-flushed working set is still useful and bounded by FR-DATA-5.
 func (m *Manager) flushRunning(ctx context.Context, serverID string) {
-	ctrl, err := m.openControl(ctx, serverID)
+	ctrl, err := m.openControl(ctx, serverID, m.driverFor(serverID))
 	if err != nil {
 		m.logger.Warn("snapshot save-all: open rcon failed", "server_id", serverID, "error", err)
 		return
@@ -352,7 +356,7 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 			"instancemanager: server not running")
 	}
 
-	ctrl, err := m.openControl(ctx, cmd.ServerID)
+	ctrl, err := m.openControl(ctx, cmd.ServerID, m.driverFor(cmd.ServerID))
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: open rcon: %v", err))
@@ -709,6 +713,17 @@ func refuseExistingLeaf(parentFd int, leaf string) error {
 		return errIsDir
 	}
 	return nil
+}
+
+// driverFor returns the execution driver recorded for serverID's running
+// instance (its StartServer command's Driver), so the RCON dial host can be
+// resolved per driver. It is empty for a server that is not running, in which
+// case the caller resolves the loopback host — but both RCON call sites first
+// confirm the server is running, so the recorded driver is present.
+func (m *Manager) driverFor(serverID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.startCmds[serverID].Driver
 }
 
 // take removes and returns the instance and its StartServer command for

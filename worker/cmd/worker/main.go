@@ -157,10 +157,17 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	}
 
 	// ServerCommand forwarding and the pre-snapshot save-all open RCON by server
-	// id; the dial host comes from the (container) driver's topology so it reaches
-	// the MC container's RCON in the containerized deployment (issue #218).
-	openControl := func(ctx context.Context, serverID string) (execution.ServerControl, error) {
-		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), containerRconHost(serverID))
+	// id; the dial host is resolved from the driver that actually runs that server.
+	// Only a container-driven server with a configured network is dialed over the
+	// network (its container name); every other server — including a host-process
+	// server on a worker that also advertises the container driver — keeps the host
+	// loopback, so a mixed-driver worker resolves each server correctly (issue #218).
+	openControl := func(ctx context.Context, serverID, driver string) (execution.ServerControl, error) {
+		host := ""
+		if driver == "container" {
+			host = containerRconHost(serverID)
+		}
+		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host)
 	}
 	return instancemanager.New(drivers, wc.ScratchDir, openControl).WithLogger(logger), nil
 }

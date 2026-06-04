@@ -135,7 +135,10 @@ Its handling depends on `driver.container.network` (env
   loopback is not the host loopback where a published RCON port would land
   (issue #218). The compose default network's name is pinned to `mcsd` so the
   worker (a compose service) and the sibling MC containers it creates share the
-  same network with container-name DNS.
+  same network with container-name DNS. The network **must be user-defined**
+  (a `docker network create` network, as the pinned `mcsd` is): the default
+  `bridge` has no container-name DNS, so pointing this at `bridge` lets the
+  attach succeed but the RCON dial silently fails.
 - **Unset** (bare-metal worker / host-process parity): RCON is published to the
   host loopback (`127.0.0.1`) and dialed there, the historical behavior.
 

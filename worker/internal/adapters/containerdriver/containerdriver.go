@@ -110,7 +110,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	}
 }
 
-// RconHost returns the host RCON for serverID is dialed at. It is empty when no
+// RconHost returns the host that RCON for serverID is dialed at. It is empty when no
 // network is configured (the caller falls back to the host loopback), and the
 // container name when a user-defined network is configured: the network's
 // container-name DNS resolves it, so RCON is reached over the network rather than
