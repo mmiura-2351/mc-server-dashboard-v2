@@ -291,6 +291,20 @@ class ObjectStorage(Storage):
         re-run; never touches the prefix the pointer resolves to. A superseded
         prefix an active hydrate reader still leases is skipped and reclaimed by a
         later sweep once the reader releases (Section 4.2 reader safety).
+
+        Sweep-vs-flip race (issue #113): a concurrent publish whose new-prefix
+        objects were already in the listing but whose pointer flip lands after the
+        per-server pointer read would otherwise see the just-made-live prefix as an
+        orphan and delete it. The guard below re-reads the pointer immediately
+        before deleting each candidate snapshot prefix and skips it if the pointer
+        now names it. This narrows the window to the gap between that re-read and
+        the delete; it does not eliminate it, so the sweep remains safest run when
+        no publisher is concurrent (today: API startup only — Section 8.5 leaves
+        scheduling open). The ``incoming/`` window is not closed: a transfer staged
+        but not yet committed has no live pointer to re-read against, so a sweep
+        scheduled concurrently with an in-flight stage could still delete its
+        staging objects (the fs adapter pins staging with a lease; the object
+        adapter does not, so this residual window is documented, not closed).
         """
 
         async with self._client_factory() as client:
@@ -301,14 +315,27 @@ class ObjectStorage(Storage):
     async def _sweep_server(
         self, client: S3Client, server_prefix: str, keys: list[str]
     ) -> None:
-        live = await self._read_pointer(client, server_prefix)
+        # One re-read decision per candidate snapshot prefix (not per key): the
+        # first object encountered under a prefix re-reads the pointer and caches
+        # whether to delete that whole prefix.
+        delete_prefix: dict[str, bool] = {}
         for key in keys:
             rest = key[len(server_prefix) :]
             if rest.startswith("incoming/"):
                 await client.delete_object(key)
             elif rest.startswith("snapshots/"):
                 snap_prefix = server_prefix + "/".join(rest.split("/")[:2]) + "/"
-                if snap_prefix != live and not self._is_leased(snap_prefix):
+                if snap_prefix not in delete_prefix:
+                    # Re-read the pointer immediately before the first delete under
+                    # this prefix: a concurrent publish may have flipped it onto the
+                    # candidate after the listing was taken (issue #113), in which
+                    # case the prefix is live now and must be kept. A leased
+                    # superseded prefix is likewise kept (Section 4.2).
+                    live = await self._read_pointer(client, server_prefix)
+                    delete_prefix[snap_prefix] = (
+                        snap_prefix != live and not self._is_leased(snap_prefix)
+                    )
+                if delete_prefix[snap_prefix]:
                     await client.delete_object(key)
 
     # --- working-set hydrate / snapshot (Section 3.1) ----------------------
