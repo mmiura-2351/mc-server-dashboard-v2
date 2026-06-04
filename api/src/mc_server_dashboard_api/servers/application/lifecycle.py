@@ -198,12 +198,22 @@ class StartServer:
         failure we honestly undo them so the record does not claim a server is
         running when the Worker rejected it.
 
+        Placement-load decrement semantics (symmetric with StartServer's
+        increment): decrement **iff** the revert compare-and-set actually
+        reverted the row (rowcount true). If the CAS matched no row, a concurrent
+        transition (e.g. a stop) already moved the state out of running and owns
+        the decrement; decrementing here too would drive the count below the true
+        running tally. If the compensation commit itself errors the DB state is
+        unknown, so we do **not** decrement and log loudly — the reconnect
+        assignment rebuild reconciles the count from the authoritative tally.
+
         If the compensation itself fails, the original dispatch failure
         (``original``) must not be masked: we log both errors explicitly and
         re-raise the compensation error chained from the original so neither is
         lost (the record is left diverged, which a reconciler later detects).
         """
 
+        reverted = False
         try:
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
@@ -211,7 +221,7 @@ class StartServer:
                     server.desired_state = DesiredState.STOPPED
                     server.assigned_worker_id = None
                     server.updated_at = self.clock.now()
-                    await self.uow.servers.update_lifecycle(
+                    reverted = await self.uow.servers.update_lifecycle(
                         server, expected_from=DesiredState.RUNNING
                     )
                     await self.uow.commit()
@@ -224,7 +234,8 @@ class StartServer:
                 exc_info=compensation_error,
             )
             raise compensation_error from original
-        self.control_plane.decrement_assignment(worker_id=worker_id)
+        if reverted:
+            self.control_plane.decrement_assignment(worker_id=worker_id)
 
 
 @dataclass(frozen=True)

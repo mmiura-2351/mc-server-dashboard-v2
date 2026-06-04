@@ -305,3 +305,40 @@ async def test_dispatch_times_out_when_unanswered() -> None:
         await call.done_writing()
     finally:
         await harness.stop()
+
+
+async def test_stale_session_teardown_does_not_fail_new_sessions_pending() -> None:
+    # A worker reconnects on session B; an in-flight command is registered under
+    # B. A delayed teardown of the OLD session A then fires fail_worker_pending
+    # with A's token. Because A is no longer the worker's current session, B's
+    # pending future must NOT be failed (it can still be answered on B's stream).
+    state = ControlPlaneState()
+    worker = WorkerId(_WORKER)
+    session_a = 1
+    session_b = 2
+
+    state.open_session(worker, session_a)
+    state.open_session(worker, session_b)  # the reconnect; B is now current
+    future = state.register_pending("cmd-1", worker)
+
+    state.fail_worker_pending(worker, session_a, WorkerNotConnectedError(worker.value))
+
+    assert not future.done()
+
+
+async def test_current_session_teardown_fails_its_pending_fast() -> None:
+    # The normal disconnect: the tearing-down session is still the worker's
+    # current one, so its in-flight command fails fast instead of riding out the
+    # command timeout.
+    state = ControlPlaneState()
+    worker = WorkerId(_WORKER)
+    session = 1
+
+    state.open_session(worker, session)
+    future = state.register_pending("cmd-1", worker)
+
+    state.fail_worker_pending(worker, session, WorkerNotConnectedError(worker.value))
+
+    assert future.done()
+    with pytest.raises(WorkerNotConnectedError):
+        future.result()
