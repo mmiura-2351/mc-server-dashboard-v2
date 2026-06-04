@@ -149,3 +149,20 @@ async def test_read_traversal_is_invalid_path(tmp_path: Path) -> None:
                 server_id=ServerId(server),
                 rel_path=bad,
             )
+
+
+def test_validate_rel_path_rejects_traversal(tmp_path: Path) -> None:
+    # The running branch pre-rejects through the seam (no Storage I/O); the
+    # adapter applies the storage string-level rule, keeping RelPath behind the
+    # seam (issue #122).
+    adapter = StorageFileStoreAdapter(storage=FsStorage(tmp_path))
+
+    for bad in ("../escape", "/etc/passwd", "a/../../escape"):
+        with pytest.raises(InvalidFilePathError):
+            adapter.validate_rel_path(bad)
+
+
+def test_validate_rel_path_accepts_clean_path(tmp_path: Path) -> None:
+    adapter = StorageFileStoreAdapter(storage=FsStorage(tmp_path))
+
+    adapter.validate_rel_path("world/level.dat")

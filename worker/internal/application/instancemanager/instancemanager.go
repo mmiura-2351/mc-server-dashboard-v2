@@ -14,6 +14,7 @@ package instancemanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,8 +23,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -382,41 +384,40 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
 			fmt.Sprintf("instancemanager: read file: %v", err))
 	}
-	// Real-path containment: a symlink on an intermediate path component (which
-	// the running MC process can plant inside its own working set) would
-	// otherwise redirect the read outside the root. Resolve the target's parent
-	// and confirm it stays inside the resolved root before touching the target.
-	if err := verifyParentContained(root, target); err != nil {
-		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
-			fmt.Sprintf("instancemanager: read file: %v", err))
-	}
-
-	info, err := os.Lstat(target)
+	// Resolve the parent to a dirfd that is guaranteed beneath the root, then
+	// open the leaf relative to that fd: a symlink on any intermediate component
+	// (which the running MC process can plant inside its own working set) is
+	// refused rather than followed, and the open acts on the same resolved fd, so
+	// a concurrent symlink swap between resolution and open cannot redirect it.
+	parentFd, leaf, err := openParentBeneath(root, target, false)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, unix.ENOENT) {
+			// A missing working dir or intermediate dir: the file is simply not
+			// there, not an escape attempt.
 			return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 				fmt.Sprintf("instancemanager: read file: %q not found", cmd.Path))
 		}
-		return fail(cmd.CommandID, session.CommandErrorInternal,
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
 			fmt.Sprintf("instancemanager: read file: %v", err))
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		// A symlink is the classic escape vector; refuse it outright rather than
-		// following it out of the working set (FR-FILE-4).
-		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
-			fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
-	}
-	if info.IsDir() {
+	defer func() { _ = unix.Close(parentFd) }()
+
+	content, err := readLeafNoFollow(parentFd, leaf)
+	switch {
+	case errors.Is(err, errIsDir):
 		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
 			fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
-	}
-	if info.Size() > MaxFileBytes {
+	case errors.Is(err, errTooLarge):
 		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
 			fmt.Sprintf("instancemanager: %q exceeds the %d-byte read cap", cmd.Path, MaxFileBytes))
-	}
-
-	content, err := readFileNoFollow(target)
-	if err != nil {
+	case errors.Is(err, unix.ELOOP):
+		// O_NOFOLLOW refused a final-component symlink: the classic escape vector.
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
+	case errors.Is(err, unix.ENOENT):
+		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+			fmt.Sprintf("instancemanager: read file: %q not found", cmd.Path))
+	case err != nil:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: read file: %v", err))
 	}
@@ -445,39 +446,31 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 			fmt.Sprintf("instancemanager: edit file: %v", err))
 	}
 
-	// Real-path containment, guarding an intermediate-component symlink the MC
-	// process could plant: resolve the deepest *existing* ancestor and confirm
-	// it stays inside the resolved root before any MkdirAll. This ensures
-	// MkdirAll cannot traverse a link and create dirs outside the root.
-	if err := verifyParentContained(root, target); err != nil {
+	// Resolve (and, for missing intermediate dirs, create) the parent as a dirfd
+	// beneath the root via a per-component O_NOFOLLOW walk, then write relative to
+	// that fd. An intermediate-component symlink the MC process could plant is
+	// refused rather than followed, the dir creation cannot traverse a link out of
+	// the root, and the temp-create + rename act on the same resolved fd, so a
+	// concurrent symlink swap between the walk and the rename cannot redirect it.
+	parentFd, leaf, err := openParentBeneath(root, target, true)
+	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
 			fmt.Sprintf("instancemanager: edit file: %v", err))
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-		return fail(cmd.CommandID, session.CommandErrorInternal,
-			fmt.Sprintf("instancemanager: edit file: %v", err))
-	}
-	// Re-verify after MkdirAll: the now-fully-materialized parent must still
-	// resolve inside the root (belt-and-braces against a concurrently planted
-	// link), then refuse an existing symlink/dir at the final component.
-	if err := verifyParentContained(root, target); err != nil {
-		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
-			fmt.Sprintf("instancemanager: edit file: %v", err))
-	}
-	if info, statErr := os.Lstat(target); statErr == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
-				fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
-		}
-		if info.IsDir() {
+	defer func() { _ = unix.Close(parentFd) }()
+
+	if err := atomicWriteAt(parentFd, leaf, cmd.Content); err != nil {
+		switch {
+		case errors.Is(err, errIsDir):
 			return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
 				fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
+		case errors.Is(err, unix.ELOOP):
+			return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+				fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
+		default:
+			return fail(cmd.CommandID, session.CommandErrorInternal,
+				fmt.Sprintf("instancemanager: edit file: %v", err))
 		}
-	}
-
-	if err := atomicWrite(target, cmd.Content); err != nil {
-		return fail(cmd.CommandID, session.CommandErrorInternal,
-			fmt.Sprintf("instancemanager: edit file: %v", err))
 	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
@@ -485,9 +478,9 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 // safeJoin joins name under root and verifies the result stays inside root.
 // Absolute paths and any ".." component are rejected outright (not clamped),
 // mirroring the data-plane extractor's discipline (FR-FILE-4). The string-level
-// check below does not resolve symlinks; the handlers additionally call
-// verifyParentContained (real-path containment of intermediate components) and
-// Lstat the final component so no in-path link can redirect the access.
+// check below does not resolve symlinks; the handlers additionally resolve the
+// parent through openParentBeneath (a per-component O_NOFOLLOW walk beneath root)
+// and act on the resulting dirfd, so no in-path link can redirect the access.
 func safeJoin(root, name string) (string, error) {
 	slashed := filepath.ToSlash(name)
 	if path.IsAbs(slashed) {
@@ -510,93 +503,92 @@ func safeJoin(root, name string) (string, error) {
 	return joined, nil
 }
 
-// verifyParentContained confirms that target's parent directory, after fully
-// resolving symlinks, stays inside the resolved root. safeJoin already rejects
-// lexical escapes (absolute / ".."), but it does not resolve links: a symlink on
-// an intermediate path component would lexically look contained yet redirect the
-// real path outside root. Both root and parent are resolved through the same
-// deepest-existing-ancestor mechanism (so an outer symlink such as /tmp does not
-// cause a spurious mismatch), and the parent must stay inside the resolved root
-// (FR-FILE-4).
-func verifyParentContained(root, target string) error {
-	resolvedRoot, err := resolveExisting(root)
-	if err != nil {
-		return fmt.Errorf("resolving root: %w", err)
-	}
-	resolvedParent, err := resolveExisting(filepath.Dir(target))
-	if err != nil {
-		return fmt.Errorf("resolving path: %w", err)
-	}
-	if resolvedParent != resolvedRoot &&
-		!strings.HasPrefix(resolvedParent, resolvedRoot+string(os.PathSeparator)) {
-		return fmt.Errorf("refusing path escape via symlink %q", target)
-	}
-	return nil
-}
+// errIsDir / errTooLarge are sentinel results from the leaf helpers, mapped by
+// the handlers to their coded FILE_ACCESS_DENIED responses.
+var (
+	errIsDir    = errors.New("path is a directory")
+	errTooLarge = errors.New("file exceeds the read cap")
+)
 
-// resolveExisting returns p with every symlink in its existing portion resolved.
-// It walks up to the deepest ancestor that exists, EvalSymlinks that (the only
-// part that can hold a link), then reattaches the not-yet-created lexical tail.
-func resolveExisting(p string) (string, error) {
-	existing := p
-	for {
-		if _, err := os.Lstat(existing); err == nil {
-			break
-		}
-		parent := filepath.Dir(existing)
-		if parent == existing {
-			break
-		}
-		existing = parent
-	}
-	resolved, err := filepath.EvalSymlinks(existing)
-	if err != nil {
-		return "", err
-	}
-	if existing == p {
-		return resolved, nil
-	}
-	rest, err := filepath.Rel(existing, p)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(resolved, rest), nil
-}
-
-// readFileNoFollow reads a regular file, refusing to follow a symlink at the
-// final component (O_NOFOLLOW belt-and-braces; the handler also Lstat-guards it).
-func readFileNoFollow(target string) ([]byte, error) {
-	f, err := os.OpenFile(target, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+// readLeafNoFollow opens leaf relative to parentFd refusing to follow a final
+// symlink (O_NOFOLLOW yields ELOOP, which the handler maps to a denial), then
+// reads the regular file. A directory or an oversized file yields the matching
+// sentinel; ENOENT surfaces for a missing file.
+func readLeafNoFollow(parentFd int, leaf string) ([]byte, error) {
+	fd, err := unix.Openat(parentFd, leaf, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
+	f := os.NewFile(uintptr(fd), leaf)
 	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, errIsDir
+	}
+	if info.Size() > MaxFileBytes {
+		return nil, errTooLarge
+	}
 	return io.ReadAll(f)
 }
 
-// atomicWrite writes data to a temp sibling, fsyncs it, and renames it over the
-// target so a concurrent reader sees either the old or the complete new content,
-// never a partial write (mirrors the Storage adapter's write discipline).
-func atomicWrite(target string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".edit-*")
+// atomicWriteAt writes data to a temp file created under parentFd, fsyncs it, and
+// renames it over leaf relative to the same dirfd, so a concurrent reader sees
+// either the old or the complete new content, never a partial write. The whole
+// operation rides parentFd (already resolved beneath the root), so it cannot be
+// redirected by a concurrently swapped intermediate symlink. An existing symlink
+// or directory at leaf is refused before the write (errIsDir / ELOOP) rather than
+// replaced silently.
+func atomicWriteAt(parentFd int, leaf string, data []byte) error {
+	if err := refuseExistingLeaf(parentFd, leaf); err != nil {
+		return err
+	}
+
+	tmpName := ".edit-" + filepath.Base(leaf) + "-tmp"
+	fd, err := unix.Openat(parentFd, tmpName,
+		unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o640)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
+	tmp := os.NewFile(uintptr(fd), tmpName)
+	defer func() {
+		_ = tmp.Close()
+		_ = unix.Unlinkat(parentFd, tmpName, 0)
+	}()
 
 	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, target)
+	return unix.Renameat(parentFd, tmpName, parentFd, leaf)
+}
+
+// refuseExistingLeaf rejects an existing symlink or directory at leaf relative to
+// parentFd, so the atomic rename never silently replaces a symlink (the escape
+// vector) and never targets a directory.
+func refuseExistingLeaf(parentFd int, leaf string) error {
+	var st unix.Stat_t
+	if err := unix.Fstatat(parentFd, leaf, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFLNK:
+		return unix.ELOOP
+	case unix.S_IFDIR:
+		return errIsDir
+	}
+	return nil
 }
 
 // take removes and returns the instance and its StartServer command for

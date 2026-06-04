@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from pathlib import PurePosixPath
 
 import pytest
 
@@ -69,6 +70,13 @@ class FakeFileStore(FileStore):
         self.rollbacks: list[tuple[str, str]] = []
         self.missing = False
         self.bad_path = False
+
+    def validate_rel_path(self, rel_path: str) -> None:
+        # Mirror the seam's string-level traversal rule (absolute / ".."
+        # rejection) so the running branch pre-rejects without a real adapter.
+        parts = PurePosixPath(rel_path)
+        if parts.is_absolute() or ".." in parts.parts:
+            raise InvalidFilePathError(rel_path)
 
     async def read_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

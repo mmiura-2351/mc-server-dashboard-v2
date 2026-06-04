@@ -37,6 +37,17 @@ class FileStore(abc.ABC):
     """Port: the file layer's seam to the authoritative-copy file store."""
 
     @abc.abstractmethod
+    def validate_rel_path(self, rel_path: str) -> None:
+        """Reject a traversal-unsafe ``rel_path`` at the string level (FR-FILE-4).
+
+        The running branch forwards the raw ``rel_path`` to the Worker rather than
+        through this seam, so the use case asks the seam to pre-reject a doomed
+        path before dispatch. The adapter applies the same string-level rule the
+        storage value object enforces, keeping the storage type behind the seam.
+        Raises :class:`InvalidFilePathError` for a traversal-unsafe path.
+        """
+
+    @abc.abstractmethod
     async def read_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> bytes:
