@@ -1,9 +1,10 @@
 """Adapter implementing the community :class:`UserDirectory` Port over identity.
 
-This is the edge where the community context's narrow "does this user exist?"
-question (FR-COMM-2) is answered against the identity user store. Only the
+This is the edge where the community context's user-directory questions are
+answered against the identity user store: "does this user exist?" (FR-COMM-2) and
+"what are these users' display names?" for member listings (issue #78). Only the
 *adapter* crosses contexts — the community domain stays unaware of identity
-(DATABASE.md Section 5) — and it asks only for existence, nothing more.
+(DATABASE.md Section 5) — and it asks only for existence and usernames.
 """
 
 from __future__ import annotations
@@ -28,3 +29,13 @@ class IdentityUserDirectory(UserDirectory):
         async with self._uow as uow:
             user = await uow.users.get_by_id(IdentityUserId(user_id.value))
         return user is not None
+
+    async def usernames_for(self, user_ids: list[UserId]) -> dict[UserId, str]:
+        async with self._uow as uow:
+            resolved = await uow.users.usernames_by_id(
+                [IdentityUserId(uid.value) for uid in user_ids]
+            )
+        return {
+            UserId(identity_id.value): username.value
+            for identity_id, username in resolved.items()
+        }

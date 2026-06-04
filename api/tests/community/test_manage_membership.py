@@ -53,11 +53,19 @@ class _FakeClock(Clock):
 
 
 class _FakeUserDirectory(UserDirectory):
-    def __init__(self, *, known: bool) -> None:
+    def __init__(
+        self, *, known: bool = True, usernames: dict[UserId, str] | None = None
+    ) -> None:
         self._known = known
+        self._usernames = usernames or {}
+        self.usernames_for_calls: list[list[UserId]] = []
 
     async def exists(self, user_id: UserId) -> bool:
         return self._known
+
+    async def usernames_for(self, user_ids: list[UserId]) -> dict[UserId, str]:
+        self.usernames_for_calls.append(list(user_ids))
+        return {uid: self._usernames[uid] for uid in user_ids if uid in self._usernames}
 
 
 def _seed_community(uow: FakeAuthzUnitOfWork, name: str = "guild") -> Community:
@@ -225,23 +233,62 @@ async def test_remove_non_owner_is_allowed_even_as_sole_owner_exists() -> None:
 # --- ListMembers ------------------------------------------------------------
 
 
-async def test_list_members_returns_members_with_role_names() -> None:
+async def test_list_members_returns_members_with_role_names_and_username() -> None:
     uow = FakeAuthzUnitOfWork()
     community = _seed_community(uow)
     user = UserId(uuid.uuid4())
     uow.add_role(user, community.id, {Permission("server:read")}, name="Editor")
+    users = _FakeUserDirectory(usernames={user: "alice"})
 
-    members = await ListMembers(uow=uow)(community_id=community.id)
+    members = await ListMembers(uow=uow, users=users)(community_id=community.id)
 
     assert len(members) == 1
     assert members[0].user_id == user
     assert members[0].role_names == ["Editor"]
+    assert members[0].username == "alice"
+
+
+async def test_list_members_resolves_usernames_in_one_batch_call() -> None:
+    # The directory must be queried once for all members, not once per member.
+    uow = FakeAuthzUnitOfWork()
+    community = _seed_community(uow)
+    first = UserId(uuid.uuid4())
+    second = UserId(uuid.uuid4())
+    uow.add_role(first, community.id, {Permission("server:read")}, name="Editor")
+    uow._membership_for(second, community.id)
+    users = _FakeUserDirectory(usernames={first: "alice", second: "bob"})
+
+    members = await ListMembers(uow=uow, users=users)(community_id=community.id)
+
+    assert len(users.usernames_for_calls) == 1
+    assert set(users.usernames_for_calls[0]) == {first, second}
+    by_user = {view.user_id: view.username for view in members}
+    assert by_user == {first: "alice", second: "bob"}
+
+
+async def test_list_members_unresolved_username_falls_back_to_none() -> None:
+    # Defensive: membership.user_id FK is ON DELETE CASCADE, so a listed member
+    # whose username does not resolve is unreachable in normal operation; the use
+    # case still degrades gracefully rather than dropping the member.
+    uow = FakeAuthzUnitOfWork()
+    community = _seed_community(uow)
+    user = UserId(uuid.uuid4())
+    uow._membership_for(user, community.id)
+    users = _FakeUserDirectory(usernames={})
+
+    members = await ListMembers(uow=uow, users=users)(community_id=community.id)
+
+    assert len(members) == 1
+    assert members[0].user_id == user
+    assert members[0].username is None
 
 
 async def test_list_members_missing_community_raises_not_found() -> None:
     uow = FakeAuthzUnitOfWork()
     with pytest.raises(CommunityNotFoundError):
-        await ListMembers(uow=uow)(community_id=CommunityId(uuid.uuid4()))
+        await ListMembers(uow=uow, users=_FakeUserDirectory())(
+            community_id=CommunityId(uuid.uuid4())
+        )
 
 
 # --- AssignRole / UnassignRole ---------------------------------------------

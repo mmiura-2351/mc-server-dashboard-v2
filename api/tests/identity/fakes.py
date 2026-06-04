@@ -73,6 +73,10 @@ class FakeUserRepository(UserRepository):
                 return user
         return None
 
+    async def usernames_by_id(self, user_ids: list[UserId]) -> dict[UserId, Username]:
+        wanted = set(user_ids)
+        return {uid: user.username for uid, user in self.by_id.items() if uid in wanted}
+
 
 class FakeRefreshTokenRepository(RefreshTokenRepository):
     def __init__(self) -> None:

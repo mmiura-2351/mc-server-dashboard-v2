@@ -88,6 +88,14 @@ class SqlAlchemyUserRepository(UserRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row is not None else None
 
+    async def usernames_by_id(self, user_ids: list[UserId]) -> dict[UserId, Username]:
+        if not user_ids:
+            return {}
+        ids = [uid.value for uid in user_ids]
+        stmt = select(UserModel.id, UserModel.username).where(UserModel.id.in_(ids))
+        rows = (await self._session.execute(stmt)).all()
+        return {UserId(row.id): Username(row.username) for row in rows}
+
 
 class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
     """:class:`RefreshTokenRepository` adapter over an ``AsyncSession``."""

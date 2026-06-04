@@ -86,10 +86,17 @@ class MembershipResponse(BaseModel):
 
 
 class MemberResponse(BaseModel):
-    """A member of a community with the names of the roles they hold."""
+    """A member of a community with their username and the roles they hold.
+
+    ``username`` is ``null`` only when the id does not resolve in the identity
+    store — unreachable in normal operation given the ``ON DELETE CASCADE`` FK
+    from ``membership`` to ``user`` (DATABASE.md Section 5); it is a defensive
+    fallback so a UI client always receives the member row (issue #78).
+    """
 
     membership_id: str
     user_id: str
+    username: str | None
     role_names: list[str]
 
     @classmethod
@@ -97,6 +104,7 @@ class MemberResponse(BaseModel):
         return cls(
             membership_id=str(view.membership_id.value),
             user_id=str(view.user_id.value),
+            username=view.username,
             role_names=view.role_names,
         )
 

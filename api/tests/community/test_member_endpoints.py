@@ -205,7 +205,10 @@ def test_list_members_authorized_returns_200() -> None:
     community = CommunityId.new()
     user = UserId(uuid.uuid4())
     view = MemberView(
-        user_id=user, membership_id=MembershipId.new(), role_names=["Owner"]
+        user_id=user,
+        membership_id=MembershipId.new(),
+        role_names=["Owner"],
+        username="alice",
     )
     app = _app(member=True, allow=True, list_uc=_FakeUseCase(result=[view]))
     client = next(_client(app))
@@ -213,6 +216,25 @@ def test_list_members_authorized_returns_200() -> None:
     assert resp.status_code == 200
     assert resp.json()[0]["role_names"] == ["Owner"]
     assert resp.json()[0]["user_id"] == str(user.value)
+    assert resp.json()[0]["username"] == "alice"
+
+
+def test_list_members_unresolved_username_is_null_in_response() -> None:
+    # Defensive fallback: a member whose username does not resolve still appears,
+    # with username null (issue #78).
+    community = CommunityId.new()
+    user = UserId(uuid.uuid4())
+    view = MemberView(
+        user_id=user,
+        membership_id=MembershipId.new(),
+        role_names=[],
+        username=None,
+    )
+    app = _app(member=True, allow=True, list_uc=_FakeUseCase(result=[view]))
+    client = next(_client(app))
+    resp = client.get(f"/communities/{community.value}/members")
+    assert resp.status_code == 200
+    assert resp.json()[0]["username"] is None
 
 
 def test_list_members_non_member_gets_404() -> None:

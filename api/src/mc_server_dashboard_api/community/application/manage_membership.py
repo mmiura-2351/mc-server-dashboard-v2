@@ -86,11 +86,19 @@ def _is_preset_owner(role: Role) -> bool:
 
 @dataclass(frozen=True)
 class MemberView:
-    """A member of a community with the names of the roles they hold."""
+    """A member of a community with their username and the roles they hold.
+
+    ``username`` is resolved through the :class:`UserDirectory` seam (issue #78).
+    It is ``None`` only when the id does not resolve — unreachable in normal
+    operation because ``membership.user_id`` FKs ``user.id`` with
+    ``ON DELETE CASCADE`` (DATABASE.md Section 5), so a deleted user takes their
+    memberships with them; the field is a defensive fallback, not an expected case.
+    """
 
     user_id: UserId
     membership_id: MembershipId
     role_names: list[str]
+    username: str | None
 
 
 @dataclass(frozen=True)
@@ -153,9 +161,14 @@ class RemoveMember:
 
 @dataclass(frozen=True)
 class ListMembers:
-    """List the community's members with their role names (member:read)."""
+    """List the community's members with username and role names (member:read).
+
+    Usernames are resolved through the :class:`UserDirectory` seam in one batch
+    lookup for all members (issue #78), never one lookup per member.
+    """
 
     uow: UnitOfWork
+    users: UserDirectory
 
     async def __call__(self, *, community_id: CommunityId) -> list[MemberView]:
         async with self.uow:
@@ -167,21 +180,26 @@ class ListMembers:
                 for role in await self.uow.roles.list_for_community(community_id)
             }
             memberships = await self.uow.memberships.list_for_community(community_id)
-            views = []
-            for membership in memberships:
-                role_ids = await self.uow.memberships.list_role_ids(membership.id)
-                views.append(
-                    MemberView(
-                        user_id=membership.user_id,
-                        membership_id=membership.id,
-                        role_names=[
-                            roles[role_id].name.value
-                            for role_id in role_ids
-                            if role_id in roles
-                        ],
-                    )
-                )
-        return views
+            role_ids_by_membership = {
+                membership.id: await self.uow.memberships.list_role_ids(membership.id)
+                for membership in memberships
+            }
+        usernames = await self.users.usernames_for(
+            [membership.user_id for membership in memberships]
+        )
+        return [
+            MemberView(
+                user_id=membership.user_id,
+                membership_id=membership.id,
+                role_names=[
+                    roles[role_id].name.value
+                    for role_id in role_ids_by_membership[membership.id]
+                    if role_id in roles
+                ],
+                username=usernames.get(membership.user_id),
+            )
+            for membership in memberships
+        ]
 
 
 @dataclass(frozen=True)
