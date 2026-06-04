@@ -78,7 +78,10 @@ class RoleGrantPermissionChecker(PermissionChecker):
 
             if resource.resource_type is not None and resource.resource_id is not None:
                 grant = await uow.resource_grants.get_for_user_resource(
-                    user_id, resource.resource_type, resource.resource_id
+                    user_id,
+                    resource.community_id,
+                    resource.resource_type,
+                    resource.resource_id,
                 )
                 if grant is not None:
                     effective |= grant.permissions

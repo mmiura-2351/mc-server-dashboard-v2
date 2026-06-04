@@ -128,6 +128,32 @@ async def test_resource_grant_does_not_apply_to_a_different_resource() -> None:
     assert allowed is False
 
 
+async def test_resource_grant_does_not_apply_in_a_different_community() -> None:
+    # Defense-in-depth (FR-AUTHZ-4): a grant on (server, X) in community A must
+    # never satisfy a check scoped to community B for the same resource id, even
+    # if a caller passes a mismatched (community_id, resource_id) pair.
+    user = _member()
+    community_a = CommunityId.new()
+    community_b = CommunityId.new()
+    server_id = uuid.uuid4()
+    uow = FakeAuthzUnitOfWork()
+    seed_member_with_role(uow, user.user_id, community_b, set())
+    uow.add_grant(
+        user.user_id, community_a, "server", server_id, {Permission("server:stop")}
+    )
+    checker = RoleGrantPermissionChecker(uow)
+
+    allowed = await checker.can(
+        user=user,
+        operation=Permission("server:stop"),
+        resource=ResourceRef(
+            community_id=community_b, resource_type="server", resource_id=server_id
+        ),
+    )
+
+    assert allowed is False
+
+
 async def test_resource_grant_is_ignored_without_a_resource_in_the_ref() -> None:
     # A community-level check (no resource_id) cannot draw on a per-resource grant.
     user = _member()

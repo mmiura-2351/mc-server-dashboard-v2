@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 
+import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
@@ -134,3 +135,49 @@ def test_platform_admin_required_rejects_non_admin() -> None:
     client = next(_client(app))
     resp = client.get("/admin/ping")
     assert resp.status_code == 403
+
+
+def test_resource_type_without_id_param_is_a_construction_error() -> None:
+    # both-or-neither: passing only resource_type fails fast at wiring time.
+    with pytest.raises(ValueError):
+        require_permission(Permission("server:stop"), resource_type="server")
+
+
+def test_resource_id_param_without_type_is_a_construction_error() -> None:
+    with pytest.raises(ValueError):
+        require_permission(
+            Permission("server:stop"), resource_id_param="server_id"
+        )
+
+
+def test_missing_path_param_is_a_server_misconfiguration() -> None:
+    # The route omits the {server_id} segment the dependency expects: fail-closed
+    # with a 500, not an opaque KeyError.
+    app = FastAPI()
+    checker = _FakeChecker(allow=True)
+
+    @app.get(
+        "/communities/{community_id}/oops",
+        dependencies=[
+            Depends(
+                require_permission(
+                    Permission("server:stop"),
+                    resource_type="server",
+                    resource_id_param="server_id",
+                )
+            )
+        ],
+    )
+    async def _oops() -> dict[str, str]:
+        return {"ok": "yes"}
+
+    user = make_user()
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=True
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: checker
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get(f"/communities/{uuid.uuid4()}/oops")
+    assert resp.status_code == 500

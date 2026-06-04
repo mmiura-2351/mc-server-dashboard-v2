@@ -190,7 +190,7 @@ async def test_resource_grant_round_trip(engine: AsyncEngine) -> None:
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
         loaded = await uow.resource_grants.get_for_user_resource(
-            UserId(user_id), "server", resource_id
+            UserId(user_id), community.id, "server", resource_id
         )
     assert loaded is not None
     assert loaded.id == grant.id

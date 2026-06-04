@@ -177,6 +177,46 @@ async def test_resource_grant_scoped_to_exact_resource(engine: AsyncEngine) -> N
     assert on_y is False
 
 
+async def test_resource_grant_does_not_apply_in_a_different_community(
+    engine: AsyncEngine,
+) -> None:
+    # Defense-in-depth (FR-AUTHZ-4): a grant on (server, X) in community A must
+    # not satisfy a check scoped to community B for the same resource id.
+    factory = create_session_factory(engine)
+    user_id = uuid.uuid4()
+    await _insert_user(engine, user_id, "alice")
+    community_a = _community("a")
+    community_b = _community("b")
+    membership_b = _membership(user_id, community_b.id)
+    server_id = uuid.uuid4()
+    grant = ResourceGrant(
+        id=ResourceGrantId.new(),
+        user_id=UserId(user_id),
+        community_id=community_a.id,
+        resource_type="server",
+        resource_id=server_id,
+        permissions={Permission("server:stop")},
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community_a)
+        await uow.communities.add(community_b)
+        await uow.memberships.add(membership_b)
+        await uow.resource_grants.add(grant)
+        await uow.commit()
+
+    checker = RoleGrantPermissionChecker(SqlAlchemyUnitOfWork(factory))
+    in_b = await checker.can(
+        user=AuthUser(user_id=UserId(user_id)),
+        operation=Permission("server:stop"),
+        resource=ResourceRef(
+            community_id=community_b.id, resource_type="server", resource_id=server_id
+        ),
+    )
+    assert in_b is False
+
+
 async def test_cross_community_isolation(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     user_id = uuid.uuid4()

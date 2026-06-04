@@ -110,9 +110,18 @@ class ResourceGrantRepository(abc.ABC):
 
     @abc.abstractmethod
     async def get_for_user_resource(
-        self, user_id: UserId, resource_type: str, resource_id: uuid.UUID
+        self,
+        user_id: UserId,
+        community_id: CommunityId,
+        resource_type: str,
+        resource_id: uuid.UUID,
     ) -> ResourceGrant | None:
-        """Return the grant for ``(user, resource_type, resource_id)``, or ``None``."""
+        """Return the grant for ``(user, community, resource_type, resource_id)``.
+
+        ``community_id`` is part of the key so a grant can never satisfy a check
+        scoped to a different community (FR-AUTHZ-4 defense-in-depth). Returns
+        ``None`` when no matching grant exists.
+        """
 
     @abc.abstractmethod
     async def delete_for_user_in_community(

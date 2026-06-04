@@ -224,10 +224,15 @@ class SqlAlchemyResourceGrantRepository(ResourceGrantRepository):
         return _to_resource_grant(row) if row is not None else None
 
     async def get_for_user_resource(
-        self, user_id: UserId, resource_type: str, resource_id: uuid.UUID
+        self,
+        user_id: UserId,
+        community_id: CommunityId,
+        resource_type: str,
+        resource_id: uuid.UUID,
     ) -> ResourceGrant | None:
         stmt = select(ResourceGrantModel).where(
             ResourceGrantModel.user_id == user_id.value,
+            ResourceGrantModel.community_id == community_id.value,
             ResourceGrantModel.resource_type == resource_type,
             ResourceGrantModel.resource_id == resource_id,
         )

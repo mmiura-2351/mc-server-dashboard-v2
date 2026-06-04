@@ -343,7 +343,24 @@ def require_permission(
     operations, pass ``resource_type`` and the path-parameter name carrying the
     resource id (``resource_id_param``) so the grant lookup is scoped to the
     exact resource (FR-AUTHZ-2). Returns the authorized :class:`AuthUser`.
+
+    ``resource_type`` and ``resource_id_param`` are both-or-neither: pass both
+    for a per-resource check or neither for a community-level check. Passing
+    exactly one is a wiring mistake that would silently degrade a per-resource
+    operation to a community-level grant lookup, so it raises here at
+    dependency-construction time (fail-fast, before any request).
+
+    Route convention: the community path segment must be named ``community_id``
+    (see ``_dependency`` below); #69+ routes are expected to follow this.
     """
+
+    if (resource_type is None) != (resource_id_param is None):
+        raise ValueError(
+            "require_permission: resource_type and resource_id_param are "
+            "both-or-neither; pass both for a per-resource check or neither "
+            f"for a community-level check (got resource_type={resource_type!r}, "
+            f"resource_id_param={resource_id_param!r})"
+        )
 
     async def _dependency(
         community_id: uuid.UUID,
@@ -392,6 +409,15 @@ async def require_platform_admin(
 def _resource_id_from_path(request: Request, param: str | None) -> uuid.UUID | None:
     if param is None:
         return None
+    if param not in request.path_params:
+        # Fail-closed by design: a per-resource check whose route does not
+        # declare the named path param is a server-side misconfiguration. Raise
+        # a diagnosable RuntimeError (-> 500) instead of an opaque KeyError.
+        raise RuntimeError(
+            f"require_permission: path param {param!r} is not declared by route "
+            f"{request.url.path!r}; the route must include a "
+            f"{{{param}}} path segment"
+        )
     raw = request.path_params[param]
     return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
 

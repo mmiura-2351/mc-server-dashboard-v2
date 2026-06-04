@@ -116,11 +116,16 @@ class FakeResourceGrantRepository(ResourceGrantRepository):
         return self.by_id.get(grant_id)
 
     async def get_for_user_resource(
-        self, user_id: UserId, resource_type: str, resource_id: uuid.UUID
+        self,
+        user_id: UserId,
+        community_id: CommunityId,
+        resource_type: str,
+        resource_id: uuid.UUID,
     ) -> ResourceGrant | None:
         for grant in self.by_id.values():
             if (
                 grant.user_id == user_id
+                and grant.community_id == community_id
                 and grant.resource_type == resource_type
                 and grant.resource_id == resource_id
             ):
