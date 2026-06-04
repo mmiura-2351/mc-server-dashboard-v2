@@ -122,7 +122,7 @@ runs on push of any `v*` tag. To cut a release:
 
    ```sh
    git fetch origin
-   git tag vX.Y.Z origin/main      # or a specific <sha>
+   git tag -a vX.Y.Z -m "vX.Y.Z" origin/main      # or a specific <sha>
    git push origin vX.Y.Z
    ```
 
