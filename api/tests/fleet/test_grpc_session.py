@@ -26,12 +26,17 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneSta
 from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServicer
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
+from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from mcsd.controlplane.v1.control_plane_pb2_grpc import (
     WorkerServiceStub,
     add_WorkerServiceServicer_to_server,
 )
-from tests.fleet.fakes import FakeClock, FakeServerStateSink
+from tests.fleet.fakes import (
+    FakeClock,
+    FakeServerStateSink,
+    RecordingRealTimeEvents,
+)
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _TIMEOUT = dt.timedelta(seconds=30)
@@ -64,11 +69,13 @@ class _Harness:
         *,
         state_sink: FakeServerStateSink | None = None,
         control_plane: ControlPlaneState | None = None,
+        real_time_events: RecordingRealTimeEvents | None = None,
     ) -> None:
         self.registry = registry
         self.clock = clock
         self.state_sink = state_sink or FakeServerStateSink()
         self.control_plane = control_plane or ControlPlaneState()
+        self.real_time_events = real_time_events or RecordingRealTimeEvents()
         self._server: aio.Server | None = None
         self._channel: aio.Channel | None = None
 
@@ -81,6 +88,7 @@ class _Harness:
             heartbeat_timeout=_TIMEOUT,
             control_plane=self.control_plane,
             state_sink=self.state_sink,
+            real_time_events=self.real_time_events,
         )
         add_WorkerServiceServicer_to_server(servicer, server)
         port = server.add_insecure_port("127.0.0.1:0")
@@ -296,3 +304,84 @@ async def _drain_until_heartbeat_recorded(harness: _Harness) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("heartbeat was not recorded in time")
+
+
+async def _wait_for_published(harness: _Harness, count: int) -> None:
+    import asyncio
+
+    for _ in range(100):
+        if len(harness.real_time_events.published) >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("event was not published in time")
+
+
+_SERVER_ID = "11111111-1111-1111-1111-111111111111"
+
+
+async def test_status_change_is_published_to_real_time_events(
+    harness: _Harness,
+) -> None:
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+
+    await call.write(_status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING))
+    await _wait_for_published(harness, 1)
+
+    server_id, event = harness.real_time_events.published[0]
+    assert server_id == _SERVER_ID
+    assert event.stream is EventStream.STATUS
+    assert event.payload["state"] == "running"
+    await call.done_writing()
+
+
+async def test_log_line_is_published_to_real_time_events(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+
+    await call.write(
+        pb.WorkerMessage(
+            event=pb.Event(
+                server_id=_SERVER_ID,
+                log_line=pb.LogLine(line="hello", stream=pb.LOG_STREAM_STDOUT),
+            )
+        )
+    )
+    await _wait_for_published(harness, 1)
+
+    server_id, event = harness.real_time_events.published[0]
+    assert server_id == _SERVER_ID
+    assert event.stream is EventStream.LOG
+    assert event.payload == {"line": "hello", "stream": "stdout"}
+    await call.done_writing()
+
+
+async def test_metrics_is_published_to_real_time_events(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+
+    await call.write(
+        pb.WorkerMessage(
+            event=pb.Event(
+                server_id=_SERVER_ID,
+                metrics=pb.Metrics(cpu_millis=1500, memory_bytes=2048, player_count=3),
+            )
+        )
+    )
+    await _wait_for_published(harness, 1)
+
+    server_id, event = harness.real_time_events.published[0]
+    assert server_id == _SERVER_ID
+    assert event.stream is EventStream.METRICS
+    assert event.payload == {
+        "cpu_millis": 1500,
+        "memory_bytes": 2048,
+        "player_count": 3,
+    }
+    await call.done_writing()

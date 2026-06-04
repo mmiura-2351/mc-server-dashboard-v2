@@ -6,6 +6,12 @@ import datetime as dt
 
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.entities import Worker
+from mc_server_dashboard_api.fleet.domain.real_time_events import (
+    EventStream,
+    EventSubscription,
+    RealTimeEvent,
+    RealTimeEvents,
+)
 from mc_server_dashboard_api.fleet.domain.server_state_sink import ServerStateSink
 from mc_server_dashboard_api.fleet.domain.value_objects import (
     DriverKind,
@@ -50,6 +56,25 @@ class FakeServerStateSink(ServerStateSink):
     async def count_running_assignments(self, *, worker_id: str) -> int:
         self.counted_for.append(worker_id)
         return self._running_counts.get(worker_id, 0)
+
+
+class RecordingRealTimeEvents(RealTimeEvents):
+    """Records every published event by server id; subscribe is unused here.
+
+    The servicer-publish tests assert events flow from a fake session into this
+    sink without the session path awaiting any subscriber consumption.
+    """
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, RealTimeEvent]] = []
+
+    def publish(self, *, server_id: str, event: RealTimeEvent) -> None:
+        self.published.append((server_id, event))
+
+    def subscribe(
+        self, *, server_id: str, streams: frozenset[EventStream]
+    ) -> EventSubscription:  # pragma: no cover - unused in these tests
+        raise NotImplementedError
 
 
 def make_worker(
