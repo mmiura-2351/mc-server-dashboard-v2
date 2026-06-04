@@ -16,7 +16,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -24,6 +24,11 @@ from pydantic_settings import (
 )
 
 _MASK = "***"
+
+# Minimum HS256 signing-key length: the key is the shared-secret entropy of the
+# MAC, so it should be at least as long as the 256-bit (32-byte) digest
+# (CONFIGURATION.md Section 5.3).
+_HS256_MIN_KEY_BYTES = 32
 
 
 class _Section(BaseModel):
@@ -188,6 +193,24 @@ class TokenSettings(_Section):
     signing_key: str | None = None
     access_ttl_seconds: int = 900
     refresh_ttl_seconds: int = 1209600
+
+    @model_validator(mode="after")
+    def _enforce_hs256_key_length(self) -> TokenSettings:
+        # For the symmetric HS256 the signing key is shared-secret entropy; a key
+        # shorter than the 256-bit (32-byte) digest weakens the MAC. Reject a
+        # too-short key at load (CONFIGURATION.md Section 5.3, fail-fast). RS256
+        # keys are asymmetric PEM material, not raw entropy, so this floor does
+        # not apply to them.
+        if (
+            self.algorithm == "HS256"
+            and self.signing_key is not None
+            and len(self.signing_key.encode("utf-8")) < _HS256_MIN_KEY_BYTES
+        ):
+            raise ValueError(
+                "auth.token.signing_key must be at least "
+                f"{_HS256_MIN_KEY_BYTES} bytes for HS256"
+            )
+        return self
 
 
 class BruteForceSettings(_Section):
