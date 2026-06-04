@@ -198,7 +198,7 @@ publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md (#17).
 |---|---|---|---|
 | `auth.token.algorithm` | `HS256` | | Signing algorithm of the `TokenService` JWT adapter (REQUIREMENTS.md FR-AUTH-2). One of `HS256` / `RS256` (case-sensitive); any other value fails fast at load. A parameter of the adapter, not an adapter selector (Section 4). |
 | `auth.token.signing_key` | *required* | secret | Signing key/secret for access & refresh tokens (REQUIREMENTS.md FR-AUTH-2). For an asymmetric algorithm this is the private key (path or value). Under `HS256` the key is shared-secret entropy and **must be at least 32 bytes** (the 256-bit digest length); a shorter key fails fast at load. |
-| `auth.token.access_ttl_seconds` | `900` | | Short-lived access-token lifetime. Must be positive. |
+| `auth.token.access_ttl_seconds` | `900` | | Short-lived access-token lifetime. Must be positive and **strictly less than** `refresh_ttl_seconds` (an access token may not outlive the refresh token); a non-conforming pair fails fast at load. |
 | `auth.token.refresh_ttl_seconds` | `1209600` | | Long-lived refresh-token lifetime (14 days). Must be positive. |
 | `auth.password.hash` | `argon2` | | `PasswordHasher` selector (Section 4): `argon2` / `bcrypt`. |
 
@@ -213,7 +213,7 @@ for the full cadence model.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `snapshot.default_interval_seconds` | `3600` | | Global default periodic snapshot interval applied to every running server. Must be positive. |
-| `snapshot.min_interval_seconds` | `300` | | Lower bound a per-server override may not go below (guards against snapshot thrash). Must be positive. |
+| `snapshot.min_interval_seconds` | `300` | | Lower bound a per-server override may not go below (guards against snapshot thrash). Must be positive and **not exceed** `default_interval_seconds`; a floor above the default fails fast at load. |
 
 ### 5.5 Backup cadence
 
@@ -370,7 +370,7 @@ spec.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `auth.password.min_length` | `12` | Minimum password length (characters). Must be positive. |
+| `auth.password.min_length` | `12` | Minimum password length (characters). Must be positive and **not exceed** `max_length`; a min above the max fails fast at load. |
 | `auth.password.max_length` | `128` | Maximum length (bcrypt 72-byte cap plus a DoS guard). Must be positive. |
 | `auth.password.require_complexity` | `true` | Enforce the complexity-or-length rule: at least 3 of {upper, lower, digit, symbol} **or** at least 16 characters. |
 | `auth.password.check_common_list` | `true` | Reject passwords on a common-password blocklist (legacy baseline: SecLists xato-net top-10,000). |
@@ -390,7 +390,7 @@ enumeration (REQUIREMENTS.md FR-AUTH-4).
 | `auth.brute_force.username_window_seconds` | `900` | Sliding window for the per-username count. Must be positive. |
 | `auth.brute_force.ip_threshold` | `20` | Failures per source IP before throttling. Must be at least 1. |
 | `auth.brute_force.ip_window_seconds` | `300` | Sliding window for the per-IP count. Must be positive. |
-| `auth.brute_force.lockout_base_seconds` | `900` | Initial lockout duration; doubles on repeat (exponential back-off). Must be positive. |
+| `auth.brute_force.lockout_base_seconds` | `900` | Initial lockout duration; doubles on repeat (exponential back-off). Must be positive and **not exceed** `lockout_max_seconds`; a base above the cap fails fast at load. |
 | `auth.brute_force.lockout_max_seconds` | `86400` | Cap on the backed-off lockout duration. Must be positive. |
 | `auth.brute_force.delay_ms` | `200` | Artificial delay added on a failed attempt to deny timing enumeration. Must be non-negative; `0` explicitly disables the delay (forgoing the timing-uniformity guarantee). |
 | `auth.brute_force.prune_interval_seconds` | `3600` | How often the background loop prunes `login_attempt` rows older than the longest window, independent of logins (SECURITY.md Section 3). Must be positive. |
