@@ -65,6 +65,41 @@ GOBIN="$(pwd)/.bin" go install github.com/golangci/golangci-lint/v2/cmd/golangci
 
 To auto-format instead of just checking: `gofmt -w .`.
 
+The default `go test ./...` deliberately excludes the cross-language data-plane
+harness under `test/e2e/`: it is behind the `e2e` build tag and skips unless
+`MCD_E2E_API_URL` and `MCD_E2E_CREDENTIAL` are set. See
+[Cross-language data-plane e2e](#cross-language-data-plane-e2e).
+
+## Cross-language data-plane e2e
+
+`test/e2e/` drives the **real** Go data-plane client against a **real** running
+Python API, proving the tar conventions, status codes, and auth header line up
+end to end (issue #111). CI runs it in `.github/workflows/e2e.yml`; to dry-run it
+locally, boot the API and point the test at it.
+
+The data-plane endpoints need only Storage and the Worker credential, so the
+control plane can stay disabled. The hydrate path's resolved-JAR lookup reads the
+`servers` table, so the API needs a migrated database — point it at a local
+Postgres (the `api/` README covers spinning one up for its integration tests).
+
+```sh
+# 1. From api/: migrate, then boot uvicorn with the data-plane config.
+export MCD_API_DATABASE__URL=postgresql+asyncpg://mcsd:mcsd@localhost:5432/mcsd
+export MCD_API_CONTROL__ENABLED=false
+export MCD_API_CONTROL__WORKER_CREDENTIAL=dev-secret
+export MCD_API_AUTH__TOKEN__SIGNING_KEY=dev-signing-key-0123456789abcdef0123
+export MCD_API_STORAGE__BACKEND=fs
+export MCD_API_STORAGE__FS__ROOT=/tmp/mcsd-e2e-storage
+uv run alembic upgrade head
+uv run uvicorn mc_server_dashboard_api.app:create_app --factory \
+  --host 127.0.0.1 --port 8000 &
+
+# 2. From worker/: run the e2e-tagged test against it.
+MCD_E2E_API_URL=http://127.0.0.1:8000 \
+MCD_E2E_CREDENTIAL=dev-secret \
+  go test -tags e2e -v ./test/e2e/...
+```
+
 ## Configuration
 
 The Worker reads its configuration from an optional TOML file plus
