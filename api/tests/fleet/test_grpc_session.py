@@ -82,7 +82,8 @@ class _Harness:
         self.control_plane = control_plane or ControlPlaneState()
         self.real_time_events = real_time_events or RecordingRealTimeEvents()
         self._server: aio.Server | None = None
-        self._channel: aio.Channel | None = None
+        self._port: int | None = None
+        self._channels: list[aio.Channel] = []
 
     async def start(self) -> WorkerServiceStub:
         server = aio.server()
@@ -96,15 +97,27 @@ class _Harness:
             real_time_events=self.real_time_events,
         )
         add_WorkerServiceServicer_to_server(servicer, server)
-        port = server.add_insecure_port("127.0.0.1:0")
+        self._port = server.add_insecure_port("127.0.0.1:0")
         await server.start()
         self._server = server
-        self._channel = aio.insecure_channel(f"127.0.0.1:{port}")
-        return WorkerServiceStub(self._channel)
+        return self.new_stub()
+
+    def new_stub(self) -> WorkerServiceStub:
+        """Open a fresh channel to the running server and return a stub on it.
+
+        A fresh connection per call keeps a previous channel's teardown (or a
+        connection-level GOAWAY) from racing a new call (issue #181). Every
+        channel is tracked and closed in ``stop``.
+        """
+
+        assert self._port is not None, "start() must run before new_stub()"
+        channel = aio.insecure_channel(f"127.0.0.1:{self._port}")
+        self._channels.append(channel)
+        return WorkerServiceStub(channel)
 
     async def stop(self) -> None:
-        if self._channel is not None:
-            await self._channel.close()
+        for channel in self._channels:
+            await channel.close()
         if self._server is not None:
             await self._server.stop(grace=None)
 
@@ -127,7 +140,14 @@ def _auth(credential: str | None) -> list[tuple[str, str]]:
     return [("authorization", f"Bearer {credential}")]
 
 
-async def _terminal_code(
+# Connection-level statuses that mean "the transport went away", not "the
+# server made a per-call decision". Under full-suite load a channel can emit a
+# GOAWAY (surfacing as INTERNAL/UNAVAILABLE) before the per-call abort's
+# trailing status is read, masking the real rejection code (issue #181).
+_GOAWAY_CODES = frozenset({grpc.StatusCode.INTERNAL, grpc.StatusCode.UNAVAILABLE})
+
+
+async def _drive_terminal_code(
     call: aio.StreamStreamCall, message: pb.WorkerMessage | None = None
 ) -> grpc.StatusCode:
     """Drive a rejected ``Session`` to its terminal status, race-free.
@@ -149,6 +169,31 @@ async def _terminal_code(
     return await asyncio.wait_for(call.code(), timeout=5)
 
 
+async def _terminal_code(
+    harness: _Harness,
+    metadata: list[tuple[str, str]],
+    message: pb.WorkerMessage | None = None,
+) -> grpc.StatusCode:
+    """Return the terminal status of a rejected ``Session``, GOAWAY-tolerant.
+
+    The server's per-call abort is authoritative, but a connection-level GOAWAY
+    can race it and surface as INTERNAL/UNAVAILABLE instead (issue #181). That
+    is a transport artifact, not the rejection: retry once on a *fresh* channel,
+    which cannot inherit the prior connection's teardown. One retry is enough —
+    two independent GOAWAYs back-to-back would itself be a real bug worth a
+    failure.
+    """
+
+    code = await _drive_terminal_code(
+        harness.new_stub().Session(metadata=metadata), message
+    )
+    if code in _GOAWAY_CODES:
+        code = await _drive_terminal_code(
+            harness.new_stub().Session(metadata=metadata), message
+        )
+    return code
+
+
 async def test_register_returns_ack(harness: _Harness) -> None:
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))
@@ -167,25 +212,28 @@ async def test_register_returns_ack(harness: _Harness) -> None:
 
 
 async def test_missing_credential_is_rejected(harness: _Harness) -> None:
-    stub = await harness.start()
-    call = stub.Session(metadata=_auth(None))
+    await harness.start()
 
-    assert await _terminal_code(call) == grpc.StatusCode.UNAUTHENTICATED
+    code = await _terminal_code(harness, _auth(None))
+
+    assert code == grpc.StatusCode.UNAUTHENTICATED
     assert harness.registry.list_workers() == []
 
 
 async def test_wrong_credential_is_rejected(harness: _Harness) -> None:
-    stub = await harness.start()
-    call = stub.Session(metadata=_auth("wrong"))
+    await harness.start()
 
-    assert await _terminal_code(call) == grpc.StatusCode.UNAUTHENTICATED
+    code = await _terminal_code(harness, _auth("wrong"))
+
+    assert code == grpc.StatusCode.UNAUTHENTICATED
 
 
 async def test_non_register_first_message_is_rejected(harness: _Harness) -> None:
-    stub = await harness.start()
-    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await harness.start()
 
-    code = await _terminal_code(call, message=_heartbeat_message())
+    code = await _terminal_code(
+        harness, _auth(_CREDENTIAL), message=_heartbeat_message()
+    )
 
     assert code == grpc.StatusCode.FAILED_PRECONDITION
 
