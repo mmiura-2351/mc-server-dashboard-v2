@@ -37,6 +37,11 @@ class IncompleteTransferError(StorageError):
     ``commit_snapshot`` refuses to publish a staging area that the data plane has
     not signalled complete (STORAGE.md Section 4.1); publishing a partial copy is
     the exact defect the atomic-publish protocol forbids (FR-DATA-6).
+
+    The same gate also refuses an *empty* staging area even when the transfer
+    completed cleanly: a worker packing an empty working set is a bug signal,
+    never a valid snapshot. The snapshot endpoint surfaces this as
+    ``400 empty_snapshot`` (STORAGE.md Section 8).
     """
 
 

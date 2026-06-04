@@ -237,6 +237,11 @@ Worker sent and what landed in staging). The exact completeness signal is part o
 the data-plane contract (epic #8); `Storage.commit_snapshot` is the gate that
 refuses to publish without it.
 
+An empty staging area is not a publishable transfer: a worker packing an empty
+working set is a bug signal, never a valid snapshot. `Storage.commit_snapshot`
+refuses it with `IncompleteTransferError`, which the snapshot endpoint surfaces
+as `400 empty_snapshot` (Section 8).
+
 ### 4.2 What "single atomic step" means per backend family
 
 The publish step's atomicity is realized differently per adapter family, but the
@@ -459,7 +464,7 @@ Section 7.1). No compression at M1.
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
 | `GET /data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present, #118). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir); `401` |
-| `POST /data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. | `204` | `400` length mismatch / incomplete; `411` no `Content-Length`; `413` over the size cap; `401` |
+| `POST /data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `411` no `Content-Length`; `413` over the size cap; `401` |
 
 **JAR posture (M1).** ARCHITECTURE.md Section 7.3 says the resolved server JAR
 reaches the Worker as part of hydrate. As of issue #118 (version catalog + JAR
