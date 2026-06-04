@@ -289,6 +289,76 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
+async def test_start_failure_logs_warning_with_server_and_kind(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A failed start dispatch turns into a CommandDispatchError; the Worker's
+    # message is logged at WARN with server_id and command kind context so a
+    # failure is diagnosable, while the raw message stays out of the HTTP body
+    # (issue #194).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="instance busy")
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": busy})
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(CommandDispatchError),
+    ):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    record = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    message = record.getMessage()
+    assert "instance busy" in message
+    assert "StartServer" in message
+    assert str(server_id) in message
+
+
+async def test_stop_failure_logs_warning_with_server_and_kind(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    busy = CommandOutcome(status=CommandStatus.INTERNAL, message="stop refused")
+    cp = FakeControlPlane(outcomes={"stop": busy})
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(CommandDispatchError),
+    ):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    record = next(
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "stop refused" in r.getMessage()
+    )
+    message = record.getMessage()
+    assert "StopServer" in message
+    assert str(server_id) in message
+
+
 async def test_start_compensation_decrements_only_when_revert_applies() -> None:
     # Dispatch fails, so the committed start intent is compensated. The revert
     # compare-and-set matches the still-running row, so the placement-load

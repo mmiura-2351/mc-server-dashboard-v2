@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -110,6 +111,26 @@ const (
 	// path or an oversized read/edit (FR-FILE-4, CONTROL_PLANE.md Section 7).
 	CommandErrorFileAccessDenied
 )
+
+// String renders the error code as a stable name for logs (issue #194).
+func (c CommandErrorCode) String() string {
+	switch c {
+	case CommandErrorInternal:
+		return "internal"
+	case CommandErrorServerNotFound:
+		return "server_not_found"
+	case CommandErrorInvalidState:
+		return "invalid_state"
+	case CommandErrorDriverUnavailable:
+		return "driver_unavailable"
+	case CommandErrorTransferFailed:
+		return "transfer_failed"
+	case CommandErrorFileAccessDenied:
+		return "file_access_denied"
+	default:
+		return fmt.Sprintf("CommandErrorCode(%d)", int(c))
+	}
+}
 
 // StatusEvent is an observed server-state transition the session emits as a
 // StatusChange event (CONTROL_PLANE.md Section 6). State is the wire state name
