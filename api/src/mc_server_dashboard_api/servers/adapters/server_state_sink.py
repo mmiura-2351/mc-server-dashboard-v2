@@ -15,6 +15,7 @@ fleet (import-linter); only this edge module bridges the two.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,6 +30,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     WorkerId,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 def _parse_uuid(value: str) -> uuid.UUID | None:
@@ -50,13 +53,36 @@ class ServersServerStateSink(ServerStateSink):
         self._session_factory = session_factory
         self._clock = clock
 
-    async def record_observed_state(self, *, server_id: str, state: str) -> None:
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str
+    ) -> None:
         parsed = _parse_uuid(server_id)
-        if parsed is None:
+        parsed_worker = _parse_uuid(worker_id)
+        if parsed is None or parsed_worker is None:
             return
         observed = ObservedState(state)
         async with self._session_factory() as session:
             repo = SqlAlchemyServerRepository(session)
+            server = await repo.get_by_id(ServerId(parsed))
+            if server is None:
+                return
+            # Ownership guard: only the server's currently assigned worker may
+            # write its observed state. A report from any other worker (stale or
+            # misrouted) is dropped with a warning, not applied (defense-in-depth).
+            if server.assigned_worker_id != WorkerId(parsed_worker):
+                _LOG.warning(
+                    "dropping status report from non-owning worker",
+                    extra={
+                        "server_id": server_id,
+                        "reporting_worker_id": worker_id,
+                        "assigned_worker_id": (
+                            None
+                            if server.assigned_worker_id is None
+                            else str(server.assigned_worker_id.value)
+                        ),
+                    },
+                )
+                return
             await repo.record_observed_state(
                 ServerId(parsed), observed, self._clock.now()
             )

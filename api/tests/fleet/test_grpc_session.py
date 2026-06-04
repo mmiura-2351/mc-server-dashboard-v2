@@ -242,7 +242,7 @@ async def test_status_change_reconciles_observed_state(harness: _Harness) -> Non
             break
         await __import__("asyncio").sleep(0.01)
 
-    assert harness.state_sink.observed == [(server_id, "running")]
+    assert harness.state_sink.observed == [(server_id, "worker-1", "running")]
     await call.done_writing()
 
 

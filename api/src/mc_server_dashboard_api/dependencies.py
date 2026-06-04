@@ -661,6 +661,7 @@ def get_restart_server(
     return RestartServer(
         uow=ServersUnitOfWork(session_factory),
         control_plane=control_plane,
+        clock=ServersSystemClock(),
     )
 
 

@@ -21,11 +21,16 @@ class ServerStateSink(abc.ABC):
     """Port: reconcile authoritative server state from control-plane events."""
 
     @abc.abstractmethod
-    async def record_observed_state(self, *, server_id: str, state: str) -> None:
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str
+    ) -> None:
         """Cache the worker-reported observed state for ``server_id`` (FR-SRV-4).
 
         A report for an unknown server is ignored (the worker may know a server
-        the API has since deleted).
+        the API has since deleted). ``worker_id`` is the reporting worker; the
+        adapter applies the write only when it is the server's assigned worker, so
+        a stale or misrouted report from a worker that no longer owns the server
+        cannot overwrite authoritative state (defense-in-depth).
         """
 
     @abc.abstractmethod

@@ -9,8 +9,9 @@ entity here.
 from __future__ import annotations
 
 import datetime as dt
+from typing import Any, cast
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
@@ -110,10 +111,26 @@ class SqlAlchemyServerRepository(ServerRepository):
         )
         await self._session.execute(stmt)
 
-    async def update_lifecycle(self, server: Server) -> None:
+    async def update_lifecycle(
+        self,
+        server: Server,
+        *,
+        expected_from: DesiredState,
+        require_unassigned: bool = False,
+    ) -> bool:
+        # Compare-and-set: the WHERE clause carries the expected-from precondition
+        # so a concurrent transition that already moved the row matches no row and
+        # returns rowcount 0 (the lost-race signal). require_unassigned adds the
+        # start precondition that nothing has placed the server yet.
+        conditions = [
+            ServerModel.id == server.id.value,
+            ServerModel.desired_state == expected_from.value,
+        ]
+        if require_unassigned:
+            conditions.append(ServerModel.assigned_worker_id.is_(None))
         stmt = (
             update(ServerModel)
-            .where(ServerModel.id == server.id.value)
+            .where(*conditions)
             .values(
                 desired_state=server.desired_state.value,
                 assigned_worker_id=(
@@ -124,7 +141,10 @@ class SqlAlchemyServerRepository(ServerRepository):
                 updated_at=server.updated_at,
             )
         )
-        await self._session.execute(stmt)
+        result = await self._session.execute(stmt)
+        # An UPDATE returns a CursorResult, whose rowcount is the matched count;
+        # the compare-and-set matched a row iff it equals 1 (the lost race is 0).
+        return cast("CursorResult[Any]", result).rowcount == 1
 
     async def record_observed_state(
         self,

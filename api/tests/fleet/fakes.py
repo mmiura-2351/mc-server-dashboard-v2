@@ -34,13 +34,15 @@ class FakeServerStateSink(ServerStateSink):
     """
 
     def __init__(self, *, running_counts: dict[str, int] | None = None) -> None:
-        self.observed: list[tuple[str, str]] = []
+        self.observed: list[tuple[str, str, str]] = []
         self.unknown_for: list[str] = []
         self.counted_for: list[str] = []
         self._running_counts = running_counts or {}
 
-    async def record_observed_state(self, *, server_id: str, state: str) -> None:
-        self.observed.append((server_id, state))
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str
+    ) -> None:
+        self.observed.append((server_id, worker_id, state))
 
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
         self.unknown_for.append(worker_id)

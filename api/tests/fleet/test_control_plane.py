@@ -201,6 +201,31 @@ async def test_dispatch_to_unconnected_worker_raises(harness: _Harness) -> None:
         )
 
 
+async def test_dispatch_fails_fast_on_worker_disconnect(harness: _Harness) -> None:
+    # A command in flight when the worker's session ends must fail immediately
+    # with WorkerNotConnectedError, not ride out the (long) command timeout.
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+
+    async def disconnect_after_command() -> None:
+        # Wait for the command to ride the outbound stream, then end the session.
+        await call.read()
+        await call.done_writing()
+
+    dropper = asyncio.ensure_future(disconnect_after_command())
+    with pytest.raises(WorkerNotConnectedError):
+        # The harness command timeout is 5s; failing fast returns well under it.
+        await asyncio.wait_for(
+            harness.control_plane.dispatch(
+                worker_id=WorkerId(_WORKER),
+                server_id=str(uuid.uuid4()),
+                command=ServerCommandCommand(line="list"),
+            ),
+            timeout=2.0,
+        )
+    await dropper
+
+
 async def test_dispatch_times_out_when_unanswered() -> None:
     harness = _Harness(command_timeout=0.2)
     try:

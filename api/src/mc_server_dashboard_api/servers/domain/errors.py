@@ -67,6 +67,18 @@ class InvalidLifecycleTransitionError(ServerError):
     """
 
 
+class LifecycleTransitionConflictError(ServerError):
+    """A concurrent lifecycle transition lost a compare-and-set race.
+
+    The in-memory transition check admitted the op, but the persisted
+    compare-and-set (UPDATE ... WHERE desired_state = expected, plus any
+    transition precondition) matched no row: another concurrent transition
+    already moved the server out of the expected state. The use case aborts
+    *before* dispatching or touching placement-load counts so a lost race causes
+    no double placement/dispatch; the edge maps this to 409 ``transition_conflict``.
+    """
+
+
 class NoEligibleWorkerError(ServerError):
     """Placement found no Worker that can host the server (FR-WRK-3).
 

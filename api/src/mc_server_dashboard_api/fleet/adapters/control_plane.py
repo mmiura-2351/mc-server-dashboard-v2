@@ -68,7 +68,10 @@ class ControlPlaneState:
 
     def __init__(self) -> None:
         self._outbound: dict[WorkerId, asyncio.Queue[pb.ApiMessage]] = {}
-        self._pending: dict[str, asyncio.Future[pb.CommandResult]] = {}
+        # command_id -> (owning worker, result future). The worker is tracked so a
+        # disconnect can fail exactly that worker's in-flight commands fast,
+        # instead of letting them wait out the full command timeout.
+        self._pending: dict[str, tuple[WorkerId, asyncio.Future[pb.CommandResult]]] = {}
 
     def open_session(self, worker_id: WorkerId) -> asyncio.Queue[pb.ApiMessage]:
         """Register a fresh outbound queue for ``worker_id`` and return it.
@@ -94,13 +97,19 @@ class ControlPlaneState:
         if self._outbound.get(worker_id) is queue:
             del self._outbound[worker_id]
 
-    def register_pending(self, command_id: str) -> asyncio.Future[pb.CommandResult]:
-        """Create and track a future awaiting the result for ``command_id``."""
+    def register_pending(
+        self, command_id: str, worker_id: WorkerId
+    ) -> asyncio.Future[pb.CommandResult]:
+        """Create and track a future awaiting the result for ``command_id``.
+
+        ``worker_id`` is the worker the command was dispatched to, recorded so
+        :meth:`fail_worker_pending` can fail it on that worker's disconnect.
+        """
 
         future: asyncio.Future[pb.CommandResult] = (
             asyncio.get_running_loop().create_future()
         )
-        self._pending[command_id] = future
+        self._pending[command_id] = (worker_id, future)
         return future
 
     def discard_pending(self, command_id: str) -> None:
@@ -115,9 +124,27 @@ class ControlPlaneState:
         or duplicate ``CommandResult`` never crashes the inbound loop.
         """
 
-        future = self._pending.pop(command_id, None)
-        if future is not None and not future.done():
-            future.set_result(result)
+        entry = self._pending.pop(command_id, None)
+        if entry is not None:
+            _, future = entry
+            if not future.done():
+                future.set_result(result)
+
+    def fail_worker_pending(self, worker_id: WorkerId, error: BaseException) -> None:
+        """Fail every in-flight command awaiting ``worker_id`` with ``error``.
+
+        Invoked when the worker's session ends: its outbound stream is gone, so a
+        pending command can never be answered. Failing fast (rather than waiting
+        out the command timeout) unblocks awaiters with a typed
+        :class:`WorkerNotConnectedError` immediately (CONTROL_PLANE.md 4.4).
+        """
+
+        for command_id in [
+            cid for cid, (wid, _) in self._pending.items() if wid == worker_id
+        ]:
+            _, future = self._pending.pop(command_id)
+            if not future.done():
+                future.set_exception(error)
 
     def outbound_for(self, worker_id: WorkerId) -> asyncio.Queue[pb.ApiMessage] | None:
         return self._outbound.get(worker_id)
@@ -165,7 +192,7 @@ class GrpcControlPlane(ControlPlane):
         if queue is None:
             raise WorkerNotConnectedError(worker_id.value)
         command_id = str(uuid.uuid4())
-        future = self._state.register_pending(command_id)
+        future = self._state.register_pending(command_id, worker_id)
         api_command = _to_api_command(command_id, server_id, command)
         await queue.put(
             pb.ApiMessage(correlation_id=command_id, api_command=api_command)

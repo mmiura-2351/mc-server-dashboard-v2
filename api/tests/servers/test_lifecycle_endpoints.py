@@ -41,6 +41,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     InvalidLifecycleTransitionError,
+    LifecycleTransitionConflictError,
     NoEligibleWorkerError,
     ServerNotFoundError,
     ServerNotRunningError,
@@ -206,6 +207,18 @@ def test_start_invalid_transition_is_409() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["detail"]["reason"] == "invalid_transition"
+
+
+def test_start_transition_conflict_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        start=_FakeUseCase(error=LifecycleTransitionConflictError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "transition_conflict"
 
 
 def test_start_no_eligible_worker_is_503() -> None:

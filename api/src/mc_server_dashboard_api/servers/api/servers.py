@@ -58,6 +58,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidLifecycleTransitionError,
     InvalidServerNameError,
+    LifecycleTransitionConflictError,
     NoEligibleWorkerError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -300,6 +301,8 @@ async def start_server(
         raise _not_found() from exc
     except InvalidLifecycleTransitionError as exc:
         raise _conflict("invalid_transition") from exc
+    except LifecycleTransitionConflictError as exc:
+        raise _conflict("transition_conflict") from exc
     except NoEligibleWorkerError as exc:
         raise _service_unavailable("no_eligible_worker") from exc
     except WorkerUnavailableError as exc:
@@ -334,6 +337,8 @@ async def stop_server(
         raise _not_found() from exc
     except InvalidLifecycleTransitionError as exc:
         raise _conflict("invalid_transition") from exc
+    except LifecycleTransitionConflictError as exc:
+        raise _conflict("transition_conflict") from exc
     except WorkerUnavailableError as exc:
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
@@ -366,6 +371,8 @@ async def restart_server(
         raise _not_found() from exc
     except InvalidLifecycleTransitionError as exc:
         raise _conflict("invalid_transition") from exc
+    except LifecycleTransitionConflictError as exc:
+        raise _conflict("transition_conflict") from exc
     except WorkerUnavailableError as exc:
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:

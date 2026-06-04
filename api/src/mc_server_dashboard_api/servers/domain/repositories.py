@@ -22,6 +22,7 @@ import uuid
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    DesiredState,
     ObservedState,
     ServerId,
     ServerName,
@@ -55,13 +56,28 @@ class ServerRepository(abc.ABC):
         """Persist the mutable fields of ``server`` (name, config, timestamps)."""
 
     @abc.abstractmethod
-    async def update_lifecycle(self, server: Server) -> None:
-        """Persist a server's lifecycle fields (desired state + assigned Worker).
+    async def update_lifecycle(
+        self,
+        server: Server,
+        *,
+        expected_from: DesiredState,
+        require_unassigned: bool = False,
+    ) -> bool:
+        """Compare-and-set a server's lifecycle fields (desired state + Worker).
 
         Distinct from :meth:`update` (name/config edits): the lifecycle ops set
         ``desired_state``, ``assigned_worker_id`` and ``updated_at`` and must not
         touch name/config. Observed state is written separately via
         :meth:`record_observed_state` from the control-plane event path.
+
+        The write is guarded so two concurrent transitions that both passed the
+        in-memory check cannot both apply: the UPDATE matches only when the row's
+        ``desired_state`` still equals ``expected_from`` (and, when
+        ``require_unassigned`` is set for a start, ``assigned_worker_id IS NULL``).
+        Returns ``True`` when exactly one row was updated, ``False`` when the
+        precondition no longer held (a lost race); the caller turns ``False`` into
+        a :class:`LifecycleTransitionConflictError` and does **not** dispatch or
+        adjust placement-load counts.
         """
 
     @abc.abstractmethod

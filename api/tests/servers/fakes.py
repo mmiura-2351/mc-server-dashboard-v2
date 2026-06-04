@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import replace
 
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
@@ -56,7 +57,12 @@ class FakeServerRepository(ServerRepository):
         self.by_id[server.id] = server
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:
-        return self.by_id.get(server_id)
+        # Return a detached copy so a use case that mutates the loaded entity
+        # before writing does not silently mutate the "persisted" row; this lets
+        # update_lifecycle compare against the actual stored desired state (the
+        # compare-and-set the real adapter does in SQL).
+        server = self.by_id.get(server_id)
+        return None if server is None else replace(server)
 
     async def get_by_community_and_name(
         self, community_id: CommunityId, name: ServerName
@@ -72,8 +78,20 @@ class FakeServerRepository(ServerRepository):
     async def update(self, server: Server) -> None:
         self.by_id[server.id] = server
 
-    async def update_lifecycle(self, server: Server) -> None:
+    async def update_lifecycle(
+        self,
+        server: Server,
+        *,
+        expected_from: DesiredState,
+        require_unassigned: bool = False,
+    ) -> bool:
+        current = self.by_id.get(server.id)
+        if current is None or current.desired_state is not expected_from:
+            return False
+        if require_unassigned and current.assigned_worker_id is not None:
+            return False
         self.by_id[server.id] = server
+        return True
 
     async def record_observed_state(
         self,

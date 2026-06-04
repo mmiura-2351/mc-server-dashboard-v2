@@ -43,6 +43,7 @@ from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
 from mc_server_dashboard_api.fleet.domain.clock import Clock
+from mc_server_dashboard_api.fleet.domain.control_plane import WorkerNotConnectedError
 from mc_server_dashboard_api.fleet.domain.entities import Worker
 from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
 from mc_server_dashboard_api.fleet.domain.registry import SessionToken, WorkerRegistry
@@ -162,6 +163,12 @@ class WorkerSessionServicer(WorkerServiceServicer):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reader
             self._control_plane.close_session(worker_id, outbound)
+            # Fail this worker's in-flight commands immediately: its outbound
+            # stream is gone, so they can never be answered. Awaiters get a typed
+            # WorkerNotConnectedError now instead of riding the full timeout.
+            self._control_plane.fail_worker_pending(
+                worker_id, WorkerNotConnectedError(worker_id.value)
+            )
             # Pass this Session's token so a delayed teardown only offlines the
             # Worker if it has not reconnected on a newer Session (Section 4.4).
             self._registry.mark_disconnected(worker_id, session)
@@ -255,16 +262,16 @@ class WorkerSessionServicer(WorkerServiceServicer):
         if event == "heartbeat":
             self._registry.record_heartbeat(worker_id, self._clock.now())
         elif event == "status_change":
-            await self._reconcile_status(message.event)
+            await self._reconcile_status(worker_id, message.event)
         # LogLine / Metrics are accepted and ignored; their consumers are later
         # epics (#10).
 
-    async def _reconcile_status(self, event: pb.Event) -> None:
+    async def _reconcile_status(self, worker_id: WorkerId, event: pb.Event) -> None:
         state = _STATE_BY_PROTO.get(event.status_change.state)
         if state is None or not event.server_id:
             return
         await self._state_sink.record_observed_state(
-            server_id=event.server_id, state=state
+            server_id=event.server_id, worker_id=worker_id.value, state=state
         )
 
     def _register_ack(self, *, correlation_id: str) -> pb.ApiMessage:
