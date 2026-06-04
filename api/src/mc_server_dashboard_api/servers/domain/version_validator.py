@@ -27,6 +27,16 @@ class UnknownVersionError(ServerError):
     """The requested MC version is not offered for the server type."""
 
 
+class CatalogUnavailableError(ServerError):
+    """The version catalog could not be reached to validate create (FR-VER-2).
+
+    A transient source outage with no usable cache: validation cannot confirm the
+    requested ``(server_type, version)`` is offered, so create fails loudly rather
+    than admitting an unvalidated version. The edge maps this to a 503 so the
+    client retries once the source recovers.
+    """
+
+
 class VersionValidator(abc.ABC):
     """Port: validate a ``(server_type, version)`` against the catalog (FR-VER-1)."""
 
@@ -36,7 +46,7 @@ class VersionValidator(abc.ABC):
 
         Raises :class:`UnsupportedServerTypeError` for a type the catalog cannot
         resolve at M1 (forge) and :class:`UnknownVersionError` for an unoffered
-        version. A transient source outage is *not* swallowed here — the adapter
-        lets it surface so create fails loudly rather than admitting an unvalidated
-        version.
+        version. A transient source outage is *not* swallowed: the adapter surfaces
+        it as :class:`CatalogUnavailableError` so create fails loudly (503) rather
+        than admitting an unvalidated version.
         """

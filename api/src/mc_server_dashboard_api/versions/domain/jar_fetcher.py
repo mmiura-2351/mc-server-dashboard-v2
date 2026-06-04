@@ -5,8 +5,9 @@ than parsed JSON, and because the ensure-on-start use case must hash the bytes t
 verify the source's expected digest before storing (FR-VER-2/3). The bytes are
 buffered whole: an M1 server JAR is tens of MB, well within memory, which keeps
 the verify-then-store path simple and lets the hash be checked before a single
-byte reaches the content-addressed store. A streaming, bounded-memory fetch is a
-later optimisation if a backend ever serves much larger artifacts.
+byte reaches the content-addressed store. The httpx adapter streams the body and
+caps it (a 512 MiB ceiling) so a runaway or hostile response is aborted rather
+than buffered unboundedly before verification.
 """
 
 from __future__ import annotations

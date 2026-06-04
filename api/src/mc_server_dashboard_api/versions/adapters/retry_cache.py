@@ -6,7 +6,10 @@ upstream with a bounded, jittered retry budget; on success it refreshes the cach
 and returns. If the budget is spent, it serves the last-good cached payload when
 one is still within its TTL, so a transient source outage degrades gracefully
 rather than failing the whole catalog. Only when there is no usable cache does the
-wrapped failure surface.
+failure surface — as a :class:`CatalogUnavailableError` (a ``VersionError``), the
+single choke point that gives every consumer a typed domain error to map (the edge
+turns it into a 503), so a cold-cache source outage never leaks a bare
+``FetchError`` out as a 500.
 
 This is deliberately *not* persisted to Storage: the manifest payloads are small
 and re-fetched cheaply on a cold process, and the content-addressed JarStore is a
@@ -25,6 +28,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from mc_server_dashboard_api.versions.domain.errors import CatalogUnavailableError
 from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
 
 
@@ -72,8 +76,12 @@ class RetryCachingFetcher(JsonFetcher):
         cached = self._fresh_cache(url)
         if cached is not None:
             return cached.payload
+        # Retry budget spent with no usable cache: this is THE choke point where
+        # every catalog consumer (list, resolve, ensure-on-start) sees a typed
+        # domain error instead of a bare FetchError leaking out as a 500. Translate
+        # to CatalogUnavailableError so the edge maps it to a 503 (FR-VER-2).
         assert last_error is not None
-        raise last_error
+        raise CatalogUnavailableError(str(last_error)) from last_error
 
     def _fresh_cache(self, url: str) -> _CacheEntry | None:
         entry = self._cache.get(url)

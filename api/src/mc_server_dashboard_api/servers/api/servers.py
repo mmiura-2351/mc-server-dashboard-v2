@@ -67,14 +67,16 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
     UnknownExecutionBackendError,
     UnknownServerTypeError,
+    UnsupportedEditionError,
 )
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from mc_server_dashboard_api.servers.domain.version_validator import (
-    UnknownVersionError as CatalogUnknownVersionError,
+    CatalogUnavailableError,
+    UnsupportedServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
-    UnsupportedServerTypeError,
+    UnknownVersionError as CatalogUnknownVersionError,
 )
 
 router = APIRouter()
@@ -167,6 +169,10 @@ async def create_server(
             execution_backend=body.execution_backend,
             config=body.config,
         )
+    except UnsupportedEditionError as exc:
+        # The catalog is Java-only at M1 (FR-VER-1): a non-java edition is rejected
+        # before staging the row, distinct from an invalid type/version.
+        raise _unprocessable("unsupported_edition") from exc
     except UnknownServerTypeError as exc:
         raise _unprocessable("invalid_server_type") from exc
     except UnknownExecutionBackendError as exc:
@@ -177,6 +183,10 @@ async def create_server(
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnknownVersionError as exc:
         raise _unprocessable("unknown_version") from exc
+    except CatalogUnavailableError as exc:
+        # The catalog source is down with no usable cache: create cannot validate
+        # the version, so fail transiently (FR-VER-2) rather than 500.
+        raise _service_unavailable("catalog_unavailable") from exc
     except InvalidServerNameError as exc:
         raise _unprocessable("invalid_server_name") from exc
     except ServerNameAlreadyExistsError as exc:

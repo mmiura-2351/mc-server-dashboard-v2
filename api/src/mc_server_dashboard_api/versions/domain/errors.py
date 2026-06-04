@@ -33,3 +33,20 @@ class JarHashMismatchError(VersionError):
     The bytes are rejected and never stored; the start that triggered the download
     fails cleanly before placement/dispatch (the issue's ensure-on-start ruling).
     """
+
+
+class JarDownloadError(VersionError):
+    """A JAR download failed at the transport edge (non-2xx or transport error).
+
+    The start that triggered the download fails cleanly before placement; the edge
+    maps it to a transient 503 (``jar_unavailable``).
+    """
+
+
+class JarTooLargeError(VersionError):
+    """A JAR download exceeded the maximum allowed size and was aborted.
+
+    The body is streamed and aborted once it crosses the cap (no unbounded buffer
+    before verification), so a runaway or hostile response cannot exhaust memory.
+    The edge maps it to the same ``jar_unavailable`` 503 surface.
+    """

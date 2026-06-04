@@ -119,9 +119,9 @@ async def hydrate_working_set(
     the server has a resolved JAR recorded (start ensured it into the pool), it is
     injected into the hydrate tar at the conventional ``server.jar`` relpath so the
     Worker launches against it without ever fetching JARs itself (FR-VER-3). The
-    JAR is appended as one extra tar member after the working set's members; the
-    working set's own trailing end-of-archive marker is stripped so the result is a
-    single valid archive.
+    JAR is serialised as one EOF-less tar member and prepended before the working
+    set, which keeps its own trailing end-of-archive marker, so the concatenation
+    is a single valid archive.
 
     The 204 posture is preserved only when there is *nothing* to send — no
     published snapshot and no resolved JAR. With a resolved JAR but no snapshot

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mc_server_dashboard_api.versions.adapters.retry_cache import RetryCachingFetcher
-from mc_server_dashboard_api.versions.domain.fetcher import FetchError
+from mc_server_dashboard_api.versions.domain.errors import CatalogUnavailableError
 from tests.versions.fakes import FakeJsonFetcher, FlakyJsonFetcher
 
 _URL = "https://example.test/manifest.json"
@@ -28,7 +28,9 @@ async def test_retries_then_succeeds() -> None:
 async def test_exhausted_retries_with_no_cache_raise() -> None:
     inner = FakeJsonFetcher({_URL: _PAYLOAD}, fail=True)
     fetcher = RetryCachingFetcher(inner=inner, attempts=2, sleep=_no_sleep)
-    with pytest.raises(FetchError):
+    # The bare FetchError is translated to the typed domain error at this choke
+    # point so consumers never see a bare Exception leak out as a 500.
+    with pytest.raises(CatalogUnavailableError):
         await fetcher.get_json(_URL)
 
 
@@ -57,5 +59,5 @@ async def test_expired_cache_does_not_serve() -> None:
     assert await fetcher.get_json(_URL) == _PAYLOAD
     inner.fail = True
     clock[0] = 100.0  # past the TTL
-    with pytest.raises(FetchError):
+    with pytest.raises(CatalogUnavailableError):
         await fetcher.get_json(_URL)

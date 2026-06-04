@@ -28,6 +28,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
     UnknownExecutionBackendError,
     UnknownServerTypeError,
+    UnsupportedEditionError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -105,6 +106,48 @@ async def test_create_defaults_to_stopped_and_commits() -> None:
     assert server.execution_backend is ExecutionBackend.CONTAINER
     assert uow.commits == 1
     assert uow.servers.by_id[server.id] is server
+
+
+async def test_create_accepts_java_edition() -> None:
+    uow = FakeUnitOfWork()
+    validator = FakeVersionValidator()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=validator,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+    assert server.mc_edition == "java"
+    assert uow.commits == 1
+
+
+async def test_create_rejects_non_java_edition() -> None:
+    uow = FakeUnitOfWork()
+    validator = FakeVersionValidator()
+    with pytest.raises(UnsupportedEditionError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=validator,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="s",
+            mc_edition="bedrock",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={},
+        )
+    # Rejected before staging or even consulting the catalog (Java-only at M1).
+    assert uow.commits == 0
+    assert validator.calls == []
 
 
 async def test_create_rejects_unknown_server_type() -> None:

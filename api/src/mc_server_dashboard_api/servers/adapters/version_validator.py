@@ -14,11 +14,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.version_validator import (
+    CatalogUnavailableError,
     UnknownVersionError,
     UnsupportedServerTypeError,
     VersionValidator,
 )
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
+from mc_server_dashboard_api.versions.domain.errors import (
+    CatalogUnavailableError as VersionsCatalogUnavailableError,
+)
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 
 
@@ -34,6 +38,12 @@ class CatalogVersionValidator(VersionValidator):
         except ValueError as exc:
             # Valid in the schema CHECK enum (e.g. forge) but not catalogued at M1.
             raise UnsupportedServerTypeError(server_type) from exc
-        offered = await self.catalog.list_versions(catalog_type)
+        try:
+            offered = await self.catalog.list_versions(catalog_type)
+        except VersionsCatalogUnavailableError as exc:
+            # A transient source outage with no usable cache: translate the
+            # versions-domain error into the servers-domain one so the create edge
+            # maps it to a 503 without importing the versions domain (FR-VER-2).
+            raise CatalogUnavailableError(str(exc)) from exc
         if version not in {ref.version for ref in offered}:
             raise UnknownVersionError(f"{server_type} {version}")

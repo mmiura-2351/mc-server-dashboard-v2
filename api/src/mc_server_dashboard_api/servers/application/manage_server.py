@@ -30,6 +30,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
     UnknownExecutionBackendError,
     UnknownServerTypeError,
+    UnsupportedEditionError,
 )
 from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
     override_from_config,
@@ -49,6 +50,9 @@ from mc_server_dashboard_api.servers.domain.version_validator import VersionVali
 # The resource type a server grant is keyed by (DATABASE.md Sections 6, 10). The
 # delete sweep removes grants for ``(resource_type='server', resource_id=<id>)``.
 _SERVER_RESOURCE_TYPE = "server"
+
+# The only MC edition the version catalog can serve at M1 (Java-only; FR-VER-1).
+_SUPPORTED_EDITION = "java"
 
 
 def _parse_server_type(value: str) -> ServerType:
@@ -71,8 +75,9 @@ class CreateServer:
 
     Create validates the requested ``(server_type, mc_version)`` against the global
     version catalog (cheap, no download — the JAR is fetched on first start, the
-    ensure-on-start ruling). The check rejects an unsupported type (forge at M1)
-    and an unoffered version before the row is staged (FR-VER-1).
+    ensure-on-start ruling). The check rejects an unsupported edition (the catalog
+    is Java-only at M1), an unsupported type (forge at M1), and an unoffered version
+    before the row is staged (FR-VER-1).
     """
 
     uow: UnitOfWork
@@ -90,6 +95,10 @@ class CreateServer:
         execution_backend: str,
         config: dict[str, Any],
     ) -> Server:
+        if mc_edition != _SUPPORTED_EDITION:
+            # The catalog is Java-only at M1 (FR-VER-1); reject other editions
+            # before staging the row so an unprovisionable server is never created.
+            raise UnsupportedEditionError(mc_edition)
         parsed_type = _parse_server_type(server_type)
         parsed_backend = _parse_execution_backend(execution_backend)
         await self.version_validator.validate(
