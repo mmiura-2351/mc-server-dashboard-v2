@@ -274,6 +274,107 @@ async def test_sink_drops_status_from_non_owning_worker(engine: AsyncEngine) -> 
     assert loaded.observed_state is ObservedState.STOPPED
 
 
+async def test_sink_unassigns_when_owning_worker_reports_stopped_under_desired_stopped(
+    engine: AsyncEngine,
+) -> None:
+    # Timeout-resilient confirmation point (issue #217): when the stop dispatch
+    # outcome times out, the in-band #209 unassign is lost. The owning worker's
+    # later StatusChange(stopped) under desired=stopped is the authoritative "no
+    # live instance" signal, so the sink clears the assignment in the same write.
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    worker = uuid.uuid4()
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        # desired_state stays STOPPED (a graceful stop already flipped intent);
+        # the row is still assigned because the outcome timed out.
+        server.assigned_worker_id = WorkerId(worker)
+        server.updated_at = _NOW
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.commit()
+
+    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.STOPPED
+    assert loaded.assigned_worker_id is None
+
+
+async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_running(
+    engine: AsyncEngine,
+) -> None:
+    # A stopped report while desired=running is a divergence the reconciler owns;
+    # the sink must not unassign (that would break stickiness, issue #206).
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    worker = uuid.uuid4()
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        server.desired_state = DesiredState.RUNNING
+        server.assigned_worker_id = WorkerId(worker)
+        server.updated_at = _NOW
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.commit()
+
+    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.STOPPED
+    assert loaded.assigned_worker_id == WorkerId(worker)
+
+
+@pytest.mark.parametrize("state", ["running", "crashed"])
+async def test_sink_keeps_assignment_for_non_stopped_reports_under_desired_stopped(
+    engine: AsyncEngine, state: str
+) -> None:
+    # Only a stopped report confirms no live instance; running/crashed never
+    # unassign, even under desired=stopped (issue #217).
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    worker = uuid.uuid4()
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        server.assigned_worker_id = WorkerId(worker)
+        server.updated_at = _NOW
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.commit()
+
+    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state=state
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.assigned_worker_id == WorkerId(worker)
+
+
 async def test_sink_marks_worker_servers_unknown(engine: AsyncEngine) -> None:
     community_id = await _seed_community(engine)
     server_id = await _create_server(engine, community_id, "survival")
