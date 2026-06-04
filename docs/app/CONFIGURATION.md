@@ -180,7 +180,7 @@ publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md (#17).
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `auth.token.algorithm` | `HS256` | | Signing algorithm of the `TokenService` JWT adapter (REQUIREMENTS.md FR-AUTH-2), e.g. `HS256` / `RS256`. A parameter of the adapter, not an adapter selector (Section 4). |
-| `auth.token.signing_key` | *required* | secret | Signing key/secret for access & refresh tokens (REQUIREMENTS.md FR-AUTH-2). For an asymmetric algorithm this is the private key (path or value). |
+| `auth.token.signing_key` | *required* | secret | Signing key/secret for access & refresh tokens (REQUIREMENTS.md FR-AUTH-2). For an asymmetric algorithm this is the private key (path or value). Under `HS256` the key is shared-secret entropy and **must be at least 32 bytes** (the 256-bit digest length); a shorter key fails fast at load. |
 | `auth.token.access_ttl_seconds` | `900` | | Short-lived access-token lifetime. |
 | `auth.token.refresh_ttl_seconds` | `1209600` | | Long-lived refresh-token lifetime (14 days). |
 | `auth.password.hash` | `argon2` | | `PasswordHasher` selector (Section 4): `argon2` / `bcrypt`. |

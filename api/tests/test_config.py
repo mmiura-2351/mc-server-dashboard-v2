@@ -216,9 +216,30 @@ def test_token_signing_key_from_env_is_masked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
-    monkeypatch.setenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", "top-secret-key")
+    secret = "top-secret-signing-key-of-32-byte"
+    monkeypatch.setenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", secret)
     settings = load_settings(config_file=None)
-    assert settings.auth.token.signing_key == "top-secret-key"
+    assert settings.auth.token.signing_key == secret
     dump = settings.masked_dump()
-    assert "top-secret-key" not in repr(dump)
+    assert secret not in repr(dump)
     assert dump["auth"]["token"]["signing_key"] == "***"
+
+
+def test_short_hs256_signing_key_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An HS256 signing key shorter than 32 bytes is too weak; the loader rejects
+    # it at boot (CONFIGURATION.md Section 5.3, fail-fast).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", "x" * 31)
+    with pytest.raises(ValidationError, match="signing_key"):
+        load_settings(config_file=None)
+
+
+def test_hs256_signing_key_at_32_bytes_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", "x" * 32)
+    settings = load_settings(config_file=None)
+    assert settings.auth.token.signing_key == "x" * 32
