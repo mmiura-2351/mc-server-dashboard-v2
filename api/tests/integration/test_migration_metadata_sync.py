@@ -21,8 +21,8 @@ for the naming convention (issue #60): every constraint/index name the ORM
 models render on ``Base.metadata`` must already exist in the migrated database,
 so an Alembic autogenerate would see no spurious rename. It checks one direction
 only -- names the models declare must exist in the DB; it does not assert the
-reverse, because a migration-only index the models do not declare (the
-``ix_server_assigned_worker_id`` gap) is a separate concern, not a rename.
+reverse, because a migration-only construct the models do not declare is a
+separate concern (a spurious *drop*, not a rename).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5).
