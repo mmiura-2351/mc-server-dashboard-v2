@@ -25,9 +25,11 @@ class AuditLogModel(Base):
 
     __tablename__ = "audit_log"
     __table_args__ = (
+        # Bare name; the ``ck`` naming convention renders ``ck_audit_log_outcome``
+        # (issue #60), matching the migration-created name.
         CheckConstraint(
             "outcome IN ('success', 'denied', 'error')",
-            name="ck_audit_log_outcome",
+            name="outcome",
         ),
         # Member-scoped, Community-bounded queries (FR-AUD-3).
         Index("ix_audit_log_community_id_created_at", "community_id", "created_at"),

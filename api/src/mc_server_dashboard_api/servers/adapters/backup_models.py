@@ -36,9 +36,11 @@ class BackupModel(Base):
 
     __tablename__ = "backup"
     __table_args__ = (
+        # Bare name; the ``ck`` naming convention renders ``ck_backup_source``
+        # (issue #60), matching the migration-created name.
         CheckConstraint(
             "source IN ('manual', 'scheduled', 'event')",
-            name="ck_backup_source",
+            name="source",
         ),
         # List a server's backups newest-first (DATABASE.md Section 8).
         Index("ix_backup_server_id_created_at", "server_id", "created_at"),

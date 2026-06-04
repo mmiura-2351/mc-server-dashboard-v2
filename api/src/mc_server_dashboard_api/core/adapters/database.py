@@ -8,7 +8,7 @@ layer owns and the liveness probe behind the :class:`DatabasePing` Port.
 
 from __future__ import annotations
 
-from sqlalchemy import text
+from sqlalchemy import MetaData, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -19,13 +19,29 @@ from sqlalchemy.orm import DeclarativeBase
 
 from mc_server_dashboard_api.core.domain.health import DatabasePing
 
+# Deterministic constraint/index names so a model with no explicit name renders
+# the same name the hand-written migrations created, keeping a future Alembic
+# autogenerate diff quiet (issue #60). The ``ck`` template prefixes the bare
+# name passed to ``CheckConstraint(name=...)`` -- e.g. ``name="type"`` on
+# ``server`` becomes ``ck_server_type``, matching the migration.
+_NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
 
 class Base(DeclarativeBase):
     """Shared declarative base; every context's ORM models register here.
 
     A single ``MetaData`` keeps cross-context foreign keys resolvable and gives
-    Alembic one place to read the schema from (migrations/env.py).
+    Alembic one place to read the schema from (migrations/env.py). Its
+    ``naming_convention`` pins constraint/index names (issue #60).
     """
+
+    metadata = MetaData(naming_convention=_NAMING_CONVENTION)
 
 
 def create_engine(url: str) -> AsyncEngine:

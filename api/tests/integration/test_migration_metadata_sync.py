@@ -16,6 +16,14 @@ isolation, so the comparison reflects what migrations actually pull in.
 
 The database half (the tables migrations create at head) stays in-process.
 
+``test_metadata_constraint_names_exist_in_db`` is the autogenerate-quiet guard
+for the naming convention (issue #60): every constraint/index name the ORM
+models render on ``Base.metadata`` must already exist in the migrated database,
+so an Alembic autogenerate would see no spurious rename. It checks one direction
+only -- names the models declare must exist in the DB; it does not assert the
+reverse, because a migration-only index the models do not declare (the
+``ix_server_assigned_worker_id`` gap) is a separate concern, not a rename.
+
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5).
 """
@@ -25,10 +33,11 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import Connection, inspect
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from tests.integration.migrate import downgrade_base, upgrade_head
@@ -68,6 +77,45 @@ def _registry_tables() -> set[str]:
     return {line for line in result.stdout.splitlines() if line}
 
 
+def _metadata_names() -> dict[str, set[str]]:
+    """Constraint and index names the ORM models render, keyed by table.
+
+    Imports the same registration path ``env.py`` uses so ``Base.metadata`` is
+    fully populated; this is exactly the metadata Alembic autogenerate diffs.
+    """
+
+    sys.path.insert(0, str(_MIGRATIONS_DIR))
+    from model_registry import target_metadata
+
+    names: dict[str, set[str]] = {}
+    for table in target_metadata.tables.values():
+        table_names = {c.name for c in table.constraints if isinstance(c.name, str)}
+        table_names |= {i.name for i in table.indexes if isinstance(i.name, str)}
+        names[table.name] = table_names
+    return names
+
+
+def _db_names(sync_conn: Connection) -> dict[str, set[str]]:
+    """All constraint and index names present in the live database, by table."""
+
+    inspector = inspect(sync_conn)
+    names: dict[str, set[str]] = {}
+    for table in inspector.get_table_names():
+        if table in _ALEMBIC_BOOKKEEPING:
+            continue
+        reflected: list[Mapping[str, object]] = [
+            inspector.get_pk_constraint(table),
+            *inspector.get_foreign_keys(table),
+            *inspector.get_unique_constraints(table),
+            *inspector.get_check_constraints(table),
+            *inspector.get_indexes(table),
+        ]
+        names[table] = {
+            name for entry in reflected if isinstance(name := entry.get("name"), str)
+        }
+    return names
+
+
 async def test_head_tables_match_registry() -> None:
     assert _DB_URL is not None
     await downgrade_base(_DB_URL)
@@ -95,4 +143,31 @@ async def test_head_tables_match_registry() -> None:
     assert not extra_in_registry, (
         f"tables in migrations/model_registry with no corresponding migration: "
         f"{extra_in_registry}"
+    )
+
+
+async def test_metadata_constraint_names_exist_in_db() -> None:
+    assert _DB_URL is not None
+    await downgrade_base(_DB_URL)
+    await upgrade_head(_DB_URL)
+
+    engine = create_async_engine(_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            db_names = await conn.run_sync(_db_names)
+    finally:
+        await engine.dispose()
+        await downgrade_base(_DB_URL)
+
+    metadata_names = _metadata_names()
+
+    mismatches: dict[str, set[str]] = {}
+    for table, names in metadata_names.items():
+        missing = names - db_names.get(table, set())
+        if missing:
+            mismatches[table] = missing
+    assert not mismatches, (
+        "constraint/index names rendered by the ORM models that the migrated "
+        "database does not have -- the naming convention diverges from the "
+        f"migration-created names (autogenerate would emit a rename): {mismatches}"
     )
