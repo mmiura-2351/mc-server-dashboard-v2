@@ -177,6 +177,8 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 		return m.handleReadFile(cmd)
 	case "EditFile":
 		return m.handleEditFile(cmd)
+	case "ListFiles":
+		return m.handleListFiles(cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
@@ -475,6 +477,121 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
+// MaxDirEntries bounds a ListFiles response. A pathological directory (a world
+// with tens of thousands of region files) must not fill the control-plane stream
+// with one enormous result; the listing is clipped to this many entries and the
+// result carries a Truncated marker the browse view surfaces. The cap is generous
+// enough for any realistic config directory.
+const MaxDirEntries = 4096
+
+// handleListFiles lists a directory in the live working set (Section 6.9, 7.2).
+// The listing is read-only. The path is sanitized against traversal (FR-FILE-4)
+// exactly like read/edit, the directory is opened through the hardened dirfd
+// resolution refusing intermediate or final symlinks, and the result is bounded
+// to MaxDirEntries with a truncation marker. A missing directory maps to
+// SERVER_NOT_FOUND (the API turns it into a 404); a path that is a regular file
+// (not a directory) is FILE_ACCESS_DENIED. It runs inline on the receive loop:
+// a single directory read is fast, unlike the off-loop bulk transfers.
+func (m *Manager) handleListFiles(cmd session.Command) session.CommandResult {
+	root := filepath.Join(m.scratchDir, cmd.ServerID)
+
+	dirFd, err := m.openListDir(root, cmd.Path)
+	switch {
+	case errors.Is(err, unix.ELOOP):
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
+	case errors.Is(err, unix.ENOTDIR):
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: %q is not a directory", cmd.Path))
+	case errors.Is(err, unix.ENOENT):
+		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+			fmt.Sprintf("instancemanager: list files: %q not found", cmd.Path))
+	case errors.Is(err, errPathDenied):
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: list files: %v", err))
+	case err != nil:
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: list files: %v", err))
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+
+	listing, err := readDirEntries(dirFd)
+	if err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: list files: %v", err))
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true, FileListing: listing}
+}
+
+// openListDir resolves the directory at relPath beneath root to a dirfd, refusing
+// to follow any intermediate or final symlink. relPath == "." (or empty) lists
+// the working-set root directly (safeJoin rejects the root as a file path, so the
+// listing handles it here). For any other path it reuses the same hardened
+// resolution as read/edit (openParentBeneath) and opens the leaf as a directory
+// relative to the resolved parent fd, so a concurrent symlink swap cannot
+// redirect it. The caller owns the returned fd.
+func (m *Manager) openListDir(root, relPath string) (int, error) {
+	if relPath == "" || relPath == "." {
+		return unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	}
+	target, err := safeJoin(root, relPath)
+	if err != nil {
+		return -1, errPathDenied
+	}
+	parentFd, leaf, err := openParentBeneath(root, target, false)
+	if err != nil {
+		return -1, err
+	}
+	defer func() { _ = unix.Close(parentFd) }()
+
+	// O_DIRECTORY makes opening a regular file fail with ENOTDIR, and O_NOFOLLOW
+	// makes a final-component symlink fail with ELOOP; both surface as denials.
+	return unix.Openat(parentFd, leaf,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+}
+
+// readDirEntries reads the immediate children of dirFd (not recursive), bounded
+// to MaxDirEntries. It dups the fd into an *os.File so os.File.ReadDir does the
+// getdents loop; the dup keeps the caller's fd ownership intact (os.File closes
+// its own copy). Each entry is stat'd relative to dirFd without following a
+// symlink, so an entry's type/size reflect the link itself, not its target.
+func readDirEntries(dirFd int) (*session.FileListing, error) {
+	dup, err := unix.Dup(dirFd)
+	if err != nil {
+		return nil, err
+	}
+	dir := os.NewFile(uintptr(dup), ".")
+	defer func() { _ = dir.Close() }()
+
+	names, err := dir.Readdirnames(MaxDirEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	truncated := false
+	if len(names) > MaxDirEntries {
+		names = names[:MaxDirEntries]
+		truncated = true
+	}
+
+	entries := make([]session.FileEntry, 0, len(names))
+	for _, name := range names {
+		var st unix.Stat_t
+		if err := unix.Fstatat(dirFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			// An entry that vanished between readdir and stat is simply skipped; a
+			// live working set mutates under the listing and a best-effort snapshot
+			// is the documented contract.
+			continue
+		}
+		isDir := st.Mode&unix.S_IFMT == unix.S_IFDIR
+		size := uint64(0)
+		if !isDir && st.Size > 0 {
+			size = uint64(st.Size)
+		}
+		entries = append(entries, session.FileEntry{Name: name, IsDir: isDir, Size: size})
+	}
+	return &session.FileListing{Entries: entries, Truncated: truncated}, nil
+}
+
 // safeJoin joins name under root and verifies the result stays inside root.
 // Absolute paths and any ".." component are rejected outright (not clamped),
 // mirroring the data-plane extractor's discipline (FR-FILE-4). The string-level
@@ -508,6 +625,9 @@ func safeJoin(root, name string) (string, error) {
 var (
 	errIsDir    = errors.New("path is a directory")
 	errTooLarge = errors.New("file exceeds the read cap")
+	// errPathDenied marks a ListFiles path rejected by the lexical traversal check
+	// (safeJoin), mapped by the handler to a FILE_ACCESS_DENIED response.
+	errPathDenied = errors.New("path rejected")
 )
 
 // readLeafNoFollow opens leaf relative to parentFd refusing to follow a final

@@ -178,6 +178,32 @@ def test_list_returns_entries() -> None:
     assert resp.json()["entries"] == [{"name": "world", "is_dir": True, "size": 0}]
 
 
+def test_list_disconnected_worker_is_503() -> None:
+    app = _app(
+        member=True, allow=True, list_=_FakeUseCase(error=WorkerUnavailableError("x"))
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["reason"] == "worker_unavailable"
+
+
+def test_list_transitional_server_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        list_=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
+
+
 def test_write_decodes_base64_and_passes_bytes() -> None:
     raw = bytes(range(256))
     use_case = _FakeUseCase()

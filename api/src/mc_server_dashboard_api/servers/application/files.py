@@ -16,15 +16,15 @@ server state per the 6.9 table:
   mismatch) → :class:`ServerFilesUnsettledError` (the edge returns 409): neither
   resting target is well-defined.
 
-Browsing (:class:`ListDir`), history (:class:`ListFileVersions`), and rollback
-(:class:`RollbackFile`) act on the authoritative Storage copy regardless of run
-state. The control plane carries only ReadFile/EditFile (CONTROL_PLANE.md
-Section 5 table) — there is no live directory-listing or version command — so
-those operations have no running-server route; rollback additionally requires the
-server at rest (it republishes the authoritative copy, which would diverge from a
-live working set), and is 409 while running. This is the documented gap: directory
-structure served from Storage may lag a running server's live set by up to the
-snapshot RPO (FR-DATA-5).
+Browsing (:class:`ListDir`) branches like read/edit: a running server lists its
+live working set via the control plane's ListFiles, a server at rest reads
+Storage (issue #121 closes the RPO-stale-listing gap). History
+(:class:`ListFileVersions`) and rollback (:class:`RollbackFile`) stay
+authoritative-only regardless of run state: versions exist only on the
+authoritative copy, so history reads Storage even while running, and rollback
+additionally requires the server at rest (it republishes the authoritative copy,
+which would diverge from a live working set) and is 409 while running. The control
+plane carries no version or rollback command (CONTROL_PLANE.md Section 5 table).
 
 Edits are bounded to :data:`MAX_EDIT_BYTES`: file access rides the control plane
 for small, interactive edits (ARCHITECTURE.md Section 7.2), so a multi-MiB write
@@ -128,23 +128,45 @@ class ReadFile:
 
 @dataclass(frozen=True)
 class ListDir:
-    """Browse a directory in the authoritative copy (file:read).
+    """Browse a directory, branching at-rest -> Storage / running -> Worker (file:read).
 
-    Listing always reads Storage: the control plane carries no live-listing
-    command, and the 6.9 table tables only read/edit (see module docstring).
+    For a running server the listing comes from the Worker's live working set via
+    ListFiles over the control plane (closing the RPO-stale-listing gap, issue
+    #121); for a server at rest it reads the authoritative Storage copy. Both
+    sources yield the same :class:`FileEntry` shape (name / is_dir / size), so the
+    caller cannot tell them apart. A disconnected worker surfaces
+    :class:`WorkerUnavailableError` (the edge returns 503), matching read/edit.
     """
 
     uow: UnitOfWork
+    control_plane: ControlPlane
     file_store: FileStore
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:
         async with self.uow:
-            await _load(self.uow, community_id, server_id)
-        return await self.file_store.list_dir(
-            community_id=community_id, server_id=server_id, rel_path=rel_path
-        )
+            server = await _load(self.uow, community_id, server_id)
+
+        if server.is_at_rest():
+            return await self.file_store.list_dir(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+        if _is_running(server):
+            self.file_store.validate_rel_path(rel_path)
+            outcome = await self.control_plane.list_files(
+                worker_id=server.assigned_worker_id,  # type: ignore[arg-type]
+                server_id=server_id,
+                rel_path=rel_path,
+            )
+            if not outcome.success:
+                _map_file_status(server_id, outcome.status, outcome.message)
+            listing = outcome.listing
+            entries = () if listing is None else listing.entries
+            return [
+                FileEntry(name=e.name, is_dir=e.is_dir, size=e.size) for e in entries
+            ]
+        raise ServerFilesUnsettledError(str(server_id.value))
 
 
 @dataclass(frozen=True)

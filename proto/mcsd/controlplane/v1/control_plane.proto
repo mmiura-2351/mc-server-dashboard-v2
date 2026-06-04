@@ -165,6 +165,9 @@ message ApiCommand {
     ReadFile read_file = 9;
     // EditFile writes to a running server's live working set (Section 7.2).
     EditFile edit_file = 10;
+    // ListFiles browses a directory in a running server's live working set
+    // (Section 6.9, Section 7.2).
+    ListFiles list_files = 11;
   }
 }
 
@@ -234,6 +237,16 @@ message EditFile {
   bytes content = 2;
 }
 
+// ListFiles lists the entries of a directory in a running server's live working
+// set (Section 6.9, Section 7.2). The listing comes back in the CommandResult's
+// file_listing. Path-traversal protection is enforced on the Worker side
+// (FR-FILE-4); the listing is read-only.
+message ListFiles {
+  // path is the directory relative to the server's working-set root; "." (or
+  // empty) lists the root itself.
+  string path = 1;
+}
+
 // ---------------------------------------------------------------------------
 // Command results: Worker -> API
 // ---------------------------------------------------------------------------
@@ -253,7 +266,35 @@ message CommandResult {
     string command_output = 3;
     // file_content is the bytes read for a ReadFile.
     bytes file_content = 4;
+    // file_listing is the directory listing for a ListFiles.
+    FileListing file_listing = 5;
   }
+}
+
+// FileListing is the directory listing returned for a ListFiles command. Entries
+// are unordered; the API sorts for display.
+message FileListing {
+  // entries are the directory's immediate children (not recursive).
+  repeated FileEntry entries = 1;
+
+  // truncated is true when the directory held more than the Worker's per-listing
+  // cap and entries was clipped to that cap. The browse view shows a partial
+  // listing rather than refusing an enormous directory.
+  bool truncated = 2;
+}
+
+// FileEntry is one child of a listed directory. The shape mirrors the API's
+// authoritative-Storage listing (name, is_dir, size) so a running-server listing
+// and an at-rest listing unify into one response shape.
+message FileEntry {
+  // name is the entry's base name (no path separators).
+  string name = 1;
+
+  // is_dir is true for a subdirectory, false for a regular file.
+  bool is_dir = 2;
+
+  // size is the file size in bytes; 0 for a directory.
+  uint64 size = 3;
 }
 
 // CommandError reports why a command failed (NFR-OBS-1 error reporting).

@@ -35,6 +35,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResultCode,
     CommandTimedOutError,
     EditFileCommand,
+    ListFilesCommand,
     ReadFileCommand,
     ServerCommandCommand,
     StartServerCommand,
@@ -219,6 +220,48 @@ async def test_dispatch_edit_file_carries_content(harness: _Harness) -> None:
     await echo
 
     assert result.success
+    await call.done_writing()
+
+
+async def test_dispatch_list_files_carries_listing_back(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+
+    async def worker_echo() -> None:
+        msg = await call.read()
+        assert msg.api_command.WhichOneof("command") == "list_files"
+        assert msg.api_command.list_files.path == "plugins"
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(
+                    success=True,
+                    file_listing=pb.FileListing(
+                        entries=[
+                            pb.FileEntry(name="config.yml", is_dir=False, size=128),
+                            pb.FileEntry(name="data", is_dir=True, size=0),
+                        ],
+                        truncated=True,
+                    ),
+                ),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    result = await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=ListFilesCommand(path="plugins"),
+    )
+    await echo
+
+    assert result.success
+    assert result.file_listing is not None
+    assert result.file_listing.truncated is True
+    assert [(e.name, e.is_dir, e.size) for e in result.file_listing.entries] == [
+        ("config.yml", False, 128),
+        ("data", True, 0),
+    ]
     await call.done_writing()
 
 

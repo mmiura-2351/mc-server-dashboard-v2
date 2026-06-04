@@ -369,6 +369,11 @@ class FakeControlPlane(ControlPlane):
     ) -> CommandOutcome:
         return await self._record("edit_file", worker_id, server_id)
 
+    async def list_files(
+        self, *, worker_id: WorkerId, server_id: ServerId, rel_path: str
+    ) -> CommandOutcome:
+        return await self._record("list_files", worker_id, server_id)
+
 
 class FakeBackupArchiveStore(BackupArchiveStore):
     """In-memory backup-archive seam for the backup use-case tests.

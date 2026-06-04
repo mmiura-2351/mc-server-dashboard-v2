@@ -116,11 +116,16 @@ func (t *transport) SendHeartbeat(_ context.Context) error {
 func (t *transport) SendCommandResult(_ context.Context, result session.CommandResult) error {
 	cr := &controlplanev1.CommandResult{Success: result.Success}
 	if result.Success {
-		// A successful ServerCommand carries its console output and a ReadFile its
-		// bytes (mutually exclusive); other successes have no payload
-		// (CONTROL_PLANE.md Section 5). FileContent is checked first so an empty
-		// file (zero-length, non-nil content) still rides the file_content arm.
+		// A successful ServerCommand carries its console output, a ReadFile its
+		// bytes, and a ListFiles its directory listing (mutually exclusive); other
+		// successes have no payload (CONTROL_PLANE.md Section 5). FileListing and
+		// FileContent are checked first so an empty listing / empty file (non-nil
+		// but zero-length) still rides its own arm of the result oneof.
 		switch {
+		case result.FileListing != nil:
+			cr.Result = &controlplanev1.CommandResult_FileListing{
+				FileListing: toFileListing(result.FileListing),
+			}
 		case result.FileContent != nil:
 			cr.Result = &controlplanev1.CommandResult_FileContent{FileContent: result.FileContent}
 		case result.Output != "":
@@ -350,8 +355,23 @@ func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
 	case *controlplanev1.ApiCommand_EditFile:
 		out.Path = c.EditFile.GetPath()
 		out.Content = c.EditFile.GetContent()
+	case *controlplanev1.ApiCommand_ListFiles:
+		out.Path = c.ListFiles.GetPath()
 	}
 	return out
+}
+
+// toFileListing maps the domain listing onto the wire FileListing message.
+func toFileListing(listing *session.FileListing) *controlplanev1.FileListing {
+	entries := make([]*controlplanev1.FileEntry, 0, len(listing.Entries))
+	for _, e := range listing.Entries {
+		entries = append(entries, &controlplanev1.FileEntry{
+			Name:  e.Name,
+			IsDir: e.IsDir,
+			Size:  e.Size,
+		})
+	}
+	return &controlplanev1.FileListing{Entries: entries, Truncated: listing.Truncated}
 }
 
 // driverName maps the wire driver enum to the configured driver name used by the
@@ -387,6 +407,8 @@ func commandKind(cmd *controlplanev1.ApiCommand) string {
 		return "ReadFile"
 	case *controlplanev1.ApiCommand_EditFile:
 		return "EditFile"
+	case *controlplanev1.ApiCommand_ListFiles:
+		return "ListFiles"
 	default:
 		return "unknown"
 	}

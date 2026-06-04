@@ -134,6 +134,12 @@ async def read_or_list_files(
             raise _not_found() from exc
         except InvalidFilePathError as exc:
             raise _unprocessable("invalid_path") from exc
+        except ServerFilesUnsettledError as exc:
+            raise _conflict("server_unsettled") from exc
+        except WorkerUnavailableError as exc:
+            raise _service_unavailable("worker_unavailable") from exc
+        except CommandDispatchError as exc:
+            raise _conflict("command_failed") from exc
         return DirListingResponse(
             path=path, entries=[DirEntryResponse.from_entry(e) for e in entries]
         )

@@ -33,6 +33,12 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandStatus,
     WorkerUnavailableError,
 )
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    FileEntry as OutcomeFileEntry,
+)
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    FileListing as OutcomeFileListing,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
@@ -525,7 +531,32 @@ async def test_write_transitional_state_is_unsettled() -> None:
 # --- list / history / rollback ---------------------------------------------
 
 
-async def test_list_dir_reads_storage_regardless_of_state() -> None:
+async def test_list_dir_at_rest_reads_storage() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+        ),
+    )
+    store = FakeFileStore()
+    store.dirs["."] = [FileEntry(name="world", is_dir=True, size=0)]
+    cp = FakeControlPlane()
+    use_case = ListDir(uow=uow, control_plane=cp, file_store=store)
+    entries = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=".",
+    )
+    assert [e.name for e in entries] == ["world"]
+    assert cp.dispatched == []  # never touched the worker
+
+
+async def test_list_dir_running_reads_control_plane() -> None:
     community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     uow = FakeUnitOfWork()
     _seed(
@@ -539,14 +570,130 @@ async def test_list_dir_reads_storage_regardless_of_state() -> None:
         ),
     )
     store = FakeFileStore()
-    store.dirs["."] = [FileEntry(name="world", is_dir=True, size=0)]
-    use_case = ListDir(uow=uow, file_store=store)
+    # Storage is stale (empty); the live listing must come from the worker.
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=CommandStatus.OK,
+            listing=OutcomeFileListing(
+                entries=(
+                    OutcomeFileEntry(name="server.properties", is_dir=False, size=42),
+                    OutcomeFileEntry(name="world", is_dir=True, size=0),
+                ),
+                truncated=False,
+            ),
+        )
+    )
+    use_case = ListDir(uow=uow, control_plane=cp, file_store=store)
+
     entries = await use_case(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
         rel_path=".",
     )
-    assert [e.name for e in entries] == ["world"]
+    assert [(e.name, e.is_dir, e.size) for e in entries] == [
+        ("server.properties", False, 42),
+        ("world", True, 0),
+    ]
+    assert [d[0] for d in cp.dispatched] == ["list_files"]
+
+
+async def test_list_dir_running_disconnected_worker_raises_unavailable() -> None:
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    cp = FakeControlPlane(raise_unavailable=True)
+    use_case = ListDir(uow=uow, control_plane=cp, file_store=FakeFileStore())
+
+    with pytest.raises(WorkerUnavailableError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=".",
+        )
+
+
+async def test_list_dir_transitional_state_is_unsettled() -> None:
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STARTING,
+            worker=worker,
+        ),
+    )
+    use_case = ListDir(
+        uow=uow, control_plane=FakeControlPlane(), file_store=FakeFileStore()
+    )
+    with pytest.raises(ServerFilesUnsettledError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=".",
+        )
+
+
+async def test_list_dir_running_traversal_rejected_before_dispatch() -> None:
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    cp = FakeControlPlane()
+    use_case = ListDir(uow=uow, control_plane=cp, file_store=FakeFileStore())
+
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="../escape",
+        )
+    assert cp.dispatched == []  # rejected before any dispatch
+
+
+async def test_list_dir_running_file_access_denied_maps_to_invalid_path() -> None:
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.FILE_ACCESS_DENIED, message="nope")
+    )
+    use_case = ListDir(uow=uow, control_plane=cp, file_store=FakeFileStore())
+
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="plugins",
+        )
 
 
 async def test_history_lists_versions() -> None:

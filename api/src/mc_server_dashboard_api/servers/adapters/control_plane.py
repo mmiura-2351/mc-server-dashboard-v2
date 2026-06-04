@@ -25,6 +25,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandTimedOutError,
     EditFileCommand,
     HydrateCommand,
+    ListFilesCommand,
     ReadFileCommand,
     RestartServerCommand,
     ServerCommandCommand,
@@ -46,6 +47,12 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandStatus,
     ControlPlane,
     WorkerUnavailableError,
+)
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    FileEntry as OutcomeFileEntry,
+)
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    FileListing as OutcomeFileListing,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -75,11 +82,21 @@ _STATUS_BY_CODE: dict[CommandResultCode, CommandStatus] = {
 
 
 def _to_outcome(result: CommandResult) -> CommandOutcome:
+    listing = None
+    if result.file_listing is not None:
+        listing = OutcomeFileListing(
+            entries=tuple(
+                OutcomeFileEntry(name=e.name, is_dir=e.is_dir, size=e.size)
+                for e in result.file_listing.entries
+            ),
+            truncated=result.file_listing.truncated,
+        )
     return CommandOutcome(
         status=_STATUS_BY_CODE[result.code],
         message=result.message,
         output=result.output,
         file_content=result.file_content,
+        listing=listing,
     )
 
 
@@ -218,6 +235,13 @@ class FleetControlPlaneAdapter(ControlPlane):
             worker_id, server_id, EditFileCommand(path=rel_path, content=content)
         )
 
+    async def list_files(
+        self, *, worker_id: WorkerId, server_id: ServerId, rel_path: str
+    ) -> CommandOutcome:
+        return await self._dispatch(
+            worker_id, server_id, ListFilesCommand(path=rel_path)
+        )
+
     def _base(self) -> str:
         if not self._data_plane_base_url:
             raise WorkerUnavailableError(
@@ -255,7 +279,8 @@ class FleetControlPlaneAdapter(ControlPlane):
         | HydrateCommand
         | SnapshotCommand
         | ReadFileCommand
-        | EditFileCommand,
+        | EditFileCommand
+        | ListFilesCommand,
     ) -> CommandOutcome:
         try:
             result = await self._control_plane.dispatch(

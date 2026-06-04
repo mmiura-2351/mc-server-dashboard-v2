@@ -176,6 +176,7 @@ running-server file access.
 | `SnapshotTrigger` | Push the working set back to the data plane (save-all first for a running server). | none | FR-DATA-4, FR-DATA-7, Section 6.9 |
 | `ReadFile` | Read a path from a running server's live working set. | `file_content` | Section 6.9, Section 7.2 |
 | `EditFile` | Write a path in a running server's live working set. | none | Section 6.9, Section 7.2 |
+| `ListFiles` | List a directory in a running server's live working set (read-only). | `file_listing` | Section 6.9, Section 7.2 |
 
 Notes:
 
@@ -185,10 +186,21 @@ Notes:
   endpoint spec is STORAGE.md Section 8; Section 5.1 cross-references it.
 - **File access rides the control plane** for *running* servers only; a stopped
   server's files are served from authoritative Storage by the API directly
-  (Section 6.9). Path-traversal protection is enforced Worker-side (FR-FILE-4),
-  realized by the Worker's `WorkingDir` Port (ARCHITECTURE.md Section 5.2). The
-  control plane is for small interactive edits; bulk movement stays on the data
-  plane (ARCHITECTURE.md Section 7.2).
+  (Section 6.9). This covers `ReadFile`, `EditFile`, and `ListFiles` — a running
+  server's browse view lists the live working set rather than the snapshot-stale
+  authoritative copy. Path-traversal protection is enforced Worker-side
+  (FR-FILE-4), realized by the Worker's `WorkingDir` Port (ARCHITECTURE.md
+  Section 5.2). The control plane is for small interactive edits; bulk movement
+  stays on the data plane (ARCHITECTURE.md Section 7.2).
+- **`ListFiles` is a quick, inline command** answered on the receive loop like
+  `ReadFile`/`EditFile` (no 5.1 trigger completion to await — it touches no data
+  plane). The listing is non-recursive (immediate children) and read-only, and is
+  bounded to a per-listing cap (the Worker clips a pathological directory and sets
+  `file_listing.truncated`). Each `FileEntry` carries `name` / `is_dir` / `size`,
+  the same shape the API's authoritative-Storage listing uses, so the running and
+  at-rest sources unify into one response. History and rollback stay
+  authoritative-only (versions exist only on the authoritative copy), so there is
+  no live-version control-plane command.
 - **Delete and config edit are not control-plane commands.** Server delete and
   config editing (FR-SRV-2) are API/Storage-side operations: deleting a running
   server is stop-then-delete, and config edits on a running server go through the
@@ -284,7 +296,7 @@ with a `rejection_reason`, since it predates any command.
 | FR-SRV-4 (observed runtime state) | `StatusChange`, `ServerState` (Section 6) |
 | FR-SRV-5 (RCON/server command forwarding) | `ServerCommand` → `command_output` (Section 5) |
 | FR-DATA-4 / FR-DATA-7 (hydrate/snapshot triggers) | `HydrateTrigger`, `SnapshotTrigger` (triggers only; Section 5) |
-| Section 6.9 / Section 7.2 (running-server file access) | `ReadFile`, `EditFile` (Section 5) |
+| Section 6.9 / Section 7.2 (running-server file access) | `ReadFile`, `EditFile`, `ListFiles` (Section 5) |
 | FR-MON-1..3 (status/log/metrics) | `StatusChange`, `LogLine`, `Metrics` (Section 6) |
 | FR-EXE-5 (Worker picks Java runtime) | `StartServer.minecraft_version`; no Java field from the API (Section 5) |
 | NFR-OBS-1 (correlation IDs, error reporting) | `correlation_id`, `command_id`, `CommandError` (Section 3, Section 7) |

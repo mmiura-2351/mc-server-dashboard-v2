@@ -16,11 +16,18 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResultCode,
     EditFileCommand,
     HydrateCommand,
+    ListFilesCommand,
     ReadFileCommand,
     SnapshotCommand,
 )
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     ControlPlane as FleetControlPlane,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    FileEntry as FleetFileEntry,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    FileListing as FleetFileListing,
 )
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
 from mc_server_dashboard_api.servers.adapters.control_plane import (
@@ -128,6 +135,37 @@ async def test_edit_file_dispatches_content() -> None:
     assert isinstance(fleet.last, EditFileCommand)
     assert fleet.last.path == "ops.json"
     assert fleet.last.content == b"[]"
+
+
+async def test_list_files_dispatches_and_carries_listing() -> None:
+    fleet = _CapturingFleetControlPlane(
+        result=CommandResult(
+            code=CommandResultCode.OK,
+            file_listing=FleetFileListing(
+                entries=(
+                    FleetFileEntry(name="config.yml", is_dir=False, size=12),
+                    FleetFileEntry(name="data", is_dir=True, size=0),
+                ),
+                truncated=True,
+            ),
+        )
+    )
+    adapter = _adapter(fleet)
+
+    outcome = await adapter.list_files(
+        worker_id=WorkerId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+        rel_path="plugins",
+    )
+    assert isinstance(fleet.last, ListFilesCommand)
+    assert fleet.last.path == "plugins"
+    assert outcome.success
+    assert outcome.listing is not None
+    assert outcome.listing.truncated is True
+    assert [(e.name, e.is_dir, e.size) for e in outcome.listing.entries] == [
+        ("config.yml", False, 12),
+        ("data", True, 0),
+    ]
 
 
 async def test_file_access_denied_maps_to_status() -> None:
