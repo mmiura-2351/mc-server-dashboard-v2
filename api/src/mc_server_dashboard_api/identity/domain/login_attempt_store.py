@@ -23,8 +23,10 @@ from dataclasses import dataclass
 class Lockout:
     """The ``account_lockout`` record: active lockout + historic count.
 
-    ``locked_until`` is the instant the active lockout expires (``None`` if the
-    account has a row only because it was locked before but is not locked now).
+    ``locked_until`` is the instant the active lockout expires; an expired value
+    (in the past) means the account is no longer locked but keeps its row so the
+    historic count survives. ``clear_lockout`` deletes the row outright, so a
+    successful login leaves no row rather than a ``None`` ``locked_until``.
     ``lockout_count`` is how many times the account has ever been locked, driving
     the exponential back-off (SECURITY.md Section 2 step 4).
     """
@@ -43,9 +45,16 @@ class LoginAttemptStore(abc.ABC):
         username: str,
         ip: str | None,
         success: bool,
+        failure_reason: str | None,
         at: dt.datetime,
     ) -> None:
-        """Append one authentication attempt to ``login_attempt``."""
+        """Append one authentication attempt to ``login_attempt``.
+
+        ``failure_reason`` records *why* a failed attempt was rejected (one of the
+        :data:`~..application.login` reason constants); it is ``None`` for a
+        successful attempt. It is stored for audit/forensics only and never
+        surfaced to the caller (the failure response stays uniform).
+        """
 
     @abc.abstractmethod
     async def count_username_failures(

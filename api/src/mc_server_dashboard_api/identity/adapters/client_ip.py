@@ -5,8 +5,15 @@ operator runs, so the per-IP brute-force counter must not trust it blindly. This
 resolver returns the client IP the counter keys on:
 
 - with ``trust_forwarded_headers`` off, always the immediate peer;
-- with it on, the left-most ``X-Forwarded-For`` entry *only* when the immediate
-  peer is on the ``trusted_proxies`` allow-list (IPs/CIDRs); otherwise the peer.
+- with it on, and *only* when the immediate peer is on the ``trusted_proxies``
+  allow-list (IPs/CIDRs), the right-most ``X-Forwarded-For`` entry that is not
+  itself a trusted proxy (the real hop just before our trusted edge); otherwise
+  the peer.
+
+The right-most-untrusted hop is the spoof-resistant choice: an attacker can
+prepend arbitrary entries to ``X-Forwarded-For``, but our trusted proxy appends
+the real peer on the right, so walking from the right and skipping our own
+trusted proxies lands on the address the attacker could not forge.
 
 This is an edge/adapter concern (it reads the transport peer and an HTTP header),
 so it lives in the adapters layer and is invoked from the wiring dependency.
@@ -35,7 +42,7 @@ def resolve_client_ip(
         return peer_ip
     if not _peer_is_trusted(peer_ip, trusted_proxies):
         return peer_ip
-    forwarded = _leftmost_forwarded(forwarded_for)
+    forwarded = _rightmost_untrusted(forwarded_for, trusted_proxies)
     return forwarded if forwarded is not None else peer_ip
 
 
@@ -49,13 +56,25 @@ def forwarded_for_header(headers: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _leftmost_forwarded(forwarded_for: str | None) -> str | None:
-    """The original client is the first entry of ``X-Forwarded-For`` (RFC 7239)."""
+def _rightmost_untrusted(
+    forwarded_for: str | None, trusted_proxies: Sequence[str]
+) -> str | None:
+    """The first ``X-Forwarded-For`` hop, from the right, that is not our proxy.
+
+    Trusted proxies append the genuine peer on the right, so walking right-to-left
+    past our own trusted proxies yields the closest hop we did not append — the
+    address an attacker cannot spoof by prepending entries.
+    """
 
     if not forwarded_for:
         return None
-    first = forwarded_for.split(",", 1)[0].strip()
-    return first or None
+    for entry in reversed(forwarded_for.split(",")):
+        hop = entry.strip()
+        if not hop:
+            continue
+        if not _peer_is_trusted(hop, trusted_proxies):
+            return hop
+    return None
 
 
 def _peer_is_trusted(peer_ip: str, trusted_proxies: Sequence[str]) -> bool:

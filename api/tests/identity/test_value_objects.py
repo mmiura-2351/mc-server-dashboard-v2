@@ -45,6 +45,12 @@ def test_username_equality_is_case_insensitive() -> None:
     assert Username("Alice").value == "Alice"
 
 
+def test_username_key_is_case_folded() -> None:
+    # Brute-force state keys on this folded form so spelling variants aggregate.
+    assert Username("Alice").key == "alice"
+    assert Username("Alice").key == Username("ALICE").key
+
+
 def test_email_must_contain_an_at_sign() -> None:
     with pytest.raises(InvalidEmailError):
         EmailAddress("not-an-email")

@@ -40,9 +40,23 @@ def test_trusted_peer_without_forwarded_falls_back_to_peer() -> None:
     assert _resolve(forwarded_for=None) == _PEER
 
 
-def test_leftmost_entry_is_the_client() -> None:
-    # X-Forwarded-For lists the original client first, then each proxy.
+def test_rightmost_untrusted_hop_is_the_client() -> None:
+    # X-Forwarded-For appends each hop on the right; the last entry here (a
+    # trusted proxy) is skipped, leaving the real client to its left.
     assert _resolve(forwarded_for="203.0.113.7, 10.0.0.9") == _FORWARDED
+
+
+def test_spoofed_left_entry_is_ignored() -> None:
+    # An attacker prepends a forged entry; our trusted proxy then appends the
+    # attacker's real address. Walking from the right past trusted proxies must
+    # resolve to the attacker's real hop, not the forged left-most one.
+    assert _resolve(forwarded_for="1.2.3.4, 203.0.113.7, 10.0.0.9") == _FORWARDED
+
+
+def test_all_trusted_hops_falls_back_to_peer() -> None:
+    # If every forwarded hop is a trusted proxy, there is no untrusted client to
+    # trust; fall back to the immediate peer rather than a proxy address.
+    assert _resolve(forwarded_for="10.0.0.9, 10.0.0.8") == _PEER
 
 
 def test_exact_ip_in_trusted_list() -> None:

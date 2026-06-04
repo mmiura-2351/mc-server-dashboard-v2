@@ -13,6 +13,15 @@ awaiting the artificial :class:`LoginFailureDelay`, so none can be told apart by
 status or timing (enumeration defence). Crossing the per-username threshold locks
 the account for an exponentially backed-off duration; a successful login clears
 the lockout, resets the back-off, and prunes stale attempt rows.
+
+Two enumeration-defence details: brute-force state keys on the case-folded
+:attr:`Username.key`, so failures spread across spelling variants of one username
+aggregate and lock together; and the unknown-user path still runs
+:meth:`PasswordHasher.verify` against a static dummy hash so it costs the same as
+the wrong-password path and cannot be told apart by timing.
+
+The per-failure reason is recorded on the ``login_attempt`` row for forensics
+only; it is never surfaced to the caller.
 """
 
 from __future__ import annotations
@@ -41,6 +50,13 @@ from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.identity.domain.value_objects import Username
 
+# Failure reasons recorded on the ``login_attempt`` row (forensics only; never
+# surfaced — the caller always sees one uniform error).
+REASON_LOCKED = "locked"
+REASON_IP_THROTTLED = "ip_throttled"
+REASON_UNKNOWN_USER = "unknown_user"
+REASON_WRONG_PASSWORD = "wrong_password"
+
 
 @dataclass(frozen=True)
 class Login:
@@ -50,6 +66,7 @@ class Login:
     attempts: LoginAttemptStore
     brute_force: BruteForceConfig
     hasher: PasswordHasher
+    dummy_password_hash: str
     tokens: TokenService
     clock: Clock
     failure_delay: LoginFailureDelay
@@ -59,15 +76,23 @@ class Login:
         self, *, username: str, password: str, ip: str | None = None
     ) -> TokenPair:
         name = Username(username)
+        key = name.key
         now = self.clock.now()
 
-        if self.brute_force.enabled and await self._is_blocked(name.value, ip, now=now):
-            await self._fail(name.value, ip, now=now)
+        if self.brute_force.enabled:
+            blocked = await self._blocked_reason(key, ip, now=now)
+            if blocked is not None:
+                await self._fail(key, ip, blocked, now=now)
 
         async with self.uow:
             user = await self.uow.users.get_by_username(name)
-            if user is None or not self.hasher.verify(password, user.password_hash):
-                await self._fail(name.value, ip, now=now)
+            if user is None:
+                # Verify against a static dummy hash so the unknown-user path
+                # costs the same as a wrong password (timing-enumeration defence).
+                self.hasher.verify(password, self.dummy_password_hash)
+                await self._fail(key, ip, REASON_UNKNOWN_USER, now=now)
+            if not self.hasher.verify(password, user.password_hash):
+                await self._fail(key, ip, REASON_WRONG_PASSWORD, now=now)
             pair = await issue_token_pair(
                 uow=self.uow,
                 tokens=self.tokens,
@@ -79,40 +104,41 @@ class Login:
 
         if self.brute_force.enabled:
             await self.attempts.record_attempt(
-                username=name.value, ip=ip, success=True, at=now
+                username=key, ip=ip, success=True, failure_reason=None, at=now
             )
-            await self.attempts.clear_lockout(name.value)
+            await self.attempts.clear_lockout(key)
             await self._prune(now=now)
         return pair
 
-    async def _is_blocked(
+    async def _blocked_reason(
         self, username: str, ip: str | None, *, now: dt.datetime
-    ) -> bool:
-        """Whether to reject before verifying: active lockout or IP over threshold."""
+    ) -> str | None:
+        """Reason to reject before verifying, or ``None``: lockout / IP threshold."""
 
         lockout = await self.attempts.get_lockout(username)
         if lockout is not None and is_locked(lockout.locked_until, now=now):
-            return True
+            return REASON_LOCKED
         if ip is not None:
             ip_failures = await self.attempts.count_ip_failures(
                 ip, since=now - self.brute_force.ip_window
             )
             if ip_failures >= self.brute_force.ip_threshold:
-                return True
-        return False
+                return REASON_IP_THROTTLED
+        return None
 
     async def _fail(
-        self, username: str, ip: str | None, *, now: dt.datetime
+        self, username: str, ip: str | None, reason: str, *, now: dt.datetime
     ) -> NoReturn:
         """Record the failure, lock the account if over threshold, delay, raise.
 
         The same exit for every failure path (locked, IP-throttled, unknown user,
-        wrong password) so none is distinguishable by status or timing.
+        wrong password) so none is distinguishable by status or timing; the
+        ``reason`` is persisted on the attempt row for forensics, never returned.
         """
 
         if self.brute_force.enabled:
             await self.attempts.record_attempt(
-                username=username, ip=ip, success=False, at=now
+                username=username, ip=ip, success=False, failure_reason=reason, at=now
             )
             await self._maybe_lock(username, now=now)
         await self.failure_delay.apply()

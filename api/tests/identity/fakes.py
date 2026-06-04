@@ -140,12 +140,20 @@ class FakeUnitOfWork(UnitOfWork):
 
 
 class StubHasher(PasswordHasher):
-    """Treats a hash of the form ``hashed::<plaintext>`` as the stored hash."""
+    """Treats a hash of the form ``hashed::<plaintext>`` as the stored hash.
+
+    Counts ``verify`` calls so tests can assert the unknown-user and
+    wrong-password paths both run a verify (timing-enumeration defence).
+    """
+
+    def __init__(self) -> None:
+        self.verify_calls = 0
 
     def hash(self, plaintext: str) -> str:
         return f"hashed::{plaintext}"
 
     def verify(self, plaintext: str, password_hash: str) -> bool:
+        self.verify_calls += 1
         return password_hash == f"hashed::{plaintext}"
 
 
@@ -206,8 +214,8 @@ class FakeLoginAttemptStore(LoginAttemptStore):
     """In-memory :class:`LoginAttemptStore`: a list of attempts + lockout map."""
 
     def __init__(self) -> None:
-        # (username, ip, success, created_at)
-        self.attempts: list[tuple[str, str | None, bool, dt.datetime]] = []
+        # (username, ip, success, failure_reason, created_at)
+        self.attempts: list[tuple[str, str | None, bool, str | None, dt.datetime]] = []
         self.lockouts: dict[str, Lockout] = {}
 
     async def record_attempt(
@@ -216,23 +224,24 @@ class FakeLoginAttemptStore(LoginAttemptStore):
         username: str,
         ip: str | None,
         success: bool,
+        failure_reason: str | None,
         at: dt.datetime,
     ) -> None:
-        self.attempts.append((username, ip, success, at))
+        self.attempts.append((username, ip, success, failure_reason, at))
 
     async def count_username_failures(
         self, username: str, *, since: dt.datetime
     ) -> int:
         return sum(
             1
-            for (name, _ip, success, at) in self.attempts
+            for (name, _ip, success, _reason, at) in self.attempts
             if name == username and not success and at >= since
         )
 
     async def count_ip_failures(self, ip: str, *, since: dt.datetime) -> int:
         return sum(
             1
-            for (_name, attempt_ip, success, at) in self.attempts
+            for (_name, attempt_ip, success, _reason, at) in self.attempts
             if attempt_ip == ip and not success and at >= since
         )
 
@@ -250,7 +259,7 @@ class FakeLoginAttemptStore(LoginAttemptStore):
         self.lockouts.pop(username, None)
 
     async def prune_attempts(self, *, older_than: dt.datetime) -> None:
-        self.attempts = [a for a in self.attempts if a[3] >= older_than]
+        self.attempts = [a for a in self.attempts if a[4] >= older_than]
 
 
 def make_brute_force_config(

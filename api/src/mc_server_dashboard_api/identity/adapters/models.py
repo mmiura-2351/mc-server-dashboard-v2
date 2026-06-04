@@ -91,7 +91,8 @@ class LoginAttemptModel(Base):
     are ``COUNT`` queries over this table within the window bound; the
     ``(username, created_at)`` and ``(ip, created_at)`` indexes serve them. ``ip``
     is nullable because the per-IP path is skipped when no trustworthy client IP
-    is available (SECURITY.md Section 4).
+    is available (SECURITY.md Section 4). ``failure_reason`` records why a failed
+    attempt was rejected and is null for a success.
     """
 
     __tablename__ = "login_attempt"
@@ -104,6 +105,7 @@ class LoginAttemptModel(Base):
     username: Mapped[str] = mapped_column(String, nullable=False)
     ip: Mapped[str | None] = mapped_column(String, nullable=True)
     success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

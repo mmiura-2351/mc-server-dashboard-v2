@@ -55,6 +55,8 @@ pytestmark = pytest.mark.skipif(
 
 _PASSWORD = "Wm7!qz#Lp2vT"
 _REFRESH_TTL = dt.timedelta(days=14)
+# Static dummy hash for the unknown-user verify path (login timing equalization).
+_DUMMY_HASH = Argon2PasswordHasher().hash("dummy")
 
 
 @pytest.fixture
@@ -106,6 +108,7 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
         attempts=SqlAlchemyLoginAttemptStore(factory),
         brute_force=make_brute_force_config(),
         hasher=Argon2PasswordHasher(),
+        dummy_password_hash=_DUMMY_HASH,
         tokens=_tokens(),
         clock=SystemClock(),
         failure_delay=FixedLoginFailureDelay(
@@ -157,6 +160,7 @@ async def test_brute_force_lockout_then_backoff_growth(engine: AsyncEngine) -> N
             attempts=store,
             brute_force=config,
             hasher=Argon2PasswordHasher(),
+            dummy_password_hash=_DUMMY_HASH,
             tokens=_tokens(),
             clock=clock,
             failure_delay=FixedLoginFailureDelay(

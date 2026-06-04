@@ -48,6 +48,24 @@ def _store(engine: AsyncEngine) -> SqlAlchemyLoginAttemptStore:
     return SqlAlchemyLoginAttemptStore(create_session_factory(engine))
 
 
+async def _record(
+    store: SqlAlchemyLoginAttemptStore,
+    *,
+    username: str,
+    ip: str | None,
+    success: bool,
+    at: dt.datetime,
+    failure_reason: str | None = None,
+) -> None:
+    await store.record_attempt(
+        username=username,
+        ip=ip,
+        success=success,
+        failure_reason=failure_reason,
+        at=at,
+    )
+
+
 async def test_migration_creates_tables_and_indexes(engine: AsyncEngine) -> None:
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda c: set(inspect(c).get_table_names()))
@@ -56,17 +74,23 @@ async def test_migration_creates_tables_and_indexes(engine: AsyncEngine) -> None
         indexes = await conn.run_sync(
             lambda c: {ix["name"] for ix in inspect(c).get_indexes("login_attempt")}
         )
+        columns = await conn.run_sync(
+            lambda c: {col["name"] for col in inspect(c).get_columns("login_attempt")}
+        )
     assert "ix_login_attempt_username_created_at" in indexes
     assert "ix_login_attempt_ip_created_at" in indexes
+    # SECURITY.md Section 3: the attempt row carries the failure reason.
+    assert "failure_reason" in columns
 
 
 async def test_count_username_failures_within_window(engine: AsyncEngine) -> None:
     store = _store(engine)
-    await store.record_attempt(username="alice", ip="10.0.0.1", success=False, at=_NOW)
-    await store.record_attempt(username="alice", ip="10.0.0.1", success=False, at=_NOW)
+    await _record(store, username="alice", ip="10.0.0.1", success=False, at=_NOW)
+    await _record(store, username="alice", ip="10.0.0.1", success=False, at=_NOW)
     # A success and an out-of-window failure must not be counted.
-    await store.record_attempt(username="alice", ip="10.0.0.1", success=True, at=_NOW)
-    await store.record_attempt(
+    await _record(store, username="alice", ip="10.0.0.1", success=True, at=_NOW)
+    await _record(
+        store,
         username="alice",
         ip="10.0.0.1",
         success=False,
@@ -81,9 +105,9 @@ async def test_count_username_failures_within_window(engine: AsyncEngine) -> Non
 
 async def test_count_ip_failures_within_window(engine: AsyncEngine) -> None:
     store = _store(engine)
-    await store.record_attempt(username="alice", ip="10.0.0.2", success=False, at=_NOW)
-    await store.record_attempt(username="bob", ip="10.0.0.2", success=False, at=_NOW)
-    await store.record_attempt(username="carol", ip="10.0.0.3", success=False, at=_NOW)
+    await _record(store, username="alice", ip="10.0.0.2", success=False, at=_NOW)
+    await _record(store, username="bob", ip="10.0.0.2", success=False, at=_NOW)
+    await _record(store, username="carol", ip="10.0.0.3", success=False, at=_NOW)
 
     count = await store.count_ip_failures(
         "10.0.0.2", since=_NOW - dt.timedelta(minutes=5)
@@ -121,8 +145,9 @@ async def test_clear_lockout_removes_row(engine: AsyncEngine) -> None:
 
 async def test_prune_deletes_only_old_attempts(engine: AsyncEngine) -> None:
     store = _store(engine)
-    await store.record_attempt(username="alice", ip="10.0.0.1", success=False, at=_NOW)
-    await store.record_attempt(
+    await _record(store, username="alice", ip="10.0.0.1", success=False, at=_NOW)
+    await _record(
+        store,
         username="alice",
         ip="10.0.0.1",
         success=False,

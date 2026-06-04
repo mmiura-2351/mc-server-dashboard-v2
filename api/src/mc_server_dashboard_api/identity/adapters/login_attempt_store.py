@@ -41,12 +41,17 @@ class SqlAlchemyLoginAttemptStore(LoginAttemptStore):
         username: str,
         ip: str | None,
         success: bool,
+        failure_reason: str | None,
         at: dt.datetime,
     ) -> None:
         async with self._session_factory() as session:
             session.add(
                 LoginAttemptModel(
-                    username=username, ip=ip, success=success, created_at=at
+                    username=username,
+                    ip=ip,
+                    success=success,
+                    failure_reason=failure_reason,
+                    created_at=at,
                 )
             )
             await session.commit()

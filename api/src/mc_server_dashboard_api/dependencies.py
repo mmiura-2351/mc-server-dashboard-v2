@@ -91,6 +91,20 @@ def _build_password_hasher(password: PasswordSettings) -> PasswordHasher:
     return Argon2PasswordHasher()
 
 
+# A throwaway value to derive the dummy verification hash from. Verifying a real
+# password against this hash always fails; its only purpose is to give the
+# unknown-user login path the same cost as a wrong-password verify.
+_DUMMY_VERIFY_PLAINTEXT = "dummy-password-for-timing-equalization"
+
+
+@lru_cache(maxsize=2)
+def _dummy_password_hash(algorithm: str) -> str:
+    """Pre-compute the static dummy hash for ``algorithm`` once (login timing)."""
+
+    hasher = BcryptPasswordHasher() if algorithm == "bcrypt" else Argon2PasswordHasher()
+    return hasher.hash(_DUMMY_VERIFY_PLAINTEXT)
+
+
 @lru_cache(maxsize=1)
 def _common_passwords() -> frozenset[str]:
     """Load the common-password blocklist once and reuse it across requests."""
@@ -169,6 +183,7 @@ def get_login(request: Request) -> Login:
         attempts=SqlAlchemyLoginAttemptStore(session_factory),
         brute_force=brute_force,
         hasher=_build_password_hasher(settings.auth.password),
+        dummy_password_hash=_dummy_password_hash(settings.auth.password.hash),
         tokens=_build_token_service(settings.auth.token, clock),
         clock=clock,
         failure_delay=FixedLoginFailureDelay(
