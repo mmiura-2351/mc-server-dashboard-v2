@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -212,6 +213,88 @@ func TestLifecycleCommandDispatchedToHandler(t *testing.T) {
 	got := transport.resultsCopy()[0]
 	if got.CommandID != "cmd-1" || !got.Success || got.Output != "ok" {
 		t.Fatalf("dispatched result = %+v, want success cmd-1 output ok", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// recordAttr returns the value of the named attribute on a slog.Record as a
+// string (via its Value), or "" if absent.
+func recordAttr(rec slog.Record, key string) (string, bool) {
+	var val string
+	var found bool
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			val = a.Value.String()
+			found = true
+			return false
+		}
+		return true
+	})
+	return val, found
+}
+
+func TestFailedCommandResultIsLogged(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	logger, capture := captureLogger()
+	handler := newFakeHandler(CommandResult{
+		Success:      false,
+		ErrorCode:    CommandErrorInvalidState,
+		ErrorMessage: "instance already running",
+	})
+	r := NewRunner(dialer, testCaps(), clock, logger, WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	transport.commands <- Command{CommandID: "cmd-9", ServerID: "srv-1", Kind: "StartServer"}
+
+	waitFor(t, func() bool { return len(capture.recordsAtLevel(slog.LevelWarn)) == 1 })
+	rec := capture.recordsAtLevel(slog.LevelWarn)[0]
+
+	if got, _ := recordAttr(rec, "command_id"); got != "cmd-9" {
+		t.Errorf("warn command_id = %q, want cmd-9", got)
+	}
+	if got, _ := recordAttr(rec, "server_id"); got != "srv-1" {
+		t.Errorf("warn server_id = %q, want srv-1", got)
+	}
+	if got, _ := recordAttr(rec, "kind"); got != "StartServer" {
+		t.Errorf("warn kind = %q, want StartServer", got)
+	}
+	if got, _ := recordAttr(rec, "error_code"); got != CommandErrorInvalidState.String() {
+		t.Errorf("warn error_code = %q, want %q", got, CommandErrorInvalidState.String())
+	}
+	if got, _ := recordAttr(rec, "error_message"); got != "instance already running" {
+		t.Errorf("warn error_message = %q, want %q", got, "instance already running")
+	}
+
+	cancel()
+	<-done
+}
+
+func TestSuccessfulCommandResultIsNotWarnLogged(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	logger, capture := captureLogger()
+	handler := newFakeHandler(CommandResult{Success: true, Output: "ok"})
+	r := NewRunner(dialer, testCaps(), clock, logger, WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	transport.commands <- Command{CommandID: "cmd-1", ServerID: "srv-1", Kind: "StartServer"}
+
+	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
+	if n := len(capture.recordsAtLevel(slog.LevelWarn)); n != 0 {
+		t.Errorf("warn records = %d, want 0 for a successful command", n)
 	}
 
 	cancel()

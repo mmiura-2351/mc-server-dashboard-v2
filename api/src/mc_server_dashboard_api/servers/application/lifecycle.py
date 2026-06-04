@@ -89,6 +89,28 @@ _LOG = logging.getLogger(__name__)
 _DEFAULT_JAR_RELPATH = "server.jar"
 
 
+def _dispatch_failure(
+    *, server_id: ServerId, kind: str, outcome: CommandOutcome
+) -> CommandDispatchError:
+    """Log a failed command outcome at WARN and build the typed dispatch error.
+
+    Every ``CommandDispatchError(outcome.message or outcome.status.value)`` raise
+    flows through here so the Worker's failure detail is recorded once, with
+    server and command-kind context, before the edge maps the error to a generic
+    409 (issue #194). The raw Worker message stays out of the HTTP response — it
+    can leak Worker host paths — so it is logged, not returned.
+    """
+
+    detail = outcome.message or outcome.status.value
+    _LOG.warning(
+        "command %s failed for server %s: %s",
+        kind,
+        server_id.value,
+        detail,
+    )
+    return CommandDispatchError(detail)
+
+
 @dataclass
 class _Dispatch:
     """Mutable marker recording whether a start command was sent (issue #101).
@@ -167,7 +189,9 @@ class StartServer:
             await self._compensate(community_id, server_id, worker_id, original=exc)
             raise
         if not outcome.success:
-            failure = CommandDispatchError(outcome.message or outcome.status.value)
+            failure = _dispatch_failure(
+                server_id=server_id, kind="StartServer", outcome=outcome
+            )
             await self._compensate(community_id, server_id, worker_id, original=failure)
             raise failure
         return server
@@ -247,7 +271,9 @@ class StartServer:
                 await self._unassign(community_id, server_id, worker_id, original=exc)
             raise
         if not outcome.success:
-            failure = CommandDispatchError(outcome.message or outcome.status.value)
+            failure = _dispatch_failure(
+                server_id=server_id, kind="StartServer", outcome=outcome
+            )
             # A failed START outcome may reflect a command the Worker partially
             # applied; keep the assignment for a same-Worker redispatch. A failed
             # HYDRATE outcome (not dispatched) never reached the start, so unassign.
@@ -289,7 +315,9 @@ class StartServer:
         outcome = await self._launch(server, community_id, server_id, worker_id)
         if outcome.success or outcome.status is CommandStatus.INVALID_STATE:
             return server
-        raise CommandDispatchError(outcome.message or outcome.status.value)
+        raise _dispatch_failure(
+            server_id=server_id, kind="StartServer", outcome=outcome
+        )
 
     async def _launch(
         self,
@@ -508,7 +536,9 @@ class StopServer:
             worker_id=worker_id, server_id=server_id
         )
         if not outcome.success:
-            raise CommandDispatchError(outcome.message or outcome.status.value)
+            raise _dispatch_failure(
+                server_id=server_id, kind="StopServer", outcome=outcome
+            )
         # Final snapshot AFTER the process has exited (the graceful stop above
         # only returns once the Worker reports the process gone), so the captured
         # working set is quiescent (FR-DATA-4, FR-DATA-7). A snapshot failure is
@@ -565,7 +595,9 @@ class StopServer:
             worker_id=worker_id, server_id=server_id
         )
         if not outcome.success:
-            raise CommandDispatchError(outcome.message or outcome.status.value)
+            raise _dispatch_failure(
+                server_id=server_id, kind="StopServer", outcome=outcome
+            )
         return server
 
 
@@ -604,7 +636,9 @@ class RestartServer:
             worker_id=worker_id, server_id=server_id
         )
         if not outcome.success:
-            raise CommandDispatchError(outcome.message or outcome.status.value)
+            raise _dispatch_failure(
+                server_id=server_id, kind="RestartServer", outcome=outcome
+            )
         return server
 
 
@@ -636,5 +670,7 @@ class SendServerCommand:
         if outcome.status is CommandStatus.INVALID_STATE:
             raise ServerNotRunningError(str(server_id.value))
         if not outcome.success:
-            raise CommandDispatchError(outcome.message or outcome.status.value)
+            raise _dispatch_failure(
+                server_id=server_id, kind="ServerCommand", outcome=outcome
+            )
         return outcome.output

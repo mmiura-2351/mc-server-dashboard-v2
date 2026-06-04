@@ -14,6 +14,44 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// captureHandler is a slog.Handler that records the records it receives so tests
+// can assert on emitted log lines (level and attributes).
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// recordsAtLevel returns a copy of the captured records at the given level.
+func (h *captureHandler) recordsAtLevel(level slog.Level) []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []slog.Record
+	for _, rec := range h.records {
+		if rec.Level == level {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// captureLogger pairs a capturing handler with a logger built on it.
+func captureLogger() (*slog.Logger, *captureHandler) {
+	h := &captureHandler{}
+	return slog.New(h), h
+}
+
 // fakeClock is a manually-advanced Clock. After returns a channel a test fires
 // by calling fire(); Now is fixed (tests that need it advance manually).
 type fakeClock struct {

@@ -267,8 +267,27 @@ func (r *Runner) emitResult(ctx context.Context, results chan<- CommandResult, r
 }
 
 // handle dispatches a command to the handler when it is a handled kind and a
-// handler is wired; otherwise it returns the "unsupported" result.
+// handler is wired; otherwise it returns the "unsupported" result. Every result
+// flows back through here, so a single failure-logging site (issue #194) covers
+// every handler: a failed result is logged at WARN with the command context the
+// CommandResult itself does not carry (server_id, kind).
 func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
+	result := r.handleCommand(ctx, cmd)
+	if !result.Success {
+		r.logger.Warn("command failed",
+			"command_id", cmd.CommandID,
+			"server_id", cmd.ServerID,
+			"kind", cmd.Kind,
+			"error_code", result.ErrorCode,
+			"error_message", result.ErrorMessage,
+		)
+	}
+	return result
+}
+
+// handleCommand produces the CommandResult for a command, dispatching to the
+// handler for a handled kind and answering "unsupported" otherwise.
+func (r *Runner) handleCommand(ctx context.Context, cmd Command) CommandResult {
 	if r.handler != nil && isHandledKind(cmd.Kind) {
 		r.logger.Info("dispatching command",
 			"command_id", cmd.CommandID, "server_id", cmd.ServerID, "kind", cmd.Kind)
