@@ -60,10 +60,37 @@ service WorkerService {
 - `ApiMessage` — everything the API sends (registration acknowledgement,
   commands).
 
-The channel is authenticated and encrypted with TLS/mTLS (REQUIREMENTS.md
-NFR-SEC-1); the TLS material and the Worker credential are configuration
+The channel is authenticated and encrypted (REQUIREMENTS.md NFR-SEC-1).
+**Authentication** is the shared Worker credential carried in call metadata
+(`authorization: Bearer <credential>`); **encryption** is server-side TLS on the
+gRPC listener. The TLS material and the Worker credential are configuration
 (CONFIGURATION.md Sections 5.1 and 6.1). Transport security sits below this
 contract and is not modelled in the `.proto`.
+
+**mTLS is deferred (M1).** The control channel currently uses server-side TLS
+only: the API presents a certificate the Worker verifies, and the shared
+credential authenticates the Worker. Client-certificate (mTLS) verification is
+not implemented; the `control.tls.client_ca_file` / `api.tls.client_cert_file` /
+`api.tls.client_key_file` keys are documented-deferred placeholders that keep the
+config shape forward-compatible (CONFIGURATION.md Sections 5.1, 6.1).
+
+### Deployment posture
+
+Two ways to satisfy the encryption requirement:
+
+1. **Direct TLS (default).** Set `control.tls.cert_file` / `control.tls.key_file`
+   on the API; the gRPC listener serves TLS directly. The Worker verifies it
+   against `api.tls.ca_file`. The required-unless-insecure rule means the API
+   fails fast at startup if neither a cert/key pair nor `control.tls.insecure=true`
+   is set (CONFIGURATION.md Section 5.1).
+2. **Reverse-proxy termination.** Terminate TLS at a reverse proxy / load
+   balancer in front of the API and run the gRPC listener with
+   `control.tls.insecure=true` on a trusted internal network. The proxy presents
+   the certificate the Worker verifies; the API-to-proxy hop must stay on a
+   private link. Use this when TLS material is managed centrally at the edge.
+
+Plaintext without a fronting proxy (`control.tls.insecure=true` exposed directly)
+is local/dev only and logs a `WARN` at startup.
 
 ---
 

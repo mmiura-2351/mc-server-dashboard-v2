@@ -53,6 +53,31 @@ class ServerSettings(_Section):
     public_base_url: str | None = None
 
 
+class ControlTlsSettings(_Section):
+    """Control-channel TLS material for the gRPC listener (CONFIGURATION.md
+    Section 5.1, REQUIREMENTS.md NFR-SEC-1).
+
+    The control channel must be authenticated AND encrypted. ``cert_file`` and
+    ``key_file`` are the server certificate / private key the gRPC listener
+    presents; both must be set together to serve over TLS. ``insecure`` opts in
+    to a plaintext listener for local/dev only — the API logs a ``WARN`` at
+    startup. The required-unless-insecure rule (enforced by the app factory)
+    mirrors the Worker's ``api.tls.*`` precedent (Section 6.1): with neither the
+    cert/key pair nor ``insecure=true`` set, startup fails fast.
+
+    ``client_ca_file`` is reserved for client-certificate (mTLS) verification
+    and is **documented-deferred** in M1: the shared credential authenticates
+    the Worker (NFR-SEC-1), so M1 ships server-side TLS only. The key exists so
+    the config shape stays forward-compatible; it is currently unused.
+    """
+
+    cert_file: str | None = None
+    key_file: str | None = None
+    insecure: bool = False
+    # Documented-deferred (M1): client-cert (mTLS) verification. Unused today.
+    client_ca_file: str | None = None
+
+
 class ControlSettings(_Section):
     """Control-plane (Worker channel) settings (CONFIGURATION.md Section 5.1).
 
@@ -82,6 +107,7 @@ class ControlSettings(_Section):
     # would fail every command immediately.
     command_timeout_seconds: int = Field(default=30, gt=0)
     worker_credential: str | None = None
+    tls: ControlTlsSettings = Field(default_factory=ControlTlsSettings)
 
 
 class LogSettings(_Section):

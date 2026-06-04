@@ -152,10 +152,27 @@ marks keys with no default.
 | `server.public_base_url` | *required for hydrate/snapshot* | | Externally reachable base URL of the API's data-plane HTTP endpoint, handed to Workers for hydrate/snapshot transfer (REQUIREMENTS.md Section 5.2, STORAGE.md Section 8). Optional in code so a process that never dispatches a transfer need not set it; a lifecycle command that needs it fails fast when it is unset. |
 | `control.enabled` | `true` | | Whether the API hosts the control-plane gRPC server in this process (REQUIREMENTS.md Section 5.1). When `true`, `control.worker_credential` is required (fail-fast). |
 | `control.worker_credential` | *required when enabled* | secret | Shared credential a Worker must present (`authorization: Bearer <credential>` metadata) to authenticate its stream (REQUIREMENTS.md NFR-SEC-1); the API-side counterpart of the Worker's `api.credential` (Section 6.1). |
-| `control.tls.cert_file` | *required* | | Path to the control-channel TLS certificate (REQUIREMENTS.md NFR-SEC-1). |
-| `control.tls.key_file` | *required* | secret | Path to the control-channel TLS private key. |
+| `control.tls.cert_file` | *required²* | | Path to the control-channel TLS server certificate the gRPC listener presents (REQUIREMENTS.md NFR-SEC-1). |
+| `control.tls.key_file` | *required²* | secret | Path to the control-channel TLS private key. |
+| `control.tls.insecure` | `false` | | When `true`, bind the control-plane gRPC listener in plaintext (no TLS). Local/dev only; the API logs a `WARN` at startup. Required to opt out of TLS when no cert/key pair is set. |
+| `control.tls.client_ca_file` | — | | **Deferred (M1).** Reserved for client-certificate (mTLS) verification of the Worker. Unused today — the shared `control.worker_credential` authenticates the Worker (NFR-SEC-1), so M1 ships server-side TLS only. Documented to keep the config shape forward-compatible. |
 | `control.heartbeat_timeout_seconds` | `30` | | Liveness window: a Worker missing heartbeats past this is marked disconnected (REQUIREMENTS.md FR-WRK-2). Must be positive. |
 | `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). Must be positive. |
+
+² `control.tls.cert_file` and `control.tls.key_file` are required **together,
+unless** `control.tls.insecure=true`. With neither the cert/key pair nor
+`insecure=true` set — or with only one of cert/key set — `create_app` fails fast
+at startup; with `control.tls.insecure=true` the listener binds plaintext
+(local/dev only) and logs a `WARN`. Production must set the cert/key pair (or
+terminate TLS at a reverse proxy and run the listener `insecure=true` behind it
+— see CONTROL_PLANE.md Section 2). This mirrors the Worker's `api.tls.*`
+required-unless-insecure rule (Section 6.1): the Worker verifies this
+certificate against its `api.tls.ca_file`.
+
+> **Upgrade impact (existing dev setups).** This is a behavior change: a dev
+> process with `control.enabled=true` that previously bound plaintext now fails
+> fast at startup unless it sets `control.tls.insecure=true` (or supplies a
+> cert/key pair). Add `control.tls.insecure=true` to local/dev configs.
 
 ### 5.2 Persistence and Storage adapter
 
@@ -233,8 +250,8 @@ can run**, and **where its scratch space is**.
 | `api.credential` | *required* | secret | The Worker's credential for authenticating to the API (REQUIREMENTS.md NFR-SEC-1, FR-WRK-1). |
 | `api.tls.ca_file` | *required¹* | | Path to the CA bundle used to verify the API's control-channel TLS (REQUIREMENTS.md NFR-SEC-1). |
 | `api.tls.insecure` | `false` | | When `true`, dial the control channel in plaintext (no TLS). Local/dev only; the Worker logs a `WARN` at startup. Required to opt out of TLS when `api.tls.ca_file` is unset. |
-| `api.tls.client_cert_file` | — | | Path to the Worker's client certificate, when the control channel uses mTLS. |
-| `api.tls.client_key_file` | — | secret | Path to the Worker's client private key (mTLS). |
+| `api.tls.client_cert_file` | — | | **Deferred (M1).** Path to the Worker's client certificate, when the control channel uses mTLS. The API does not yet verify client certificates (it ships server-side TLS only; the `api.credential` authenticates the Worker), so this key is currently unused; it stays documented to keep the config shape forward-compatible. |
+| `api.tls.client_key_file` | — | secret | **Deferred (M1).** Path to the Worker's client private key (mTLS). Unused until the API verifies client certificates (see `api.tls.client_cert_file`). |
 | `worker.id` | *(auto)* | | Stable identifier the Worker registers under. **Must be a UUID**: the API persists a server's assigned worker as a UUID column, so registration rejects a non-UUID id with `INVALID_ARGUMENT` (and the Worker fails config load if an explicit `worker.id` is not a UUID). When unset, the Worker generates a UUIDv4 on first boot, persists it at `<worker.scratch_dir>/worker-id` (mode `0600`), and reuses it on later restarts so identity stays stable. **Upgrade impact:** a Worker that previously defaulted to its hostname gets a new UUID identity on first boot after upgrading, so the API sees a brand-new Worker and the old `assigned_worker_id` rows are orphaned (recovered via the disconnect/mark-unknown path; servers restart cleanly on hydrate). This is a one-time transition. |
 
 ¹ `api.tls.ca_file` is required **unless** `api.tls.insecure=true`. With neither

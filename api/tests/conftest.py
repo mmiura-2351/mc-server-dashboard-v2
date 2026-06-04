@@ -25,3 +25,8 @@ def _dummy_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     # gRPC integration tests construct the server directly; tests that need the
     # control-plane fail-fast behaviour set these explicitly.
     monkeypatch.setenv("MCD_API_CONTROL__ENABLED", "false")
+    # Opt the control channel into a plaintext listener by default so tests that
+    # DO enable the control plane build without TLS material (CONFIGURATION.md
+    # Section 5.1, required-unless-insecure). Tests that exercise the TLS posture
+    # or the fail-fast set these explicitly.
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__INSECURE", "true")
