@@ -3,7 +3,9 @@ package containerdriver
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
@@ -77,5 +79,95 @@ func TestDemuxLogsTrimsCarriageReturn(t *testing.T) {
 	got := drainLogs(pump)
 	if len(got) != 1 || got[0].Line != "crlf line" {
 		t.Fatalf("got %v, want trimmed line", got)
+	}
+}
+
+// oneHeaderReader returns its header bytes once, then reports EOF. It proves the
+// demux rejects an oversized frame from the header alone: if the demux tried to
+// read the (multi-GiB) declared payload it would first allocate that buffer; the
+// cap must end the stream before any payload read or allocation.
+type oneHeaderReader struct {
+	header []byte
+	off    int
+}
+
+func (r *oneHeaderReader) Read(p []byte) (int, error) {
+	if r.off >= len(r.header) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.header[r.off:])
+	r.off += n
+	return n, nil
+}
+
+// A corrupt frame whose declared size exceeds the sanity cap ends the stream
+// cleanly without allocating the (huge) payload: the demux returns promptly and
+// emits nothing.
+func TestDemuxLogsRejectsOversizedFrame(t *testing.T) {
+	hdr := make([]byte, dockerStreamHeaderLen)
+	hdr[0] = dockerStreamStdout
+	binary.BigEndian.PutUint32(hdr[4:], maxFrameBytes+1)
+
+	pump := execution.NewLogPump("s1", 16)
+	done := make(chan struct{})
+	go func() { demuxLogs(&oneHeaderReader{header: hdr}, pump); pump.Close(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("demux did not return promptly on an oversized frame")
+	}
+	if got := drainLogs(pump); len(got) != 0 {
+		t.Fatalf("got %v, want no emitted lines", got)
+	}
+}
+
+// A frame whose declared size equals the cap is accepted (boundary): only
+// size > maxFrameBytes is rejected. The payload is exactly maxFrameBytes and a
+// short newline-terminated line is appended so a complete line follows it; the
+// demux must read past the at-cap payload and emit that trailing line, proving
+// the frame was not rejected as oversized.
+func TestDemuxLogsAcceptsFrameAtCap(t *testing.T) {
+	atCap := make([]byte, maxFrameBytes)
+	for i := range atCap {
+		atCap[i] = 'a'
+	}
+	atCap[len(atCap)-1] = '\n' // terminate the at-cap line so it is emitted whole.
+
+	var buf bytes.Buffer
+	hdr := make([]byte, dockerStreamHeaderLen)
+	hdr[0] = dockerStreamStdout
+	binary.BigEndian.PutUint32(hdr[4:], maxFrameBytes)
+	buf.Write(hdr)
+	buf.Write(atCap)
+	buf.Write(frame(dockerStreamStdout, "after at-cap\n"))
+
+	pump := execution.NewLogPump("s1", 16)
+	go func() { demuxLogs(&buf, pump); pump.Close() }()
+
+	got := drainLogs(pump)
+	if len(got) != 2 {
+		t.Fatalf("got %d line(s), want 2 (at-cap frame accepted + the line after it)", len(got))
+	}
+	if got[1].Line != "after at-cap" {
+		t.Fatalf("trailing line = %q, want the line after the at-cap frame", got[1].Line)
+	}
+}
+
+// An out-of-range stream-type byte is labelled stderr (not silently stdout), so
+// the output is preserved and visibly attributed to the error stream.
+func TestDemuxLogsUnknownStreamTypeGoesToStderr(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write(frame(7, "mystery line\n")) // 7 is neither stdout(1) nor stderr(2)
+
+	pump := execution.NewLogPump("s1", 16)
+	go func() { demuxLogs(&buf, pump); pump.Close() }()
+
+	got := drainLogs(pump)
+	if len(got) != 1 || got[0].Line != "mystery line" {
+		t.Fatalf("got %v, want one line", got)
+	}
+	if got[0].Stream != execution.LogStreamStderr {
+		t.Fatalf("stream = %v, want stderr for an unknown stream-type byte", got[0].Stream)
 	}
 }

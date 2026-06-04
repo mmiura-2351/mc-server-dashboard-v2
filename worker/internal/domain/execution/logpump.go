@@ -48,24 +48,73 @@ func NewLogPump(serverID string, bufSize int) *LogPump {
 // finished and Close has been called.
 func (p *LogPump) Logs() <-chan LogEvent { return p.out }
 
-// scanHardLimit is the largest token bufio.Scanner will return before erroring.
-// It is set well above MaxLogLineBytes so an over-long line is still returned and
-// then truncate-with-marker'd (rather than dropped as ErrTooLong); only a
-// pathologically long unterminated run past this ceiling is skipped.
-const scanHardLimit = 1024 * 1024
-
 // Scan reads r line by line and emits each as a LogEvent on the given stream
 // until r reaches EOF or errors. It returns when r is exhausted; callers run it
-// in a goroutine per stream (stdout, stderr). Lines longer than MaxLogLineBytes
-// are truncated with a marker.
+// in a goroutine per stream (stdout, stderr). A line longer than MaxLogLineBytes
+// is truncated with a marker and the scan continues — an oversized line never
+// stops the stream. It uses a bufio.Reader ReadSlice loop rather than a
+// bufio.Scanner so an over-long line is recovered (the Scanner surfaced it as
+// ErrTooLong and stopped, losing the rest of the stream).
 func (p *LogPump) Scan(r io.Reader, stream LogStream) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), scanHardLimit)
-	for scanner.Scan() {
-		p.emit(truncate(scanner.Text()), stream)
+	br := bufio.NewReader(r)
+	for {
+		// kept holds at most MaxLogLineBytes content bytes; truncated records that
+		// the line exceeded the cap so the marker is appended. Excess bytes of an
+		// oversized line are read and discarded until the newline arrives.
+		var kept []byte
+		truncated := false
+		for {
+			chunk, err := br.ReadSlice('\n')
+			content := chunk
+			if err == nil {
+				content = trimLineEnd(chunk) // drop the trailing \n (and any \r).
+			}
+			if room := MaxLogLineBytes - len(kept); room > 0 {
+				if len(content) > room {
+					kept = append(kept, content[:room]...)
+					truncated = true
+				} else {
+					kept = append(kept, content...)
+				}
+			} else if len(content) > 0 {
+				truncated = true
+			}
+
+			if err == nil {
+				break // ReadSlice stopped at a newline: the line is complete.
+			}
+			if err == bufio.ErrBufferFull {
+				continue // line longer than bufio's buffer; keep reading it.
+			}
+			// io.EOF or a read error: emit any trailing partial, then stop.
+			if len(kept) > 0 || truncated {
+				p.emitScanLine(kept, truncated, stream)
+			}
+			return
+		}
+		p.emitScanLine(kept, truncated, stream)
 	}
-	// A line longer than scanHardLimit surfaces as ErrTooLong and is skipped; the
-	// truncate path already bounds normal lines, and such a run is degenerate.
+}
+
+// emitScanLine emits one scanned line, appending the truncation marker when the
+// line overflowed MaxLogLineBytes.
+func (p *LogPump) emitScanLine(kept []byte, truncated bool, stream LogStream) {
+	line := string(kept)
+	if truncated {
+		line += truncationMarker
+	}
+	p.emit(line, stream)
+}
+
+// trimLineEnd drops a trailing \n and any preceding \r from a ReadSlice result.
+func trimLineEnd(b []byte) []byte {
+	if n := len(b); n > 0 && b[n-1] == '\n' {
+		b = b[:n-1]
+	}
+	if n := len(b); n > 0 && b[n-1] == '\r' {
+		b = b[:n-1]
+	}
+	return b
 }
 
 // Emit queues one already-formed line, truncating it to MaxLogLineBytes. It is

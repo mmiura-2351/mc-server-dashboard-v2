@@ -38,6 +38,52 @@ func TestLogPumpScanEmitsLinesPerStream(t *testing.T) {
 	}
 }
 
+// A single line far longer than any read buffer is truncated with a marker, AND
+// the stream keeps flowing: the line after the giant one is still emitted. The
+// old bufio.Scanner path surfaced ErrTooLong on such a line and stopped
+// scanning, losing every subsequent line; the ReadSlice reader recovers instead.
+func TestLogPumpScanTruncatesOversizedLineAndContinues(t *testing.T) {
+	p := NewLogPump("s1", 16)
+	huge := strings.Repeat("z", 4*1024*1024) // well past any bufio default buffer
+	r := strings.NewReader(huge + "\n" + "after\n")
+	p.Scan(r, LogStreamStdout)
+	p.Close()
+
+	got := drainLogs(p.Logs())
+	if len(got) != 2 {
+		t.Fatalf("got %d lines, want 2 (truncated giant + the line after it): lengths=%v", len(got), summarize(got))
+	}
+	want := strings.Repeat("z", MaxLogLineBytes) + truncationMarker
+	if got[0].Line != want {
+		t.Fatalf("first line len=%d, want truncated to %d + marker", len(got[0].Line), MaxLogLineBytes)
+	}
+	if got[1].Line != "after" {
+		t.Fatalf("second line = %q, want the line after the oversized one", got[1].Line)
+	}
+}
+
+// A final line with no trailing newline (the stream ends at EOF mid-line) is
+// still emitted: Scan flushes the trailing partial when ReadSlice returns EOF.
+func TestLogPumpScanEmitsUnterminatedFinalLine(t *testing.T) {
+	p := NewLogPump("s1", 16)
+	p.Scan(strings.NewReader("abc"), LogStreamStdout)
+	p.Close()
+
+	got := drainLogs(p.Logs())
+	if len(got) != 1 || got[0].Line != "abc" {
+		t.Fatalf("got %+v, want one line %q", got, "abc")
+	}
+}
+
+// summarize renders just the line lengths so a failure does not dump megabytes.
+func summarize(evs []LogEvent) []int {
+	out := make([]int, len(evs))
+	for i, e := range evs {
+		out[i] = len(e.Line)
+	}
+	return out
+}
+
 func TestLogPumpTruncatesLongLine(t *testing.T) {
 	p := NewLogPump("s1", 4)
 	long := strings.Repeat("x", MaxLogLineBytes+50)

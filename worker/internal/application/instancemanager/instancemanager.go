@@ -633,6 +633,18 @@ func (m *Manager) logPump(serverID string, src execution.LogSource) {
 // (FR-MON-3). A full sink drops the sample with a warning (issue #96 posture).
 func (m *Manager) metricsPump(serverID string, inst execution.Instance, done chan struct{}) {
 	stats, _ := inst.(execution.StatsSource)
+
+	// Bound every Sample by a context cancelled when the instance tears down (done
+	// closes), so a hung Engine stats call does not leak this goroutine past
+	// stop/crash. Each sample additionally carries a timeout proportionate to the
+	// interval so a single slow-but-not-stuck call cannot stall the cadence.
+	pumpCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-done
+		cancel()
+	}()
+
 	for {
 		select {
 		case <-done:
@@ -642,7 +654,7 @@ func (m *Manager) metricsPump(serverID string, inst execution.Instance, done cha
 
 		sample := session.MetricsEvent{ServerID: serverID}
 		if stats != nil {
-			if s, err := stats.Sample(context.Background()); err == nil {
+			if s, err := sampleWithTimeout(pumpCtx, stats, m.metricsInterval); err == nil {
 				sample.CPUMillis = s.CPUMillis
 				sample.MemoryBytes = s.MemoryBytes
 				sample.PlayerCount = s.PlayerCount
@@ -657,6 +669,17 @@ func (m *Manager) metricsPump(serverID string, inst execution.Instance, done cha
 			m.logger.Warn("dropped metrics sample; sink full", "server_id", serverID)
 		}
 	}
+}
+
+// sampleWithTimeout calls Sample under a context that is cancelled when parent is
+// (instance teardown) or when the per-sample timeout elapses, whichever comes
+// first. The timeout is the sampling interval: a sample that has not returned by
+// the time the next one is due is abandoned so a stuck Engine call cannot wedge
+// the cadence.
+func sampleWithTimeout(parent context.Context, stats execution.StatsSource, timeout time.Duration) (execution.MetricsSample, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	return stats.Sample(ctx)
 }
 
 // mapLogStream maps a domain log stream onto the session log stream.

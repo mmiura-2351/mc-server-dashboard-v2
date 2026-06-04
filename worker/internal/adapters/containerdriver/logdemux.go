@@ -19,6 +19,12 @@ const (
 	dockerStreamStderr = 2
 )
 
+// maxFrameBytes caps a single frame's declared payload size. A corrupt header
+// can claim up to ~4 GiB (uint32); allocating that blindly would let one bad
+// frame exhaust memory. A frame larger than this is treated as corruption and
+// ends the stream cleanly rather than allocating the buffer.
+const maxFrameBytes = 16 * 1024 * 1024
+
 // demuxLogs reads Docker's multiplexed log stream from r, splits each frame's
 // payload into lines, and emits them into pump tagged with the frame's stream
 // (FR-MON-2). It returns when r is exhausted or errors (e.g. the follow is
@@ -40,15 +46,23 @@ func demuxLogs(r io.Reader, pump *execution.LogPump) {
 		if size == 0 {
 			continue
 		}
+		if size > maxFrameBytes {
+			// Corrupt/oversized frame: refuse to allocate it and end the stream.
+			return
+		}
 
 		payload := make([]byte, size)
 		if _, err := io.ReadFull(br, payload); err != nil {
 			return
 		}
 
+		// Map the stream-type byte to a stream and its carry buffer. Anything but
+		// stdout(1) is treated as stderr: an out-of-range byte (corrupt frame) is
+		// attributed to the error stream rather than silently mislabelled as stdout,
+		// so the output is preserved and visibly flagged.
 		stream := execution.LogStreamStdout
 		buf := &partial[dockerStreamStdout]
-		if streamType == dockerStreamStderr {
+		if streamType != dockerStreamStdout {
 			stream = execution.LogStreamStderr
 			buf = &partial[dockerStreamStderr]
 		}
