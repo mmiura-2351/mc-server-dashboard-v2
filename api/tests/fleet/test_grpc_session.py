@@ -15,6 +15,7 @@ These tests need no Postgres and run in the unit-runnable suite.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import datetime as dt
 from collections.abc import AsyncIterator
@@ -123,7 +124,9 @@ def _auth(credential: str | None) -> list[tuple[str, str]]:
     return [("authorization", f"Bearer {credential}")]
 
 
-async def _terminal_code(call: aio.StreamStreamCall) -> grpc.StatusCode:
+async def _terminal_code(
+    call: aio.StreamStreamCall, message: pb.WorkerMessage | None = None
+) -> grpc.StatusCode:
     """Drive a rejected ``Session`` to its terminal status, race-free.
 
     The server aborts the stream (e.g. UNAUTHENTICATED) immediately on connect,
@@ -131,14 +134,16 @@ async def _terminal_code(call: aio.StreamStreamCall) -> grpc.StatusCode:
     depending on timing — asserting on either one alone is flaky. The
     authoritative trailing status is always available via ``call.code()`` once
     the call terminates, so we let the abort land wherever it does and read the
-    final code from the call object.
+    final code from the call object. ``code()`` is bounded by a timeout so an
+    auth-bypass regression that wrongly accepts the session fails fast instead
+    of hanging the suite.
     """
 
     with contextlib.suppress(aio.AioRpcError):
-        await call.write(_register_message())
+        await call.write(message if message is not None else _register_message())
     with contextlib.suppress(aio.AioRpcError):
         await call.read()
-    return await call.code()
+    return await asyncio.wait_for(call.code(), timeout=5)
 
 
 async def test_register_returns_ack(harness: _Harness) -> None:
@@ -176,12 +181,10 @@ async def test_wrong_credential_is_rejected(harness: _Harness) -> None:
 async def test_non_register_first_message_is_rejected(harness: _Harness) -> None:
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))
-    with contextlib.suppress(aio.AioRpcError):
-        await call.write(_heartbeat_message())
-    with contextlib.suppress(aio.AioRpcError):
-        await call.read()
 
-    assert await call.code() == grpc.StatusCode.FAILED_PRECONDITION
+    code = await _terminal_code(call, message=_heartbeat_message())
+
+    assert code == grpc.StatusCode.FAILED_PRECONDITION
 
 
 async def test_heartbeat_refreshes_liveness(harness: _Harness) -> None:
