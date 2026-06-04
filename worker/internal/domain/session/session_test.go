@@ -358,6 +358,35 @@ func TestFileCommandDispatchedToHandler(t *testing.T) {
 	<-done
 }
 
+func TestListFilesDispatchedToHandler(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true, FileListing: &FileListing{}})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// ListFiles is small and stays inline on the receive loop; it must reach the
+	// handler rather than be answered with the canned "unsupported" result
+	// (issue #219).
+	transport.commands <- Command{CommandID: "cmd-4", ServerID: "srv-1", Kind: "ListFiles", Path: "."}
+
+	waitFor(t, func() bool { return len(handler.handledCopy()) == 1 })
+	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
+
+	got := transport.resultsCopy()[0]
+	if got.CommandID != "cmd-4" || !got.Success {
+		t.Fatalf("dispatched result = %+v, want success cmd-4", got)
+	}
+
+	cancel()
+	<-done
+}
+
 // blockingHandler blocks SnapshotTrigger on a release channel so a test can hold
 // one in flight while sending another command; all other commands return at once.
 type blockingHandler struct {
