@@ -99,6 +99,10 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         if self._assignments.get(worker_id, 0) > 0:
             self._assignments[worker_id] -= 1
 
+    def set_assignment(self, worker_id: WorkerId, count: int) -> None:
+        if worker_id in self._assignments:
+            self._assignments[worker_id] = count
+
     def candidates_for_placement(self) -> list[PlacementCandidate]:
         now = self._clock.now()
         return [

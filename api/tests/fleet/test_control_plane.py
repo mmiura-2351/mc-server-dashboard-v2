@@ -1,0 +1,217 @@
+"""In-process integration tests for the control-plane command dispatch path.
+
+Starts a real grpc.aio server with the session servicer and a shared
+:class:`ControlPlaneState`, dials it with a real client, registers a worker, then
+exercises :class:`GrpcControlPlane.dispatch` end to end (CONTROL_PLANE.md
+Sections 3, 5):
+
+- a dispatched command rides the worker's outbound stream; the worker answers a
+  CommandResult correlated by command_id and dispatch returns the typed result;
+- a failure CommandResult maps to the typed failure code, with RCON output
+  carried through on success;
+- dispatch to a worker with no live session raises WorkerNotConnectedError;
+- a command the worker never answers raises CommandTimedOutError.
+
+No Postgres; runs in the unit-runnable suite.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import uuid
+from collections.abc import AsyncIterator
+
+import pytest
+from grpc import aio
+
+from mc_server_dashboard_api.fleet.adapters.control_plane import (
+    ControlPlaneState,
+    GrpcControlPlane,
+)
+from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServicer
+from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    CommandResultCode,
+    CommandTimedOutError,
+    ServerCommandCommand,
+    StartServerCommand,
+    WorkerNotConnectedError,
+)
+from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, WorkerId
+from mcsd.controlplane.v1 import control_plane_pb2 as pb
+from mcsd.controlplane.v1.control_plane_pb2_grpc import (
+    WorkerServiceStub,
+    add_WorkerServiceServicer_to_server,
+)
+from tests.fleet.fakes import FakeClock, FakeServerStateSink
+
+_T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+_TIMEOUT = dt.timedelta(seconds=30)
+_CREDENTIAL = "shared-worker-secret"
+_WORKER = "worker-1"
+
+
+def _register_message() -> pb.WorkerMessage:
+    caps = pb.WorkerCapabilities(drivers=[pb.EXECUTION_DRIVER_KIND_HOST_PROCESS])
+    return pb.WorkerMessage(
+        correlation_id="reg-1",
+        register=pb.Register(
+            worker_id=_WORKER, worker_version="1.0.0", capabilities=caps
+        ),
+    )
+
+
+class _Harness:
+    def __init__(self, *, command_timeout: float = 5.0) -> None:
+        self.state = ControlPlaneState()
+        self.control_plane = GrpcControlPlane(
+            self.state, timeout_seconds=command_timeout
+        )
+        self.registry = InMemoryWorkerRegistry(
+            clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT
+        )
+        self._server: aio.Server | None = None
+        self._channel: aio.Channel | None = None
+
+    async def start(self) -> WorkerServiceStub:
+        server = aio.server()
+        servicer = WorkerSessionServicer(
+            registry=self.registry,
+            clock=FakeClock(_T0),
+            worker_credential=_CREDENTIAL,
+            heartbeat_timeout=_TIMEOUT,
+            control_plane=self.state,
+            state_sink=FakeServerStateSink(),
+        )
+        add_WorkerServiceServicer_to_server(servicer, server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        self._server = server
+        self._channel = aio.insecure_channel(f"127.0.0.1:{port}")
+        return WorkerServiceStub(self._channel)
+
+    async def stop(self) -> None:
+        if self._channel is not None:
+            await self._channel.close()
+        if self._server is not None:
+            await self._server.stop(grace=None)
+
+
+@pytest.fixture
+async def harness() -> AsyncIterator[_Harness]:
+    h = _Harness()
+    try:
+        yield h
+    finally:
+        await h.stop()
+
+
+def _auth() -> list[tuple[str, str]]:
+    return [("authorization", f"Bearer {_CREDENTIAL}")]
+
+
+async def _registered_call(
+    harness: _Harness, stub: WorkerServiceStub
+) -> aio.StreamStreamCall:
+    call = stub.Session(metadata=_auth())
+    await call.write(_register_message())
+    await call.read()  # ack
+    # Wait until the servicer has registered this worker's outbound session.
+    for _ in range(100):
+        if harness.state.outbound_for(WorkerId(_WORKER)) is not None:
+            return call
+        await asyncio.sleep(0.01)
+    raise AssertionError("session was not opened in time")
+
+
+async def test_dispatch_correlates_command_result(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+
+    async def worker_echo() -> None:
+        # Read the pushed command and answer a success result for its command_id.
+        msg = await call.read()
+        assert msg.WhichOneof("payload") == "api_command"
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(
+                    success=True, command_output="players: 3"
+                ),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    result = await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=ServerCommandCommand(line="list"),
+    )
+    await echo
+
+    assert result.success
+    assert result.output == "players: 3"
+    await call.done_writing()
+
+
+async def test_dispatch_failure_maps_typed_code(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+
+    async def worker_reject() -> None:
+        msg = await call.read()
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(
+                    success=False,
+                    error=pb.CommandError(
+                        code=pb.COMMAND_ERROR_CODE_INVALID_STATE, message="running"
+                    ),
+                ),
+            )
+        )
+
+    rejecter = asyncio.ensure_future(worker_reject())
+    result = await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=StartServerCommand(
+            driver=DriverKind.HOST_PROCESS,
+            jar_relpath="server.jar",
+            minecraft_version="1.21.1",
+        ),
+    )
+    await rejecter
+
+    assert not result.success
+    assert result.code is CommandResultCode.INVALID_STATE
+    assert result.message == "running"
+    await call.done_writing()
+
+
+async def test_dispatch_to_unconnected_worker_raises(harness: _Harness) -> None:
+    await harness.start()
+    with pytest.raises(WorkerNotConnectedError):
+        await harness.control_plane.dispatch(
+            worker_id=WorkerId("ghost"),
+            server_id=str(uuid.uuid4()),
+            command=ServerCommandCommand(line="list"),
+        )
+
+
+async def test_dispatch_times_out_when_unanswered() -> None:
+    harness = _Harness(command_timeout=0.2)
+    try:
+        stub = await harness.start()
+        call = await _registered_call(harness, stub)
+        with pytest.raises(CommandTimedOutError):
+            await harness.control_plane.dispatch(
+                worker_id=WorkerId(_WORKER),
+                server_id=str(uuid.uuid4()),
+                command=ServerCommandCommand(line="list"),
+            )
+        await call.done_writing()
+    finally:
+        await harness.stop()

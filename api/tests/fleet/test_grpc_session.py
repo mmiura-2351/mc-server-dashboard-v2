@@ -22,6 +22,7 @@ import grpc
 import pytest
 from grpc import aio
 
+from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
 from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServicer
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
@@ -30,7 +31,7 @@ from mcsd.controlplane.v1.control_plane_pb2_grpc import (
     WorkerServiceStub,
     add_WorkerServiceServicer_to_server,
 )
-from tests.fleet.fakes import FakeClock
+from tests.fleet.fakes import FakeClock, FakeServerStateSink
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _TIMEOUT = dt.timedelta(seconds=30)
@@ -56,9 +57,18 @@ def _heartbeat_message() -> pb.WorkerMessage:
 
 
 class _Harness:
-    def __init__(self, registry: InMemoryWorkerRegistry, clock: FakeClock) -> None:
+    def __init__(
+        self,
+        registry: InMemoryWorkerRegistry,
+        clock: FakeClock,
+        *,
+        state_sink: FakeServerStateSink | None = None,
+        control_plane: ControlPlaneState | None = None,
+    ) -> None:
         self.registry = registry
         self.clock = clock
+        self.state_sink = state_sink or FakeServerStateSink()
+        self.control_plane = control_plane or ControlPlaneState()
         self._server: aio.Server | None = None
         self._channel: aio.Channel | None = None
 
@@ -69,6 +79,8 @@ class _Harness:
             clock=self.clock,
             worker_credential=_CREDENTIAL,
             heartbeat_timeout=_TIMEOUT,
+            control_plane=self.control_plane,
+            state_sink=self.state_sink,
         )
         add_WorkerServiceServicer_to_server(servicer, server)
         port = server.add_insecure_port("127.0.0.1:0")
@@ -207,6 +219,72 @@ async def test_stale_session_teardown_keeps_reconnected_worker_online(
     snapshot = harness.registry.list_workers()[0]
     assert snapshot.status is WorkerStatus.ONLINE
     await call_b.done_writing()
+
+
+def _status_message(
+    server_id: str, state: "pb.ServerState.ValueType"
+) -> pb.WorkerMessage:
+    return pb.WorkerMessage(
+        event=pb.Event(server_id=server_id, status_change=pb.StatusChange(state=state))
+    )
+
+
+async def test_status_change_reconciles_observed_state(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+
+    server_id = "11111111-1111-1111-1111-111111111111"
+    await call.write(_status_message(server_id, pb.SERVER_STATE_RUNNING))
+    for _ in range(100):
+        if harness.state_sink.observed:
+            break
+        await __import__("asyncio").sleep(0.01)
+
+    assert harness.state_sink.observed == [(server_id, "running")]
+    await call.done_writing()
+
+
+async def test_disconnect_marks_worker_servers_unknown(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+
+    await call.done_writing()
+    while await call.read() is not aio.EOF:
+        pass
+
+    assert harness.state_sink.unknown_for == ["worker-1"]
+
+
+async def test_reregister_rebuilds_assignment_count_from_tally() -> None:
+    # The Worker is reported (via the authoritative tally) to be running 2 servers;
+    # on (re)register the registry must rebuild its load to 2, not the reset 0.
+    sink = FakeServerStateSink(running_counts={"worker-1": 2})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        for _ in range(100):
+            snapshots = h.registry.list_workers()
+            if snapshots and snapshots[0].assigned_count == 2:
+                break
+            await __import__("asyncio").sleep(0.01)
+
+        assert sink.counted_for == ["worker-1"]
+        assert h.registry.list_workers()[0].assigned_count == 2
+        await call.done_writing()
+    finally:
+        await h.stop()
 
 
 async def _drain_until_heartbeat_recorded(harness: _Harness) -> None:

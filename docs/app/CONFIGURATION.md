@@ -155,6 +155,7 @@ marks keys with no default.
 | `control.tls.cert_file` | *required* | | Path to the control-channel TLS certificate (REQUIREMENTS.md NFR-SEC-1). |
 | `control.tls.key_file` | *required* | secret | Path to the control-channel TLS private key. |
 | `control.heartbeat_timeout_seconds` | `30` | | Liveness window: a Worker missing heartbeats past this is marked disconnected (REQUIREMENTS.md FR-WRK-2). |
+| `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). |
 
 ### 5.2 Persistence and Storage adapter
 

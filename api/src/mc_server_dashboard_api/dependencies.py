@@ -87,6 +87,9 @@ from mc_server_dashboard_api.core.adapters.database import (
 from mc_server_dashboard_api.core.domain.health import DatabasePing
 from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    ControlPlane as FleetControlPlane,
+)
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
 from mc_server_dashboard_api.identity.adapters.client_ip import (
     forwarded_for_header,
@@ -125,8 +128,17 @@ from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.servers.adapters.clock import (
     SystemClock as ServersSystemClock,
 )
+from mc_server_dashboard_api.servers.adapters.control_plane import (
+    FleetControlPlaneAdapter,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
+)
+from mc_server_dashboard_api.servers.application.lifecycle import (
+    RestartServer,
+    SendServerCommand,
+    StartServer,
+    StopServer,
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
     CreateServer,
@@ -134,6 +146,9 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ListServers,
     ReadServer,
     UpdateServer,
+)
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    ControlPlane as ServersControlPlane,
 )
 
 
@@ -584,6 +599,82 @@ def get_delete_server(request: Request) -> DeleteServer:
 
     session_factory = create_session_factory(get_engine(request))
     return DeleteServer(uow=ServersUnitOfWork(session_factory))
+
+
+def get_fleet_control_plane(request: Request) -> FleetControlPlane:
+    """Return the process-wide fleet ``ControlPlane`` adapter from app state.
+
+    The same instance the control-plane gRPC servicer dispatches through; the
+    lifecycle use cases reach it via the servers control-plane seam below.
+    """
+
+    control_plane: FleetControlPlane = request.app.state.control_plane
+    return control_plane
+
+
+def get_servers_control_plane(
+    registry: Annotated[WorkerRegistry, Depends(get_worker_registry)],
+    fleet_control_plane: Annotated[FleetControlPlane, Depends(get_fleet_control_plane)],
+) -> ServersControlPlane:
+    """Bind the servers control-plane seam to the registry + fleet control plane."""
+
+    return FleetControlPlaneAdapter(
+        registry=registry, control_plane=fleet_control_plane
+    )
+
+
+def get_start_server(
+    request: Request,
+    control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
+) -> StartServer:
+    """Assemble the :class:`StartServer` use case (server:start)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return StartServer(
+        uow=ServersUnitOfWork(session_factory),
+        control_plane=control_plane,
+        clock=ServersSystemClock(),
+    )
+
+
+def get_stop_server(
+    request: Request,
+    control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
+) -> StopServer:
+    """Assemble the :class:`StopServer` use case (server:stop)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return StopServer(
+        uow=ServersUnitOfWork(session_factory),
+        control_plane=control_plane,
+        clock=ServersSystemClock(),
+    )
+
+
+def get_restart_server(
+    request: Request,
+    control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
+) -> RestartServer:
+    """Assemble the :class:`RestartServer` use case (server:restart)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RestartServer(
+        uow=ServersUnitOfWork(session_factory),
+        control_plane=control_plane,
+    )
+
+
+def get_send_server_command(
+    request: Request,
+    control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
+) -> SendServerCommand:
+    """Assemble the :class:`SendServerCommand` use case (server:command)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SendServerCommand(
+        uow=ServersUnitOfWork(session_factory),
+        control_plane=control_plane,
+    )
 
 
 def _to_auth_user(user: User) -> AuthUser:

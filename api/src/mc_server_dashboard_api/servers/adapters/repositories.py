@@ -8,7 +8,9 @@ entity here.
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select, update
+import datetime as dt
+
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
@@ -107,6 +109,58 @@ class SqlAlchemyServerRepository(ServerRepository):
             )
         )
         await self._session.execute(stmt)
+
+    async def update_lifecycle(self, server: Server) -> None:
+        stmt = (
+            update(ServerModel)
+            .where(ServerModel.id == server.id.value)
+            .values(
+                desired_state=server.desired_state.value,
+                assigned_worker_id=(
+                    None
+                    if server.assigned_worker_id is None
+                    else server.assigned_worker_id.value
+                ),
+                updated_at=server.updated_at,
+            )
+        )
+        await self._session.execute(stmt)
+
+    async def record_observed_state(
+        self,
+        server_id: ServerId,
+        observed_state: ObservedState,
+        observed_at: dt.datetime,
+    ) -> None:
+        stmt = (
+            update(ServerModel)
+            .where(ServerModel.id == server_id.value)
+            .values(
+                observed_state=observed_state.value,
+                observed_at=observed_at,
+            )
+        )
+        await self._session.execute(stmt)
+
+    async def mark_worker_servers_unknown(
+        self, worker_id: WorkerId, observed_at: dt.datetime
+    ) -> None:
+        stmt = (
+            update(ServerModel)
+            .where(ServerModel.assigned_worker_id == worker_id.value)
+            .values(
+                observed_state=ObservedState.UNKNOWN.value,
+                observed_at=observed_at,
+            )
+        )
+        await self._session.execute(stmt)
+
+    async def count_running_for_worker(self, worker_id: WorkerId) -> int:
+        stmt = select(func.count()).where(
+            ServerModel.assigned_worker_id == worker_id.value,
+            ServerModel.desired_state == DesiredState.RUNNING.value,
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
 
     async def delete(self, server_id: ServerId) -> None:
         stmt = delete(ServerModel).where(ServerModel.id == server_id.value)

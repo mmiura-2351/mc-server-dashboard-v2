@@ -6,6 +6,7 @@ import datetime as dt
 
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.entities import Worker
+from mc_server_dashboard_api.fleet.domain.server_state_sink import ServerStateSink
 from mc_server_dashboard_api.fleet.domain.value_objects import (
     DriverKind,
     HostResources,
@@ -23,6 +24,30 @@ class FakeClock(Clock):
 
     def now(self) -> dt.datetime:
         return self._now
+
+
+class FakeServerStateSink(ServerStateSink):
+    """Records control-plane reconciliation calls; configurable running tally.
+
+    The servicer drives this on a StatusChange (observed-state cache), on
+    disconnect (mark unknown), and on register (rebuild assignment count).
+    """
+
+    def __init__(self, *, running_counts: dict[str, int] | None = None) -> None:
+        self.observed: list[tuple[str, str]] = []
+        self.unknown_for: list[str] = []
+        self.counted_for: list[str] = []
+        self._running_counts = running_counts or {}
+
+    async def record_observed_state(self, *, server_id: str, state: str) -> None:
+        self.observed.append((server_id, state))
+
+    async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+        self.unknown_for.append(worker_id)
+
+    async def count_running_assignments(self, *, worker_id: str) -> int:
+        self.counted_for.append(worker_id)
+        return self._running_counts.get(worker_id, 0)
 
 
 def make_worker(

@@ -16,13 +16,16 @@ both run in one transaction.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 import uuid
 
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    ObservedState,
     ServerId,
     ServerName,
+    WorkerId,
 )
 
 
@@ -50,6 +53,43 @@ class ServerRepository(abc.ABC):
     @abc.abstractmethod
     async def update(self, server: Server) -> None:
         """Persist the mutable fields of ``server`` (name, config, timestamps)."""
+
+    @abc.abstractmethod
+    async def update_lifecycle(self, server: Server) -> None:
+        """Persist a server's lifecycle fields (desired state + assigned Worker).
+
+        Distinct from :meth:`update` (name/config edits): the lifecycle ops set
+        ``desired_state``, ``assigned_worker_id`` and ``updated_at`` and must not
+        touch name/config. Observed state is written separately via
+        :meth:`record_observed_state` from the control-plane event path.
+        """
+
+    @abc.abstractmethod
+    async def record_observed_state(
+        self,
+        server_id: ServerId,
+        observed_state: ObservedState,
+        observed_at: dt.datetime,
+    ) -> None:
+        """Cache the worker-reported observed state for ``server_id`` (FR-SRV-4).
+
+        A no-op if the server is absent (it may have been deleted while the
+        Worker still tracked it).
+        """
+
+    @abc.abstractmethod
+    async def mark_worker_servers_unknown(
+        self, worker_id: WorkerId, observed_at: dt.datetime
+    ) -> None:
+        """Set observed=unknown for all servers assigned to ``worker_id`` (FR-WRK-4)."""
+
+    @abc.abstractmethod
+    async def count_running_for_worker(self, worker_id: WorkerId) -> int:
+        """Count servers assigned to ``worker_id`` with desired=running.
+
+        The placement-load tally used to rebuild a reconnected Worker's
+        assignment count (epic #7 reconciliation obligation).
+        """
 
     @abc.abstractmethod
     async def delete(self, server_id: ServerId) -> None:

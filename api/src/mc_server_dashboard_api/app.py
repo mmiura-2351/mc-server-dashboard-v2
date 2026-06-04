@@ -24,15 +24,28 @@ from mc_server_dashboard_api.community.api import (
     roles,
 )
 from mc_server_dashboard_api.config import Settings, load_settings
-from mc_server_dashboard_api.core.adapters.database import create_engine
+from mc_server_dashboard_api.core.adapters.database import (
+    create_engine,
+    create_session_factory,
+)
 from mc_server_dashboard_api.core.api import health
 from mc_server_dashboard_api.fleet.adapters.clock import SystemClock as FleetSystemClock
+from mc_server_dashboard_api.fleet.adapters.control_plane import (
+    ControlPlaneState,
+    GrpcControlPlane,
+)
 from mc_server_dashboard_api.fleet.adapters.grpc_server import make_grpc_server
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.api import workers
 from mc_server_dashboard_api.identity.api import auth, users
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.middleware import correlation_id_middleware
+from mc_server_dashboard_api.servers.adapters.clock import (
+    SystemClock as ServersSystemClock,
+)
+from mc_server_dashboard_api.servers.adapters.server_state_sink import (
+    ServersServerStateSink,
+)
 from mc_server_dashboard_api.servers.api import servers
 
 # Optional TOML config file location, overridable per deployment.
@@ -75,6 +88,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             clock=FleetSystemClock(), heartbeat_timeout=heartbeat_timeout
         )
         app.state.worker_registry = registry
+        # Shared control-plane command-routing state: the servicer registers
+        # sessions and resolves results on it; the GrpcControlPlane adapter
+        # dispatches through it. The lifecycle use cases reach it via the adapter.
+        control_plane_state = ControlPlaneState()
+        app.state.control_plane = GrpcControlPlane(
+            control_plane_state,
+            timeout_seconds=settings.control.command_timeout_seconds,
+        )
+        # The control-plane event path writes back observed server state through
+        # this sink (its own session per call; the servicer has no request UoW).
+        state_sink = ServersServerStateSink(
+            create_session_factory(engine), clock=ServersSystemClock()
+        )
         logging.getLogger(__name__).info(
             "api starting", extra={"config": settings.masked_dump()}
         )
@@ -89,6 +115,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 clock=FleetSystemClock(),
                 worker_credential=settings.control.worker_credential,
                 heartbeat_timeout=heartbeat_timeout,
+                control_plane=control_plane_state,
+                state_sink=state_sink,
                 host=settings.server.host,
                 port=settings.server.grpc_port,
             )

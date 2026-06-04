@@ -56,3 +56,37 @@ class ServerNotStoppedError(ServerError):
     ``desired_state == stopped`` and ``observed_state in {stopped, unknown}``
     (Section 6.9 spirit — avoid diverging from a live working set).
     """
+
+
+class InvalidLifecycleTransitionError(ServerError):
+    """A lifecycle op was requested against an incompatible desired state.
+
+    Starting a server whose desired state is already ``running``, or
+    stopping/restarting one whose desired state is ``stopped``, is a conflicting
+    transition (FR-SRV-2). The edge maps this to 409.
+    """
+
+
+class NoEligibleWorkerError(ServerError):
+    """Placement found no Worker that can host the server (FR-WRK-3).
+
+    No connected, non-draining Worker advertises the server's execution backend
+    with free capacity. The edge maps this to a typed 409.
+    """
+
+
+class ServerNotRunningError(ServerError):
+    """An RCON/console command targeted a server that is not observed running.
+
+    Forwarding a console line is only meaningful for a live server
+    (CONTROL_PLANE.md Section 7 ``INVALID_STATE``); the edge maps this to 409.
+    """
+
+
+class CommandDispatchError(ServerError):
+    """A dispatched lifecycle/RCON command was refused by the Worker.
+
+    The Worker returned a ``CommandResult`` failure (CONTROL_PLANE.md Section 7).
+    For a start, the use case compensates the desired/assignment write before
+    raising. The edge maps this to a typed 409.
+    """
