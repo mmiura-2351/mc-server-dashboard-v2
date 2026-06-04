@@ -44,6 +44,7 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
     CommandStatus,
     ControlPlane,
     WorkerUnavailableError,
@@ -134,7 +135,15 @@ class StartServer:
             await self.uow.commit()
 
         self.control_plane.increment_assignment(worker_id=worker_id)
-        await self._hydrate_and_start(server, community_id, server_id, worker_id)
+        try:
+            outcome = await self._launch(server, community_id, server_id, worker_id)
+        except WorkerUnavailableError as exc:
+            await self._compensate(community_id, server_id, worker_id, original=exc)
+            raise
+        if not outcome.success:
+            failure = CommandDispatchError(outcome.message or outcome.status.value)
+            await self._compensate(community_id, server_id, worker_id, original=failure)
+            raise failure
         return server
 
     async def place_and_start(
@@ -145,11 +154,12 @@ class StartServer:
         The reconciler's compensation-failure orphan path (issue #101): the start
         intent already committed (``desired_state=running``) but the server has no
         assigned Worker, so the normal placement+dispatch never completed. This
-        reuses the exact placement, CAS-assignment, load-increment, and
-        hydrate-then-start dispatch of :meth:`__call__`; only the entry guard
-        differs (desired is already running, the server is unassigned). Raises the
-        same typed errors as a normal start (no eligible Worker, dispatch refusal),
-        and compensates the assignment on dispatch failure.
+        reuses the placement, CAS-assignment, load-increment, and hydrate-then-start
+        dispatch of :meth:`__call__`; only the entry guard differs (desired is
+        already running, the server is unassigned) and the failure handling does NOT
+        revert the desired state — the running intent is authoritative and was not
+        created here; we only undo the assignment we just made so a later tick
+        re-places. Raises the same typed errors as a normal start.
         """
 
         async with self.uow:
@@ -181,7 +191,15 @@ class StartServer:
             await self.uow.commit()
 
         self.control_plane.increment_assignment(worker_id=worker_id)
-        await self._hydrate_and_start(server, community_id, server_id, worker_id)
+        try:
+            outcome = await self._launch(server, community_id, server_id, worker_id)
+        except WorkerUnavailableError as exc:
+            await self._unassign(community_id, server_id, worker_id, original=exc)
+            raise
+        if not outcome.success:
+            failure = CommandDispatchError(outcome.message or outcome.status.value)
+            await self._unassign(community_id, server_id, worker_id, original=failure)
+            raise failure
         return server
 
     async def redispatch_start(
@@ -192,10 +210,15 @@ class StartServer:
         The reconciler's stale-intent path (issue #101): the start intent committed
         and a Worker is assigned, but the launch was never sent (crash between
         commit and dispatch) or the Worker is not actually running it. The intent
-        and assignment stand; only the dispatch is replayed. The placement load was
-        already counted on the original assignment, so this does not increment it
-        again. On dispatch failure the assignment is compensated, mirroring the
-        normal start failure path.
+        and assignment stand; only the dispatch is replayed, so this changes no DB
+        row — and on failure it reverts nothing (a later reconcile tick retries
+        under backoff). The placement load was already counted on the original
+        assignment, so it is not incremented again.
+
+        An ``INVALID_STATE`` outcome means the Worker is already running the server
+        (the hydrate/start guards reject a live instance): the divergence is in fact
+        resolved, so we treat it as success rather than flipping the authoritative
+        running intent to stopped. Any other failure raises for the next tick.
         """
 
         async with self.uow:
@@ -207,55 +230,45 @@ class StartServer:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             worker_id = server.assigned_worker_id
 
-        await self._hydrate_and_start(server, community_id, server_id, worker_id)
-        return server
+        outcome = await self._launch(server, community_id, server_id, worker_id)
+        if outcome.success or outcome.status is CommandStatus.INVALID_STATE:
+            return server
+        raise CommandDispatchError(outcome.message or outcome.status.value)
 
-    async def _hydrate_and_start(
+    async def _launch(
         self,
         server: Server,
         community_id: CommunityId,
         server_id: ServerId,
         worker_id: WorkerId,
-    ) -> None:
-        """Hydrate the working set then dispatch the launch, compensating on failure.
+    ) -> CommandOutcome:
+        """Hydrate the working set then dispatch the launch; return the outcome.
 
-        Shared by the normal start (:meth:`__call__`) and the reconciler's
-        re-dispatch paths. Hydrate the working set BEFORE the launch (FR-DATA-4):
-        the API drives a pull of the authoritative working set from Storage to the
-        Worker's scratch, then the Worker launches against it. A server with no
-        published working set yet hydrates to an empty dir (the data-plane endpoint
-        is 204 and the Worker starts fresh), so this is not an error. Either step
-        failing compensates the committed intent and re-raises.
+        Hydrate the working set BEFORE the launch (FR-DATA-4): the API drives a pull
+        of the authoritative working set from Storage to the Worker's scratch, then
+        the Worker launches against it. A server with no published working set yet
+        hydrates to an empty dir (the data-plane endpoint is 204 and the Worker
+        starts fresh), so this is not an error. The failing step's outcome is
+        returned (a failed hydrate short-circuits the launch); a
+        :class:`WorkerUnavailableError` propagates. Compensation/cleanup policy is
+        the caller's — this helper makes no DB write — so the normal start and the
+        reconciler's re-dispatch paths can each react differently to a failure.
         """
 
-        try:
-            hydrate = await self.control_plane.hydrate(
-                worker_id=worker_id,
-                community_id=community_id,
-                server_id=server_id,
-            )
-        except WorkerUnavailableError as exc:
-            await self._compensate(community_id, server_id, worker_id, original=exc)
-            raise
+        hydrate = await self.control_plane.hydrate(
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+        )
         if not hydrate.success:
-            failure = CommandDispatchError(hydrate.message or hydrate.status.value)
-            await self._compensate(community_id, server_id, worker_id, original=failure)
-            raise failure
-        try:
-            outcome = await self.control_plane.start(
-                worker_id=worker_id,
-                server_id=server_id,
-                backend=server.execution_backend,
-                jar_relpath=_DEFAULT_JAR_RELPATH,
-                minecraft_version=server.mc_version,
-            )
-        except WorkerUnavailableError as exc:
-            await self._compensate(community_id, server_id, worker_id, original=exc)
-            raise
-        if not outcome.success:
-            failure = CommandDispatchError(outcome.message or outcome.status.value)
-            await self._compensate(community_id, server_id, worker_id, original=failure)
-            raise failure
+            return hydrate
+        return await self.control_plane.start(
+            worker_id=worker_id,
+            server_id=server_id,
+            backend=server.execution_backend,
+            jar_relpath=_DEFAULT_JAR_RELPATH,
+            minecraft_version=server.mc_version,
+        )
 
     async def _ensure_jar(self, server: Server) -> str:
         """Ensure the resolved JAR is pooled; return its content key (FR-VER-3).
@@ -318,6 +331,51 @@ class StartServer:
                 "failed to compensate start intent after a failed dispatch; "
                 "the server record is left with desired=running (original "
                 "dispatch failure: %r)",
+                original,
+                exc_info=compensation_error,
+            )
+            raise compensation_error from original
+        if reverted:
+            self.control_plane.decrement_assignment(worker_id=worker_id)
+
+    async def _unassign(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        *,
+        original: Exception,
+    ) -> None:
+        """Undo only the assignment after a failed orphan re-placement (issue #101).
+
+        Unlike :meth:`_compensate`, the desired state is **left running**: the
+        running intent is authoritative and was not created by this reconcile path,
+        so a dispatch failure must not silently flip it to stopped — it only means
+        the freshly-chosen Worker did not take the launch. We clear the assignment
+        (and decrement its load iff the revert matched) so a later tick re-places on
+        a fresh Worker. A failed compensation is logged, not masked; the row is left
+        diverged for the next tick.
+        """
+
+        reverted = False
+        try:
+            async with self.uow:
+                server = await self.uow.servers.get_by_id(server_id)
+                if (
+                    server is not None
+                    and server.community_id == community_id
+                    and server.assigned_worker_id == worker_id
+                ):
+                    server.assigned_worker_id = None
+                    server.updated_at = self.clock.now()
+                    reverted = await self.uow.servers.update_lifecycle(
+                        server, expected_from=DesiredState.RUNNING
+                    )
+                    await self.uow.commit()
+        except Exception as compensation_error:
+            _LOG.error(
+                "failed to undo orphan re-placement after a failed dispatch; the "
+                "server record is left assigned (original dispatch failure: %r)",
                 original,
                 exc_info=compensation_error,
             )
