@@ -120,6 +120,11 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 				openFromWorkingDir,
 				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second},
 			)
+			// The sweep force-removes every container labelled for this Worker,
+			// including ones still running: a graceful restart while servers are up
+			// kills those live servers. That is the deliberate M1 stateless-worker
+			// posture (no hydration yet; the API sees the resulting state on
+			// reconnect/status).
 			if err := cd.Sweep(ctx); err != nil {
 				// A failed sweep is logged, not fatal: leftover containers block the
 				// affected servers' restart but must not stop the Worker from serving.

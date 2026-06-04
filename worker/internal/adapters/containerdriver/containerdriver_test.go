@@ -272,6 +272,41 @@ func TestGracefulStopViaRCON(t *testing.T) {
 	}
 }
 
+// A container that exits mid-graceful-stop releases the Stop wait via
+// close(exited) rather than timing out. The stop is already in flight, so
+// supervise records the terminal state as stopped, and the driver never escalates
+// to docker stop/kill.
+func TestStopWaitSatisfiedByCrash(t *testing.T) {
+	docker := newFakeDocker()
+	// RCON "stop" does not exit the container immediately; it exits shortly after,
+	// and waitExit completes when supervise closes exited.
+	ctrl := &fakeControl{onStop: func() {
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			docker.exit(0, nil)
+		}()
+	}}
+	d := newTestDriver(docker, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	start := time.Now()
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 50*time.Millisecond {
+		t.Fatalf("Stop timed out instead of completing on exit: took %v", elapsed)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if docker.stopWasCalled() || docker.killWasCalled() {
+		t.Fatal("Stop should not escalate to docker stop/kill when the container exits during the wait")
+	}
+}
+
 // When RCON is unavailable, a graceful stop falls back to docker stop.
 func TestGracefulStopFallsBackToDockerStop(t *testing.T) {
 	docker := newFakeDocker()

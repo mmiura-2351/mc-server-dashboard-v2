@@ -6,7 +6,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -142,6 +144,21 @@ func TestEngineClientListFiltersByLabel(t *testing.T) {
 	req := d.requests[0]
 	if req.method != http.MethodGet || req.path != "/v1.43/containers/json" {
 		t.Fatalf("request = %s %s", req.method, req.path)
+	}
+	q, err := url.ParseQuery(req.query)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", req.query, err)
+	}
+	if q.Get("all") != "true" {
+		t.Fatalf("all = %q, want true", q.Get("all"))
+	}
+	var filters map[string][]string
+	if err := json.Unmarshal([]byte(q.Get("filters")), &filters); err != nil {
+		t.Fatalf("decode filters %q: %v", q.Get("filters"), err)
+	}
+	want := map[string][]string{"label": {labelWorkerID + "=w1"}}
+	if !reflect.DeepEqual(filters, want) {
+		t.Fatalf("filters = %v, want %v", filters, want)
 	}
 }
 

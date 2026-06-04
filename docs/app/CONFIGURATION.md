@@ -290,11 +290,14 @@ with `MCD_WORKER_DRIVER_CONTAINER_DOCKER_HOST` for the daemon endpoint.
 
 The `container` driver names each container deterministically (`mcsd-<server_id>`)
 and labels it with this Worker's id (`mcsd.worker.id`) and the server id
-(`mcsd.server.id`). At startup it sweeps and removes leftover containers carrying
-its own worker-id label — recovering from a crash that left a server's container
-behind — before launching any server; it removes a container after the server
-exits. Resource limits (CPU/memory quotas) are deferred to M2+
-(REQUIREMENTS.md Section 2.2).
+(`mcsd.server.id`). At startup it sweeps and force-removes every container
+carrying its own worker-id label before launching any server, then removes a
+container after the server exits. The sweep recovers from a crash that left a
+server's container behind, but because it force-removes *running* containers too,
+a graceful Worker restart while servers are up kills those live servers — this is
+the deliberate M1 stateless-worker posture (no hydration of prior state yet; the
+API observes the resulting state via the Worker's reconnect/status). Resource
+limits (CPU/memory quotas) are deferred to M2+ (REQUIREMENTS.md Section 2.2).
 
 ### 6.4 Observability
 

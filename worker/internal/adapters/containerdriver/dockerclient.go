@@ -113,6 +113,13 @@ func (c *EngineClient) Start(ctx context.Context, id string) error {
 }
 
 // Stop sends SIGTERM and, after timeout, SIGKILL.
+//
+// A real daemon answers 304 Not Modified when the container is already stopped,
+// which do() reports as an error; the driver then escalates to Kill. That path is
+// reachable only via a self-exit race (the container exits between our Wait
+// observing it and this Stop firing) and is benign: supervise has already
+// recorded the terminal state, and Kill on a dead container is a harmless no-op.
+// We accept the spurious escalation rather than special-casing 304.
 func (c *EngineClient) Stop(ctx context.Context, id string, timeout time.Duration) error {
 	q := url.Values{"t": {fmt.Sprintf("%d", int(timeout.Seconds()))}}
 	return c.do(ctx, http.MethodPost, "/containers/"+id+"/stop", q, nil, nil)
