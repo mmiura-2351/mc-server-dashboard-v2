@@ -40,6 +40,23 @@ def test_disconnected_worker_is_offline_even_when_fresh() -> None:
     assert worker.status(now=_T0, timeout=_TIMEOUT) is WorkerStatus.OFFLINE
 
 
+def test_draining_worker_reports_draining_while_live() -> None:
+    worker = make_worker(at=_T0).start_draining()
+    assert worker.status(now=_T0, timeout=_TIMEOUT) is WorkerStatus.DRAINING
+
+
+def test_draining_offline_worker_is_offline() -> None:
+    # Liveness wins over drain: a draining Worker that has gone offline reports
+    # OFFLINE, not DRAINING.
+    worker = make_worker(at=_T0).start_draining().disconnect()
+    assert worker.status(now=_T0, timeout=_TIMEOUT) is WorkerStatus.OFFLINE
+
+
+def test_stop_draining_returns_to_online() -> None:
+    worker = make_worker(at=_T0).start_draining().stop_draining()
+    assert worker.status(now=_T0, timeout=_TIMEOUT) is WorkerStatus.ONLINE
+
+
 def test_blank_worker_id_is_rejected() -> None:
     with pytest.raises(InvalidWorkerIdError):
         WorkerId("   ")

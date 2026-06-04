@@ -7,6 +7,11 @@ adapter behind the same Port without touching the gRPC edge or the read
 endpoint. Liveness is re-derived on every read from the injected ``Clock`` and
 the configured heartbeat timeout, so no background sweep is needed.
 
+Drain intent outlives connections: the registry remembers which worker ids an
+operator has drained, so a re-registration of a drained id comes back DRAINING
+rather than silently dropping the operator's intent when the Go agent
+auto-reconnects. Only the DELETE drain endpoint clears that intent.
+
 The adapter is shared across concurrent stream handlers on one event loop; its
 operations are synchronous, non-blocking dict mutations, so no lock is required
 under cooperative asyncio scheduling.
@@ -17,7 +22,8 @@ from __future__ import annotations
 import datetime as dt
 
 from mc_server_dashboard_api.fleet.domain.clock import Clock
-from mc_server_dashboard_api.fleet.domain.entities import Worker
+from mc_server_dashboard_api.fleet.domain.entities import Worker, WorkerStatus
+from mc_server_dashboard_api.fleet.domain.placement import PlacementCandidate
 from mc_server_dashboard_api.fleet.domain.registry import (
     SessionToken,
     WorkerRegistry,
@@ -37,9 +43,25 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # fresh tokens so a reconnect always supersedes the prior Session.
         self._sessions: dict[WorkerId, SessionToken] = {}
         self._next_session: SessionToken = 0
+        # Per-worker assigned-server count, the placement 'load' axis (FR-WRK-3).
+        # Reset on (re)registration: a fresh connection starts with no servers
+        # placed on it (epic #7 will re-place after hydrate).
+        self._assignments: dict[WorkerId, int] = {}
+        # Worker ids an operator has drained. This outlives connections so the
+        # drain intent survives the Go agent's automatic reconnect; only the
+        # DELETE drain endpoint clears it (FR-WRK-5).
+        self._drained: set[WorkerId] = set()
 
     def register(self, worker: Worker) -> SessionToken:
+        # Re-apply any standing drain intent: a re-registering worker that was
+        # drained must come back DRAINING, not silently ONLINE.
+        if worker.id in self._drained:
+            worker = worker.start_draining()
         self._workers[worker.id] = worker
+        # Assignment counts reset on (re)register; the server-lifecycle layer
+        # (epic #7) MUST reconcile counts from worker status reports after
+        # reconnect — a reconnected worker may still be running servers.
+        self._assignments[worker.id] = 0
         session = self._next_session
         self._next_session += 1
         self._sessions[worker.id] = session
@@ -57,6 +79,39 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         if worker is not None and self._sessions.get(worker_id) == session:
             self._workers[worker_id] = worker.disconnect()
 
+    def set_draining(self, worker_id: WorkerId, draining: bool) -> bool:
+        worker = self._workers.get(worker_id)
+        if worker is None:
+            return False
+        if draining:
+            self._drained.add(worker_id)
+            self._workers[worker_id] = worker.start_draining()
+        else:
+            self._drained.discard(worker_id)
+            self._workers[worker_id] = worker.stop_draining()
+        return True
+
+    def increment_assignment(self, worker_id: WorkerId) -> None:
+        if worker_id in self._assignments:
+            self._assignments[worker_id] += 1
+
+    def decrement_assignment(self, worker_id: WorkerId) -> None:
+        if self._assignments.get(worker_id, 0) > 0:
+            self._assignments[worker_id] -= 1
+
+    def candidates_for_placement(self) -> list[PlacementCandidate]:
+        now = self._clock.now()
+        return [
+            PlacementCandidate(
+                worker_id=worker.id,
+                drivers=worker.capabilities.drivers,
+                capacity=worker.capabilities.max_servers,
+                load=self._assignments[worker.id],
+            )
+            for worker in self._workers.values()
+            if worker.status(now=now, timeout=self._timeout) is WorkerStatus.ONLINE
+        ]
+
     def list_workers(self) -> list[WorkerSnapshot]:
         now = self._clock.now()
         return [
@@ -67,6 +122,7 @@ class InMemoryWorkerRegistry(WorkerRegistry):
                 registered_at=worker.registered_at,
                 last_heartbeat_at=worker.last_heartbeat_at,
                 status=worker.status(now=now, timeout=self._timeout),
+                assigned_count=self._assignments[worker.id],
             )
             for worker in self._workers.values()
         ]

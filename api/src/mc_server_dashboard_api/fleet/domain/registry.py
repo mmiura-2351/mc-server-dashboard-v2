@@ -18,6 +18,7 @@ import datetime as dt
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.fleet.domain.entities import Worker, WorkerStatus
+from mc_server_dashboard_api.fleet.domain.placement import PlacementCandidate
 from mc_server_dashboard_api.fleet.domain.value_objects import (
     WorkerCapabilities,
     WorkerId,
@@ -32,7 +33,13 @@ SessionToken = int
 
 @dataclass(frozen=True)
 class WorkerSnapshot:
-    """A read view of a registered Worker with its liveness resolved at read time."""
+    """A read view of a registered Worker with its liveness resolved at read time.
+
+    ``assigned_count`` is the Worker's current load: the number of servers
+    assigned to it (the placement 'load' axis, FR-WRK-3). At M1 it is tracked by
+    the registry via :meth:`WorkerRegistry.increment_assignment` /
+    :meth:`WorkerRegistry.decrement_assignment`.
+    """
 
     id: WorkerId
     version: str
@@ -40,6 +47,7 @@ class WorkerSnapshot:
     registered_at: dt.datetime
     last_heartbeat_at: dt.datetime
     status: WorkerStatus
+    assigned_count: int
 
 
 class WorkerRegistry(abc.ABC):
@@ -70,6 +78,40 @@ class WorkerRegistry(abc.ABC):
         ignored, so a stale stream's delayed teardown cannot offline a Worker
         that has reconnected on a newer Session (CONTROL_PLANE.md Section 4.4). A
         disconnect for an unknown Worker is ignored.
+        """
+
+    @abc.abstractmethod
+    def set_draining(self, worker_id: WorkerId, draining: bool) -> bool:
+        """Set or clear the Worker's drain flag (FR-WRK-5).
+
+        A draining Worker stays connected and heartbeating but is excluded from
+        placement. Clearing it (``draining=False``) makes the Worker eligible
+        again. Returns ``True`` if the Worker was found, ``False`` otherwise, so
+        the endpoint can map an unknown id to 404.
+        """
+
+    @abc.abstractmethod
+    def increment_assignment(self, worker_id: WorkerId) -> None:
+        """Record that one more server has been assigned to the Worker (load++).
+
+        A call for an unknown Worker is ignored.
+        """
+
+    @abc.abstractmethod
+    def decrement_assignment(self, worker_id: WorkerId) -> None:
+        """Record that one server has left the Worker (load--, not below zero).
+
+        A call for an unknown Worker is ignored.
+        """
+
+    @abc.abstractmethod
+    def candidates_for_placement(self) -> list[PlacementCandidate]:
+        """Return the placement-eligible Workers as :class:`PlacementCandidate`.
+
+        Only ONLINE, non-draining Workers are included; each carries its
+        advertised driver set and capacity plus its current load (assigned
+        count). The pure :func:`place` function applies the driver/capacity
+        filter and selection.
         """
 
     @abc.abstractmethod
