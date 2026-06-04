@@ -44,6 +44,10 @@ from mc_server_dashboard_api.fleet.api import workers
 from mc_server_dashboard_api.identity.api import auth, users
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.middleware import correlation_id_middleware
+from mc_server_dashboard_api.servers.adapters.backup_loop import run_backup_loop
+from mc_server_dashboard_api.servers.adapters.backup_store import (
+    StorageBackupStoreAdapter,
+)
 from mc_server_dashboard_api.servers.adapters.clock import (
     SystemClock as ServersSystemClock,
 )
@@ -57,10 +61,16 @@ from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
+from mc_server_dashboard_api.servers.api import backups as server_backups
 from mc_server_dashboard_api.servers.api import files as server_files
 from mc_server_dashboard_api.servers.api import servers
+from mc_server_dashboard_api.servers.application.backup_scheduler import (
+    RunBackupScheduleTick,
+)
+from mc_server_dashboard_api.servers.application.backups import CreateBackup
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
+    SnapshotServer,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_client import (
@@ -221,6 +231,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         grpc_server = None
         snapshot_task: asyncio.Task[None] | None = None
+        backup_task: asyncio.Task[None] | None = None
         if settings.control.enabled:
             # Run the control-plane gRPC server as a lifespan task on the same
             # asyncio event loop as FastAPI (grpc.aio): one process, one loop,
@@ -267,9 +278,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             logging.getLogger(__name__).info("snapshot scheduler started")
+            # Run the periodic scheduled-backup scheduler as a lifespan task
+            # (FR-BAK-3), alongside the snapshot scheduler. Gated on the control
+            # plane like the snapshot loop: the running-server backup path needs a
+            # worker (save-all -> snapshot), and an at-rest server cannot have been
+            # started without the control plane, so a backup loop with no control
+            # plane has nothing to act on. The CreateBackup it drives reuses the
+            # same control-plane adapter + Storage backup seam as the HTTP path.
+            backup_control_plane = FleetControlPlaneAdapter(
+                registry=registry,
+                control_plane=app.state.control_plane,
+                data_plane_base_url=settings.server.public_base_url,
+                worker_credential=settings.control.worker_credential,
+            )
+            backup_scheduler = RunBackupScheduleTick(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+                create_backup=CreateBackup(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    control_plane=backup_control_plane,
+                    backup_store=StorageBackupStoreAdapter(storage=storage),
+                    snapshot_server=SnapshotServer(
+                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        control_plane=backup_control_plane,
+                    ),
+                    clock=ServersSystemClock(),
+                ),
+                clock=ServersSystemClock(),
+            )
+            backup_task = asyncio.create_task(
+                run_backup_loop(
+                    backup_scheduler,
+                    tick_seconds=settings.backup.schedule_tick_seconds,
+                )
+            )
+            logging.getLogger(__name__).info("backup scheduler started")
         try:
             yield
         finally:
+            if backup_task is not None:
+                backup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await backup_task
             if snapshot_task is not None:
                 snapshot_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -289,6 +338,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(grants.router)
     app.include_router(servers.router)
     app.include_router(server_files.router)
+    app.include_router(server_backups.router)
     app.include_router(workers.router)
     app.include_router(transfers.router)
     app.include_router(versions_api.router)

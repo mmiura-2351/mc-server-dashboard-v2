@@ -118,6 +118,18 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def list_all(self) -> list[Server]:
+        """Return every server, spanning all communities (FR-BAK-3).
+
+        The candidate set the periodic scheduled-backup scheduler iterates: unlike
+        the snapshot scheduler (running-only), a scheduled backup applies to an
+        at-rest server too (archived directly from Storage, no Worker), so the
+        scheduler must see every server and branch on each one's state. The
+        scheduler filters to those carrying a per-server schedule in config. A
+        process-wide background task, not scoped to one community.
+        """
+
+    @abc.abstractmethod
     async def delete(self, server_id: ServerId) -> None:
         """Delete the server row (its grants are swept separately, Section 10)."""
 

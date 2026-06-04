@@ -143,6 +143,19 @@ class SnapshotSettings(_Section):
     min_interval_seconds: int = 300
 
 
+class BackupSettings(_Section):
+    """Scheduled-backup cadence (FR-BAK-3).
+
+    The per-server schedule itself lives on the ``Server`` config blob as an
+    interval in hours (DATABASE.md Section 8); this only tunes how often the
+    background scheduler *wakes* to check which servers are due.
+    ``schedule_tick_seconds`` is the loop resolution — coarse, since backup
+    cadence is measured in hours; it defaults to five minutes.
+    """
+
+    schedule_tick_seconds: int = 300
+
+
 class PasswordSettings(_Section):
     """Password hashing + policy (CONFIGURATION.md Sections 5.3 and 7.1).
 
@@ -241,6 +254,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings
     storage: StorageSettings = Field(default_factory=StorageSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
+    backup: BackupSettings = Field(default_factory=BackupSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
 
     @classmethod
@@ -284,6 +298,7 @@ class Settings(BaseSettings):
             "database": {"url": _MASK},
             "storage": storage,
             "snapshot": self.snapshot.model_dump(),
+            "backup": self.backup.model_dump(),
             "auth": auth,
         }
 

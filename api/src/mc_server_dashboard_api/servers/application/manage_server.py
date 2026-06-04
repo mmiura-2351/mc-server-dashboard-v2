@@ -21,6 +21,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from mc_server_dashboard_api.servers.domain.backup_schedule import (
+    schedule_from_config,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -181,8 +184,11 @@ class UpdateServer:
     ) -> Server:
         new_name = None if name is None else ServerName(name)
         if config is not None:
-            # Validate the override before any write; raises on a bad value.
+            # Validate the overrides carried on config before any write; each
+            # raises on a bad value. The snapshot interval (FR-DATA-7) and the
+            # backup schedule (FR-BAK-3) are validated the same way.
             override_from_config(config, floor=self.min_interval_seconds)
+            schedule_from_config(config)
         async with self.uow:
             server = await self.uow.servers.get_by_id(server_id)
             if server is None or server.community_id != community_id:

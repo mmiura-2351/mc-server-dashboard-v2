@@ -195,6 +195,11 @@ class SqlAlchemyServerRepository(ServerRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_server(row) for row in rows]
 
+    async def list_all(self) -> list[Server]:
+        stmt = select(ServerModel)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_server(row) for row in rows]
+
     async def delete(self, server_id: ServerId) -> None:
         stmt = delete(ServerModel).where(ServerModel.id == server_id.value)
         await self._session.execute(stmt)

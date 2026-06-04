@@ -25,6 +25,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from mc_server_dashboard_api.community.adapters.repositories import (
     SqlAlchemyResourceGrantRepository,
 )
+from mc_server_dashboard_api.servers.adapters.backup_repository import (
+    SqlAlchemyBackupRepository,
+)
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
@@ -68,6 +71,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self._session = self._session_factory()
         self.servers = SqlAlchemyServerRepository(self._session)
         self.resource_grants = _ResourceGrantSweeperAdapter(self._session)
+        self.backups = SqlAlchemyBackupRepository(self._session)
         return self
 
     async def __aexit__(
