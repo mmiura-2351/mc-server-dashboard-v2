@@ -213,6 +213,11 @@ async def unassign_role(
         raise _not_found() from exc
     except RoleNotFoundError as exc:
         raise _not_found() from exc
+    except LastOwnerRemovalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "last_owner"},
+        ) from exc
 
 
 def _parse_user_id(raw: str) -> UserId:

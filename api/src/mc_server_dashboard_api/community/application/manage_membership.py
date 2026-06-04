@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.community.domain.clock import Clock
-from mc_server_dashboard_api.community.domain.entities import Membership
+from mc_server_dashboard_api.community.domain.entities import Membership, Role
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityNotFoundError,
     LastOwnerRemovalError,
@@ -43,6 +43,45 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     RoleName,
     UserId,
 )
+
+
+async def _guard_last_owner(
+    uow: UnitOfWork, community_id: CommunityId, membership: Membership
+) -> None:
+    """Enforce the community's last-Owner invariant for ``membership``.
+
+    A community must always retain at least one member holding the preset Owner
+    role. This is enforced on member removal and on Owner-role unassignment;
+    role deletion will need the same guard (issue #71).
+
+    If ``membership`` holds the preset Owner role and is the only member that
+    does, raise :class:`LastOwnerRemovalError`; otherwise return. When the
+    community has no preset Owner role the guard is a no-op.
+    """
+    owner_role = next(
+        (
+            role
+            for role in await uow.roles.list_for_community(community_id)
+            if _is_preset_owner(role)
+        ),
+        None,
+    )
+    if owner_role is None:
+        return
+    held = await uow.memberships.list_role_ids(membership.id)
+    if owner_role.id not in held:
+        return
+    # The member holds Owner; refuse if they are the only such holder.
+    for other in await uow.memberships.list_for_community(community_id):
+        if other.id == membership.id:
+            continue
+        if owner_role.id in await uow.memberships.list_role_ids(other.id):
+            return
+    raise LastOwnerRemovalError(str(membership.user_id.value))
+
+
+def _is_preset_owner(role: Role) -> bool:
+    return role.is_preset and role.name == RoleName(OWNER_ROLE_NAME)
 
 
 @dataclass(frozen=True)
@@ -100,7 +139,7 @@ class RemoveMember:
             if membership is None:
                 raise MembershipNotFoundError(str(user_id.value))
 
-            await self._guard_last_owner(community_id, membership)
+            await _guard_last_owner(self.uow, community_id, membership)
 
             # membership_role rows cascade from the membership delete; the grants
             # FK user_id (not membership_id) so they need the explicit sweep — both
@@ -110,30 +149,6 @@ class RemoveMember:
                 user_id, community_id
             )
             await self.uow.commit()
-
-    async def _guard_last_owner(
-        self, community_id: CommunityId, membership: Membership
-    ) -> None:
-        owner_role = next(
-            (
-                role
-                for role in await self.uow.roles.list_for_community(community_id)
-                if role.is_preset and role.name == RoleName(OWNER_ROLE_NAME)
-            ),
-            None,
-        )
-        if owner_role is None:
-            return
-        held = await self.uow.memberships.list_role_ids(membership.id)
-        if owner_role.id not in held:
-            return
-        # The member holds Owner; refuse if they are the only such holder.
-        for other in await self.uow.memberships.list_for_community(community_id):
-            if other.id == membership.id:
-                continue
-            if owner_role.id in await self.uow.memberships.list_role_ids(other.id):
-                return
-        raise LastOwnerRemovalError(str(membership.user_id.value))
 
 
 @dataclass(frozen=True)
@@ -207,7 +222,9 @@ class UnassignRole:
     """Unassign a community role from a member (role:manage).
 
     Like :class:`AssignRole`, validates the role belongs to this community so a
-    caller cannot probe another community's role ids.
+    caller cannot probe another community's role ids. When the role is the preset
+    Owner role, the last-Owner invariant is enforced so a caller cannot orphan
+    the community by stripping Owner from its sole holder.
     """
 
     uow: UnitOfWork
@@ -225,6 +242,9 @@ class UnassignRole:
             role = await self.uow.roles.get_by_id(role_id)
             if role is None or role.community_id != community_id:
                 raise RoleNotFoundError(str(role_id.value))
+
+            if _is_preset_owner(role):
+                await _guard_last_owner(self.uow, community_id, membership)
 
             await self.uow.memberships.unassign_role(membership.id, role_id)
             await self.uow.commit()

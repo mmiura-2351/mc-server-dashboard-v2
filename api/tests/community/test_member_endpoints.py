@@ -330,6 +330,20 @@ def test_unassign_role_authorized_returns_204() -> None:
     assert resp.status_code == 204
 
 
+def test_unassign_last_owner_returns_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        unassign_uc=_FakeUseCase(error=LastOwnerRemovalError("x")),
+    )
+    client = next(_client(app))
+    resp = client.delete(
+        f"/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles/{uuid.uuid4()}"
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "last_owner"
+
+
 def test_unassign_role_non_member_gets_404() -> None:
     app = _app(member=False, allow=True, unassign_uc=_FakeUseCase())
     client = next(_client(app))

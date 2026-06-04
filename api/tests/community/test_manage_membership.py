@@ -317,14 +317,55 @@ async def test_unassign_role_detaches_role() -> None:
     community = _seed_community(uow)
     user = UserId(uuid.uuid4())
     membership = uow._membership_for(user, community.id)
-    role = _seed_owner_role(uow, community.id)
-    uow.memberships.role_ids.setdefault(membership.id, []).append(role.id)
+    role_id = uow.add_role(user, community.id, {Permission("server:read")})
 
     await UnassignRole(uow=uow)(
-        community_id=community.id, user_id=user, role_id=role.id
+        community_id=community.id, user_id=user, role_id=role_id
     )
 
     assert await uow.memberships.list_role_ids(membership.id) == []
+    assert uow.commits == 1
+
+
+async def test_unassign_last_owner_is_rejected() -> None:
+    # The preset Owner role cannot be stripped from its sole holder, which would
+    # orphan the community (same invariant as RemoveMember's last-Owner guard).
+    uow = FakeAuthzUnitOfWork()
+    community = _seed_community(uow)
+    owner_role = _seed_owner_role(uow, community.id)
+    owner = UserId(uuid.uuid4())
+    membership = uow._membership_for(owner, community.id)
+    uow.memberships.role_ids.setdefault(membership.id, []).append(owner_role.id)
+
+    with pytest.raises(LastOwnerRemovalError):
+        await UnassignRole(uow=uow)(
+            community_id=community.id, user_id=owner, role_id=owner_role.id
+        )
+    # Nothing detached/committed.
+    assert await uow.memberships.list_role_ids(membership.id) == [owner_role.id]
+    assert uow.commits == 0
+
+
+async def test_unassign_owner_allowed_when_another_owner_remains() -> None:
+    uow = FakeAuthzUnitOfWork()
+    community = _seed_community(uow)
+    owner_role = _seed_owner_role(uow, community.id)
+    first = UserId(uuid.uuid4())
+    second = UserId(uuid.uuid4())
+    memberships = {}
+    for user in (first, second):
+        membership = uow._membership_for(user, community.id)
+        uow.memberships.role_ids.setdefault(membership.id, []).append(owner_role.id)
+        memberships[user] = membership
+
+    await UnassignRole(uow=uow)(
+        community_id=community.id, user_id=first, role_id=owner_role.id
+    )
+
+    assert await uow.memberships.list_role_ids(memberships[first].id) == []
+    assert await uow.memberships.list_role_ids(memberships[second].id) == [
+        owner_role.id
+    ]
     assert uow.commits == 1
 
 
