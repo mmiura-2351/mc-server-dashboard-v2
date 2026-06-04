@@ -77,6 +77,15 @@ def test_login_returns_token_pair() -> None:
     }
 
 
+def test_login_passes_resolved_client_ip_to_use_case() -> None:
+    # With proxy trust off (default), the resolved IP is the immediate peer; the
+    # endpoint must forward it to the use case for the per-IP counter.
+    fake = _Fake(result=TokenPair(access_token="acc", refresh_token="ref"))
+    client = next(_client(login=fake))
+    client.post("/auth/login", json={"username": "alice", "password": "pw"})
+    assert fake.calls == [{"username": "alice", "password": "pw", "ip": "testclient"}]
+
+
 def test_login_invalid_credentials_returns_401() -> None:
     fake = _Fake(error=InvalidCredentialsError())
     client = next(_client(login=fake))

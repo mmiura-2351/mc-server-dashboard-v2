@@ -1,20 +1,29 @@
-"""No-op adapter for the :class:`LoginFailureDelay` Port (M1 seam).
+"""Real adapter for the :class:`LoginFailureDelay` Port (#57, FR-AUTH-4).
 
-The brute-force / lockout feature (#57, FR-AUTH-4, SECURITY.md Section 2) owns
-the real artificial delay. Until then this honest no-op fills the seam so the
-:class:`~..application.login.Login` use case already calls the hook on every
-failure; only this adapter changes when the delay is implemented.
+Every failed login incurs the same fixed artificial delay (``auth.brute_force.
+delay_ms``, SECURITY.md Section 2 step 5) so a caller cannot distinguish "no such
+user" from "wrong password" — or a locked account — by timing. The pause is an
+awaitable through the :class:`Sleeper` Port (no event-loop blocking); the M1
+sleeper is :func:`asyncio.sleep`.
 """
 
 from __future__ import annotations
 
+import datetime as dt
+from dataclasses import dataclass
+
 from mc_server_dashboard_api.identity.domain.login_failure_delay import (
     LoginFailureDelay,
 )
+from mc_server_dashboard_api.identity.domain.sleeper import Sleeper
 
 
-class NoOpLoginFailureDelay(LoginFailureDelay):
-    """:class:`LoginFailureDelay` adapter that does nothing (M1 placeholder)."""
+@dataclass(frozen=True)
+class FixedLoginFailureDelay(LoginFailureDelay):
+    """:class:`LoginFailureDelay` adapter that sleeps a fixed ``delay`` per call."""
+
+    delay: dt.timedelta
+    sleeper: Sleeper
 
     async def apply(self) -> None:
-        return None
+        await self.sleeper.sleep(self.delay)

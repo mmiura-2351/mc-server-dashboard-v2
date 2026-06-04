@@ -9,8 +9,13 @@ from __future__ import annotations
 
 import datetime as dt
 
+from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
+from mc_server_dashboard_api.identity.domain.login_attempt_store import (
+    Lockout,
+    LoginAttemptStore,
+)
 from mc_server_dashboard_api.identity.domain.login_failure_delay import (
     LoginFailureDelay,
 )
@@ -19,6 +24,7 @@ from mc_server_dashboard_api.identity.domain.repositories import (
     RefreshTokenRepository,
     UserRepository,
 )
+from mc_server_dashboard_api.identity.domain.sleeper import Sleeper
 from mc_server_dashboard_api.identity.domain.token_service import (
     IssuedRefreshToken,
     TokenService,
@@ -184,6 +190,90 @@ class RecordingFailureDelay(LoginFailureDelay):
 
     async def apply(self) -> None:
         self.calls += 1
+
+
+class RecordingSleeper(Sleeper):
+    """Records requested sleep durations instead of really sleeping (TESTING 4)."""
+
+    def __init__(self) -> None:
+        self.sleeps: list[dt.timedelta] = []
+
+    async def sleep(self, duration: dt.timedelta) -> None:
+        self.sleeps.append(duration)
+
+
+class FakeLoginAttemptStore(LoginAttemptStore):
+    """In-memory :class:`LoginAttemptStore`: a list of attempts + lockout map."""
+
+    def __init__(self) -> None:
+        # (username, ip, success, created_at)
+        self.attempts: list[tuple[str, str | None, bool, dt.datetime]] = []
+        self.lockouts: dict[str, Lockout] = {}
+
+    async def record_attempt(
+        self,
+        *,
+        username: str,
+        ip: str | None,
+        success: bool,
+        at: dt.datetime,
+    ) -> None:
+        self.attempts.append((username, ip, success, at))
+
+    async def count_username_failures(
+        self, username: str, *, since: dt.datetime
+    ) -> int:
+        return sum(
+            1
+            for (name, _ip, success, at) in self.attempts
+            if name == username and not success and at >= since
+        )
+
+    async def count_ip_failures(self, ip: str, *, since: dt.datetime) -> int:
+        return sum(
+            1
+            for (_name, attempt_ip, success, at) in self.attempts
+            if attempt_ip == ip and not success and at >= since
+        )
+
+    async def get_lockout(self, username: str) -> Lockout | None:
+        return self.lockouts.get(username)
+
+    async def lock(
+        self, username: str, *, locked_until: dt.datetime, lockout_count: int
+    ) -> None:
+        self.lockouts[username] = Lockout(
+            locked_until=locked_until, lockout_count=lockout_count
+        )
+
+    async def clear_lockout(self, username: str) -> None:
+        self.lockouts.pop(username, None)
+
+    async def prune_attempts(self, *, older_than: dt.datetime) -> None:
+        self.attempts = [a for a in self.attempts if a[3] >= older_than]
+
+
+def make_brute_force_config(
+    *,
+    enabled: bool = True,
+    username_threshold: int = 5,
+    username_window: dt.timedelta = dt.timedelta(minutes=15),
+    ip_threshold: int = 20,
+    ip_window: dt.timedelta = dt.timedelta(minutes=5),
+    lockout_base: dt.timedelta = dt.timedelta(minutes=15),
+    lockout_max: dt.timedelta = dt.timedelta(days=1),
+    delay: dt.timedelta = dt.timedelta(milliseconds=200),
+) -> BruteForceConfig:
+    return BruteForceConfig(
+        enabled=enabled,
+        username_threshold=username_threshold,
+        username_window=username_window,
+        ip_threshold=ip_threshold,
+        ip_window=ip_window,
+        lockout_base=lockout_base,
+        lockout_max=lockout_max,
+        delay=delay,
+    )
 
 
 def make_user(

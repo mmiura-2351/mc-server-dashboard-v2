@@ -17,8 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
 from mc_server_dashboard_api.identity.adapters.clock import SystemClock
+from mc_server_dashboard_api.identity.adapters.login_attempt_store import (
+    SqlAlchemyLoginAttemptStore,
+)
 from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
-    NoOpLoginFailureDelay,
+    FixedLoginFailureDelay,
 )
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
@@ -28,11 +31,19 @@ from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUni
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.domain.entities import User
-from mc_server_dashboard_api.identity.domain.errors import InvalidRefreshTokenError
+from mc_server_dashboard_api.identity.domain.errors import (
+    InvalidCredentialsError,
+    InvalidRefreshTokenError,
+)
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     UserId,
     Username,
+)
+from tests.identity.fakes import (
+    FakeClock,
+    RecordingSleeper,
+    make_brute_force_config,
 )
 from tests.integration.migrate import downgrade_base, upgrade_head
 
@@ -92,10 +103,14 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
 
     login = Login(
         uow=SqlAlchemyUnitOfWork(factory),
+        attempts=SqlAlchemyLoginAttemptStore(factory),
+        brute_force=make_brute_force_config(),
         hasher=Argon2PasswordHasher(),
         tokens=_tokens(),
         clock=SystemClock(),
-        failure_delay=NoOpLoginFailureDelay(),
+        failure_delay=FixedLoginFailureDelay(
+            delay=dt.timedelta(), sleeper=RecordingSleeper()
+        ),
         refresh_ttl=_REFRESH_TTL,
     )
     pair = await login(username="alice", password=_PASSWORD)
@@ -116,3 +131,69 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
     # Reuse triggered a family revoke, so the rotated token is dead too.
     with pytest.raises(InvalidRefreshTokenError):
         await refresh(refresh_token=rotated.refresh_token)
+
+
+async def test_brute_force_lockout_then_backoff_growth(engine: AsyncEngine) -> None:
+    """End-to-end on Postgres: lockout after N failures, then exponential growth.
+
+    Drives the real LoginAttemptStore + UnitOfWork with a controllable clock so
+    the lockout window can be advanced deterministically (no real sleeping). It
+    is the scripted evidence for the FR-AUTH-4 algorithm against the DB.
+    """
+
+    await _seed_user(engine)
+    factory = create_session_factory(engine)
+    clock = FakeClock(dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc))
+    store = SqlAlchemyLoginAttemptStore(factory)
+    # threshold 3, base lockout 60s so the test can step past it cheaply.
+    config = make_brute_force_config(
+        username_threshold=3,
+        lockout_base=dt.timedelta(seconds=60),
+    )
+
+    def _login() -> Login:
+        return Login(
+            uow=SqlAlchemyUnitOfWork(factory),
+            attempts=store,
+            brute_force=config,
+            hasher=Argon2PasswordHasher(),
+            tokens=_tokens(),
+            clock=clock,
+            failure_delay=FixedLoginFailureDelay(
+                delay=dt.timedelta(), sleeper=RecordingSleeper()
+            ),
+            refresh_ttl=_REFRESH_TTL,
+        )
+
+    # 3 wrong passwords trip the per-username threshold and lock the account.
+    for _ in range(3):
+        with pytest.raises(InvalidCredentialsError):
+            await _login()(username="alice", password="wrong", ip="198.51.100.5")
+
+    first = await store.get_lockout("alice")
+    assert first is not None
+    assert first.lockout_count == 1
+    locked_at = clock.now()
+    assert first.locked_until == locked_at + dt.timedelta(seconds=60)
+
+    # Even the correct password is rejected while the lockout is active.
+    with pytest.raises(InvalidCredentialsError):
+        await _login()(username="alice", password=_PASSWORD, ip="198.51.100.5")
+
+    # Step past the first lockout; the next batch of failures re-locks with a
+    # doubled (back-off) duration.
+    clock.set(first.locked_until + dt.timedelta(seconds=1))
+    for _ in range(3):
+        with pytest.raises(InvalidCredentialsError):
+            await _login()(username="alice", password="wrong", ip="198.51.100.5")
+
+    second = await store.get_lockout("alice")
+    assert second is not None
+    assert second.lockout_count == 2
+    # base * 2**1 = 120s.
+    assert second.locked_until == clock.now() + dt.timedelta(seconds=120)
+
+    # A successful login after the lockout elapses clears the back-off state.
+    clock.set(second.locked_until + dt.timedelta(seconds=1))
+    await _login()(username="alice", password=_PASSWORD, ip="198.51.100.5")
+    assert await store.get_lockout("alice") is None

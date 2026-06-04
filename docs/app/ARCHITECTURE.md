@@ -199,6 +199,7 @@ adapter on the other side of the wire may fulfil it (e.g. the API's
 | `PermissionChecker` | `can(user, operation, resource)` decision (FR-AUTHZ-1, NFR-SEC-2) | role + resource-grant evaluator |
 | `TokenService` | Issue/verify short-lived access & long-lived refresh tokens (FR-AUTH-2) | JWT-or-equivalent adapter |
 | `PasswordHasher` | Hash/verify passwords with per-user salt (FR-AUTH-3) | bcrypt/argon2 adapter |
+| `LoginAttemptStore` | Brute-force/lockout runtime state: record attempts, count per-username/per-IP failures over sliding windows, hold the per-account lockout + back-off (FR-AUTH-4). Decision in SECURITY.md Section 3 | DB-backed adapter (`login_attempt` + `account_lockout` tables) |
 | `ControlPlane` | Send commands to a Worker, receive its events; track liveness (FR-SRV-5, FR-WRK-2, Section 6.13) | gRPC bidi-stream server (`proto/`) |
 | `WorkerRegistry` | Connected Workers, capabilities, liveness, placement input (FR-WRK-1, FR-WRK-2, FR-WRK-3) | in-memory registry fed by the stream |
 | `VersionCatalog` / JAR source | List MC versions/types, resolve & fetch the JAR (FR-VER-1, FR-VER-2) | external-manifest client with retry + cache fallback |
