@@ -434,7 +434,7 @@ class ApiCommand(_message.Message):
     def hydrate(self) -> Global___HydrateTrigger:
         """Hydrate triggers the Worker to pull the working set from the API data
         plane before launch (FR-DATA-4). The bulk transfer itself rides the HTTP
-        data plane, not this stream (Section 5.2).
+        data plane, not this stream (Section 5.1).
         """
 
     @_builtins.property
@@ -582,7 +582,7 @@ Global___ServerCommand: _TypeAlias = ServerCommand  # noqa: Y015
 class HydrateTrigger(_message.Message):
     """HydrateTrigger tells the Worker to pull a server's working set from the API
     data plane into local scratch (FR-DATA-4). transfer_url and transfer_token
-    address the API-terminated HTTP data-plane endpoint (Section 5.2); the bulk
+    address the API-terminated HTTP data-plane endpoint (Section 5.1); the bulk
     bytes never traverse this stream.
     """
 
