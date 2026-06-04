@@ -73,13 +73,24 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
 def _translate_integrity_error(exc: IntegrityError) -> None:
     """Raise the matching domain error for a known unique violation, else return.
 
-    The constraint name comes from the asyncpg driver error underneath the
-    SQLAlchemy wrapper; an unrecognised violation is left for the caller to
+    The constraint name lives on the asyncpg ``UniqueViolationError`` underneath
+    the SQLAlchemy wrapper (``exc.orig`` is the DBAPI shim; its ``__cause__`` is
+    the asyncpg error). An unrecognised violation is left to the caller to
     re-raise as-is.
     """
 
-    constraint = getattr(exc.orig, "constraint_name", None)
+    constraint = _constraint_name(exc)
     if constraint in _USERNAME_CONSTRAINTS:
         raise UsernameAlreadyExistsError(str(constraint)) from exc
     if constraint in _EMAIL_CONSTRAINTS:
         raise EmailAlreadyExistsError(str(constraint)) from exc
+
+
+def _constraint_name(exc: IntegrityError) -> str | None:
+    """Extract the violated constraint name from the wrapped driver error."""
+
+    for candidate in (exc.orig, getattr(exc.orig, "__cause__", None)):
+        name = getattr(candidate, "constraint_name", None)
+        if name:
+            return str(name)
+    return None
