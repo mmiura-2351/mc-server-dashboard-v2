@@ -11,7 +11,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, func, select, update
+from sqlalchemy import CursorResult, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
@@ -197,6 +197,35 @@ class SqlAlchemyServerRepository(ServerRepository):
 
     async def list_all(self) -> list[Server]:
         stmt = select(ServerModel)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_server(row) for row in rows]
+
+    async def list_reconcilable(self) -> list[Server]:
+        running = DesiredState.RUNNING.value
+        stopped = DesiredState.STOPPED.value
+        stmt = select(ServerModel).where(
+            or_(
+                # desired=running but observed neither starting nor running
+                # (start never delivered, or a Worker-reported crash).
+                and_(
+                    ServerModel.desired_state == running,
+                    ServerModel.observed_state.notin_(
+                        [ObservedState.STARTING.value, ObservedState.RUNNING.value]
+                    ),
+                ),
+                # desired=running with no assigned Worker (compensation-failure
+                # orphan); caught regardless of observed state.
+                and_(
+                    ServerModel.desired_state == running,
+                    ServerModel.assigned_worker_id.is_(None),
+                ),
+                # desired=stopped but the Worker still reports it running.
+                and_(
+                    ServerModel.desired_state == stopped,
+                    ServerModel.observed_state == ObservedState.RUNNING.value,
+                ),
+            )
+        )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_server(row) for row in rows]
 
