@@ -173,14 +173,8 @@ async def test_start_hydrate_failure_compensates_without_dispatching_start() -> 
     uow.servers.seed(_server(community_id=community, server_id=server_id))
     # The hydrate dispatch fails; the launch must never be attempted (FR-DATA-4:
     # the working set must be in place before the process starts).
-    cp = FakeControlPlane(
-        place_to=WorkerId(worker),
-        outcomes={
-            "hydrate": CommandOutcome(
-                status=CommandStatus.INVALID_STATE, message="busy"
-            )
-        },
-    )
+    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": busy})
     use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
 
     with pytest.raises(CommandDispatchError):
@@ -203,14 +197,8 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
     uow.servers.seed(_server(community_id=community, server_id=server_id))
     # Hydrate succeeds, then the launch fails: both dispatches ran, and the
     # committed intent must still be compensated.
-    cp = FakeControlPlane(
-        place_to=WorkerId(worker),
-        outcomes={
-            "start": CommandOutcome(
-                status=CommandStatus.INVALID_STATE, message="busy"
-            )
-        },
-    )
+    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": busy})
     use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
 
     with pytest.raises(CommandDispatchError):
