@@ -182,7 +182,7 @@ Notes:
 - **Hydrate / snapshot are triggers only.** The command carries a transfer URL
   and a short-lived token addressing the API's HTTP data plane; the Worker moves
   the bytes there, off this stream (REQUIREMENTS.md Section 5.2). The data-plane
-  endpoint spec is epic #8, out of scope here.
+  endpoint spec is STORAGE.md Section 8; Section 5.1 cross-references it.
 - **File access rides the control plane** for *running* servers only; a stopped
   server's files are served from authoritative Storage by the API directly
   (Section 6.9). Path-traversal protection is enforced Worker-side (FR-FILE-4),

@@ -1,7 +1,7 @@
 // Package datatransfer is the Worker's HTTP data-plane client: it moves a
 // server's working set between the API's authoritative Storage and the local
 // scratch dir (FR-DATA-3, FR-DATA-4). The control plane only triggers a
-// transfer and hands over a URL + token (CONTROL_PLANE.md Section 5.2); this
+// transfer and hands over a URL + token (CONTROL_PLANE.md Section 5); this
 // adapter does the bulk byte movement, off the gRPC stream.
 //
 //   - Hydrate: GET the working-set tar and stream-unpack it into the instance

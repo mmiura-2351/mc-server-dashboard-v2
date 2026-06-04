@@ -437,7 +437,7 @@ does not.
 The control plane only *triggers* a working-set transfer; the bulk bytes ride a
 separate **API-terminated HTTP data plane** so a multi-GB hydrate/snapshot never
 blocks control traffic (REQUIREMENTS.md Section 5.2, ARCHITECTURE.md Section 4,
-CONTROL_PLANE.md Section 5.2). These endpoints are the wire transport the Port's
+CONTROL_PLANE.md Section 5). These endpoints are the wire transport the Port's
 Section 3.1 contract deliberately leaves out; Storage guarantees the
 authoritative-side semantics, and this section is the matching transport.
 
