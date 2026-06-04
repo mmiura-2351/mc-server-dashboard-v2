@@ -16,6 +16,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -112,6 +113,11 @@ type ContainerConfig struct {
 	// JRE, mirroring worker.java.runtimes. The driver selects the image for the
 	// major a server's Minecraft version requires.
 	Images map[int]string
+	// GameBindIP is the host interface the driver publishes each server's game
+	// port on. The in-code default is 127.0.0.1 (loopback-only, preserving the
+	// historical behavior); set 0.0.0.0 to accept players from outside the host.
+	// RCON always stays on loopback regardless of this value.
+	GameBindIP string
 }
 
 // LogConfig is the observability surface (CONFIGURATION.md Section 6.4).
@@ -150,6 +156,7 @@ type fileConfig struct {
 	Driver struct {
 		Container struct {
 			DockerHost *string `toml:"docker_host"`
+			GameBindIP *string `toml:"game_bind_ip"`
 			// Images maps a Java major (string key, e.g. "21") to the base image
 			// ref. TOML table keys are strings; they are parsed to ints.
 			Images map[string]string `toml:"images"`
@@ -169,6 +176,11 @@ func defaults() Config {
 		Worker: WorkerConfig{
 			Drivers:    []string{"host-process"},
 			MaxServers: 0,
+		},
+		Driver: DriverConfig{
+			Container: ContainerConfig{
+				GameBindIP: "127.0.0.1",
+			},
 		},
 		Log: LogConfig{
 			Level:  "info",
@@ -248,6 +260,7 @@ func applyFile(cfg *Config, path string) error {
 		cfg.Worker.Java.Runtimes = runtimes
 	}
 	setString(&cfg.Driver.Container.DockerHost, fc.Driver.Container.DockerHost)
+	setString(&cfg.Driver.Container.GameBindIP, fc.Driver.Container.GameBindIP)
 	if fc.Driver.Container.Images != nil {
 		images, err := parseMajorMap("driver.container.images", fc.Driver.Container.Images)
 		if err != nil {
@@ -311,6 +324,7 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	}
 
 	setEnvString(&cfg.Driver.Container.DockerHost, getenv, "DRIVER_CONTAINER_DOCKER_HOST")
+	setEnvString(&cfg.Driver.Container.GameBindIP, getenv, "DRIVER_CONTAINER_GAME_BIND_IP")
 
 	// DRIVER_CONTAINER_IMAGES is a comma-separated list of major=image pairs, e.g.
 	// "17=eclipse-temurin:17-jre,21=eclipse-temurin:21-jre".
@@ -404,6 +418,10 @@ func (c Config) validate() error {
 	case "json", "text":
 	default:
 		return fmt.Errorf("config: log.format: unknown format %q (want json or text)", c.Log.Format)
+	}
+
+	if net.ParseIP(c.Driver.Container.GameBindIP) == nil {
+		return fmt.Errorf("config: driver.container.game_bind_ip: %q is not a valid IP address", c.Driver.Container.GameBindIP)
 	}
 
 	return nil

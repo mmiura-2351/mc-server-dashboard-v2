@@ -126,7 +126,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 				docker,
 				containerdriver.NewImageSelector(cfg.Driver.Container.Images),
 				openFromWorkingDir,
-				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second},
+				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second, GameBindIP: cfg.Driver.Container.GameBindIP},
 			)
 			// The sweep force-removes every container labelled for this Worker,
 			// including ones still running: a graceful restart while servers are up

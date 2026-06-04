@@ -116,6 +116,14 @@ declared in `compose.yaml` — the host firewall must allow inbound traffic to
 whichever game ports your servers use. Assign distinct `server-port` values per
 server to avoid host-port collisions.
 
+The host interface the **game port** binds to is configurable via
+`driver.container.game_bind_ip` (env `MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP`).
+The in-code default is `127.0.0.1` (loopback-only); this `compose.yaml` overrides
+it to `0.0.0.0` so a started server accepts players out of the box, leaving the
+host firewall to govern which game ports are actually exposed. The **RCON port**
+always binds to loopback (`127.0.0.1`) regardless of this setting — it is the
+worker's host-side control channel and must not be reachable from off-host.
+
 ## 7. TLS guidance
 
 The in-compose deployment runs the control plane in plaintext on the private

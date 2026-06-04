@@ -42,6 +42,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.Worker.MaxServers != 0 {
 		t.Errorf("Worker.MaxServers = %d, want default 0", cfg.Worker.MaxServers)
 	}
+	if cfg.Driver.Container.GameBindIP != "127.0.0.1" {
+		t.Errorf("Driver.Container.GameBindIP = %q, want default 127.0.0.1", cfg.Driver.Container.GameBindIP)
+	}
 }
 
 func TestLoadFailsFastOnMissingRequired(t *testing.T) {
@@ -339,6 +342,81 @@ func TestLoadContainerImagesFromEnv(t *testing.T) {
 	}
 	if cfg.Driver.Container.DockerHost != "unix:///run/docker.sock" {
 		t.Fatalf("DockerHost = %q", cfg.Driver.Container.DockerHost)
+	}
+}
+
+func TestLoadGameBindIPFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "worker.toml")
+	body := `
+[api]
+grpc_endpoint = "api:50051"
+data_plane_url = "https://api/data"
+credential = "secret"
+
+[api.tls]
+insecure = true
+
+[worker]
+scratch_dir = "` + t.TempDir() + `"
+drivers = ["container"]
+
+[driver.container]
+game_bind_ip = "0.0.0.0"
+
+[driver.container.images]
+21 = "eclipse-temurin:21-jre"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path, emptyEnv)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Driver.Container.GameBindIP != "0.0.0.0" {
+		t.Fatalf("GameBindIP = %q, want 0.0.0.0 from file", cfg.Driver.Container.GameBindIP)
+	}
+}
+
+func TestLoadGameBindIPFromEnv(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":             "api:50051",
+		"MCD_WORKER_API_DATA_PLANE_URL":            "https://api/data",
+		"MCD_WORKER_API_CREDENTIAL":                "secret",
+		"MCD_WORKER_API_TLS_INSECURE":              "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":            t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":                "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":       "21=eclipse-temurin:21-jre",
+		"MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP": "0.0.0.0",
+	})
+
+	cfg, err := Load("", env)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Driver.Container.GameBindIP != "0.0.0.0" {
+		t.Fatalf("GameBindIP = %q, want 0.0.0.0 from env", cfg.Driver.Container.GameBindIP)
+	}
+}
+
+func TestLoadRejectsMalformedGameBindIP(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":             "api:50051",
+		"MCD_WORKER_API_DATA_PLANE_URL":            "https://api/data",
+		"MCD_WORKER_API_CREDENTIAL":                "secret",
+		"MCD_WORKER_API_TLS_INSECURE":              "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":            "/scratch",
+		"MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP": "not-an-ip",
+	})
+
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("Load() with malformed game_bind_ip: want error, got nil")
+	}
+	if !contains(err.Error(), "game_bind_ip") {
+		t.Errorf("error %q does not mention driver.container.game_bind_ip", err.Error())
 	}
 }
 

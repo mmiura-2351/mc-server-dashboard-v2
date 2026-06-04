@@ -37,6 +37,7 @@ func (c Config) LogValue() slog.Value {
 			slog.Group("container",
 				slog.String("docker_host", c.Driver.Container.DockerHost),
 				slog.Any("images", c.Driver.Container.Images),
+				slog.String("game_bind_ip", c.Driver.Container.GameBindIP),
 			),
 		),
 		slog.Group("log",

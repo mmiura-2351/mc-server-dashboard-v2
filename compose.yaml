@@ -87,6 +87,11 @@ services:
       # Major 7 deviates from the Temurin family because Adoptium publishes no
       # Java 7 image; `azul/zulu-openjdk:7` provides the JRE MC <= 1.7.9 needs.
       MCD_WORKER_DRIVER_CONTAINER_IMAGES: "25=eclipse-temurin:25-jre,21=eclipse-temurin:21-jre,17=eclipse-temurin:17-jre,16=eclipse-temurin:16-jdk,11=eclipse-temurin:11-jre,8=eclipse-temurin:8-jre,7=azul/zulu-openjdk:7"
+      # Publish each server's game port on all host interfaces so players connect
+      # from outside the host (the code default is 127.0.0.1, loopback-only). The
+      # host firewall governs which game ports are actually reachable. RCON always
+      # stays on loopback regardless of this value.
+      MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP: "0.0.0.0"
     # The Docker socket is how the container driver creates sibling MC containers.
     # group_add gives the worker process the host docker group so it can use the
     # socket without running privileged.
