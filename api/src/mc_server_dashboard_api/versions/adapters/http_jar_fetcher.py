@@ -33,7 +33,7 @@ MAX_JAR_BYTES = 512 * 1024 * 1024
 
 
 class HttpxJarFetcher(JarFetcher):
-    """Stream a JAR's bytes over HTTP with httpx, capped and hashed incrementally."""
+    """Stream a JAR's bytes over HTTP with httpx, capped at :data:`MAX_JAR_BYTES`."""
 
     async def fetch(self, url: str) -> bytes:
         try:
