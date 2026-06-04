@@ -2,6 +2,7 @@ package controlplane_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -10,8 +11,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/durationpb"
 
@@ -29,34 +32,28 @@ func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) 
 
 // fakeServer is an in-process WorkerService implementing the API side of the
 // stream lifecycle (CONTROL_PLANE.md Section 4) just enough to exercise the
-// client: it checks the credential metadata, answers Register with a
-// configurable ack, records heartbeats, and can drop the stream after the first
-// heartbeat to drive a reconnect.
+// client. It mirrors the real servicer (#83): a bad/missing credential aborts
+// the stream with gRPC status UNAUTHENTICATED rather than a RegisterAck — the
+// real server never sends accepted=false here. On success it answers Register
+// with an accepting ack, records heartbeats, and can drop the stream after the
+// first heartbeat to drive a transient reconnect.
 type fakeServer struct {
 	controlplanev1.UnimplementedWorkerServiceServer
 
 	wantCredential string
-	accept         bool
 	heartbeatEvery time.Duration
 	dropAfterFirst bool
 
-	mu          sync.Mutex
-	registers   int
-	heartbeats  int
-	lastCmdResp *controlplanev1.CommandResult
-	authedOK    bool
+	mu         sync.Mutex
+	registers  int
+	heartbeats int
 }
 
 func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) error {
 	if !s.checkAuth(stream.Context()) {
-		s.mu.Lock()
-		s.authedOK = false
-		s.mu.Unlock()
-		return stream.Send(rejectAck("bad credential"))
+		// Match #83: abort with a status code, not RegisterAck{accepted=false}.
+		return status.Error(codes.Unauthenticated, "worker credential rejected")
 	}
-	s.mu.Lock()
-	s.authedOK = true
-	s.mu.Unlock()
 
 	// First message must be Register.
 	first, err := stream.Recv()
@@ -64,15 +61,12 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 		return err
 	}
 	if first.GetRegister() == nil {
-		return stream.Send(rejectAck("first message was not Register"))
+		return status.Error(codes.FailedPrecondition, "first message must be Register")
 	}
 	s.mu.Lock()
 	s.registers++
 	s.mu.Unlock()
 
-	if !s.accept {
-		return stream.Send(rejectAck("registration refused"))
-	}
 	if err := stream.Send(acceptAck(s.heartbeatEvery)); err != nil {
 		return err
 	}
@@ -92,11 +86,6 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 			if drop {
 				return nil // close the stream; client must reconnect
 			}
-		}
-		if res := msg.GetCommandResult(); res != nil {
-			s.mu.Lock()
-			s.lastCmdResp = res
-			s.mu.Unlock()
 		}
 	}
 }
@@ -123,14 +112,6 @@ func (s *fakeServer) heartbeatCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.heartbeats
-}
-
-func rejectAck(reason string) *controlplanev1.ApiMessage {
-	return &controlplanev1.ApiMessage{
-		Payload: &controlplanev1.ApiMessage_RegisterAck{
-			RegisterAck: &controlplanev1.RegisterAck{Accepted: false, RejectionReason: reason},
-		},
-	}
 }
 
 func acceptAck(every time.Duration) *controlplanev1.ApiMessage {
@@ -197,7 +178,6 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestHappyPathRegisterAndHeartbeat(t *testing.T) {
 	srv := &fakeServer{
 		wantCredential: "the-secret",
-		accept:         true,
 		heartbeatEvery: 20 * time.Millisecond,
 	}
 	conn := startServer(t, srv)
@@ -217,35 +197,46 @@ func TestHappyPathRegisterAndHeartbeat(t *testing.T) {
 	<-done
 }
 
+// TestAuthRejectStopsRunner proves a wrong-credential Worker STOPS instead of
+// reconnecting forever: the server aborts the stream with UNAUTHENTICATED (as
+// #83 does), the adapter classifies that as terminal, and the runner returns
+// session.ErrTerminal without ever registering.
 func TestAuthRejectStopsRunner(t *testing.T) {
 	srv := &fakeServer{
 		wantCredential: "the-secret",
-		accept:         true,
 		heartbeatEvery: 50 * time.Millisecond,
 	}
 	conn := startServer(t, srv)
 
-	// Wrong credential: the server rejects before registration.
+	// Wrong credential: the server aborts with UNAUTHENTICATED before registration.
 	dialer := controlplane.NewDialer(conn, "wrong-secret", realClock{})
-	runner := session.NewRunner(dialer, testCaps(), realClock{}, testLogger())
+	runner := session.NewRunner(
+		dialer, testCaps(), realClock{}, testLogger(),
+		// A small backoff would still apply if the runner wrongly retried; keep it
+		// tiny so a buggy reconnect would be caught quickly by the register check.
+		session.WithBackoff(session.Backoff{Initial: 5 * time.Millisecond, Max: 20 * time.Millisecond, Multiplier: 2}),
+	)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- runner.Run(context.Background()) }()
 
 	select {
 	case err := <-errCh:
-		if err == nil {
-			t.Fatal("Run() returned nil on auth reject, want ErrRejected")
+		if !errors.Is(err, session.ErrTerminal) {
+			t.Fatalf("Run() error = %v, want session.ErrTerminal (terminal stop)", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Run() did not return after auth reject")
+		t.Fatal("Run() did not stop after auth reject; it is reconnecting forever")
+	}
+
+	if got := srv.registerCount(); got != 0 {
+		t.Errorf("registerCount = %d, want 0 (auth aborts before Register)", got)
 	}
 }
 
 func TestServerDropTriggersReconnect(t *testing.T) {
 	srv := &fakeServer{
 		wantCredential: "the-secret",
-		accept:         true,
 		heartbeatEvery: 15 * time.Millisecond,
 		dropAfterFirst: true,
 	}

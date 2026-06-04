@@ -21,6 +21,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
 		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret-token",
+		"MCD_WORKER_API_TLS_INSECURE":   "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": "/var/lib/worker",
 	})
 
@@ -63,6 +64,9 @@ func TestLoadPrecedenceFileThenEnv(t *testing.T) {
 grpc_endpoint = "file-endpoint:50051"
 data_plane_url = "https://file/data"
 credential = "file-credential"
+
+[api.tls]
+insecure = true
 
 [worker]
 scratch_dir = "/file/scratch"
@@ -108,6 +112,9 @@ level = "debug"
 	if cfg.Log.Level != "debug" {
 		t.Errorf("Log.Level = %q, want file value debug", cfg.Log.Level)
 	}
+	if !cfg.API.TLS.Insecure {
+		t.Errorf("TLS.Insecure = false, want true from file")
+	}
 }
 
 func TestLoadRejectsUnknownDriver(t *testing.T) {
@@ -115,6 +122,7 @@ func TestLoadRejectsUnknownDriver(t *testing.T) {
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
 		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret",
+		"MCD_WORKER_API_TLS_INSECURE":   "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
 		"MCD_WORKER_WORKER_DRIVERS":     "host-process,bogus",
 	})
@@ -133,12 +141,52 @@ func TestLoadRejectsMalformedMaxServers(t *testing.T) {
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
 		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret",
+		"MCD_WORKER_API_TLS_INSECURE":   "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
 		"MCD_WORKER_WORKER_MAX_SERVERS": "not-a-number",
 	})
 
 	if _, err := Load("", env); err == nil {
 		t.Fatal("Load() with malformed max_servers: want error, got nil")
+	}
+}
+
+func TestLoadFailsFastWhenTLSNeitherCAFileNorInsecure(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
+		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
+		"MCD_WORKER_API_CREDENTIAL":     "secret",
+		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
+		// Neither api.tls.ca_file nor api.tls.insecure set.
+	})
+
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("Load() with no ca_file and no insecure: want error, got nil")
+	}
+	if !contains(err.Error(), "api.tls.ca_file") {
+		t.Errorf("error %q does not mention the required api.tls.ca_file", err.Error())
+	}
+}
+
+func TestLoadAcceptsCAFileWithoutInsecure(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
+		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
+		"MCD_WORKER_API_CREDENTIAL":     "secret",
+		"MCD_WORKER_API_TLS_CA_FILE":    "/etc/ssl/ca.pem",
+		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
+	})
+
+	cfg, err := Load("", env)
+	if err != nil {
+		t.Fatalf("Load() with ca_file error = %v", err)
+	}
+	if cfg.API.TLS.CAFile != "/etc/ssl/ca.pem" {
+		t.Errorf("TLS.CAFile = %q, want /etc/ssl/ca.pem", cfg.API.TLS.CAFile)
+	}
+	if cfg.API.TLS.Insecure {
+		t.Error("TLS.Insecure = true, want false (default)")
 	}
 }
 

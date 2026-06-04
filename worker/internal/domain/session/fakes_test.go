@@ -70,6 +70,7 @@ type fakeTransport struct {
 	commands    chan Command
 	recvErr     error // returned by RecvCommand once commands drains
 	registerErr error // returned by SendRegister, if set
+	ackErr      error // returned by RecvRegisterAck, if set
 }
 
 func newFakeTransport(ack RegisterAck) *fakeTransport {
@@ -90,6 +91,9 @@ func (t *fakeTransport) SendRegister(_ context.Context, _ Capabilities) error {
 func (t *fakeTransport) RecvRegisterAck(_ context.Context) (RegisterAck, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.ackErr != nil {
+		return RegisterAck{}, t.ackErr
+	}
 	return t.ack, nil
 }
 

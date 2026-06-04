@@ -15,6 +15,14 @@ import (
 // credential would loop forever.
 var ErrRejected = errors.New("session: registration rejected by API")
 
+// ErrTerminal marks a connection failure the run loop must not retry: the same
+// dial would fail the same way (e.g. the API aborted the stream for a bad/
+// missing credential or a protocol violation). The transport adapter wraps such
+// errors with this sentinel; transient failures are returned unwrapped so the
+// loop reconnects with backoff. The domain stays transport-neutral — the adapter
+// decides which wire failures are terminal (CONTROL_PLANE.md Section 4.1).
+var ErrTerminal = errors.New("session: terminal connection error")
+
 // Runner drives the Worker's control-plane session: it registers, heartbeats,
 // acknowledges inbound commands, and reconnects with backoff. It owns no
 // transport itself; the Dialer hands it a fresh Transport per connection.
@@ -55,10 +63,11 @@ func NewRunner(dialer Dialer, caps Capabilities, clock Clock, logger *slog.Logge
 }
 
 // Run connects and maintains the session until ctx is cancelled (clean
-// shutdown) or registration is terminally rejected. On any transport error it
-// reconnects with backoff, re-registering from scratch each time
+// shutdown) or a terminal connection error occurs. On a transient transport
+// error it reconnects with backoff, re-registering from scratch each time
 // (CONTROL_PLANE.md Section 4.4). It returns nil on a cancellation-driven
-// shutdown and ErrRejected if the API refused registration.
+// shutdown and the terminal error (ErrRejected or ErrTerminal) when the API
+// refused registration or aborted the stream for a non-retryable reason.
 func (r *Runner) Run(ctx context.Context) error {
 	attempt := 0
 	for {
@@ -68,8 +77,8 @@ func (r *Runner) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-		case errors.Is(err, ErrRejected):
-			r.logger.Error("registration rejected; not reconnecting", "error", err)
+		case errors.Is(err, ErrRejected), errors.Is(err, ErrTerminal):
+			r.logger.Error("terminal connection error; not reconnecting", "error", err)
 			return err
 		default:
 			r.logger.Warn("session ended; will reconnect", "error", err)

@@ -45,15 +45,19 @@ type APIConfig struct {
 	DataPlaneURL string
 	// Credential authenticates the Worker to the API. Secret: never logged.
 	Credential string
-	// TLS holds the control-channel TLS material. When CAFile is empty the
-	// Worker dials without transport security (local/dev only).
+	// TLS holds the control-channel TLS material.
 	TLS TLSConfig
 }
 
 // TLSConfig is the control-channel TLS material (CONFIGURATION.md Section 6.1).
 type TLSConfig struct {
-	// CAFile is the CA bundle verifying the API's TLS. Empty means insecure dial.
+	// CAFile is the CA bundle verifying the API's TLS. When set, the Worker dials
+	// with TLS verified against it.
 	CAFile string
+	// Insecure opts in to a plaintext (no-TLS) dial. It is only honoured when
+	// CAFile is empty, and is for local/dev use only; production must set CAFile.
+	// With neither CAFile nor Insecure, config validation fails fast.
+	Insecure bool
 	// ClientCertFile is the Worker's mTLS client certificate.
 	ClientCertFile string
 	// ClientKeyFile is the Worker's mTLS private key. Secret: never logged.
@@ -90,6 +94,7 @@ type fileConfig struct {
 		Credential   *string `toml:"credential"`
 		TLS          struct {
 			CAFile         *string `toml:"ca_file"`
+			Insecure       *bool   `toml:"insecure"`
 			ClientCertFile *string `toml:"client_cert_file"`
 			ClientKeyFile  *string `toml:"client_key_file"`
 		} `toml:"tls"`
@@ -169,6 +174,9 @@ func applyFile(cfg *Config, path string) error {
 	setString(&cfg.API.DataPlaneURL, fc.API.DataPlaneURL)
 	setString(&cfg.API.Credential, fc.API.Credential)
 	setString(&cfg.API.TLS.CAFile, fc.API.TLS.CAFile)
+	if fc.API.TLS.Insecure != nil {
+		cfg.API.TLS.Insecure = *fc.API.TLS.Insecure
+	}
 	setString(&cfg.API.TLS.ClientCertFile, fc.API.TLS.ClientCertFile)
 	setString(&cfg.API.TLS.ClientKeyFile, fc.API.TLS.ClientKeyFile)
 	setString(&cfg.Worker.ID, fc.Worker.ID)
@@ -192,6 +200,13 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	setEnvString(&cfg.API.DataPlaneURL, getenv, "API_DATA_PLANE_URL")
 	setEnvString(&cfg.API.Credential, getenv, "API_CREDENTIAL")
 	setEnvString(&cfg.API.TLS.CAFile, getenv, "API_TLS_CA_FILE")
+	if v := getenv(EnvPrefix + "API_TLS_INSECURE"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config: %sAPI_TLS_INSECURE: %w", EnvPrefix, err)
+		}
+		cfg.API.TLS.Insecure = b
+	}
 	setEnvString(&cfg.API.TLS.ClientCertFile, getenv, "API_TLS_CLIENT_CERT_FILE")
 	setEnvString(&cfg.API.TLS.ClientKeyFile, getenv, "API_TLS_CLIENT_KEY_FILE")
 	setEnvString(&cfg.Worker.ID, getenv, "WORKER_ID")
@@ -214,8 +229,10 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 }
 
 // validate enforces the required keys with no default (CONFIGURATION.md Section
-// 6) and the documented value sets. The TLS CA file is optional: empty selects
-// an insecure dial for local development.
+// 6) and the documented value sets. Transport security is required unless
+// explicitly opted out: a CA file enables TLS, api.tls.insecure=true permits a
+// plaintext dial, and neither set is a fatal error (CONFIGURATION.md Section
+// 6.1).
 func (c Config) validate() error {
 	var missing []string
 	if c.API.GRPCEndpoint == "" {
@@ -232,6 +249,10 @@ func (c Config) validate() error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("config: missing required key(s): %s", strings.Join(missing, ", "))
+	}
+
+	if c.API.TLS.CAFile == "" && !c.API.TLS.Insecure {
+		return fmt.Errorf("config: api.tls.ca_file is required (or set api.tls.insecure=true for a plaintext dev dial)")
 	}
 
 	if len(c.Worker.Drivers) == 0 {

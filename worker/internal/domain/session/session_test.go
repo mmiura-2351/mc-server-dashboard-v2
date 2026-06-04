@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -97,6 +98,24 @@ func TestRejectedRegistrationDoesNotReconnect(t *testing.T) {
 	}
 	if dialer.dialCount() != 1 {
 		t.Errorf("dialed %d times, want exactly 1 (no reconnect on reject)", dialer.dialCount())
+	}
+}
+
+func TestTerminalErrorDoesNotReconnect(t *testing.T) {
+	// The adapter wraps a non-retryable connection failure (e.g. the API aborts
+	// the stream with UNAUTHENTICATED) as ErrTerminal; the run loop must stop.
+	transport := newFakeTransport(RegisterAck{})
+	transport.ackErr = fmt.Errorf("recv ack: %w", ErrTerminal)
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	r := NewRunner(dialer, testCaps(), clock, discardLogger())
+
+	err := r.Run(context.Background())
+	if !errors.Is(err, ErrTerminal) {
+		t.Fatalf("Run() error = %v, want ErrTerminal", err)
+	}
+	if dialer.dialCount() != 1 {
+		t.Errorf("dialed %d times, want exactly 1 (no reconnect on terminal error)", dialer.dialCount())
 	}
 }
 

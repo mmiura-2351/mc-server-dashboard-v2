@@ -7,7 +7,8 @@
 // ("authorization: Bearer <credential>"), not as a proto field — the Register
 // message carries no credential (CONTROL_PLANE.md Sections 2 and 4.1; the
 // credential is configuration, Section 6.1). Transport security (TLS/mTLS) sits
-// below this contract; an empty CA file selects an insecure dial for local use.
+// below this contract; the wiring layer builds the gRPC credentials (cmd/worker
+// dial).
 package controlplane
 
 import (
@@ -15,7 +16,9 @@ import (
 	"fmt"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	controlplanev1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/controlplane/v1"
@@ -48,7 +51,7 @@ func (d *Dialer) Dial(ctx context.Context) (session.Transport, error) {
 
 	stream, err := client.Session(authCtx)
 	if err != nil {
-		return nil, fmt.Errorf("controlplane: open session: %w", err)
+		return nil, fmt.Errorf("controlplane: open session: %w", classify(err))
 	}
 	return &transport{stream: stream, clock: d.clock}, nil
 }
@@ -80,7 +83,7 @@ func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) e
 }
 
 func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, error) {
-	msg, err := t.stream.Recv()
+	msg, err := t.recvClassified()
 	if err != nil {
 		return session.RegisterAck{}, fmt.Errorf("controlplane: recv register ack: %w", err)
 	}
@@ -134,7 +137,7 @@ func (t *transport) SendCommandResult(_ context.Context, result session.CommandR
 
 func (t *transport) RecvCommand(_ context.Context) (session.Command, error) {
 	for {
-		msg, err := t.stream.Recv()
+		msg, err := t.recvClassified()
 		if err != nil {
 			return session.Command{}, err
 		}
@@ -156,6 +159,32 @@ func (t *transport) Close() error {
 	return t.stream.CloseSend()
 }
 
+// classify maps a gRPC stream error to the domain's terminal/transient
+// distinction. The API aborts the stream with a status code rather than sending
+// RegisterAck{accepted=false} for a bad/missing credential or a protocol
+// violation (CONTROL_PLANE.md Section 4.1): those codes are terminal so the run
+// loop stops instead of reconnecting forever with the same rejected input. All
+// other failures (UNAVAILABLE, DEADLINE_EXCEEDED, mid-stream drops) stay
+// transient and keep the backoff-reconnect path. err must be non-nil.
+func classify(err error) error {
+	switch status.Code(err) {
+	case codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition, codes.InvalidArgument:
+		return fmt.Errorf("%w: %w", session.ErrTerminal, err)
+	default:
+		return err
+	}
+}
+
+// recvClassified reads the next stream message, classifying any error so the run
+// loop can distinguish a terminal abort from a transient drop (see classify).
+func (t *transport) recvClassified() (*controlplanev1.ApiMessage, error) {
+	msg, err := t.stream.Recv()
+	if err != nil {
+		return nil, classify(err)
+	}
+	return msg, nil
+}
+
 // mapDrivers translates configured driver names to the wire enum. Unknown names
 // are validated away in config; an unexpected one maps to UNSPECIFIED.
 func mapDrivers(names []string) []controlplanev1.ExecutionDriverKind {
@@ -175,13 +204,9 @@ func mapDrivers(names []string) []controlplanev1.ExecutionDriverKind {
 
 // mapErrorCode translates a domain error code to the wire enum. This milestone
 // only emits the internal/unsupported code.
-func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode {
-	switch code {
-	case session.CommandErrorInternal:
-		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
-	default:
-		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
-	}
+func mapErrorCode(_ session.CommandErrorCode) controlplanev1.CommandErrorCode {
+	// This milestone only emits the internal/unsupported code.
+	return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
 }
 
 // commandKind names the command oneof for logging and the unsupported-error

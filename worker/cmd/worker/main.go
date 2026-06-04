@@ -51,7 +51,7 @@ func run(ctx context.Context) error {
 	logger := newLogger(cfg.Log)
 	logger.Info("worker configuration loaded", "config", cfg)
 
-	conn, err := dial(cfg.API)
+	conn, err := dial(cfg.API, logger)
 	if err != nil {
 		return err
 	}
@@ -91,13 +91,15 @@ func newLogger(cfg config.LogConfig) *slog.Logger {
 	return slog.New(handler)
 }
 
-// dial opens the gRPC client connection to the API control plane. An empty CA
-// file selects an insecure dial (local/dev); otherwise the API's TLS is
-// verified against the CA bundle, with optional mTLS when a client cert/key pair
-// is configured (CONFIGURATION.md Section 6.1).
-func dial(api config.APIConfig) (*grpc.ClientConn, error) {
+// dial opens the gRPC client connection to the API control plane. A configured
+// CA file verifies the API's TLS (with optional mTLS when a client cert/key pair
+// is set); api.tls.insecure=true selects a plaintext dial for local/dev with a
+// loud warning. Config validation guarantees exactly one of the two is set
+// (CONFIGURATION.md Section 6.1).
+func dial(api config.APIConfig, logger *slog.Logger) (*grpc.ClientConn, error) {
 	var creds credentials.TransportCredentials
 	if api.TLS.CAFile == "" {
+		logger.Warn("dialing the API control plane WITHOUT TLS (api.tls.insecure=true); use only for local development")
 		creds = insecure.NewCredentials()
 	} else {
 		tlsCfg, err := buildTLSConfig(api.TLS)

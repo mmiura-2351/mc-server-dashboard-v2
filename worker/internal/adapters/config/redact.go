@@ -21,6 +21,7 @@ func (c Config) LogValue() slog.Value {
 			slog.String("credential", masked(c.API.Credential)),
 			slog.Group("tls",
 				slog.String("ca_file", c.API.TLS.CAFile),
+				slog.Bool("insecure", c.API.TLS.Insecure),
 				slog.String("client_cert_file", c.API.TLS.ClientCertFile),
 				slog.String("client_key_file", masked(c.API.TLS.ClientKeyFile)),
 			),

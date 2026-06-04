@@ -21,7 +21,9 @@ func TestLogValueMasksSecrets(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	logger.Info("loaded config", "config", cfg.LogValue())
+	// Log via the same shape main uses: pass the Config value, relying on its
+	// slog.LogValuer to mask secrets.
+	logger.Info("loaded config", "config", cfg)
 	out := buf.String()
 
 	if strings.Contains(out, "super-secret-token") {

@@ -82,7 +82,8 @@ underscores, e.g. `api.grpc_endpoint` → `MCD_WORKER_API_GRPC_ENDPOINT`.
 | `api.grpc_endpoint` | `MCD_WORKER_API_GRPC_ENDPOINT` | yes | API control-plane gRPC address to dial. |
 | `api.data_plane_url` | `MCD_WORKER_API_DATA_PLANE_URL` | yes | API HTTP data-plane base URL. |
 | `api.credential` | `MCD_WORKER_API_CREDENTIAL` | yes (secret) | Worker credential, sent as stream metadata. |
-| `api.tls.ca_file` | `MCD_WORKER_API_TLS_CA_FILE` | no | CA bundle for the API's TLS; empty dials insecurely (local only). |
+| `api.tls.ca_file` | `MCD_WORKER_API_TLS_CA_FILE` | yes¹ | CA bundle verifying the API's TLS. |
+| `api.tls.insecure` | `MCD_WORKER_API_TLS_INSECURE` | no | `true` opts in to a plaintext (no-TLS) dial for local dev; default `false`. |
 | `api.tls.client_cert_file` / `api.tls.client_key_file` | `…_CLIENT_CERT_FILE` / `…_CLIENT_KEY_FILE` | no | mTLS client cert/key pair. |
 | `worker.id` | `MCD_WORKER_WORKER_ID` | no | Registration id; defaults to the host name. |
 | `worker.drivers` | `MCD_WORKER_WORKER_DRIVERS` | no | Comma-separated `host-process` / `container`; default `host-process`. |
@@ -90,16 +91,21 @@ underscores, e.g. `api.grpc_endpoint` → `MCD_WORKER_API_GRPC_ENDPOINT`.
 | `worker.scratch_dir` | `MCD_WORKER_WORKER_SCRATCH_DIR` | yes | Local working-set root. |
 | `log.level` / `log.format` | `MCD_WORKER_LOG_LEVEL` / `…_LOG_FORMAT` | no | `info` / `json` by default; format is `json` or `text`. |
 
+¹ `api.tls.ca_file` is required **unless** `api.tls.insecure=true` is set. With
+neither, startup fails fast; with `insecure=true` the Worker dials plaintext and
+logs a `WARN` at boot. Production must set `ca_file`.
+
 ## Running against a local API
 
 With a local API control-plane server listening (e.g. on `localhost:50051`),
-run the Worker pointing at it. For local development without TLS, leave
-`api.tls.ca_file` unset to dial insecurely:
+run the Worker pointing at it. For local development without TLS, set
+`api.tls.insecure=true` to dial plaintext (the Worker logs a `WARN` at boot):
 
 ```sh
 MCD_WORKER_API_GRPC_ENDPOINT=localhost:50051 \
 MCD_WORKER_API_DATA_PLANE_URL=http://localhost:8000/data \
 MCD_WORKER_API_CREDENTIAL=dev-secret \
+MCD_WORKER_API_TLS_INSECURE=true \
 MCD_WORKER_WORKER_SCRATCH_DIR=/tmp/mcsd-worker \
 go run ./cmd/worker
 ```
@@ -117,6 +123,9 @@ go run ./cmd/worker
 [api]
 grpc_endpoint = "localhost:50051"
 data_plane_url = "http://localhost:8000/data"
+
+[api.tls]
+insecure = true  # local dev only; set ca_file instead in production
 
 [worker]
 scratch_dir = "/tmp/mcsd-worker"
