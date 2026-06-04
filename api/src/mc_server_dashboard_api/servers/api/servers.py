@@ -21,10 +21,15 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
+
 # ``Permission`` is community-context-owned (the catalog lives there); the servers
 # routes reference the ``server:*`` codes through it, as the community routes do.
-from mc_server_dashboard_api.community.domain.value_objects import Permission
+from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_create_server,
     get_delete_server,
     get_list_servers,
@@ -155,10 +160,11 @@ class ServerResponse(BaseModel):
 async def create_server(
     community_id: uuid.UUID,
     body: CreateServerRequest,
-    _authorized: Annotated[
-        object, Depends(require_permission(Permission("server:create")))
+    authorized: Annotated[
+        AuthUser, Depends(require_permission(Permission("server:create")))
     ],
     use_case: Annotated[CreateServer, Depends(get_create_server)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -192,6 +198,9 @@ async def create_server(
         raise _unprocessable("invalid_server_name") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    await _record(
+        recorder, ops.SERVER_CREATE, authorized, community_id, server.id.value
+    )
     return ServerResponse.from_entity(server)
 
 
@@ -238,8 +247,8 @@ async def update_server(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     body: UpdateServerRequest,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("server:update"),
@@ -249,6 +258,7 @@ async def update_server(
         ),
     ],
     use_case: Annotated[UpdateServer, Depends(get_update_server)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -272,6 +282,9 @@ async def update_server(
         raise _unprocessable("invalid_backup_schedule") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    await _record(
+        recorder, ops.SERVER_UPDATE, authorized, community_id, server.id.value
+    )
     return ServerResponse.from_entity(server)
 
 
@@ -282,8 +295,8 @@ async def update_server(
 async def delete_server(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("server:delete"),
@@ -293,6 +306,7 @@ async def delete_server(
         ),
     ],
     use_case: Annotated[DeleteServer, Depends(get_delete_server)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     try:
         await use_case(
@@ -303,14 +317,15 @@ async def delete_server(
         raise _not_found() from exc
     except ServerNotStoppedError as exc:
         raise _conflict("server_not_stopped") from exc
+    await _record(recorder, ops.SERVER_DELETE, authorized, community_id, server_id)
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/start")
 async def start_server(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("server:start"),
@@ -320,6 +335,7 @@ async def start_server(
         ),
     ],
     use_case: Annotated[StartServer, Depends(get_start_server)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -343,6 +359,7 @@ async def start_server(
         raise _service_unavailable("jar_unavailable") from exc
     except CommandDispatchError as exc:
         raise _conflict("command_failed") from exc
+    await _record(recorder, ops.SERVER_START, authorized, community_id, server.id.value)
     return ServerResponse.from_entity(server)
 
 
@@ -350,8 +367,8 @@ async def start_server(
 async def stop_server(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("server:stop"),
@@ -361,6 +378,7 @@ async def stop_server(
         ),
     ],
     use_case: Annotated[StopServer, Depends(get_stop_server)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -377,6 +395,7 @@ async def stop_server(
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
         raise _conflict("command_failed") from exc
+    await _record(recorder, ops.SERVER_STOP, authorized, community_id, server.id.value)
     return ServerResponse.from_entity(server)
 
 
@@ -384,8 +403,8 @@ async def stop_server(
 async def restart_server(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("server:restart"),
@@ -395,6 +414,7 @@ async def restart_server(
         ),
     ],
     use_case: Annotated[RestartServer, Depends(get_restart_server)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -411,6 +431,9 @@ async def restart_server(
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
         raise _conflict("command_failed") from exc
+    await _record(
+        recorder, ops.SERVER_RESTART, authorized, community_id, server.id.value
+    )
     return ServerResponse.from_entity(server)
 
 
@@ -419,8 +442,8 @@ async def send_server_command(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     body: ServerCommandRequest,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("server:command"),
@@ -430,6 +453,7 @@ async def send_server_command(
         ),
     ],
     use_case: Annotated[SendServerCommand, Depends(get_send_server_command)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerCommandResponse:
     try:
         output = await use_case(
@@ -445,7 +469,29 @@ async def send_server_command(
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
         raise _conflict("command_failed") from exc
+    await _record(recorder, ops.SERVER_COMMAND, authorized, community_id, server_id)
     return ServerCommandResponse(output=output)
+
+
+async def _record(
+    recorder: AuditRecorder,
+    operation: str,
+    authorized: AuthUser,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+) -> None:
+    """Record a successful server operation (FR-AUD-1), fire-after-commit."""
+
+    await recorder.record(
+        AuditEvent(
+            operation=operation,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_SERVER,
+            target_id=server_id,
+        )
+    )
 
 
 def _unprocessable(reason: str) -> HTTPException:

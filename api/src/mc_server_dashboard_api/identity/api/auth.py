@@ -13,7 +13,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_client_ip,
     get_login,
     get_logout,
@@ -61,13 +65,21 @@ async def login(
     body: LoginRequest,
     use_case: Annotated[Login, Depends(get_login)],
     client_ip: Annotated[str | None, Depends(get_client_ip)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> TokenResponse:
+    # The acting user id is intentionally not surfaced here (enumeration defence,
+    # SECURITY.md Section 2): the username/IP forensic record lives in the
+    # login_attempt table; this row captures the auth event + outcome (FR-AUD-1).
     try:
         pair = await use_case(
             username=body.username, password=body.password, ip=client_ip
         )
     except InvalidCredentialsError as exc:
+        await recorder.record(
+            AuditEvent(operation=ops.AUTH_LOGIN, outcome=Outcome.DENIED)
+        )
         raise _unauthorized() from exc
+    await recorder.record(AuditEvent(operation=ops.AUTH_LOGIN, outcome=Outcome.SUCCESS))
     return TokenResponse.from_pair(pair)
 
 
@@ -87,8 +99,12 @@ async def refresh(
 async def logout(
     body: LogoutRequest,
     use_case: Annotated[Logout, Depends(get_logout)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> Response:
     await use_case(refresh_token=body.refresh_token)
+    await recorder.record(
+        AuditEvent(operation=ops.AUTH_LOGOUT, outcome=Outcome.SUCCESS)
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

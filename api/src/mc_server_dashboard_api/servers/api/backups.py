@@ -22,8 +22,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_create_backup,
     get_delete_backup,
     get_list_backups,
@@ -98,6 +102,7 @@ async def create_backup(
         ),
     ],
     use_case: Annotated[CreateBackup, Depends(get_create_backup)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> BackupResponse:
     """Create a backup, branching on server state (Section 6.9, FR-BAK-2)."""
 
@@ -119,6 +124,9 @@ async def create_backup(
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
         raise _conflict("command_failed") from exc
+    await _record(
+        recorder, ops.BACKUP_CREATE, authorized, community_id, backup.id.value
+    )
     return BackupResponse.from_backup(backup)
 
 
@@ -158,8 +166,8 @@ async def restore_backup(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     backup_id: uuid.UUID,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("backup:restore"),
@@ -169,6 +177,7 @@ async def restore_backup(
         ),
     ],
     use_case: Annotated[RestoreBackup, Depends(get_restore_backup)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     """Restore a backup; requires the server stopped (FR-BAK-4 -> 409 if running)."""
 
@@ -184,6 +193,7 @@ async def restore_backup(
         raise _not_found() from exc
     except ServerNotStoppedError as exc:
         raise _conflict("server_not_stopped") from exc
+    await _record(recorder, ops.BACKUP_RESTORE, authorized, community_id, backup_id)
 
 
 @router.delete(
@@ -194,8 +204,8 @@ async def delete_backup(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     backup_id: uuid.UUID,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("backup:delete"),
@@ -205,6 +215,7 @@ async def delete_backup(
         ),
     ],
     use_case: Annotated[DeleteBackup, Depends(get_delete_backup)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     """Delete a backup's archive then its metadata row (backup:delete)."""
 
@@ -218,6 +229,28 @@ async def delete_backup(
         raise _not_found() from exc
     except BackupNotFoundError as exc:
         raise _not_found() from exc
+    await _record(recorder, ops.BACKUP_DELETE, authorized, community_id, backup_id)
+
+
+async def _record(
+    recorder: AuditRecorder,
+    operation: str,
+    authorized: AuthUser,
+    community_id: uuid.UUID,
+    backup_id: uuid.UUID,
+) -> None:
+    """Record a successful backup operation (FR-AUD-1), fire-after-commit."""
+
+    await recorder.record(
+        AuditEvent(
+            operation=operation,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_BACKUP,
+            target_id=backup_id,
+        )
+    )
 
 
 def _service_unavailable(reason: str) -> HTTPException:

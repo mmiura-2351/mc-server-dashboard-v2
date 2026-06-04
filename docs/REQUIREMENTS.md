@@ -516,6 +516,7 @@ Authoritative codes are `<resource>:<action>`. Initial catalog to refine:
 | Role | `role:read`, `role:manage` |
 | Grant | `grant:read`, `grant:manage` |
 | Community | `community:read`, `community:update`, `community:delete` |
+| Audit | `audit:read` (community-scoped; the audit trail query for authorized members, FR-AUD-3) |
 | Platform (admin axis) | `worker:manage`, `community:provision`, `platform:monitor` |
 
 ## Appendix B — Core entities (sketch)

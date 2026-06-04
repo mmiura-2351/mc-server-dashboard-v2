@@ -20,6 +20,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.application.manage_role import (
     CreateRole,
     DeleteRole,
@@ -43,6 +46,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     RoleId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_create_role,
     get_delete_role,
     get_list_roles,
@@ -119,10 +123,11 @@ async def read_role(
 async def create_role(
     community_id: uuid.UUID,
     body: CreateRoleRequest,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("role:manage")))
     ],
     use_case: Annotated[CreateRole, Depends(get_create_role)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> RoleResponse:
     try:
         role = await use_case(
@@ -142,6 +147,16 @@ async def create_role(
         ) from exc
     except UnknownPermissionError as exc:
         raise _invalid_permission() from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.ROLE_CREATE,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_ROLE,
+            target_id=role.id.value,
+        )
+    )
     return RoleResponse.from_entity(role)
 
 
@@ -150,10 +165,11 @@ async def update_role(
     community_id: uuid.UUID,
     role_id: uuid.UUID,
     body: UpdateRoleRequest,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("role:manage")))
     ],
     use_case: Annotated[UpdateRole, Depends(get_update_role)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> RoleResponse:
     try:
         role = await use_case(
@@ -185,6 +201,16 @@ async def update_role(
         ) from exc
     except UnknownPermissionError as exc:
         raise _invalid_permission() from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.ROLE_UPDATE,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_ROLE,
+            target_id=role.id.value,
+        )
+    )
     return RoleResponse.from_entity(role)
 
 
@@ -195,10 +221,11 @@ async def update_role(
 async def delete_role(
     community_id: uuid.UUID,
     role_id: uuid.UUID,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("role:manage")))
     ],
     use_case: Annotated[DeleteRole, Depends(get_delete_role)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     try:
         await use_case(community_id=CommunityId(community_id), role_id=RoleId(role_id))
@@ -209,6 +236,16 @@ async def delete_role(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": "preset_role"},
         ) from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.ROLE_DELETE,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_ROLE,
+            target_id=role_id,
+        )
+    )
 
 
 def _parse_permissions(raw: list[str]) -> set[Permission]:

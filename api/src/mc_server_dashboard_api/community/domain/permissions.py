@@ -49,6 +49,7 @@ COMMUNITY_PERMISSIONS: frozenset[Permission] = frozenset(
         "community:read",
         "community:update",
         "community:delete",
+        "audit:read",
     )
 )
 

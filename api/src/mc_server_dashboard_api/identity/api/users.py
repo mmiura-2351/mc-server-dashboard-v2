@@ -13,7 +13,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from mc_server_dashboard_api.dependencies import get_current_user, get_register_user
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
+from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
+    get_current_user,
+    get_register_user,
+)
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
@@ -57,6 +64,7 @@ class UserResponse(BaseModel):
 async def register_user(
     body: RegisterUserRequest,
     use_case: Annotated[RegisterUser, Depends(get_register_user)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> UserResponse:
     try:
         user = await use_case(
@@ -77,6 +85,16 @@ async def register_user(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"reason": _field_reason(exc)},
         ) from exc
+    # Self-registration: the new user is both the actor and the target (FR-AUD-1).
+    await recorder.record(
+        AuditEvent(
+            operation=ops.AUTH_REGISTER,
+            outcome=Outcome.SUCCESS,
+            actor_id=user.id.value,
+            target_type=ops.TARGET_USER,
+            target_id=user.id.value,
+        )
+    )
     return UserResponse.from_entity(user)
 
 
