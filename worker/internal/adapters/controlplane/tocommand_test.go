@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	controlplanev1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/controlplane/v1"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
 func TestToCommandMapsHydrateTrigger(t *testing.T) {
@@ -41,5 +42,44 @@ func TestToCommandMapsSnapshotTrigger(t *testing.T) {
 	}
 	if cmd.TransferURL != "https://api/snapshot" || cmd.TransferToken != "tok" {
 		t.Fatalf("transfer fields = %q/%q", cmd.TransferURL, cmd.TransferToken)
+	}
+}
+
+func TestToCommandMapsReadFile(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c3",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_ReadFile{
+			ReadFile: &controlplanev1.ReadFile{Path: "server.properties"},
+		},
+	})
+	if cmd.Kind != "ReadFile" {
+		t.Fatalf("Kind = %q, want ReadFile", cmd.Kind)
+	}
+	if cmd.Path != "server.properties" {
+		t.Fatalf("Path = %q, want server.properties", cmd.Path)
+	}
+}
+
+func TestToCommandMapsEditFile(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c4",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_EditFile{
+			EditFile: &controlplanev1.EditFile{Path: "ops.json", Content: []byte("[]")},
+		},
+	})
+	if cmd.Kind != "EditFile" {
+		t.Fatalf("Kind = %q, want EditFile", cmd.Kind)
+	}
+	if cmd.Path != "ops.json" || string(cmd.Content) != "[]" {
+		t.Fatalf("Path/Content = %q/%q", cmd.Path, cmd.Content)
+	}
+}
+
+func TestMapErrorCodeFileAccessDenied(t *testing.T) {
+	got := mapErrorCode(session.CommandErrorFileAccessDenied)
+	if got != controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_FILE_ACCESS_DENIED {
+		t.Fatalf("mapErrorCode = %v, want FILE_ACCESS_DENIED", got)
 	}
 }

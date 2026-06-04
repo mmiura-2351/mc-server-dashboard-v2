@@ -204,10 +204,11 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 // long-running transfer. Lifecycle/console commands are fast and handled inline;
 // the long-running data-plane triggers (Hydrate/Snapshot) are dispatched off the
 // loop under a bounded semaphore so a slow transfer for one server does not delay
-// commands for another (issue #95). Unhandled commands (ReadFile/EditFile) get an
-// "unsupported" result. A command is never silently dropped (CONTROL_PLANE.md
-// Section 5). Every result is pushed to results, drained by the single sender in
-// serve.
+// commands for another (issue #95). File commands (ReadFile/EditFile) are small
+// and stay inline on the loop, like ServerCommand. An unset/unknown command oneof
+// gets an "unsupported" result. A command is never silently dropped
+// (CONTROL_PLANE.md Section 5). Every result is pushed to results, drained by the
+// single sender in serve.
 func (r *Runner) receiveLoop(ctx context.Context, transport Transport, results chan<- CommandResult) error {
 	sem := make(chan struct{}, maxConcurrentTransfers)
 	for {
@@ -265,7 +266,7 @@ func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
 func isHandledKind(kind string) bool {
 	switch kind {
 	case "StartServer", "StopServer", "RestartServer", "ServerCommand",
-		"HydrateTrigger", "SnapshotTrigger":
+		"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile":
 		return true
 	default:
 		return false

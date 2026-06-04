@@ -112,3 +112,41 @@ class CommandDispatchError(ServerError):
     For a start, the use case compensates the desired/assignment write before
     raising. The edge maps this to a typed 409.
     """
+
+
+class ServerFileNotFoundError(ServerError):
+    """A file/version operation targeted a path or version that does not exist.
+
+    Raised on the at-rest path (Storage ``NotFoundError``) and the running path
+    (Worker ``SERVER_NOT_FOUND``). The edge maps this to 404, with the same
+    no-existence-signal posture as a missing server.
+    """
+
+
+class InvalidFilePathError(ServerError):
+    """A file path was rejected as traversal-unsafe (FR-FILE-4).
+
+    Raised on the at-rest path (Storage ``PathTraversalError``) and the running
+    path (Worker ``FILE_ACCESS_DENIED``): an absolute path, a ``..`` component, or
+    a symlink escape. The edge maps this to 422; the rejection is explicit, never
+    a silent clamp.
+    """
+
+
+class FileTooLargeError(ServerError):
+    """An edit exceeded the file-size cap (Section 6.10 bounds).
+
+    File access rides the control plane for small, interactive edits
+    (ARCHITECTURE.md Section 7.2), so a write is bounded to a few MiB; an oversized
+    edit is refused at the edge before dispatch. The edge maps this to 413.
+    """
+
+
+class ServerFilesUnsettledError(ServerError):
+    """A file operation hit a server in a transitional state (Section 6.9).
+
+    The state-branching policy routes a *stopped* server to Storage and a
+    *running* server to its Worker; a server that is starting, stopping,
+    restarting, crashed, or otherwise not settled in either resting state has no
+    well-defined target. The edge maps this to 409 rather than guessing.
+    """

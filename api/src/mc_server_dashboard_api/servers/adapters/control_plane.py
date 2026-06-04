@@ -23,7 +23,9 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResult,
     CommandResultCode,
     CommandTimedOutError,
+    EditFileCommand,
     HydrateCommand,
+    ReadFileCommand,
     RestartServerCommand,
     ServerCommandCommand,
     SnapshotCommand,
@@ -77,6 +79,7 @@ def _to_outcome(result: CommandResult) -> CommandOutcome:
         status=_STATUS_BY_CODE[result.code],
         message=result.message,
         output=result.output,
+        file_content=result.file_content,
     )
 
 
@@ -196,6 +199,25 @@ class FleetControlPlaneAdapter(ControlPlane):
             SnapshotCommand(transfer_url=url, transfer_token=self._token()),
         )
 
+    async def read_file(
+        self, *, worker_id: WorkerId, server_id: ServerId, rel_path: str
+    ) -> CommandOutcome:
+        return await self._dispatch(
+            worker_id, server_id, ReadFileCommand(path=rel_path)
+        )
+
+    async def edit_file(
+        self,
+        *,
+        worker_id: WorkerId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> CommandOutcome:
+        return await self._dispatch(
+            worker_id, server_id, EditFileCommand(path=rel_path, content=content)
+        )
+
     def _base(self) -> str:
         if not self._data_plane_base_url:
             raise WorkerUnavailableError(
@@ -231,7 +253,9 @@ class FleetControlPlaneAdapter(ControlPlane):
         | RestartServerCommand
         | ServerCommandCommand
         | HydrateCommand
-        | SnapshotCommand,
+        | SnapshotCommand
+        | ReadFileCommand
+        | EditFileCommand,
     ) -> CommandOutcome:
         try:
             result = await self._control_plane.dispatch(

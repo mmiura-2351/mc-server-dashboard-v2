@@ -34,6 +34,8 @@ from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegist
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResultCode,
     CommandTimedOutError,
+    EditFileCommand,
+    ReadFileCommand,
     ServerCommandCommand,
     StartServerCommand,
     WorkerNotConnectedError,
@@ -152,6 +154,64 @@ async def test_dispatch_correlates_command_result(harness: _Harness) -> None:
 
     assert result.success
     assert result.output == "players: 3"
+    await call.done_writing()
+
+
+async def test_dispatch_read_file_carries_bytes_back(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+
+    async def worker_echo() -> None:
+        msg = await call.read()
+        assert msg.api_command.WhichOneof("command") == "read_file"
+        assert msg.api_command.read_file.path == "server.properties"
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(
+                    success=True, file_content=b"\x00\x01motd"
+                ),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    result = await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=ReadFileCommand(path="server.properties"),
+    )
+    await echo
+
+    assert result.success
+    assert result.file_content == b"\x00\x01motd"
+    await call.done_writing()
+
+
+async def test_dispatch_edit_file_carries_content(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+
+    async def worker_echo() -> None:
+        msg = await call.read()
+        assert msg.api_command.WhichOneof("command") == "edit_file"
+        assert msg.api_command.edit_file.path == "ops.json"
+        assert msg.api_command.edit_file.content == b"[]"
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    result = await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=EditFileCommand(path="ops.json", content=b"[]"),
+    )
+    await echo
+
+    assert result.success
     await call.done_writing()
 
 

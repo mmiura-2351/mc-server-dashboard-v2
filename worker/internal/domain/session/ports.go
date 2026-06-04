@@ -24,10 +24,10 @@ type RegisterAck struct {
 
 // Command is an inbound API command, reduced to the fields the session and its
 // CommandHandler need (CONTROL_PLANE.md Section 5). The lifecycle commands
-// (StartServer/StopServer/RestartServer/ServerCommand) are dispatched to the
-// handler; the remaining commands (Hydrate/Snapshot/ReadFile/EditFile) are still
-// answered with an "unsupported" CommandResult (epics #8/#9), never silently
-// dropped.
+// (StartServer/StopServer/RestartServer/ServerCommand) and the file commands
+// (ReadFile/EditFile) are dispatched to the handler; Hydrate/Snapshot run their
+// data-plane transfer. An unset command oneof is answered with an "unsupported"
+// CommandResult, never silently dropped.
 type Command struct {
 	CommandID string
 	ServerID  string
@@ -50,14 +50,20 @@ type Command struct {
 	TransferURL string
 	// TransferToken is the short-lived credential authorizing one transfer.
 	TransferToken string
+	// Path is the working-set-relative path for ReadFile / EditFile (Section 7.2).
+	Path string
+	// Content is the bytes to write for EditFile.
+	Content []byte
 }
 
 // CommandResult answers a Command. A failure carries an ErrorCode and message;
-// a ServerCommand success carries Output (CONTROL_PLANE.md Section 7).
+// a ServerCommand success carries Output, and a ReadFile success carries
+// FileContent (CONTROL_PLANE.md Section 7).
 type CommandResult struct {
 	CommandID    string
 	Success      bool
 	Output       string
+	FileContent  []byte
 	ErrorCode    CommandErrorCode
 	ErrorMessage string
 }
@@ -81,6 +87,9 @@ const (
 	// CommandErrorTransferFailed marks a failed hydrate/snapshot data-plane
 	// transfer (CONTROL_PLANE.md Section 7).
 	CommandErrorTransferFailed
+	// CommandErrorFileAccessDenied marks a rejected file access: a traversal-unsafe
+	// path or an oversized read/edit (FR-FILE-4, CONTROL_PLANE.md Section 7).
+	CommandErrorFileAccessDenied
 )
 
 // StatusEvent is an observed server-state transition the session emits as a

@@ -15,10 +15,14 @@ package instancemanager
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -106,6 +110,10 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 		return m.handleHydrate(ctx, cmd)
 	case "SnapshotTrigger":
 		return m.handleSnapshot(ctx, cmd)
+	case "ReadFile":
+		return m.handleReadFile(cmd)
+	case "EditFile":
+		return m.handleEditFile(cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
@@ -277,6 +285,242 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 			fmt.Sprintf("instancemanager: server command: %v", err))
 	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true, Output: out}
+}
+
+// MaxFileBytes bounds a ReadFile response and an EditFile payload. File access
+// rides the control plane for small, interactive files (ARCHITECTURE.md
+// Section 7.2), not bulk world data — that moves on the data plane. 4 MiB matches
+// the API edge cap; an oversized read or edit is refused with a coded
+// FILE_ACCESS_DENIED error rather than streaming megabytes onto the stream.
+const MaxFileBytes = 4 * 1024 * 1024
+
+// handleReadFile reads a working-set-relative file and returns its bytes
+// (Section 6.9, 7.2). The path is sanitized against traversal (FR-FILE-4); a
+// missing file maps to SERVER_NOT_FOUND (the API turns it into a 404) and an
+// oversized file to FILE_ACCESS_DENIED. It runs inline on the receive loop: a
+// small file read is fast, unlike the off-loop bulk transfers.
+func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
+	root := filepath.Join(m.scratchDir, cmd.ServerID)
+	target, err := safeJoin(root, cmd.Path)
+	if err != nil {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: read file: %v", err))
+	}
+	// Real-path containment: a symlink on an intermediate path component (which
+	// the running MC process can plant inside its own working set) would
+	// otherwise redirect the read outside the root. Resolve the target's parent
+	// and confirm it stays inside the resolved root before touching the target.
+	if err := verifyParentContained(root, target); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: read file: %v", err))
+	}
+
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+				fmt.Sprintf("instancemanager: read file: %q not found", cmd.Path))
+		}
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: read file: %v", err))
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		// A symlink is the classic escape vector; refuse it outright rather than
+		// following it out of the working set (FR-FILE-4).
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
+	}
+	if info.IsDir() {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
+	}
+	if info.Size() > MaxFileBytes {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: %q exceeds the %d-byte read cap", cmd.Path, MaxFileBytes))
+	}
+
+	content, err := readFileNoFollow(target)
+	if err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: read file: %v", err))
+	}
+	// Use a non-nil empty slice so an empty file still rides the file_content arm
+	// of the result oneof (the transport distinguishes nil from empty).
+	if content == nil {
+		content = []byte{}
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true, FileContent: content}
+}
+
+// handleEditFile writes bytes to a working-set-relative file (Section 6.9, 7.2).
+// The path is sanitized against traversal and the payload is size-bounded; the
+// write is atomic (temp sibling + rename) so a concurrent reader never sees a
+// torn file. It runs inline on the receive loop (a small, interactive edit).
+func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
+	if len(cmd.Content) > MaxFileBytes {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: edit exceeds the %d-byte cap", MaxFileBytes))
+	}
+
+	root := filepath.Join(m.scratchDir, cmd.ServerID)
+	target, err := safeJoin(root, cmd.Path)
+	if err != nil {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: edit file: %v", err))
+	}
+
+	// Real-path containment, guarding an intermediate-component symlink the MC
+	// process could plant: resolve the deepest *existing* ancestor and confirm
+	// it stays inside the resolved root before any MkdirAll. This ensures
+	// MkdirAll cannot traverse a link and create dirs outside the root.
+	if err := verifyParentContained(root, target); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: edit file: %v", err))
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: edit file: %v", err))
+	}
+	// Re-verify after MkdirAll: the now-fully-materialized parent must still
+	// resolve inside the root (belt-and-braces against a concurrently planted
+	// link), then refuse an existing symlink/dir at the final component.
+	if err := verifyParentContained(root, target); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: edit file: %v", err))
+	}
+	if info, statErr := os.Lstat(target); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+				fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
+		}
+		if info.IsDir() {
+			return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+				fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
+		}
+	}
+
+	if err := atomicWrite(target, cmd.Content); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: edit file: %v", err))
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// safeJoin joins name under root and verifies the result stays inside root.
+// Absolute paths and any ".." component are rejected outright (not clamped),
+// mirroring the data-plane extractor's discipline (FR-FILE-4). The string-level
+// check below does not resolve symlinks; the handlers additionally call
+// verifyParentContained (real-path containment of intermediate components) and
+// Lstat the final component so no in-path link can redirect the access.
+func safeJoin(root, name string) (string, error) {
+	slashed := filepath.ToSlash(name)
+	if path.IsAbs(slashed) {
+		return "", fmt.Errorf("refusing absolute path %q", name)
+	}
+	for _, part := range strings.Split(slashed, "/") {
+		if part == ".." {
+			return "", fmt.Errorf("refusing path escape %q", name)
+		}
+	}
+	joined := filepath.Join(root, filepath.FromSlash(slashed))
+	if joined != root && !strings.HasPrefix(joined, root+string(os.PathSeparator)) {
+		return "", fmt.Errorf("refusing path escape %q", name)
+	}
+	if joined == root {
+		// The working-set root itself is a directory, never a readable/writable
+		// file; reject "." / "" so the caller gets a coded error, not an EISDIR.
+		return "", fmt.Errorf("refusing working-set root as a file path")
+	}
+	return joined, nil
+}
+
+// verifyParentContained confirms that target's parent directory, after fully
+// resolving symlinks, stays inside the resolved root. safeJoin already rejects
+// lexical escapes (absolute / ".."), but it does not resolve links: a symlink on
+// an intermediate path component would lexically look contained yet redirect the
+// real path outside root. Both root and parent are resolved through the same
+// deepest-existing-ancestor mechanism (so an outer symlink such as /tmp does not
+// cause a spurious mismatch), and the parent must stay inside the resolved root
+// (FR-FILE-4).
+func verifyParentContained(root, target string) error {
+	resolvedRoot, err := resolveExisting(root)
+	if err != nil {
+		return fmt.Errorf("resolving root: %w", err)
+	}
+	resolvedParent, err := resolveExisting(filepath.Dir(target))
+	if err != nil {
+		return fmt.Errorf("resolving path: %w", err)
+	}
+	if resolvedParent != resolvedRoot &&
+		!strings.HasPrefix(resolvedParent, resolvedRoot+string(os.PathSeparator)) {
+		return fmt.Errorf("refusing path escape via symlink %q", target)
+	}
+	return nil
+}
+
+// resolveExisting returns p with every symlink in its existing portion resolved.
+// It walks up to the deepest ancestor that exists, EvalSymlinks that (the only
+// part that can hold a link), then reattaches the not-yet-created lexical tail.
+func resolveExisting(p string) (string, error) {
+	existing := p
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		existing = parent
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", err
+	}
+	if existing == p {
+		return resolved, nil
+	}
+	rest, err := filepath.Rel(existing, p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolved, rest), nil
+}
+
+// readFileNoFollow reads a regular file, refusing to follow a symlink at the
+// final component (O_NOFOLLOW belt-and-braces; the handler also Lstat-guards it).
+func readFileNoFollow(target string) ([]byte, error) {
+	f, err := os.OpenFile(target, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
+}
+
+// atomicWrite writes data to a temp sibling, fsyncs it, and renames it over the
+// target so a concurrent reader sees either the old or the complete new content,
+// never a partial write (mirrors the Storage adapter's write discipline).
+func atomicWrite(target string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".edit-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, target)
 }
 
 // take removes and returns the instance and its StartServer command for

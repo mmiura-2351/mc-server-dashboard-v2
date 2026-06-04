@@ -29,7 +29,9 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResultCode,
     CommandTimedOutError,
     ControlPlane,
+    EditFileCommand,
     HydrateCommand,
+    ReadFileCommand,
     RestartServerCommand,
     ServerCommandCommand,
     SnapshotCommand,
@@ -182,6 +184,10 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
                 transfer_token=command.transfer_token,
             )
         )
+    elif isinstance(command, ReadFileCommand):
+        api.read_file.CopyFrom(pb.ReadFile(path=command.path))
+    elif isinstance(command, EditFileCommand):
+        api.edit_file.CopyFrom(pb.EditFile(path=command.path, content=command.content))
     else:  # pragma: no cover - exhaustive over the Command union
         raise TypeError(f"unsupported command type: {type(command)!r}")
     return api
@@ -189,7 +195,13 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
 
 def _to_result(message: pb.CommandResult) -> CommandResult:
     if message.success:
-        return CommandResult(code=CommandResultCode.OK, output=message.command_output)
+        # command_output and file_content share the result oneof; reading the
+        # unset one yields the proto default (empty), so passing both is safe.
+        return CommandResult(
+            code=CommandResultCode.OK,
+            output=message.command_output,
+            file_content=message.file_content,
+        )
     code = _CODE_FROM_PROTO.get(message.error.code, CommandResultCode.INTERNAL)
     return CommandResult(code=code, message=message.error.message)
 

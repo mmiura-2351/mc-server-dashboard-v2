@@ -56,6 +56,7 @@ from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
+from mc_server_dashboard_api.servers.api import files as server_files
 from mc_server_dashboard_api.servers.api import servers
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
@@ -246,6 +247,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(roles.router)
     app.include_router(grants.router)
     app.include_router(servers.router)
+    app.include_router(server_files.router)
     app.include_router(workers.router)
     app.include_router(transfers.router)
     return app

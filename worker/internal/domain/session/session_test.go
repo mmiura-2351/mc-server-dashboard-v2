@@ -218,7 +218,7 @@ func TestLifecycleCommandDispatchedToHandler(t *testing.T) {
 	<-done
 }
 
-func TestUnhandledCommandStillUnsupportedWithHandler(t *testing.T) {
+func TestUnknownCommandStillUnsupportedWithHandler(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
 	clock := newFakeClock()
@@ -230,17 +230,45 @@ func TestUnhandledCommandStillUnsupportedWithHandler(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = r.Run(ctx); close(done) }()
 
-	// ReadFile is not handled yet (epic #9); it must stay unsupported and never
+	// An unset/unknown command oneof (empty Kind) must stay unsupported and never
 	// reach the handler, even with one wired.
-	transport.commands <- Command{CommandID: "cmd-2", ServerID: "srv-1", Kind: "ReadFile"}
+	transport.commands <- Command{CommandID: "cmd-2", ServerID: "srv-1", Kind: ""}
 
 	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
 	got := transport.resultsCopy()[0]
 	if got.Success {
-		t.Fatal("ReadFile should remain unsupported even with a handler")
+		t.Fatal("an unknown command should remain unsupported even with a handler")
 	}
 	if len(handler.handledCopy()) != 0 {
-		t.Fatal("ReadFile should not reach the handler")
+		t.Fatal("an unknown command should not reach the handler")
+	}
+
+	cancel()
+	<-done
+}
+
+func TestFileCommandDispatchedToHandler(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true, FileContent: []byte("data")})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// ReadFile is small and stays inline on the receive loop; it reaches the
+	// handler and its bytes ride the result (Section 7.2).
+	transport.commands <- Command{CommandID: "cmd-3", ServerID: "srv-1", Kind: "ReadFile", Path: "server.properties"}
+
+	waitFor(t, func() bool { return len(handler.handledCopy()) == 1 })
+	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
+
+	got := transport.resultsCopy()[0]
+	if got.CommandID != "cmd-3" || !got.Success || string(got.FileContent) != "data" {
+		t.Fatalf("dispatched result = %+v, want success cmd-3 content data", got)
 	}
 
 	cancel()

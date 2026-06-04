@@ -116,9 +116,14 @@ func (t *transport) SendHeartbeat(_ context.Context) error {
 func (t *transport) SendCommandResult(_ context.Context, result session.CommandResult) error {
 	cr := &controlplanev1.CommandResult{Success: result.Success}
 	if result.Success {
-		// A successful ServerCommand carries its console output; other successes
-		// have no payload (CONTROL_PLANE.md Section 5).
-		if result.Output != "" {
+		// A successful ServerCommand carries its console output and a ReadFile its
+		// bytes (mutually exclusive); other successes have no payload
+		// (CONTROL_PLANE.md Section 5). FileContent is checked first so an empty
+		// file (zero-length, non-nil content) still rides the file_content arm.
+		switch {
+		case result.FileContent != nil:
+			cr.Result = &controlplanev1.CommandResult_FileContent{FileContent: result.FileContent}
+		case result.Output != "":
 			cr.Result = &controlplanev1.CommandResult_CommandOutput{CommandOutput: result.Output}
 		}
 	} else {
@@ -236,6 +241,8 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE
 	case session.CommandErrorTransferFailed:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_TRANSFER_FAILED
+	case session.CommandErrorFileAccessDenied:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_FILE_ACCESS_DENIED
 	default:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
 	}
@@ -285,6 +292,11 @@ func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
 	case *controlplanev1.ApiCommand_Snapshot:
 		out.TransferURL = c.Snapshot.GetTransferUrl()
 		out.TransferToken = c.Snapshot.GetTransferToken()
+	case *controlplanev1.ApiCommand_ReadFile:
+		out.Path = c.ReadFile.GetPath()
+	case *controlplanev1.ApiCommand_EditFile:
+		out.Path = c.EditFile.GetPath()
+		out.Content = c.EditFile.GetContent()
 	}
 	return out
 }
