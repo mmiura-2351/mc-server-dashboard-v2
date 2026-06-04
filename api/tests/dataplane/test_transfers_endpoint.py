@@ -341,6 +341,40 @@ def test_snapshot_over_cap_body_aborts_mid_stream(
     assert _read_tar(published) == {"keep.txt": b"prior"}
 
 
+def test_snapshot_empty_upload_is_rejected_and_not_published(tmp_path: Path) -> None:
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+
+    # An empty tar (just the end-of-archive marker, no members) carries a matching
+    # Content-Length, so it clears the length gate but stages zero files: a worker
+    # packing an empty working set is a bug signal, not a publishable snapshot
+    # (STORAGE.md Section 4.1). It must be refused loudly and leave the prior
+    # authoritative copy intact.
+    body = _tar_bytes({})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "empty_snapshot"
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    published = asyncio.run(_read())
+    assert _read_tar(published) == {"keep.txt": b"prior"}
+
+
 def test_snapshot_requires_content_length(tmp_path: Path) -> None:
     client, _ = _setup(tmp_path)
     community, server = _scope()
