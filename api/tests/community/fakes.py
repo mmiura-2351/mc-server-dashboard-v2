@@ -54,6 +54,9 @@ class FakeCommunityRepository(CommunityRepository):
                 return community
         return None
 
+    async def update(self, community: Community) -> None:
+        self.by_id[community.id] = community
+
     async def delete(self, community_id: CommunityId) -> None:
         self.by_id.pop(community_id, None)
 
@@ -79,6 +82,9 @@ class FakeMembershipRepository(MembershipRepository):
             ):
                 return membership
         return None
+
+    async def list_for_user(self, user_id: UserId) -> list[Membership]:
+        return [m for m in self.by_id.values() if m.user_id == user_id]
 
     async def delete(self, membership_id: MembershipId) -> None:
         self.by_id.pop(membership_id, None)
@@ -170,6 +176,9 @@ class FakeAuthzUnitOfWork(UnitOfWork):
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    async def flush(self) -> None:
         return None
 
     async def commit(self) -> None:

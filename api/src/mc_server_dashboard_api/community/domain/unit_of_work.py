@@ -42,6 +42,17 @@ class UnitOfWork(abc.ABC):
         """Roll back if the block is left without an explicit commit."""
 
     @abc.abstractmethod
+    async def flush(self) -> None:
+        """Flush staged INSERTs so later rows can reference them by FK.
+
+        ``membership_role`` references ``role`` and ``membership``, but these are
+        modelled by plain FK columns (no ORM relationship), so the unit of work
+        cannot infer the insert order on its own. A use case that stages a row,
+        then a row that FKs it, flushes between the two — without committing — so
+        the foreign-key target exists when the dependent insert runs.
+        """
+
+    @abc.abstractmethod
     async def commit(self) -> None:
         """Make the staged changes durable."""
 

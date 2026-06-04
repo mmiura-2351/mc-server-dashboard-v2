@@ -65,6 +65,15 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
             await self._session.close()
             self._session = None
 
+    async def flush(self) -> None:
+        assert self._session is not None
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            _translate_integrity_error(exc)
+            raise
+
     async def commit(self) -> None:
         assert self._session is not None
         try:
