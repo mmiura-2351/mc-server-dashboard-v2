@@ -281,6 +281,15 @@ class StartServer:
         (the hydrate/start guards reject a live instance): the divergence is in fact
         resolved, so we treat it as success rather than flipping the authoritative
         running intent to stopped. Any other failure raises for the next tick.
+
+        On the ``INVALID_STATE`` convergence we MUST record observed=running (issue
+        #213): the Worker performed no transition, so it will never emit a
+        StatusChange to repair the cached observed state — without this write the
+        row stays diverged (e.g. observed=unknown after an API restart) and the
+        reconciler re-selects and redispatches it every tick forever. We do not
+        unassign: the instance is live and keeps its Worker (mirror of the genuine
+        success path, which the Worker's StatusChange(running) already covers, so it
+        writes nothing here).
         """
 
         async with self.uow:
@@ -293,7 +302,19 @@ class StartServer:
             worker_id = server.assigned_worker_id
 
         outcome = await self._launch(server, community_id, server_id, worker_id)
-        if outcome.success or outcome.status is CommandStatus.INVALID_STATE:
+        if outcome.success:
+            return server
+        if outcome.status is CommandStatus.INVALID_STATE:
+            observed_at = self.clock.now()
+            async with self.uow:
+                await self.uow.servers.record_observed_state(
+                    server_id,
+                    observed_state=ObservedState.RUNNING,
+                    observed_at=observed_at,
+                )
+                await self.uow.commit()
+            server.observed_state = ObservedState.RUNNING
+            server.observed_at = observed_at
             return server
         raise _dispatch_failure(
             server_id=server_id, kind="StartServer", outcome=outcome
