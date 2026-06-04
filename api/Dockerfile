@@ -56,6 +56,12 @@ COPY alembic.ini ./alembic.ini
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
+# compose mounts the `api-storage` named volume here (MCD_API_STORAGE__FS__ROOT).
+# Create the mount point owned by the app user before the USER switch so Docker's
+# named-volume initialization copies that ownership; otherwise the volume root is
+# created root-owned and the non-root app cannot write to it.
+RUN mkdir -p /data/storage && chown app:app /data/storage
+
 USER app
 
 EXPOSE 8000 50051
