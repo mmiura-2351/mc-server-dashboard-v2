@@ -36,6 +36,10 @@ class PasswordPolicy:
 
     min_length: int
     max_length: int
+    # Upper bound on the UTF-8 byte length, set to 72 when the configured hasher
+    # is bcrypt (which ignores bytes past 72); ``None`` for argon2, which has no
+    # such cap. Enforced here so the bcrypt adapter never truncates silently.
+    max_bytes: int | None
     require_complexity: bool
     check_common_list: bool
     forbid_user_info: bool
@@ -52,6 +56,11 @@ class PasswordPolicy:
             raise PasswordPolicyError("too_short")
         if len(password) > self.max_length:
             raise PasswordPolicyError("too_long")
+        if (
+            self.max_bytes is not None
+            and len(password.encode("utf-8")) > self.max_bytes
+        ):
+            raise PasswordPolicyError("too_long_for_bcrypt")
         if self.require_complexity and not _has_complexity_or_length(password):
             raise PasswordPolicyError("insufficient_complexity")
         if self.check_common_list and password.casefold() in self.common_passwords:
@@ -63,7 +72,11 @@ class PasswordPolicy:
 
 
 def _has_complexity_or_length(password: str) -> bool:
-    """At least 3 of {upper, lower, digit, symbol}, or at least 16 characters."""
+    """At least 3 of {upper, lower, digit, symbol}, or at least 16 characters.
+
+    Whitespace counts toward the symbol class so passphrases with spaces get the
+    credit they deserve.
+    """
 
     if len(password) >= 16:
         return True
@@ -74,7 +87,7 @@ def _has_complexity_or_length(password: str) -> bool:
         classes += 1
     if any(c.isdigit() for c in password):
         classes += 1
-    if any(not c.isalnum() and not c.isspace() for c in password):
+    if any(not c.isalnum() for c in password):
         classes += 1
     return classes >= 3
 

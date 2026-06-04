@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argon2
 import bcrypt
+import pytest
 
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
@@ -39,10 +40,19 @@ def test_bcrypt_salts_each_hash() -> None:
     assert hasher.hash("Wm7!qz#Lp2vT") != hasher.hash("Wm7!qz#Lp2vT")
 
 
-def test_bcrypt_handles_password_over_72_bytes() -> None:
-    # bcrypt has a hard 72-byte input cap; the adapter truncates so a long but
-    # policy-valid password (max_length up to 128 chars) does not raise.
+def test_bcrypt_raises_on_password_over_72_bytes() -> None:
+    # The policy rejects >72-byte passwords under bcrypt before they reach the
+    # adapter; this defensive guard raises rather than silently truncating, so
+    # two distinct passwords sharing a 72-byte prefix can never collide.
     hasher = BcryptPasswordHasher()
     long_password = "A1!" + "x" * 100
-    hashed = hasher.hash(long_password)
-    assert bcrypt.checkpw(long_password.encode("utf-8")[:72], hashed.encode("utf-8"))
+    with pytest.raises(ValueError):
+        hasher.hash(long_password)
+
+
+def test_bcrypt_hashes_at_72_byte_boundary() -> None:
+    hasher = BcryptPasswordHasher()
+    boundary_password = "A1!" + "x" * 69
+    assert len(boundary_password.encode("utf-8")) == 72
+    hashed = hasher.hash(boundary_password)
+    assert bcrypt.checkpw(boundary_password.encode("utf-8"), hashed.encode("utf-8"))

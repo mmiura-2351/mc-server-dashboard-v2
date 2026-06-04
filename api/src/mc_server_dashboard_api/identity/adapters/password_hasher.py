@@ -13,8 +13,10 @@ import bcrypt
 
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 
-# bcrypt ignores bytes past 72 and bcrypt>=5 raises on longer input; the policy
-# permits up to ``max_length`` (default 128) characters, so truncate to the cap.
+# bcrypt ignores bytes past 72, so two passwords sharing a 72-byte prefix would
+# verify identically. The password policy rejects >72-byte input when bcrypt is
+# configured, so longer input never reaches this adapter; the guard below is
+# defensive — it raises rather than silently truncating, never masking a bug.
 _BCRYPT_MAX_BYTES = 72
 
 
@@ -38,9 +40,16 @@ class BcryptPasswordHasher(PasswordHasher):
     """:class:`PasswordHasher` adapter over bcrypt (library default cost)."""
 
     def hash(self, plaintext: str) -> str:
-        encoded = plaintext.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+        encoded = self._encode(plaintext)
         return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode("utf-8")
 
     def verify(self, plaintext: str, password_hash: str) -> bool:
-        encoded = plaintext.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+        encoded = self._encode(plaintext)
         return bcrypt.checkpw(encoded, password_hash.encode("utf-8"))
+
+    @staticmethod
+    def _encode(plaintext: str) -> bytes:
+        encoded = plaintext.encode("utf-8")
+        if len(encoded) > _BCRYPT_MAX_BYTES:
+            raise ValueError("password exceeds bcrypt's 72-byte limit")
+        return encoded

@@ -23,6 +23,7 @@ def _policy(
     *,
     min_length: int = 12,
     max_length: int = 128,
+    max_bytes: int | None = None,
     require_complexity: bool = True,
     check_common_list: bool = True,
     forbid_user_info: bool = True,
@@ -32,6 +33,7 @@ def _policy(
     return PasswordPolicy(
         min_length=min_length,
         max_length=max_length,
+        max_bytes=max_bytes,
         require_complexity=require_complexity,
         check_common_list=check_common_list,
         forbid_user_info=forbid_user_info,
@@ -71,6 +73,40 @@ def test_accepts_exactly_max_length() -> None:
     _validate(_policy(max_length=12), "Wm7!qz#Lp2vT")
 
 
+def test_rejects_over_byte_cap_under_bcrypt() -> None:
+    # 73 ASCII bytes exceeds the bcrypt 72-byte cap even though the char count
+    # is within max_length.
+    password = "Wm7!qz#Lp2vT" + "x" * 61
+    assert len(password.encode("utf-8")) == 73
+    assert _reason(_policy(max_bytes=72), password) == "too_long_for_bcrypt"
+
+
+def test_rejects_multibyte_over_byte_cap_under_bcrypt() -> None:
+    # 37 three-byte characters: 37 chars (< 72) but 111 bytes (> 72).
+    password = "あ" * 37
+    assert len(password) < 72
+    assert len(password.encode("utf-8")) > 72
+    assert _reason(_policy(max_bytes=72), password) == "too_long_for_bcrypt"
+
+
+def test_accepts_at_byte_cap_under_bcrypt() -> None:
+    # Exactly 72 ASCII bytes is allowed; other rules disabled to isolate the cap.
+    password = "Wm7!qz#Lp2vT" + "x" * 60
+    assert len(password.encode("utf-8")) == 72
+    _validate(
+        _policy(max_bytes=72, require_complexity=False, forbid_simple_patterns=False),
+        password,
+    )
+
+
+def test_byte_cap_not_enforced_for_argon2() -> None:
+    # max_bytes is None for argon2: a long password is bounded only by char count.
+    _validate(
+        _policy(require_complexity=False, forbid_simple_patterns=False),
+        "Wm7!qz#Lp2vT" + "x" * 61,
+    )
+
+
 def test_rejects_insufficient_complexity_when_short() -> None:
     # 13 lowercase letters: only one class, under 16 chars -> fails the rule.
     assert _reason(_policy(), "abcdefghijklm") == "insufficient_complexity"
@@ -84,6 +120,12 @@ def test_accepts_three_classes() -> None:
 def test_accepts_long_passphrase_without_complexity() -> None:
     # Single class but >= 16 chars satisfies the complexity-or-length rule.
     _validate(_policy(), "korvblixmpungthaz")
+
+
+def test_whitespace_counts_as_a_symbol_class() -> None:
+    # 12 chars, under the 16-char shortcut: lower + digit + space (as symbol)
+    # gives 3 classes. Without crediting whitespace this would be 2 -> fail.
+    _validate(_policy(), "korv blix m9z")
 
 
 def test_complexity_rule_disabled() -> None:

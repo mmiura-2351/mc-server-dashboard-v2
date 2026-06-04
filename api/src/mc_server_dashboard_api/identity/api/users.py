@@ -39,7 +39,9 @@ class RegisterUserRequest(BaseModel):
     # Structural email validation lives in the EmailAddress value object; the
     # router maps its InvalidEmailError to 422. Avoids an extra validator dep.
     email: str = Field(min_length=1)
-    password: str = Field(min_length=1)
+    # Cheap DoS guard so an oversized body is rejected before the password policy
+    # runs; the policy enforces the real (configurable, far tighter) bounds.
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class UserResponse(BaseModel):
