@@ -501,3 +501,128 @@ async def test_delete_grants_for_resource_sweeps_one_resource(
     async with SqlAlchemyUnitOfWork(factory) as uow:
         assert await uow.resource_grants.get_by_id(target.id) is None
         assert await uow.resource_grants.get_by_id(survivor.id) is not None
+
+
+async def test_update_role_persists_name_and_permissions(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+    community = _community()
+    role = _role(community.id, "Editor")
+    role.is_preset = False
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.roles.add(role)
+        await uow.commit()
+
+    role.name = RoleName("Operator")
+    role.permissions = {Permission("server:restart")}
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.roles.update(role)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        loaded = await uow.roles.get_by_id(role.id)
+    assert loaded is not None
+    assert loaded.name == RoleName("Operator")
+    assert loaded.permissions == {Permission("server:restart")}
+
+
+async def test_delete_role_removes_the_row(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+    community = _community()
+    role = _role(community.id, "Editor")
+    role.is_preset = False
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.roles.add(role)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.roles.delete(role.id)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.roles.get_by_id(role.id) is None
+
+
+async def test_list_grants_for_community_filters_by_user(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+    alice = uuid.uuid4()
+    bob = uuid.uuid4()
+    await _insert_user(engine, alice, "alice")
+    await _insert_user(engine, bob, "bob")
+    community = _community()
+    grant_a = ResourceGrant(
+        id=ResourceGrantId.new(),
+        user_id=UserId(alice),
+        community_id=community.id,
+        resource_type="server",
+        resource_id=uuid.uuid4(),
+        permissions={Permission("server:start")},
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    grant_b = ResourceGrant(
+        id=ResourceGrantId.new(),
+        user_id=UserId(bob),
+        community_id=community.id,
+        resource_type="server",
+        resource_id=uuid.uuid4(),
+        permissions={Permission("server:stop")},
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.resource_grants.add(grant_a)
+        await uow.resource_grants.add(grant_b)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        everyone = await uow.resource_grants.list_for_community(community.id)
+        just_alice = await uow.resource_grants.list_for_community(
+            community.id, UserId(alice)
+        )
+    assert {g.id for g in everyone} == {grant_a.id, grant_b.id}
+    assert {g.id for g in just_alice} == {grant_a.id}
+
+
+async def test_delete_grant_by_id_removes_only_that_grant(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    user_id = uuid.uuid4()
+    await _insert_user(engine, user_id, "alice")
+    community = _community()
+    target = ResourceGrant(
+        id=ResourceGrantId.new(),
+        user_id=UserId(user_id),
+        community_id=community.id,
+        resource_type="server",
+        resource_id=uuid.uuid4(),
+        permissions={Permission("server:start")},
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    survivor = ResourceGrant(
+        id=ResourceGrantId.new(),
+        user_id=UserId(user_id),
+        community_id=community.id,
+        resource_type="server",
+        resource_id=uuid.uuid4(),
+        permissions={Permission("server:stop")},
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.resource_grants.add(target)
+        await uow.resource_grants.add(survivor)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.resource_grants.delete(target.id)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.resource_grants.get_by_id(target.id) is None
+        assert await uow.resource_grants.get_by_id(survivor.id) is not None

@@ -112,6 +112,14 @@ class RoleRepository(abc.ABC):
     async def list_for_community(self, community_id: CommunityId) -> list[Role]:
         """Return all roles defined in ``community_id``."""
 
+    @abc.abstractmethod
+    async def update(self, role: Role) -> None:
+        """Persist the mutable fields of ``role`` (its name and permission set)."""
+
+    @abc.abstractmethod
+    async def delete(self, role_id: RoleId) -> None:
+        """Delete the role, cascading its ``membership_role`` rows (Section 10)."""
+
 
 class ResourceGrantRepository(abc.ABC):
     """Port: persistence for :class:`ResourceGrant` rows."""
@@ -138,6 +146,20 @@ class ResourceGrantRepository(abc.ABC):
         scoped to a different community (FR-AUTHZ-4 defense-in-depth). Returns
         ``None`` when no matching grant exists.
         """
+
+    @abc.abstractmethod
+    async def list_for_community(
+        self, community_id: CommunityId, user_id: UserId | None = None
+    ) -> list[ResourceGrant]:
+        """Return the community's grants, optionally filtered to ``user_id``.
+
+        Backs the ``grant:read`` listing (community-wide, or per-member when
+        ``user_id`` is given).
+        """
+
+    @abc.abstractmethod
+    async def delete(self, grant_id: ResourceGrantId) -> None:
+        """Delete the grant with ``grant_id`` (the ``grant:manage`` revoke)."""
 
     @abc.abstractmethod
     async def delete_for_user_in_community(

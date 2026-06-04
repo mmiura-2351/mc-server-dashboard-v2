@@ -118,6 +118,12 @@ class FakeRoleRepository(RoleRepository):
     async def list_for_community(self, community_id: CommunityId) -> list[Role]:
         return [r for r in self.by_id.values() if r.community_id == community_id]
 
+    async def update(self, role: Role) -> None:
+        self.by_id[role.id] = role
+
+    async def delete(self, role_id: RoleId) -> None:
+        self.by_id.pop(role_id, None)
+
 
 class FakeResourceGrantRepository(ResourceGrantRepository):
     def __init__(self) -> None:
@@ -145,6 +151,19 @@ class FakeResourceGrantRepository(ResourceGrantRepository):
             ):
                 return grant
         return None
+
+    async def list_for_community(
+        self, community_id: CommunityId, user_id: UserId | None = None
+    ) -> list[ResourceGrant]:
+        return [
+            g
+            for g in self.by_id.values()
+            if g.community_id == community_id
+            and (user_id is None or g.user_id == user_id)
+        ]
+
+    async def delete(self, grant_id: ResourceGrantId) -> None:
+        self.by_id.pop(grant_id, None)
 
     async def delete_for_user_in_community(
         self, user_id: UserId, community_id: CommunityId

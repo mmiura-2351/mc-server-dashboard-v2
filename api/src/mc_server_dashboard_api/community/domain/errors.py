@@ -95,6 +95,43 @@ class RoleNotFoundError(CommunityError):
     """
 
 
+class PresetRoleNotEditableError(CommunityError):
+    """An attempt was made to edit or delete a seeded preset role.
+
+    The preset Owner role (FR-COMM-4) is what keeps a community administrable: its
+    permission set must remain the full community-scoped catalog, and it must
+    always exist. The simplest honest guard (issue #71) is to make preset roles
+    immutable and undeletable; editing or deleting one raises this.
+    """
+
+
+class InvalidGrantResourceTypeError(CommunityError):
+    """A resource grant named a ``resource_type`` outside the M1 catalog.
+
+    ``resource_type`` is a CHECK-constrained enum (DATABASE.md Section 6; ``server``
+    in M1). A value outside it is rejected in the use case rather than tripping the
+    database CHECK.
+    """
+
+
+class GrantTargetNotMemberError(CommunityError):
+    """The user a grant targets is not a member of the community.
+
+    A resource grant attaches permissions to a *member* (FR-AUTHZ-2). Granting to a
+    non-member raises this rather than creating a grant that no membership backs.
+    """
+
+
+class ResourceGrantNotFoundError(CommunityError):
+    """The targeted resource grant does not exist in the community.
+
+    Raised by revoke-grant when the named grant id is unknown or, security-
+    critically, belongs to a *different* community (cross-community access, the
+    same posture as :class:`RoleNotFoundError`): reported as not-found so no signal
+    about another community's grants leaks.
+    """
+
+
 class LastOwnerRemovalError(CommunityError):
     """Removing this member would leave the community with no Owner-role holder.
 

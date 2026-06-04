@@ -39,12 +39,24 @@ from mc_server_dashboard_api.community.application.manage_community import (
     ReadCommunity,
     RenameCommunity,
 )
+from mc_server_dashboard_api.community.application.manage_grant import (
+    CreateGrant,
+    ListGrants,
+    RevokeGrant,
+)
 from mc_server_dashboard_api.community.application.manage_membership import (
     AddMember,
     AssignRole,
     ListMembers,
     RemoveMember,
     UnassignRole,
+)
+from mc_server_dashboard_api.community.application.manage_role import (
+    CreateRole,
+    DeleteRole,
+    ListRoles,
+    ReadRole,
+    UpdateRole,
 )
 from mc_server_dashboard_api.community.application.provision_community import (
     ProvisionCommunity,
@@ -423,6 +435,71 @@ def get_unassign_role(request: Request) -> UnassignRole:
 
     session_factory = create_session_factory(get_engine(request))
     return UnassignRole(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_list_roles(request: Request) -> ListRoles:
+    """Assemble the :class:`ListRoles` use case (role:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListRoles(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_read_role(request: Request) -> ReadRole:
+    """Assemble the :class:`ReadRole` use case (role:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ReadRole(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_create_role(request: Request) -> CreateRole:
+    """Assemble the :class:`CreateRole` use case (role:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return CreateRole(
+        uow=CommunityUnitOfWork(session_factory),
+        clock=CommunitySystemClock(),
+    )
+
+
+def get_update_role(request: Request) -> UpdateRole:
+    """Assemble the :class:`UpdateRole` use case (role:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UpdateRole(
+        uow=CommunityUnitOfWork(session_factory),
+        clock=CommunitySystemClock(),
+    )
+
+
+def get_delete_role(request: Request) -> DeleteRole:
+    """Assemble the :class:`DeleteRole` use case (role:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteRole(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_list_grants(request: Request) -> ListGrants:
+    """Assemble the :class:`ListGrants` use case (grant:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListGrants(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_create_grant(request: Request) -> CreateGrant:
+    """Assemble the :class:`CreateGrant` use case (grant:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return CreateGrant(
+        uow=CommunityUnitOfWork(session_factory),
+        clock=CommunitySystemClock(),
+    )
+
+
+def get_revoke_grant(request: Request) -> RevokeGrant:
+    """Assemble the :class:`RevokeGrant` use case (grant:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RevokeGrant(uow=CommunityUnitOfWork(session_factory))
 
 
 def _to_auth_user(user: User) -> AuthUser:
