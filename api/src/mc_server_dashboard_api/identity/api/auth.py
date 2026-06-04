@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.dependencies import (
+    get_client_ip,
     get_login,
     get_logout,
     get_refresh_session,
@@ -59,9 +60,12 @@ class TokenResponse(BaseModel):
 async def login(
     body: LoginRequest,
     use_case: Annotated[Login, Depends(get_login)],
+    client_ip: Annotated[str | None, Depends(get_client_ip)],
 ) -> TokenResponse:
     try:
-        pair = await use_case(username=body.username, password=body.password)
+        pair = await use_case(
+            username=body.username, password=body.password, ip=client_ip
+        )
     except InvalidCredentialsError as exc:
         raise _unauthorized() from exc
     return TokenResponse.from_pair(pair)

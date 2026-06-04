@@ -63,6 +63,16 @@ class Username:
         object.__setattr__(self, "value", trimmed)
         object.__setattr__(self, "_key", trimmed.casefold())
 
+    @property
+    def key(self) -> str:
+        """The case-folded identity key, stable across spelling variants.
+
+        Brute-force / lockout state keys on this (not ``value``) so failures
+        spread across casings of one username aggregate (SECURITY.md Section 2).
+        """
+
+        return self._key
+
 
 @dataclass(frozen=True)
 class EmailAddress:

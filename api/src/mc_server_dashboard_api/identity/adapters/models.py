@@ -10,7 +10,17 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, false, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    false,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -71,4 +81,50 @@ class RefreshTokenModel(Base):
     )
     revoked_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class LoginAttemptModel(Base):
+    """Row of the ``login_attempt`` table (SECURITY.md Section 3).
+
+    Append-only record of each authentication attempt. The sliding-window counts
+    are ``COUNT`` queries over this table within the window bound; the
+    ``(username, created_at)`` and ``(ip, created_at)`` indexes serve them. ``ip``
+    is nullable because the per-IP path is skipped when no trustworthy client IP
+    is available (SECURITY.md Section 4). ``failure_reason`` records why a failed
+    attempt was rejected and is null for a success.
+    """
+
+    __tablename__ = "login_attempt"
+    __table_args__ = (
+        Index("ix_login_attempt_username_created_at", "username", "created_at"),
+        Index("ix_login_attempt_ip_created_at", "ip", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    ip: Mapped[str | None] = mapped_column(String, nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class AccountLockoutModel(Base):
+    """Row of the ``account_lockout`` table (SECURITY.md Section 3).
+
+    At most one row per username, holding the active lockout (``locked_until``)
+    and the historic lockout count that drives the exponential back-off. The
+    username is the primary key, giving the one-row-per-account invariant.
+    """
+
+    __tablename__ = "account_lockout"
+
+    username: Mapped[str] = mapped_column(String, primary_key=True)
+    locked_until: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    lockout_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
     )

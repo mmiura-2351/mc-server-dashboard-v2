@@ -16,23 +16,36 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from mc_server_dashboard_api.config import PasswordSettings, Settings, TokenSettings
+from mc_server_dashboard_api.config import (
+    BruteForceSettings,
+    PasswordSettings,
+    Settings,
+    TokenSettings,
+)
 from mc_server_dashboard_api.core.adapters.database import (
     SqlAlchemyDatabasePing,
     create_session_factory,
 )
 from mc_server_dashboard_api.core.domain.health import DatabasePing
+from mc_server_dashboard_api.identity.adapters.client_ip import (
+    forwarded_for_header,
+    resolve_client_ip,
+)
 from mc_server_dashboard_api.identity.adapters.clock import SystemClock
 from mc_server_dashboard_api.identity.adapters.common_passwords import (
     load_common_passwords,
 )
+from mc_server_dashboard_api.identity.adapters.login_attempt_store import (
+    SqlAlchemyLoginAttemptStore,
+)
 from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
-    NoOpLoginFailureDelay,
+    FixedLoginFailureDelay,
 )
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
     BcryptPasswordHasher,
 )
+from mc_server_dashboard_api.identity.adapters.sleeper import AsyncioSleeper
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.identity.application.authenticate_request import (
@@ -42,6 +55,7 @@ from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
+from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import InvalidAccessTokenError
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
@@ -75,6 +89,20 @@ def _build_password_hasher(password: PasswordSettings) -> PasswordHasher:
     if password.hash == "bcrypt":
         return BcryptPasswordHasher()
     return Argon2PasswordHasher()
+
+
+# A throwaway value to derive the dummy verification hash from. Verifying a real
+# password against this hash always fails; its only purpose is to give the
+# unknown-user login path the same cost as a wrong-password verify.
+_DUMMY_VERIFY_PLAINTEXT = "dummy-password-for-timing-equalization"
+
+
+@lru_cache(maxsize=2)
+def _dummy_password_hash(algorithm: str) -> str:
+    """Pre-compute the static dummy hash for ``algorithm`` once (login timing)."""
+
+    hasher = BcryptPasswordHasher() if algorithm == "bcrypt" else Argon2PasswordHasher()
+    return hasher.hash(_DUMMY_VERIFY_PLAINTEXT)
 
 
 @lru_cache(maxsize=1)
@@ -128,19 +156,57 @@ def _build_token_service(token: TokenSettings, clock: SystemClock) -> TokenServi
     )
 
 
+def _build_brute_force_config(brute_force: BruteForceSettings) -> BruteForceConfig:
+    """Map the ``auth.brute_force.*`` knobs to the domain config value."""
+
+    return BruteForceConfig(
+        enabled=brute_force.enabled,
+        username_threshold=brute_force.username_threshold,
+        username_window=dt.timedelta(seconds=brute_force.username_window_seconds),
+        ip_threshold=brute_force.ip_threshold,
+        ip_window=dt.timedelta(seconds=brute_force.ip_window_seconds),
+        lockout_base=dt.timedelta(seconds=brute_force.lockout_base_seconds),
+        lockout_max=dt.timedelta(seconds=brute_force.lockout_max_seconds),
+        delay=dt.timedelta(milliseconds=brute_force.delay_ms),
+    )
+
+
 def get_login(request: Request) -> Login:
     """Assemble the :class:`Login` use case from config-selected adapters."""
 
     settings = get_settings(request)
     clock = SystemClock()
     session_factory = create_session_factory(get_engine(request))
+    brute_force = _build_brute_force_config(settings.auth.brute_force)
     return Login(
         uow=SqlAlchemyUnitOfWork(session_factory),
+        attempts=SqlAlchemyLoginAttemptStore(session_factory),
+        brute_force=brute_force,
         hasher=_build_password_hasher(settings.auth.password),
+        dummy_password_hash=_dummy_password_hash(settings.auth.password.hash),
         tokens=_build_token_service(settings.auth.token, clock),
         clock=clock,
-        failure_delay=NoOpLoginFailureDelay(),
+        failure_delay=FixedLoginFailureDelay(
+            delay=brute_force.delay, sleeper=AsyncioSleeper()
+        ),
         refresh_ttl=dt.timedelta(seconds=settings.auth.token.refresh_ttl_seconds),
+    )
+
+
+def get_client_ip(request: Request) -> str | None:
+    """Resolve the trustworthy client IP for the request (SECURITY.md Section 4).
+
+    Honors the forwarded-for header only from configured trusted peers; otherwise
+    the immediate socket peer. Feeds the per-IP brute-force counter.
+    """
+
+    proxy = get_settings(request).auth.proxy
+    peer_ip = request.client.host if request.client is not None else None
+    return resolve_client_ip(
+        peer_ip=peer_ip,
+        forwarded_for=forwarded_for_header(request.headers),
+        trust_forwarded_headers=proxy.trust_forwarded_headers,
+        trusted_proxies=proxy.trusted_proxies,
     )
 
 

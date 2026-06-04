@@ -2,10 +2,9 @@
 
 SECURITY.md Section 2 step 5 requires every failed authentication to incur the
 same delay so a caller cannot distinguish "no such user" from "wrong password"
-by timing (username-enumeration defence). The brute-force / lockout feature
-(#57, FR-AUTH-4) owns the real delay; this milestone only carves the seam so the
-:class:`~..application.login.Login` use case calls it on every failure. The M1
-adapter is an honest no-op.
+by timing (username-enumeration defence). The :class:`~..application.login.Login`
+use case calls it on every failure path; the M1 adapter applies the configured
+``auth.brute_force.delay_ms`` via the :class:`~.sleeper.Sleeper` Port.
 """
 
 from __future__ import annotations
@@ -18,4 +17,4 @@ class LoginFailureDelay(abc.ABC):
 
     @abc.abstractmethod
     async def apply(self) -> None:
-        """Incur the configured artificial delay (no-op until #57 fills it in)."""
+        """Incur the configured artificial failure delay (SECURITY.md 2 step 5)."""

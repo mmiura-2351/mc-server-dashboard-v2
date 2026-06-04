@@ -85,15 +85,47 @@ class TokenSettings(_Section):
     refresh_ttl_seconds: int = 1209600
 
 
+class BruteForceSettings(_Section):
+    """Brute-force protection (CONFIGURATION.md Section 7.2).
+
+    Per-username and per-IP failure thresholds over sliding windows, lockout with
+    exponential back-off, and the artificial failure delay against timing-based
+    enumeration (SECURITY.md Section 2). Defaults are the proven legacy baseline.
+    """
+
+    enabled: bool = True
+    username_threshold: int = 5
+    username_window_seconds: int = 900
+    ip_threshold: int = 20
+    ip_window_seconds: int = 300
+    lockout_base_seconds: int = 900
+    lockout_max_seconds: int = 86400
+    delay_ms: int = 200
+
+
+class ProxySettings(_Section):
+    """Reverse-proxy trust (CONFIGURATION.md Section 7.3).
+
+    Forwarded client IPs are honored only from explicitly trusted proxy peers
+    (SECURITY.md Section 4); the per-IP brute-force counter depends on a
+    trustworthy client IP.
+    """
+
+    trust_forwarded_headers: bool = False
+    trusted_proxies: tuple[str, ...] = ()
+
+
 class AuthSettings(_Section):
     """Authentication configuration (CONFIGURATION.md Section 5.3 / 7).
 
-    The password and token sub-groups are modelled here; brute-force knobs land
-    with their feature.
+    The password, token, brute-force, and proxy-trust sub-groups are modelled
+    here.
     """
 
     password: PasswordSettings = Field(default_factory=PasswordSettings)
     token: TokenSettings = Field(default_factory=TokenSettings)
+    brute_force: BruteForceSettings = Field(default_factory=BruteForceSettings)
+    proxy: ProxySettings = Field(default_factory=ProxySettings)
 
 
 class Settings(BaseSettings):

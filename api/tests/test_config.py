@@ -90,6 +90,42 @@ def test_password_policy_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.auth.password.forbid_simple_patterns is True
 
 
+def test_brute_force_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    bf = settings.auth.brute_force
+    assert bf.enabled is True
+    assert bf.username_threshold == 5
+    assert bf.username_window_seconds == 900
+    assert bf.ip_threshold == 20
+    assert bf.ip_window_seconds == 300
+    assert bf.lockout_base_seconds == 900
+    assert bf.lockout_max_seconds == 86400
+    assert bf.delay_ms == 200
+
+
+def test_proxy_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.auth.proxy.trust_forwarded_headers is False
+    assert settings.auth.proxy.trusted_proxies == ()
+
+
+def test_proxy_trusted_proxies_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.proxy]\n"
+        "trust_forwarded_headers = true\n"
+        'trusted_proxies = ["10.0.0.0/8"]\n',
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.auth.proxy.trust_forwarded_headers is True
+    assert settings.auth.proxy.trusted_proxies == ("10.0.0.0/8",)
+
+
 def test_password_hash_selector_from_toml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
