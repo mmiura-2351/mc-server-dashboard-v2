@@ -180,6 +180,30 @@ def _build_version_catalog() -> VersionCatalog:
     )
 
 
+def _validate_control_tls(settings: Settings) -> None:
+    """Enforce the control-channel required-unless-insecure TLS rule (NFR-SEC-1).
+
+    The gRPC listener serves over TLS when ``control.tls.cert_file`` and
+    ``control.tls.key_file`` are both set. ``control.tls.insecure=true`` opts in
+    to a plaintext listener (local/dev only). Exactly one posture must be
+    chosen: with neither the cert/key pair nor ``insecure=true`` set, or with
+    only one of cert/key set, startup fails fast. Mirrors the Worker's
+    ``api.tls`` precedent (CONFIGURATION.md Section 6.1).
+    """
+
+    tls = settings.control.tls
+    has_cert, has_key = tls.cert_file is not None, tls.key_file is not None
+    if has_cert != has_key:
+        raise ValueError(
+            "control.tls.cert_file and control.tls.key_file must be set together"
+        )
+    if not has_cert and not tls.insecure:
+        raise ValueError(
+            "control.tls.cert_file and control.tls.key_file are required "
+            "(or set control.tls.insecure=true for a plaintext dev listener)"
+        )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = load_settings(_resolve_config_file())
@@ -197,6 +221,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raise ValueError(
             "control.worker_credential is required when control.enabled is true"
         )
+
+    # The control channel must be authenticated AND encrypted (NFR-SEC-1). The
+    # gRPC listener serves over TLS when control.tls.cert_file/key_file are both
+    # set; control.tls.insecure=true opts in to a plaintext listener for
+    # local/dev only. Require one or the other — fail fast rather than silently
+    # binding plaintext. Mirrors the Worker's api.tls required-unless-insecure
+    # rule (CONFIGURATION.md Section 6.1).
+    if settings.control.enabled:
+        _validate_control_tls(settings)
 
     # Bind the Storage Port to the config-selected backend now, so an unsupported
     # backend (or, by construction, a missing fs root) fails fast at boot rather
@@ -290,6 +323,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 real_time_events=real_time_events,
                 host=settings.server.host,
                 port=settings.server.grpc_port,
+                cert_file=settings.control.tls.cert_file,
+                key_file=settings.control.tls.key_file,
+                insecure=settings.control.tls.insecure,
             )
             await grpc_server.start()
             app.state.grpc_server = grpc_server

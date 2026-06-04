@@ -381,6 +381,40 @@ class WorkerSessionServicer(WorkerServiceServicer):
         return pb.ApiMessage(correlation_id=correlation_id, register_ack=ack)
 
 
+def _bind_port(
+    server: aio.Server,
+    *,
+    address: str,
+    cert_file: str | None,
+    key_file: str | None,
+    insecure: bool,
+) -> None:
+    """Bind the listener over TLS when a cert/key pair is given, else plaintext.
+
+    Server-side TLS encrypts the control channel (NFR-SEC-1): with both
+    ``cert_file`` and ``key_file`` the listener uses
+    ``grpc.ssl_server_credentials`` (no client-cert verification — M1 ships
+    server-side TLS only; the Worker credential authenticates the Worker). With
+    neither, ``insecure`` must be true and the listener binds plaintext with a
+    loud startup WARNING for local/dev. The required-unless-insecure rule itself
+    is enforced upstream at the edge (app factory), mirroring the Worker.
+    """
+
+    if cert_file is not None and key_file is not None:
+        with open(key_file, "rb") as key_handle:
+            private_key = key_handle.read()
+        with open(cert_file, "rb") as cert_handle:
+            certificate_chain = cert_handle.read()
+        credentials = grpc.ssl_server_credentials([(private_key, certificate_chain)])
+        server.add_secure_port(address, credentials)
+        return
+    _LOG.warning(
+        "control-plane gRPC server bound WITHOUT TLS (control.tls.insecure=true); "
+        "use only for local development"
+    )
+    server.add_insecure_port(address)
+
+
 def make_grpc_server(
     *,
     registry: WorkerRegistry,
@@ -392,8 +426,16 @@ def make_grpc_server(
     real_time_events: RealTimeEvents,
     host: str,
     port: int,
+    cert_file: str | None = None,
+    key_file: str | None = None,
+    insecure: bool = False,
 ) -> aio.Server:
-    """Build (but do not start) the control-plane gRPC server bound to host:port."""
+    """Build (but do not start) the control-plane gRPC server bound to host:port.
+
+    The listener serves over TLS when ``cert_file``/``key_file`` are given, else
+    plaintext when ``insecure`` is set (NFR-SEC-1). The required-unless-insecure
+    rule is enforced at the edge before this is called.
+    """
 
     server = aio.server()
     servicer = WorkerSessionServicer(
@@ -406,5 +448,11 @@ def make_grpc_server(
         real_time_events=real_time_events,
     )
     add_WorkerServiceServicer_to_server(servicer, server)
-    server.add_insecure_port(f"{host}:{port}")
+    _bind_port(
+        server,
+        address=f"{host}:{port}",
+        cert_file=cert_file,
+        key_file=key_file,
+        insecure=insecure,
+    )
     return server
