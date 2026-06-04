@@ -8,6 +8,7 @@ depends on; concrete async-SQLAlchemy adapters implement them. Lookups return
 from __future__ import annotations
 
 import abc
+import datetime as dt
 
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.value_objects import (
@@ -47,3 +48,16 @@ class RefreshTokenRepository(abc.ABC):
     @abc.abstractmethod
     async def get_by_token_hash(self, token_hash: str) -> RefreshToken | None:
         """Return the token with ``token_hash``, or ``None`` if absent."""
+
+    @abc.abstractmethod
+    async def revoke(self, token_hash: str, *, revoked_at: dt.datetime) -> None:
+        """Set ``revoked_at`` on the token with ``token_hash`` (logout / rotation).
+
+        A no-op if no such row exists; callers establish existence first.
+        """
+
+    @abc.abstractmethod
+    async def revoke_all_for_user(
+        self, user_id: UserId, *, revoked_at: dt.datetime
+    ) -> None:
+        """Revoke every still-active token of ``user_id`` (reuse-family revoke)."""

@@ -37,3 +37,20 @@ class UsernameAlreadyExistsError(IdentityError):
 
 class EmailAlreadyExistsError(IdentityError):
     """Registration hit the email uniqueness constraint."""
+
+
+class InvalidCredentialsError(IdentityError):
+    """Login failed: unknown user or wrong password.
+
+    Deliberately one error for both cases so the edge returns a uniform 401 and
+    cannot be used to tell "no such user" from "wrong password" (SECURITY.md
+    Section 2; username-enumeration defence).
+    """
+
+
+class InvalidAccessTokenError(IdentityError):
+    """An access token failed verification (bad signature, malformed, expired)."""
+
+
+class InvalidRefreshTokenError(IdentityError):
+    """A presented refresh token is unknown, revoked, or expired (FR-AUTH-2)."""

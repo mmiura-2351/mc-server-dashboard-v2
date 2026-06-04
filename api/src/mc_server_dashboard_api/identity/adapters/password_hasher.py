@@ -27,6 +27,12 @@ class Argon2PasswordHasher(PasswordHasher):
     def hash(self, plaintext: str) -> str:
         return self._hasher.hash(plaintext)
 
+    def verify(self, plaintext: str, password_hash: str) -> bool:
+        try:
+            return self._hasher.verify(password_hash, plaintext)
+        except argon2.exceptions.VerifyMismatchError:
+            return False
+
 
 class BcryptPasswordHasher(PasswordHasher):
     """:class:`PasswordHasher` adapter over bcrypt (library default cost)."""
@@ -34,3 +40,7 @@ class BcryptPasswordHasher(PasswordHasher):
     def hash(self, plaintext: str) -> str:
         encoded = plaintext.encode("utf-8")[:_BCRYPT_MAX_BYTES]
         return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode("utf-8")
+
+    def verify(self, plaintext: str, password_hash: str) -> bool:
+        encoded = plaintext.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+        return bcrypt.checkpw(encoded, password_hash.encode("utf-8"))

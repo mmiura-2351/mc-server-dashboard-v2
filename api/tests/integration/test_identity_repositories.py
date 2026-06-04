@@ -159,6 +159,78 @@ async def test_add_refresh_token_and_read_back(engine: AsyncEngine) -> None:
     assert loaded.revoked_at is None
 
 
+async def test_revoke_marks_token_revoked(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+    user = _user()
+    token = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=user.id,
+        token_hash="to-revoke",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(user)
+        await uow.commit()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.add(token)
+        await uow.commit()
+
+    revoked_at = _NOW + dt.timedelta(hours=1)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.revoke("to-revoke", revoked_at=revoked_at)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        loaded = await uow.refresh_tokens.get_by_token_hash("to-revoke")
+    assert loaded is not None
+    assert loaded.revoked_at == revoked_at
+    assert loaded.is_active(now=_NOW + dt.timedelta(hours=2)) is False
+
+
+async def test_revoke_all_for_user_revokes_only_active_tokens(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    user = _user()
+    already_revoked_at = _NOW - dt.timedelta(hours=1)
+    active = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=user.id,
+        token_hash="active",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+    )
+    revoked = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=user.id,
+        token_hash="revoked",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+        revoked_at=already_revoked_at,
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(user)
+        await uow.commit()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.add(active)
+        await uow.refresh_tokens.add(revoked)
+        await uow.commit()
+
+    sweep_at = _NOW + dt.timedelta(hours=2)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.revoke_all_for_user(user.id, revoked_at=sweep_at)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        loaded_active = await uow.refresh_tokens.get_by_token_hash("active")
+        loaded_revoked = await uow.refresh_tokens.get_by_token_hash("revoked")
+    assert loaded_active is not None and loaded_active.revoked_at == sweep_at
+    # An already-revoked token keeps its original timestamp (only active swept).
+    assert loaded_revoked is not None
+    assert loaded_revoked.revoked_at == already_revoked_at
+
+
 async def test_deleting_user_cascades_to_refresh_tokens(
     engine: AsyncEngine,
 ) -> None:

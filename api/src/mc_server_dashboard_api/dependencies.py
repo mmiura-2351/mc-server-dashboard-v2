@@ -8,12 +8,15 @@ FastAPI's ``Depends``; tests override the providers to inject fakes.
 
 from __future__ import annotations
 
+import datetime as dt
 from functools import lru_cache
+from typing import Annotated
 
-from fastapi import Request
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from mc_server_dashboard_api.config import PasswordSettings, Settings
+from mc_server_dashboard_api.config import PasswordSettings, Settings, TokenSettings
 from mc_server_dashboard_api.core.adapters.database import (
     SqlAlchemyDatabasePing,
     create_session_factory,
@@ -23,14 +26,27 @@ from mc_server_dashboard_api.identity.adapters.clock import SystemClock
 from mc_server_dashboard_api.identity.adapters.common_passwords import (
     load_common_passwords,
 )
+from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
+    NoOpLoginFailureDelay,
+)
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
     BcryptPasswordHasher,
 )
+from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    AuthenticateRequest,
+)
+from mc_server_dashboard_api.identity.application.login import Login
+from mc_server_dashboard_api.identity.application.logout import Logout
+from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
+from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.identity.domain.errors import InvalidAccessTokenError
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
+from mc_server_dashboard_api.identity.domain.token_service import TokenService
 
 
 def get_engine(request: Request) -> AsyncEngine:
@@ -93,4 +109,107 @@ def get_register_user(request: Request) -> RegisterUser:
         hasher=_build_password_hasher(settings.auth.password),
         clock=SystemClock(),
         policy=_build_password_policy(settings.auth.password),
+    )
+
+
+def _build_token_service(token: TokenSettings, clock: SystemClock) -> TokenService:
+    """Construct the JWT TokenService adapter from ``auth.token.*``.
+
+    The signing key is required to mount the auth endpoints; the app factory
+    enforces that at startup, so it is non-None here.
+    """
+
+    assert token.signing_key is not None
+    return JwtTokenService(
+        signing_key=token.signing_key,
+        algorithm=token.algorithm,
+        access_ttl=dt.timedelta(seconds=token.access_ttl_seconds),
+        clock=clock,
+    )
+
+
+def get_login(request: Request) -> Login:
+    """Assemble the :class:`Login` use case from config-selected adapters."""
+
+    settings = get_settings(request)
+    clock = SystemClock()
+    session_factory = create_session_factory(get_engine(request))
+    return Login(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        hasher=_build_password_hasher(settings.auth.password),
+        tokens=_build_token_service(settings.auth.token, clock),
+        clock=clock,
+        failure_delay=NoOpLoginFailureDelay(),
+        refresh_ttl=dt.timedelta(seconds=settings.auth.token.refresh_ttl_seconds),
+    )
+
+
+def get_refresh_session(request: Request) -> RefreshSession:
+    """Assemble the :class:`RefreshSession` use case from config-selected adapters."""
+
+    settings = get_settings(request)
+    clock = SystemClock()
+    session_factory = create_session_factory(get_engine(request))
+    return RefreshSession(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        tokens=_build_token_service(settings.auth.token, clock),
+        clock=clock,
+        refresh_ttl=dt.timedelta(seconds=settings.auth.token.refresh_ttl_seconds),
+    )
+
+
+def get_logout(request: Request) -> Logout:
+    """Assemble the :class:`Logout` use case from config-selected adapters."""
+
+    settings = get_settings(request)
+    clock = SystemClock()
+    session_factory = create_session_factory(get_engine(request))
+    return Logout(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        tokens=_build_token_service(settings.auth.token, clock),
+        clock=clock,
+    )
+
+
+def get_authenticate_request(request: Request) -> AuthenticateRequest:
+    """Assemble the :class:`AuthenticateRequest` use case (current-user lookup)."""
+
+    settings = get_settings(request)
+    session_factory = create_session_factory(get_engine(request))
+    return AuthenticateRequest(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        tokens=_build_token_service(settings.auth.token, SystemClock()),
+    )
+
+
+# Extracts the ``Authorization: Bearer <token>`` header; a missing/blank header
+# yields 403 by default. ``auto_error=False`` lets us return a uniform 401.
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def get_current_user(
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
+    ],
+    use_case: Annotated[AuthenticateRequest, Depends(get_authenticate_request)],
+) -> User:
+    """FastAPI dependency: the authenticated user behind a Bearer access token.
+
+    Every protected endpoint depends on this. A missing, malformed, or expired
+    token is a uniform 401 (no detail that aids enumeration).
+    """
+
+    if credentials is None:
+        raise _unauthenticated()
+    try:
+        return await use_case(access_token=credentials.credentials)
+    except InvalidAccessTokenError as exc:
+        raise _unauthenticated() from exc
+
+
+def _unauthenticated() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="invalid_token",
+        headers={"WWW-Authenticate": "Bearer"},
     )

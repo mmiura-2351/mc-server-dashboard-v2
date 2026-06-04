@@ -68,14 +68,32 @@ class PasswordSettings(_Section):
     forbid_simple_patterns: bool = True
 
 
+class TokenSettings(_Section):
+    """Token issuing/verification (CONFIGURATION.md Section 5.3).
+
+    Parameters of the single ``TokenService`` JWT adapter (Section 4 note):
+    ``algorithm`` is HS256 by default (RS256 supported by supplying the matching
+    key); ``signing_key`` is the secret used to sign access tokens. The key is
+    declared optional here so the loader does not force it on processes that
+    mount no auth endpoints; the app factory fails fast when it mounts the auth
+    routers without a key (Section 3, fail-fast on a missing required secret).
+    """
+
+    algorithm: str = "HS256"
+    signing_key: str | None = None
+    access_ttl_seconds: int = 900
+    refresh_ttl_seconds: int = 1209600
+
+
 class AuthSettings(_Section):
     """Authentication configuration (CONFIGURATION.md Section 5.3 / 7).
 
-    Only the password sub-group is modelled here; token and brute-force knobs
-    land with their features.
+    The password and token sub-groups are modelled here; brute-force knobs land
+    with their feature.
     """
 
     password: PasswordSettings = Field(default_factory=PasswordSettings)
+    token: TokenSettings = Field(default_factory=TokenSettings)
 
 
 class Settings(BaseSettings):
@@ -115,11 +133,16 @@ class Settings(BaseSettings):
     def masked_dump(self) -> dict[str, Any]:
         """Config snapshot safe to log: secret values replaced with ``***``."""
 
+        auth = self.auth.model_dump()
+        # The token signing key is a secret (CONFIGURATION.md Section 5.3); mask
+        # it whenever present. ``None`` (no key configured) is not a secret.
+        if auth["token"]["signing_key"] is not None:
+            auth["token"]["signing_key"] = _MASK
         return {
             "server": self.server.model_dump(),
             "log": self.log.model_dump(),
             "database": {"url": _MASK},
-            "auth": self.auth.model_dump(),
+            "auth": auth,
         }
 
 

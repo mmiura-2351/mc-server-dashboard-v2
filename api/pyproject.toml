@@ -30,6 +30,10 @@ dependencies = [
     # the alternative. Both released well outside the 7-day cooldown (Section 3).
     "argon2-cffi>=25.1.0,<26",          # 2025-06-03
     "bcrypt>=5.0.0,<6",                 # 2025-09-25
+    # JWT access-token signing/verification behind the TokenService Port
+    # (FR-AUTH-2, CONFIGURATION.md Section 5.3). 2.13.0 (2026-05-21) is outside
+    # the 7-day cooldown (Section 3); cap the next major.
+    "pyjwt>=2.13.0,<3",                 # 2026-05-21
 ]
 
 [dependency-groups]

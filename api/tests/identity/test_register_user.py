@@ -65,6 +65,14 @@ class _FakeRefreshTokenRepository(RefreshTokenRepository):
     async def get_by_token_hash(self, token_hash: str) -> RefreshToken | None:
         raise NotImplementedError
 
+    async def revoke(self, token_hash: str, *, revoked_at: dt.datetime) -> None:
+        raise NotImplementedError
+
+    async def revoke_all_for_user(
+        self, user_id: UserId, *, revoked_at: dt.datetime
+    ) -> None:
+        raise NotImplementedError
+
 
 class _FakeUnitOfWork(UnitOfWork):
     def __init__(self, users: _FakeUserRepository) -> None:
@@ -93,6 +101,9 @@ class _FixedClock(Clock):
 class _StubHasher(PasswordHasher):
     def hash(self, plaintext: str) -> str:
         return f"hashed::{plaintext}"
+
+    def verify(self, plaintext: str, password_hash: str) -> bool:
+        return password_hash == f"hashed::{plaintext}"
 
 
 def _policy() -> PasswordPolicy:

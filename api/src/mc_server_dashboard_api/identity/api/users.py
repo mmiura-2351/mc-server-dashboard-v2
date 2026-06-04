@@ -13,7 +13,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from mc_server_dashboard_api.dependencies import get_register_user
+from mc_server_dashboard_api.dependencies import get_current_user, get_register_user
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
@@ -77,6 +77,15 @@ async def register_user(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"reason": _field_reason(exc)},
         ) from exc
+    return UserResponse.from_entity(user)
+
+
+@router.get("/users/me")
+async def read_current_user(
+    user: Annotated[User, Depends(get_current_user)],
+) -> UserResponse:
+    """Return the authenticated user — the trivially protected endpoint."""
+
     return UserResponse.from_entity(user)
 
 
