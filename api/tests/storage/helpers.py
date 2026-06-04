@@ -92,6 +92,22 @@ def malicious_tar_with_escape() -> bytes:
     return buf.getvalue()
 
 
+def malicious_tar_with_symlink_escape() -> bytes:
+    """A tar stream with a symlink member targeting an absolute path outside staging.
+
+    Used to prove ``filter="data"`` rejects/neutralizes a symlink-based escape: it
+    refuses a symlink whose target points outside the extraction root.
+    """
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        info = tarfile.TarInfo(name="escape_link")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+    return buf.getvalue()
+
+
 def snapshot_dir(root: Path, community: CommunityId, server: ServerId) -> Path:
     """The directory ``current`` resolves to (the live snapshot), for assertions."""
 

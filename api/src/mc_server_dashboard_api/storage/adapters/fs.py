@@ -15,8 +15,8 @@ consistency; no separate code path is required.
 
 Wire format: the hydrate/snapshot byte stream is a **tar stream** of the working
 set (stdlib :mod:`tarfile`); the data-plane transport (epic #8) carries it
-verbatim. Backups are self-contained ``tar.gz`` archives (see the module note on
-the codec deviation from the documented ``.tar.zst``).
+verbatim. Backups are self-contained ``tar.gz`` archives; the archive codec is
+adapter-internal (STORAGE.md Section 2): gzip in M1, with zstd deferred.
 
 Blocking filesystem/tar work runs in a worker thread via
 :func:`asyncio.to_thread` so the async Port methods do not stall the event loop.
@@ -26,13 +26,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import os
 import shutil
 import tarfile
 import tempfile
+import threading
+import time
 import uuid
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 from mc_server_dashboard_api.storage.adapters.failure_seam import (
@@ -97,6 +98,13 @@ class FsStorage(Storage):
         self._root = root
         self._version_retention = version_retention
         self._seam = failure_seam or FailureSeam()
+        # Active-reader leases: a snapshot directory an open hydrate stream is
+        # reading is held here (refcounted) so a concurrent publish/sweep does not
+        # reclaim it out from under the reader. Guarded by ``_lease_lock`` because
+        # leases are taken/released across worker threads (Section 4.2 reader
+        # safety). Keyed by the resolved snapshot path.
+        self._leases: dict[Path, int] = {}
+        self._lease_lock = threading.Lock()
 
     # --- layout helpers ----------------------------------------------------
 
@@ -135,6 +143,24 @@ class FsStorage(Storage):
 
     def _jar_path(self, key: JarKey) -> Path:
         return self._jars_dir() / f"{key.sha256}.jar"
+
+    # --- active-reader leases (Section 4.2 reader safety) -------------------
+
+    def _acquire_lease(self, snapshot: Path) -> None:
+        with self._lease_lock:
+            self._leases[snapshot] = self._leases.get(snapshot, 0) + 1
+
+    def _release_lease(self, snapshot: Path) -> None:
+        with self._lease_lock:
+            remaining = self._leases.get(snapshot, 0) - 1
+            if remaining > 0:
+                self._leases[snapshot] = remaining
+            else:
+                self._leases.pop(snapshot, None)
+
+    def _is_leased(self, snapshot: Path) -> bool:
+        with self._lease_lock:
+            return self._leases.get(snapshot, 0) > 0
 
     # --- path-traversal containment (Section 6) ----------------------------
 
@@ -183,7 +209,10 @@ class FsStorage(Storage):
         snapshots = server_root / "snapshots"
         if snapshots.is_dir():
             for snap in snapshots.iterdir():
-                if snap.name != live:
+                # Skip the live snapshot and any superseded one an active hydrate
+                # reader still holds a lease on; the next sweep reclaims it once the
+                # reader releases (Section 4.2 reader safety).
+                if snap.name != live and not self._is_leased(snap):
                     _rmtree(snap)
         incoming = server_root / "incoming"
         if incoming.is_dir():
@@ -204,7 +233,11 @@ class FsStorage(Storage):
         self, community_id: CommunityId, server_id: ServerId
     ) -> ByteStream:
         current = self._current_dir(community_id, server_id)
-        return _tar_stream(current)
+        # Register an active-reader lease on the resolved snapshot before any byte
+        # is read, so a concurrent commit/sweep skips it; the stream releases the
+        # lease when it finishes, is closed, or raises (Section 4.2 reader safety).
+        self._acquire_lease(current)
+        return _tar_stream(current, lambda: self._release_lease(current))
 
     async def begin_snapshot(
         self, community_id: CommunityId, server_id: ServerId
@@ -226,11 +259,24 @@ class FsStorage(Storage):
         )
         if not staging.is_dir():
             raise SnapshotHandleError("snapshot staging area is gone")
-        # Buffer the incoming tar stream to a temp file, then extract into staging.
+        # Spool the incoming tar to a temp file in the staging dir (disk, bounded
+        # RAM — never the whole working set in memory), then stream-extract it.
         # Extraction is sandboxed to ``staging`` (filter="data" refuses absolute /
-        # ``..`` members), so a hostile snapshot cannot escape.
-        chunks = [chunk async for chunk in stream]
-        await asyncio.to_thread(_extract_tar_into, chunks, staging)
+        # ``..`` members), so a hostile snapshot cannot escape. A file-backed spool
+        # is used rather than an os.pipe->thread bridge: it keeps RAM bounded just
+        # the same with far simpler code, and the bytes land on the same disk the
+        # extraction targets anyway.
+        fd, spool_name = await asyncio.to_thread(
+            tempfile.mkstemp, dir=str(staging), prefix=".snapshot.", suffix=".tar"
+        )
+        spool = Path(spool_name)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                async for chunk in stream:
+                    await asyncio.to_thread(out.write, chunk)
+            await asyncio.to_thread(_extract_tar_into, spool, staging)
+        finally:
+            await asyncio.to_thread(spool.unlink, missing_ok=True)
 
     async def commit_snapshot(self, handle: SnapshotHandle) -> None:
         fs_handle = _as_fs_handle(handle)
@@ -241,6 +287,11 @@ class FsStorage(Storage):
         )
         if not staging.is_dir():
             raise IncompleteTransferError("no completed staging area to publish")
+        # The "proven complete" gate (STORAGE.md Section 4.1): existence of the
+        # staging dir is the only completeness check here. The end-of-stream +
+        # integrity/manifest (size match between what the Worker sent and what
+        # landed) check is part of the data-plane contract and is deferred to the
+        # data-plane sub-issue (#106); this method is where that gate will live.
         await asyncio.to_thread(
             self._publish, fs_handle.community_id, fs_handle.server_id, staging
         )
@@ -295,7 +346,13 @@ class FsStorage(Storage):
         self._seam.reach(PublishPhase.AFTER_FSYNC)
 
         if old_snapshot_name is not None and old_snapshot_name != snapshot_id.value:
-            _rmtree(snapshots / old_snapshot_name)
+            old_snapshot = snapshots / old_snapshot_name
+            # An active hydrate reader still streaming the superseded snapshot holds
+            # a lease on it; leave it in place (the flip already made the new one
+            # authoritative) and let the next sweep/publish reclaim it once the
+            # reader releases (Section 4.2 reader safety).
+            if not self._is_leased(old_snapshot):
+                _rmtree(old_snapshot)
 
     # --- JAR store / reuse (Section 3.2) -----------------------------------
 
@@ -566,13 +623,17 @@ def _as_fs_handle(handle: SnapshotHandle) -> _FsSnapshotHandle:
 
 
 def _new_version_id() -> str:
-    """A time-ordered, collision-resistant version id.
+    """A chronologically sortable, collision-resistant version id.
 
-    ``uuid1`` is time-based, so lexicographic-by-creation ordering is approximated
-    by sorting; a random suffix de-collides ids minted in the same instant.
+    A zero-padded fixed-width nanosecond timestamp makes lexicographic order equal
+    creation order (so :func:`list_file_versions` newest-first and the oldest-first
+    pruning in :meth:`_prune_versions` are both correct); a short random suffix
+    de-collides ids minted within the same nanosecond. ``uuid1`` was unsafe here:
+    its leading ``time_low`` field wraps roughly every 429 s, so its hex was not
+    monotonic and sorting could reorder versions across a wrap.
     """
 
-    return f"{uuid.uuid1().hex}-{uuid.uuid4().hex[:8]}"
+    return f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}"
 
 
 def _rmtree(path: Path) -> None:
@@ -594,26 +655,56 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _tar_stream(directory: Path) -> AsyncIterator[bytes]:
-    """Yield a tar stream of ``directory``'s contents (working-set hydrate egress)."""
+def _tar_stream(
+    directory: Path, on_close: Callable[[], None] | None = None
+) -> AsyncIterator[bytes]:
+    """Stream a tar of ``directory``'s contents (working-set hydrate egress).
+
+    The tar is generated incrementally in stream mode (``w|``) by a worker thread
+    writing into one end of an ``os.pipe``; the generator reads bounded ``_CHUNK``
+    blocks from the other end, so peak memory is one pipe buffer plus one chunk —
+    never the whole (multi-GB) working set. ``on_close`` (the active-reader lease
+    release) is invoked exactly once when the stream finishes, is closed early, or
+    raises.
+    """
 
     async def _gen() -> AsyncIterator[bytes]:
-        buf = io.BytesIO()
-        await asyncio.to_thread(_tar_into_buffer, directory, buf)
-        buf.seek(0)
-        while True:
-            chunk = await asyncio.to_thread(buf.read, _CHUNK)
-            if not chunk:
-                return
-            yield chunk
+        read_fd, write_fd = os.pipe()
+        writer = threading.Thread(
+            target=_tar_into_fd, args=(directory, write_fd), daemon=True
+        )
+        writer.start()
+        try:
+            while True:
+                chunk = await asyncio.to_thread(os.read, read_fd, _CHUNK)
+                if not chunk:
+                    return
+                yield chunk
+        finally:
+            # Closing the read end unblocks a writer parked on a full pipe (its next
+            # write raises BrokenPipeError, which the writer swallows), so join never
+            # hangs on early consumer close.
+            os.close(read_fd)
+            await asyncio.to_thread(writer.join)
+            if on_close is not None:
+                on_close()
 
     return _gen()
 
 
-def _tar_into_buffer(directory: Path, buf: io.BytesIO) -> None:
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        for child in sorted(directory.iterdir(), key=lambda p: p.name):
-            tar.add(child, arcname=child.name)
+def _tar_into_fd(directory: Path, write_fd: int) -> None:
+    """Write a tar of ``directory`` into ``write_fd`` (stream mode), then close it."""
+
+    try:
+        with (
+            os.fdopen(write_fd, "wb") as out,
+            tarfile.open(fileobj=out, mode="w|") as tar,
+        ):
+            for child in sorted(directory.iterdir(), key=lambda p: p.name):
+                tar.add(child, arcname=child.name)
+    except BrokenPipeError:
+        # The consumer closed early; nothing more to write.
+        pass
 
 
 def _file_stream(path: Path) -> AsyncIterator[bytes]:
@@ -633,13 +724,16 @@ def _file_stream(path: Path) -> AsyncIterator[bytes]:
     return _gen()
 
 
-def _extract_tar_into(chunks: Iterable[bytes], dest: Path) -> None:
-    """Extract a tar stream (concatenated ``chunks``) into ``dest``, sandboxed."""
+def _extract_tar_into(spool: Path, dest: Path) -> None:
+    """Stream-extract the tar at ``spool`` into ``dest``, sandboxed.
 
-    buf = io.BytesIO(b"".join(chunks))
-    with tarfile.open(fileobj=buf, mode="r:*") as tar:
-        # filter="data" (Python 3.12+) refuses absolute paths, ``..`` escapes,
-        # devices and other unsafe members — the tar-side traversal defence.
+    Stream mode (``r|*``) reads the spool incrementally so the whole archive is
+    never held in memory at once. ``filter="data"`` (Python 3.12+) refuses absolute
+    paths, ``..`` escapes, devices and other unsafe members — the tar-side
+    traversal defence.
+    """
+
+    with open(spool, "rb") as fileobj, tarfile.open(fileobj=fileobj, mode="r|*") as tar:
         tar.extractall(dest, filter="data")
 
 

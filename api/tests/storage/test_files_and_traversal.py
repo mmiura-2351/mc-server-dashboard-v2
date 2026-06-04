@@ -6,11 +6,13 @@ STORAGE.md Sections 3.4, 3.5, 4.4, 5, 6.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
 
-from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters import fs as fs_module
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage, _new_version_id
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathTraversalError,
@@ -158,3 +160,53 @@ async def test_internal_symlink_within_root_is_allowed(tmp_path: Path) -> None:
     assert (
         await storage.read_file(community, server, RelPath("alias/data")) == b"inside"
     )
+
+
+def test_version_ids_sort_chronologically_across_time_low_wrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lexicographic order of version ids must equal creation order (Section 5).
+
+    The old uuid1 scheme keyed on ``time_low`` (the low 32 bits of the 100ns
+    timestamp), which wraps roughly every 429 s; ids minted across a wrap sorted
+    out of creation order. Mint ids across timestamps that span such a wrap and
+    confirm the new nanosecond-prefixed id sorts chronologically.
+    """
+
+    wrap_ns = (1 << 32) * 100  # one uuid1 time_low period, in nanoseconds
+    base = 1_700_000_000 * 1_000_000_000  # an arbitrary wall-clock nanosecond base
+    timestamps = [base, base + wrap_ns // 2, base + wrap_ns, base + 2 * wrap_ns]
+
+    feed = iter(timestamps)
+    monkeypatch.setattr(time, "time_ns", lambda: next(feed))
+    ids = [_new_version_id() for _ in timestamps]
+
+    assert sorted(ids) == ids  # lexicographic order == creation order
+
+
+async def test_retention_prunes_the_oldest_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pruning drops the OLDEST retained version, identified by id order (Section 5).
+
+    Crafted, strictly increasing ids make creation order unambiguous; after writing
+    past the retention bound the lowest-sorting (oldest) ids are the ones removed.
+    """
+
+    storage = FsStorage(tmp_path, version_retention=2)
+    community, server = new_scope()
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    crafted = iter([f"{n:020d}-aaaaaaaa" for n in range(1, 100)])
+    monkeypatch.setattr(fs_module, "_new_version_id", lambda: next(crafted))
+
+    for i in range(1, 5):  # writes v1..v4, capturing v0..v3 as versions
+        await storage.write_file(community, server, RelPath("cfg"), f"v{i}".encode())
+
+    versions = await storage.list_file_versions(community, server, RelPath("cfg"))
+    contents = [
+        await storage.read_file_version(community, server, RelPath("cfg"), v)
+        for v in versions
+    ]
+    # Only the two newest prior contents survive; the oldest (v0, v1) were pruned.
+    assert contents == [b"v3", b"v2"]

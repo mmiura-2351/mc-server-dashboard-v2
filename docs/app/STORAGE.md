@@ -92,7 +92,7 @@ across servers (FR-VER-3) and contain no Community data.
 │               │       ├── <version-id>      # an immutable prior content of that file
 │               │       └── ...
 │               └── backups/
-│                   ├── <backup-id>.tar.zst   # a retained, self-contained snapshot archive
+│                   ├── <backup-id>.<archive-ext>  # a retained, self-contained snapshot archive
 │                   └── ...
 └── jars/                                     # shared, content-addressed server JARs (FR-VER-3)
     └── <sha256>.jar
@@ -120,7 +120,9 @@ Notes:
   complete (Section 4).
 - `backups/` holds whole-working-set archives. A backup is a retained snapshot
   that does **not** depend on a specific Worker (FR-BAK-2); restoring one
-  republishes it into `current/`.
+  republishes it into `current/`. The archive codec (`<archive-ext>`) is
+  **adapter-internal** — callers hold only the opaque `BackupKey` and never the
+  on-disk name; the M1 `fs` adapter uses gzip (`.tar.gz`), with zstd deferred.
 - On object backends the tree above is a **key prefix scheme**, not real
   directories (Section 7.3); the same logical layout applies.
 

@@ -86,6 +86,40 @@ async def test_hydrate_returns_published_working_set(tmp_path: Path) -> None:
     assert read_tar(blob) == files
 
 
+async def test_hydrate_streams_incrementally_not_buffered(tmp_path: Path) -> None:
+    """A working set larger than one chunk is yielded in multiple bounded chunks.
+
+    Memory-bound evidence: the hydrate tar is generated incrementally (pipe +
+    ``tarfile`` stream mode), so a payload several chunks long surfaces as several
+    yields rather than one whole-archive buffer. Peak memory is one pipe buffer
+    plus one ``_CHUNK``, never the whole working set.
+    """
+
+    from collections.abc import AsyncIterator
+
+    from mc_server_dashboard_api.storage.adapters.fs import _CHUNK
+    from tests.storage.helpers import stream_of, tar_bytes
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    big = {"world/region.mca": b"x" * (3 * _CHUNK)}
+
+    # Stage with coarse chunks so the spool write does not dominate the test.
+    async def _coarse() -> AsyncIterator[bytes]:
+        async for chunk in stream_of(tar_bytes(big), chunk=_CHUNK):
+            yield chunk
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, _coarse())
+    await storage.commit_snapshot(handle)
+
+    stream = storage.open_hydrate_source(community, server)
+    chunks = [chunk async for chunk in stream]
+    assert len(chunks) > 1  # incremental, not one buffered blob
+    assert all(len(c) <= _CHUNK for c in chunks)  # each yield is bounded
+    assert read_tar(b"".join(chunks)) == big
+
+
 async def test_hydrate_before_any_publish_is_not_found(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = new_scope()
@@ -166,3 +200,30 @@ async def test_write_snapshot_sandboxes_malicious_members(tmp_path: Path) -> Non
     with pytest.raises(Exception):
         await storage.write_snapshot(handle, _stream())
     assert not (tmp_path / "escape.txt").exists()
+
+
+async def test_write_snapshot_rejects_symlink_escape_member(tmp_path: Path) -> None:
+    from collections.abc import AsyncIterator
+
+    from tests.storage.helpers import (
+        malicious_tar_with_symlink_escape,
+        stream_of,
+    )
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+
+    async def _stream() -> AsyncIterator[bytes]:
+        async for chunk in stream_of(malicious_tar_with_symlink_escape()):
+            yield chunk
+
+    # filter="data" refuses a symlink whose target escapes the extraction root, so
+    # extraction raises and no escaping link is created in staging.
+    with pytest.raises(Exception):
+        await storage.write_snapshot(handle, _stream())
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    staging_links = list((server_root / "incoming").rglob("escape_link"))
+    assert staging_links == []
