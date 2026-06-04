@@ -154,9 +154,9 @@ git pull
 docker compose up -d --build
 ```
 
-Stacks first deployed before the `api` image created the storage mount point own
-the `api-storage` volume as root, so the non-root app (uid 10001) cannot write to
-it. Fix the ownership once, then bring the stack up:
+Stacks that were first deployed before the `api` image pre-created the storage
+mount point have an `api-storage` volume owned by root, so the non-root app
+(uid 10001) cannot write to it. Fix the ownership once, then bring the stack up:
 
 ```sh
 docker run --rm -v mc-server-dashboard-v2_api-storage:/fix \
