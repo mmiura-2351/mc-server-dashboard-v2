@@ -24,6 +24,7 @@ from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.community.domain.entities import Community
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
+    CommunityNotFoundError,
     OwnerUserNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.permission_checker import (
@@ -219,6 +220,19 @@ def test_read_authorized_member_gets_200() -> None:
     resp = client.get(f"/communities/{community.id.value}")
     assert resp.status_code == 200
     assert resp.json()["name"] == "guild"
+
+
+def test_read_concurrent_delete_gets_404() -> None:
+    # The community vanished between the visibility check and the read: keep the
+    # no-existence-signal posture (404), matching rename/delete (Section 6.4).
+    app = _managed_app(
+        member=True,
+        allow=True,
+        read_uc=_FakeUseCase(error=CommunityNotFoundError("gone")),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/communities/{uuid.uuid4()}")
+    assert resp.status_code == 404
 
 
 def test_read_platform_admin_non_member_still_gets_404() -> None:

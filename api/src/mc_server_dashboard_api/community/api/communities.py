@@ -132,7 +132,10 @@ async def read_community(
     ],
     use_case: Annotated[ReadCommunity, Depends(get_read_community)],
 ) -> CommunityResponse:
-    community = await use_case(community_id=CommunityId(community_id))
+    try:
+        community = await use_case(community_id=CommunityId(community_id))
+    except CommunityNotFoundError as exc:
+        raise _not_found() from exc
     return CommunityResponse.from_entity(community)
 
 
