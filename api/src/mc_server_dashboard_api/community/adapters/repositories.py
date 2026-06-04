@@ -164,6 +164,13 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_membership(row) for row in rows]
 
+    async def list_for_community(self, community_id: CommunityId) -> list[Membership]:
+        stmt = select(MembershipModel).where(
+            MembershipModel.community_id == community_id.value
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_membership(row) for row in rows]
+
     async def delete(self, membership_id: MembershipId) -> None:
         stmt = delete(MembershipModel).where(MembershipModel.id == membership_id.value)
         await self._session.execute(stmt)
@@ -174,6 +181,13 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
                 membership_id=membership_id.value, role_id=role_id.value
             )
         )
+
+    async def unassign_role(self, membership_id: MembershipId, role_id: RoleId) -> None:
+        stmt = delete(MembershipRoleModel).where(
+            MembershipRoleModel.membership_id == membership_id.value,
+            MembershipRoleModel.role_id == role_id.value,
+        )
+        await self._session.execute(stmt)
 
     async def list_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
         stmt = select(MembershipRoleModel.role_id).where(

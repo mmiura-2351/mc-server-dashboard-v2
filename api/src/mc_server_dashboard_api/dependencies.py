@@ -39,6 +39,13 @@ from mc_server_dashboard_api.community.application.manage_community import (
     ReadCommunity,
     RenameCommunity,
 )
+from mc_server_dashboard_api.community.application.manage_membership import (
+    AddMember,
+    AssignRole,
+    ListMembers,
+    RemoveMember,
+    UnassignRole,
+)
 from mc_server_dashboard_api.community.application.provision_community import (
     ProvisionCommunity,
 )
@@ -377,6 +384,45 @@ def get_list_my_communities(request: Request) -> ListMyCommunities:
 
     session_factory = create_session_factory(get_engine(request))
     return ListMyCommunities(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_add_member(request: Request) -> AddMember:
+    """Assemble the :class:`AddMember` use case (FR-MEM-1)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return AddMember(
+        uow=CommunityUnitOfWork(session_factory),
+        users=IdentityUserDirectory(SqlAlchemyUnitOfWork(session_factory)),
+        clock=CommunitySystemClock(),
+    )
+
+
+def get_remove_member(request: Request) -> RemoveMember:
+    """Assemble the :class:`RemoveMember` use case (FR-MEM-3)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RemoveMember(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_list_members(request: Request) -> ListMembers:
+    """Assemble the :class:`ListMembers` use case (member:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListMembers(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_assign_role(request: Request) -> AssignRole:
+    """Assemble the :class:`AssignRole` use case (role:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return AssignRole(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_unassign_role(request: Request) -> UnassignRole:
+    """Assemble the :class:`UnassignRole` use case (role:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UnassignRole(uow=CommunityUnitOfWork(session_factory))
 
 
 def _to_auth_user(user: User) -> AuthUser:
