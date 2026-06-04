@@ -2,8 +2,8 @@
 
 The connection string is a secret (CONFIGURATION.md Section 3), so it is read
 from the same ``MCD_API_`` configuration the service uses rather than from
-``alembic.ini``. ``target_metadata`` is ``None`` until entity tables land with
-their features (DATABASE.md); the baseline migration is empty.
+``alembic.ini``. ``target_metadata`` is the shared declarative ``Base.metadata``;
+each context's ORM models are imported so their tables register on it.
 """
 
 from __future__ import annotations
@@ -14,9 +14,13 @@ from alembic import context
 from sqlalchemy.engine import Connection
 
 from mc_server_dashboard_api.config import load_settings
-from mc_server_dashboard_api.core.adapters.database import create_engine
+from mc_server_dashboard_api.core.adapters.database import Base, create_engine
+from mc_server_dashboard_api.identity.adapters import models as _identity_models
 
-target_metadata = None
+# Importing the models registers their tables on ``Base.metadata`` for autogenerate.
+_ = _identity_models
+
+target_metadata = Base.metadata
 
 
 def _database_url() -> str:
