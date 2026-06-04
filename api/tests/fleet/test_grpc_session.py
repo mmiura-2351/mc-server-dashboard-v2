@@ -15,6 +15,7 @@ These tests need no Postgres and run in the unit-runnable suite.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 from collections.abc import AsyncIterator
 
@@ -122,6 +123,24 @@ def _auth(credential: str | None) -> list[tuple[str, str]]:
     return [("authorization", f"Bearer {credential}")]
 
 
+async def _terminal_code(call: aio.StreamStreamCall) -> grpc.StatusCode:
+    """Drive a rejected ``Session`` to its terminal status, race-free.
+
+    The server aborts the stream (e.g. UNAUTHENTICATED) immediately on connect,
+    so the abort may surface on the client's ``write`` or on its ``read``
+    depending on timing — asserting on either one alone is flaky. The
+    authoritative trailing status is always available via ``call.code()`` once
+    the call terminates, so we let the abort land wherever it does and read the
+    final code from the call object.
+    """
+
+    with contextlib.suppress(aio.AioRpcError):
+        await call.write(_register_message())
+    with contextlib.suppress(aio.AioRpcError):
+        await call.read()
+    return await call.code()
+
+
 async def test_register_returns_ack(harness: _Harness) -> None:
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))
@@ -142,32 +161,27 @@ async def test_register_returns_ack(harness: _Harness) -> None:
 async def test_missing_credential_is_rejected(harness: _Harness) -> None:
     stub = await harness.start()
     call = stub.Session(metadata=_auth(None))
-    await call.write(_register_message())
 
-    with pytest.raises(aio.AioRpcError) as exc:
-        await call.read()
-    assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
+    assert await _terminal_code(call) == grpc.StatusCode.UNAUTHENTICATED
     assert harness.registry.list_workers() == []
 
 
 async def test_wrong_credential_is_rejected(harness: _Harness) -> None:
     stub = await harness.start()
     call = stub.Session(metadata=_auth("wrong"))
-    await call.write(_register_message())
 
-    with pytest.raises(aio.AioRpcError) as exc:
-        await call.read()
-    assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
+    assert await _terminal_code(call) == grpc.StatusCode.UNAUTHENTICATED
 
 
 async def test_non_register_first_message_is_rejected(harness: _Harness) -> None:
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))
-    await call.write(_heartbeat_message())
-
-    with pytest.raises(aio.AioRpcError) as exc:
+    with contextlib.suppress(aio.AioRpcError):
+        await call.write(_heartbeat_message())
+    with contextlib.suppress(aio.AioRpcError):
         await call.read()
-    assert exc.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+
+    assert await call.code() == grpc.StatusCode.FAILED_PRECONDITION
 
 
 async def test_heartbeat_refreshes_liveness(harness: _Harness) -> None:
