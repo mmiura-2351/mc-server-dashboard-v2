@@ -54,6 +54,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+_OLD = dt.datetime(2026, 6, 4, 11, 0, tzinfo=dt.timezone.utc)
 
 
 @pytest.fixture
@@ -471,3 +472,105 @@ async def test_repository_list_running_assigned(engine: AsyncEngine) -> None:
         candidates = await repo.list_running_assigned()
     # Only the running, Worker-assigned server is a snapshot candidate.
     assert [s.id for s in candidates] == [running]
+
+
+async def _assign_with_observed(
+    engine: AsyncEngine,
+    server_id: ServerId,
+    worker: uuid.UUID,
+    observed: ObservedState,
+) -> None:
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        server.assigned_worker_id = WorkerId(worker)
+        server.desired_state = DesiredState.RUNNING
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.servers.record_observed_state(
+            server_id, observed_state=observed, observed_at=_OLD
+        )
+        await uow.commit()
+
+
+async def test_reset_marks_non_terminal_assigned_unknown_keeping_assignment(
+    engine: AsyncEngine,
+) -> None:
+    # Each non-terminal observed state on an assigned row is invalidated to
+    # unknown with a fresh observed_at; the assignment is kept (stickiness).
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    worker = uuid.uuid4()
+    by_state: dict[ObservedState, ServerId] = {}
+    for observed in (
+        ObservedState.STARTING,
+        ObservedState.RUNNING,
+        ObservedState.STOPPING,
+        ObservedState.RESTARTING,
+    ):
+        sid = await _create_server(engine, community_id, observed.value)
+        await _assign_with_observed(engine, sid, worker, observed)
+        by_state[observed] = sid
+
+    async with ServersUnitOfWork(factory) as uow:
+        count = await uow.servers.reset_unverifiable_observed_states(_NOW)
+        await uow.commit()
+    assert count == 4
+
+    for observed, sid in by_state.items():
+        async with ServersUnitOfWork(factory) as uow:
+            loaded = await uow.servers.get_by_id(sid)
+        assert loaded is not None
+        assert loaded.observed_state is ObservedState.UNKNOWN
+        assert loaded.observed_at == _NOW
+        assert loaded.assigned_worker_id == WorkerId(worker)
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN]
+)
+async def test_reset_leaves_terminal_observed_states_untouched(
+    engine: AsyncEngine, observed: ObservedState
+) -> None:
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    worker = uuid.uuid4()
+    server_id = await _create_server(engine, community_id, "survival")
+    await _assign_with_observed(engine, server_id, worker, observed)
+
+    async with ServersUnitOfWork(factory) as uow:
+        count = await uow.servers.reset_unverifiable_observed_states(_NOW)
+        await uow.commit()
+    assert count == 0
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is observed
+    assert loaded.observed_at == _OLD
+
+
+async def test_reset_leaves_unassigned_rows_untouched(engine: AsyncEngine) -> None:
+    # An unassigned row keeps its observed state even when non-terminal: there is
+    # no worker to make the cache unverifiable.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.RUNNING, observed_at=_OLD
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        count = await uow.servers.reset_unverifiable_observed_states(_NOW)
+        await uow.commit()
+    assert count == 0
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.RUNNING
+    assert loaded.assigned_worker_id is None

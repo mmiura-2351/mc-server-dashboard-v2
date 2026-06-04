@@ -109,6 +109,29 @@ class ServerRepository(abc.ABC):
         """Set observed=unknown for all servers assigned to ``worker_id`` (FR-WRK-4)."""
 
     @abc.abstractmethod
+    async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
+        """Invalidate the observed cache for assigned, in-flight servers (issue #224).
+
+        Set ``observed=unknown`` (with a fresh ``observed_at``) for every server
+        that has a non-null ``assigned_worker_id`` and a non-terminal observed
+        state (``starting``, ``running``, ``stopping``, ``restarting``). The
+        assignment is kept (the stickiness invariant): only the observed-state
+        cache is cleared.
+
+        Called once on API startup, before the reconciler loop begins. Observed
+        state is a cache of worker reports; after a full-stack restart the API
+        never observed the heartbeat lapse, so a row can persist as
+        ``(desired=running, observed=running)`` with no live instance — phantom
+        running forever, since the reconciler treats ``observed=running`` as
+        converged. Resetting it to ``unknown`` makes that state unverifiable until
+        a worker re-reports, so the reconciler converges truthfully.
+
+        Terminal/cache-stable observed states (``stopped``, ``crashed``,
+        ``unknown``) are already truthful across a restart and are left untouched,
+        as are unassigned rows. Returns the number of rows updated.
+        """
+
+    @abc.abstractmethod
     async def count_running_for_worker(self, worker_id: WorkerId) -> int:
         """Count servers assigned to ``worker_id`` with desired=running.
 

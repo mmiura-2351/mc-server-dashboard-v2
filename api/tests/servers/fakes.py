@@ -182,6 +182,24 @@ class FakeServerRepository(ServerRepository):
                 server.observed_state = ObservedState.UNKNOWN
                 server.observed_at = observed_at
 
+    async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
+        non_terminal = (
+            ObservedState.STARTING,
+            ObservedState.RUNNING,
+            ObservedState.STOPPING,
+            ObservedState.RESTARTING,
+        )
+        count = 0
+        for server in self.by_id.values():
+            if (
+                server.assigned_worker_id is not None
+                and server.observed_state in non_terminal
+            ):
+                server.observed_state = ObservedState.UNKNOWN
+                server.observed_at = observed_at
+                count += 1
+        return count
+
     async def count_running_for_worker(self, worker_id: WorkerId) -> int:
         return sum(
             1

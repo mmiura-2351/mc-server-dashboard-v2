@@ -101,6 +101,9 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
     SnapshotServer,
 )
+from mc_server_dashboard_api.servers.application.startup_reset import (
+    ResetUnverifiableObservedStates,
+)
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
@@ -324,6 +327,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         logging.getLogger(__name__).info("login_attempt prune loop started")
         if settings.control.enabled:
+            # Invalidate the stale observed-state cache before the reconciler
+            # starts (issue #224). A full-stack restart kills the API before it
+            # can observe a worker's heartbeat lapse, so an assigned, in-flight
+            # row can persist as observed=running with no live instance — which
+            # the reconciler reads as converged. Marking such rows
+            # observed=unknown (assignment kept) lets the reconciler converge
+            # truthfully once workers re-report. Gated with the reconciler: it is
+            # the consumer that makes the reset matter, and a control-disabled
+            # process has no reconciler to mislead.
+            await ResetUnverifiableObservedStates(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+                clock=ServersSystemClock(),
+            )()
             # Run the control-plane gRPC server as a lifespan task on the same
             # asyncio event loop as FastAPI (grpc.aio): one process, one loop,
             # the registry shared in-memory between the two surfaces.
