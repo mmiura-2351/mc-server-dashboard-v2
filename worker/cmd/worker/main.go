@@ -23,6 +23,7 @@ import (
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/clock"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/config"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/hostprocess"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/javaruntime"
@@ -72,7 +73,10 @@ func run(ctx context.Context) error {
 		Drivers:       cfg.Worker.Drivers,
 		MaxServers:    cfg.Worker.MaxServers,
 	}
-	manager := buildInstanceManager(cfg.Worker, logger)
+	manager, err := buildInstanceManager(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
 	runner := session.NewRunner(dialer, caps, sysClock, logger, session.WithCommandHandler(manager))
 
 	// Cancel the run context on SIGINT/SIGTERM for a clean stream shutdown.
@@ -83,28 +87,52 @@ func run(ctx context.Context) error {
 	return runner.Run(sigCtx)
 }
 
-// buildInstanceManager wires the execution drivers and the instance manager that
-// handles lifecycle/console commands (issue #89). RCON for both graceful stop and
-// ServerCommand forwarding is opened from the server's working-dir
-// server.properties. Only the host-process driver lands here; the container
-// driver is the next sub-issue.
-func buildInstanceManager(wc config.WorkerConfig, logger *slog.Logger) *instancemanager.Manager {
-	selector := javaruntime.New(wc.Java.Runtimes)
+// buildInstanceManager wires the advertised execution drivers and the instance
+// manager that handles lifecycle/console commands (issue #89). RCON for both
+// graceful stop and ServerCommand forwarding is opened from the server's
+// working-dir server.properties. A driver is constructed only when
+// worker.drivers advertises it; the container driver also sweeps leftover
+// containers from a previous run before any server is launched.
+func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.Logger) (*instancemanager.Manager, error) {
+	wc := cfg.Worker
+	openFromWorkingDir := func(ctx context.Context, spec execution.InstanceSpec) (execution.ServerControl, error) {
+		return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir)
+	}
 
-	hostDriver := hostprocess.New(
-		selector,
-		hostprocess.RealSpawn,
-		func(ctx context.Context, spec execution.InstanceSpec) (execution.ServerControl, error) {
-			return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir)
-		},
-		hostprocess.Options{StopTimeout: 30 * time.Second},
-	)
+	drivers := map[string]execution.ExecutionDriver{}
+	for _, name := range wc.Drivers {
+		switch name {
+		case "host-process":
+			drivers[name] = hostprocess.New(
+				javaruntime.New(wc.Java.Runtimes),
+				hostprocess.RealSpawn,
+				openFromWorkingDir,
+				hostprocess.Options{StopTimeout: 30 * time.Second},
+			)
+		case "container":
+			docker, err := containerdriver.NewEngineClient(cfg.Driver.Container.DockerHost)
+			if err != nil {
+				return nil, err
+			}
+			cd := containerdriver.New(
+				docker,
+				containerdriver.NewImageSelector(cfg.Driver.Container.Images),
+				openFromWorkingDir,
+				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second},
+			)
+			if err := cd.Sweep(ctx); err != nil {
+				// A failed sweep is logged, not fatal: leftover containers block the
+				// affected servers' restart but must not stop the Worker from serving.
+				logger.Warn("container orphan sweep failed", "error", err)
+			}
+			drivers[name] = cd
+		}
+	}
 
-	drivers := map[string]execution.ExecutionDriver{"host-process": hostDriver}
 	openControl := func(ctx context.Context, serverID string) (execution.ServerControl, error) {
 		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID))
 	}
-	return instancemanager.New(drivers, wc.ScratchDir, openControl).WithLogger(logger)
+	return instancemanager.New(drivers, wc.ScratchDir, openControl).WithLogger(logger), nil
 }
 
 // newLogger builds the structured logger from the log configuration. Secrets are

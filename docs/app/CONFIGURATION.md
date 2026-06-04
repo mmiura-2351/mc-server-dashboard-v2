@@ -247,7 +247,8 @@ section fixes only what the operator configures.
 |---|---|---|---|
 | `worker.scratch_dir` | *required* | | Local scratch directory where the Worker hydrates a server's working set and runs it (REQUIREMENTS.md FR-DATA-4); the `WorkingDir` Port's root (ARCHITECTURE.md Section 5.2). |
 | `worker.java.runtimes` | *(empty)* | | Map of Java **major version** to the `java` binary path for it; the `JavaRuntimeSelector` picks the entry matching a server's Minecraft version (REQUIREMENTS.md FR-EXE-5, ARCHITECTURE.md Section 7.3). See below. |
-| `driver.container.docker_host` | *(daemon default)* | | Docker daemon endpoint when the `container` driver is enabled. |
+| `driver.container.docker_host` | *(daemon default)* | | Docker daemon endpoint when the `container` driver is enabled. Only a `unix://` socket is supported in M1; empty uses the daemon's default socket. |
+| `driver.container.images` | *(empty)* | | Map of Java **major version** to the base container image providing that JRE; the `container` driver picks the image matching a server's Minecraft version by the same bracket logic as `worker.java.runtimes`. **Required** when `worker.drivers` advertises `container`. See below. |
 | `java.install_dir` | *(auto-discover)* | | Directory of installed Java runtimes for future auto-discovery of `worker.java.runtimes`; not yet implemented. |
 
 The `worker.java.runtimes` map keys are Java major versions; values are absolute
@@ -266,6 +267,34 @@ the launch.
 
 The environment-variable form is a comma-separated `major=path` list:
 `MCD_WORKER_WORKER_JAVA_RUNTIMES="17=/jvm/17/bin/java,21=/jvm/21/bin/java"`.
+
+The `container` driver mirrors this: `driver.container.images` maps a Java major
+version to a base image that provides that JRE (the server JAR is bind-mounted
+from the scratch dir and run with the image's `java`). The version→major mapping
+is shared with `worker.java.runtimes`, so a server runs on the same Java major
+whether it executes as a host process or in a container. A version with no
+configured image fails the launch.
+
+```toml
+[driver.container]
+docker_host = "unix:///var/run/docker.sock"
+
+[driver.container.images]
+17 = "eclipse-temurin:17-jre"
+21 = "eclipse-temurin:21-jre"
+```
+
+The environment-variable form is a comma-separated `major=image` list:
+`MCD_WORKER_DRIVER_CONTAINER_IMAGES="17=eclipse-temurin:17-jre,21=eclipse-temurin:21-jre"`,
+with `MCD_WORKER_DRIVER_CONTAINER_DOCKER_HOST` for the daemon endpoint.
+
+The `container` driver names each container deterministically (`mcsd-<server_id>`)
+and labels it with this Worker's id (`mcsd.worker.id`) and the server id
+(`mcsd.server.id`). At startup it sweeps and removes leftover containers carrying
+its own worker-id label — recovering from a crash that left a server's container
+behind — before launching any server; it removes a container after the server
+exits. Resource limits (CPU/memory quotas) are deferred to M2+
+(REQUIREMENTS.md Section 2.2).
 
 ### 6.4 Observability
 

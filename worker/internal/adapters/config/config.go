@@ -33,6 +33,7 @@ const EnvPrefix = "MCD_WORKER_"
 type Config struct {
 	API    APIConfig
 	Worker WorkerConfig
+	Driver DriverConfig
 	Log    LogConfig
 }
 
@@ -89,6 +90,25 @@ type JavaConfig struct {
 	Runtimes map[int]string
 }
 
+// DriverConfig holds per-driver settings (CONFIGURATION.md Section 6.3). Only the
+// container driver has configurable inputs at this milestone.
+type DriverConfig struct {
+	// Container configures the container (Docker) ExecutionDriver. It is consulted
+	// only when worker.drivers advertises "container".
+	Container ContainerConfig
+}
+
+// ContainerConfig configures the container driver (CONFIGURATION.md Section 6.3).
+type ContainerConfig struct {
+	// DockerHost is the Docker daemon endpoint (unix:// socket). Empty uses the
+	// daemon default socket.
+	DockerHost string
+	// Images maps a Java major version to the base container image providing that
+	// JRE, mirroring worker.java.runtimes. The driver selects the image for the
+	// major a server's Minecraft version requires.
+	Images map[int]string
+}
+
 // LogConfig is the observability surface (CONFIGURATION.md Section 6.4).
 type LogConfig struct {
 	Level  string
@@ -121,6 +141,14 @@ type fileConfig struct {
 			Runtimes map[string]string `toml:"runtimes"`
 		} `toml:"java"`
 	} `toml:"worker"`
+	Driver struct {
+		Container struct {
+			DockerHost *string `toml:"docker_host"`
+			// Images maps a Java major (string key, e.g. "21") to the base image
+			// ref. TOML table keys are strings; they are parsed to ints.
+			Images map[string]string `toml:"images"`
+		} `toml:"container"`
+	} `toml:"driver"`
 	Log struct {
 		Level  *string `toml:"level"`
 		Format *string `toml:"format"`
@@ -204,11 +232,19 @@ func applyFile(cfg *Config, path string) error {
 	}
 	setString(&cfg.Worker.ScratchDir, fc.Worker.ScratchDir)
 	if fc.Worker.Java.Runtimes != nil {
-		runtimes, err := parseRuntimes(fc.Worker.Java.Runtimes)
+		runtimes, err := parseMajorMap("worker.java.runtimes", fc.Worker.Java.Runtimes)
 		if err != nil {
 			return err
 		}
 		cfg.Worker.Java.Runtimes = runtimes
+	}
+	setString(&cfg.Driver.Container.DockerHost, fc.Driver.Container.DockerHost)
+	if fc.Driver.Container.Images != nil {
+		images, err := parseMajorMap("driver.container.images", fc.Driver.Container.Images)
+		if err != nil {
+			return err
+		}
+		cfg.Driver.Container.Images = images
 	}
 	setString(&cfg.Log.Level, fc.Log.Level)
 	setString(&cfg.Log.Format, fc.Log.Format)
@@ -258,19 +294,32 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 		cfg.Worker.Java.Runtimes = runtimes
 	}
 
+	setEnvString(&cfg.Driver.Container.DockerHost, getenv, "DRIVER_CONTAINER_DOCKER_HOST")
+
+	// DRIVER_CONTAINER_IMAGES is a comma-separated list of major=image pairs, e.g.
+	// "17=eclipse-temurin:17-jre,21=eclipse-temurin:21-jre".
+	if v := getenv(EnvPrefix + "DRIVER_CONTAINER_IMAGES"); v != "" {
+		images, err := parseRuntimePairs(v)
+		if err != nil {
+			return fmt.Errorf("config: %sDRIVER_CONTAINER_IMAGES: %w", EnvPrefix, err)
+		}
+		cfg.Driver.Container.Images = images
+	}
+
 	return nil
 }
 
-// parseRuntimes converts a string-keyed Java-runtimes map (from TOML) to an
-// int-keyed one, erroring on a non-integer major.
-func parseRuntimes(in map[string]string) (map[int]string, error) {
+// parseMajorMap converts a string-keyed Java-major map (from TOML) to an
+// int-keyed one, erroring on a non-integer major. key names the config key for
+// the error message.
+func parseMajorMap(key string, in map[string]string) (map[int]string, error) {
 	out := make(map[int]string, len(in))
-	for k, path := range in {
+	for k, value := range in {
 		major, err := strconv.Atoi(k)
 		if err != nil {
-			return nil, fmt.Errorf("config: worker.java.runtimes: key %q is not a Java major version: %w", k, err)
+			return nil, fmt.Errorf("config: %s: key %q is not a Java major version: %w", key, k, err)
 		}
-		out[major] = path
+		out[major] = value
 	}
 	return out, nil
 }
@@ -329,6 +378,9 @@ func (c Config) validate() error {
 	for _, d := range c.Worker.Drivers {
 		if d != "host-process" && d != "container" {
 			return fmt.Errorf("config: worker.drivers: unknown driver %q (want host-process or container)", d)
+		}
+		if d == "container" && len(c.Driver.Container.Images) == 0 {
+			return fmt.Errorf("config: driver.container.images is required when worker.drivers advertises \"container\"")
 		}
 	}
 

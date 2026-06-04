@@ -34,7 +34,7 @@ func New(runtimes map[int]string) *Selector {
 // when no configured runtime satisfies the version, or a parse error when
 // mcVersion is not a recognizable version string.
 func (s *Selector) Select(mcVersion string) (string, error) {
-	majors, err := javaMajorsFor(mcVersion)
+	majors, err := MajorsFor(mcVersion)
 	if err != nil {
 		return "", err
 	}
@@ -46,10 +46,12 @@ func (s *Selector) Select(mcVersion string) (string, error) {
 	return "", fmt.Errorf("%w: Minecraft %s needs Java %v, none configured", execution.ErrNoRuntime, mcVersion, majors)
 }
 
-// javaMajorsFor returns the acceptable Java major versions for a Minecraft
-// version, most-preferred first. The legacy mapping pins a single Java major per
-// bracket except 1.7.10-1.16.5, which prefers 8 with an 11 fallback.
-func javaMajorsFor(mcVersion string) ([]int, error) {
+// MajorsFor returns the acceptable Java major versions for a Minecraft version,
+// most-preferred first. The legacy mapping pins a single Java major per bracket
+// except 1.7.10-1.16.5, which prefers 8 with an 11 fallback. It is exported so
+// the container driver can resolve a base image by the same bracket logic the
+// host-process selector uses for runtime paths.
+func MajorsFor(mcVersion string) ([]int, error) {
 	v, err := parseVersion(mcVersion)
 	if err != nil {
 		return nil, err
