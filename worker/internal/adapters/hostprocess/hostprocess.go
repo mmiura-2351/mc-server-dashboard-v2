@@ -16,6 +16,7 @@ package hostprocess
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,11 +28,22 @@ import (
 
 // process is the supervision seam over a spawned OS process. The real adapter
 // wraps *exec.Cmd; tests substitute a fake. Wait blocks until the process exits.
+// Stdout/Stderr return the process's output pipes for log capture (FR-MON-2);
+// Pid is the OS pid for /proc-based metrics (FR-MON-3).
 type process interface {
 	Wait() error
 	Signal(os.Signal) error
 	Kill() error
+	Stdout() io.Reader
+	Stderr() io.Reader
+	Pid() int
 }
+
+// logBufferLines bounds the per-instance captured-log buffer. Under heavier
+// output the pump drops the oldest line and emits a dropped-count marker (issue
+// #96 posture); 256 lines absorbs a normal startup burst without unbounded
+// growth.
+const logBufferLines = 256
 
 // spawnFunc launches a process for the given command in dir. It is the test seam
 // for process creation.
@@ -97,7 +109,15 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		events:      make(chan execution.StatusEvent, 8),
 		exited:      make(chan struct{}),
 		state:       execution.StateStarting,
+		logPump:     execution.NewLogPump(spec.ServerID, logBufferLines),
 	}
+	// Capture stdout/stderr into the per-instance log pump. The scan goroutines
+	// end at EOF (process exit closes the pipes); supervise waits on logWG before
+	// closing the pump so the consumer's range over Logs() terminates cleanly.
+	inst.logWG.Add(2)
+	go inst.scan(proc.Stdout(), execution.LogStreamStdout)
+	go inst.scan(proc.Stderr(), execution.LogStreamStderr)
+
 	inst.emit(execution.StateStarting, "")
 	inst.set(execution.StateRunning)
 	inst.emit(execution.StateRunning, "")
@@ -130,16 +150,70 @@ type instance struct {
 	// state (stopped or crashed); waitExit selects on it.
 	exited chan struct{}
 
+	// logPump captures stdout/stderr; logWG tracks the two scan goroutines so
+	// supervise closes the pump only after both have finished.
+	logPump *execution.LogPump
+	logWG   sync.WaitGroup
+
 	mu       sync.Mutex
 	state    execution.ServerState
 	stopping bool
 	closed   bool
+
+	// cpu carries the previous CPU reading so Sample reports a rate (cpu_millis,
+	// thousandths of a core) over the interval between two samples.
+	cpuMu     sync.Mutex
+	lastTicks uint64
+	lastTime  time.Time
 }
 
 func (i *instance) Status() execution.ServerState {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.state
+}
+
+// Logs streams captured console output (execution.LogSource).
+func (i *instance) Logs() <-chan execution.LogEvent { return i.logPump.Logs() }
+
+// scan feeds one output stream into the log pump, then signals logWG.
+func (i *instance) scan(r io.Reader, stream execution.LogStream) {
+	defer i.logWG.Done()
+	i.logPump.Scan(r, stream)
+}
+
+// Sample reads the process's resident memory and CPU usage from /proc
+// (execution.StatsSource, FR-MON-3). RSS is a one-shot read; CPU is a rate
+// (cpu_millis, thousandths of a core) computed from the delta in consumed CPU
+// ticks since the previous Sample. It is cheap and Linux-specific; on a platform
+// without /proc or for an exited process it returns an error and the manager
+// falls back to an up-only sample. The first Sample reports cpu_millis=0 (no
+// prior reading to diff against).
+func (i *instance) Sample(_ context.Context) (execution.MetricsSample, error) {
+	rss, ticks, hz, err := readProcStats(i.proc.Pid())
+	if err != nil {
+		return execution.MetricsSample{}, err
+	}
+
+	now := time.Now()
+	i.cpuMu.Lock()
+	var cpuMillis uint32
+	if !i.lastTime.IsZero() && hz > 0 {
+		elapsed := now.Sub(i.lastTime).Seconds()
+		if elapsed > 0 && ticks >= i.lastTicks {
+			cores := (float64(ticks-i.lastTicks) / float64(hz)) / elapsed
+			cpuMillis = uint32(cores * 1000)
+		}
+	}
+	i.lastTicks = ticks
+	i.lastTime = now
+	i.cpuMu.Unlock()
+
+	return execution.MetricsSample{
+		ServerID:    i.spec.ServerID,
+		CPUMillis:   cpuMillis,
+		MemoryBytes: rss,
+	}, nil
 }
 
 func (i *instance) Events() <-chan execution.StatusEvent { return i.events }
@@ -217,7 +291,7 @@ func (i *instance) waitExit(ctx context.Context, d time.Duration) bool {
 
 // supervise blocks on the process exit and emits the terminal state: stopped when
 // a stop was requested, crashed otherwise (FR-SRV-4). It then closes the event
-// stream.
+// and log streams.
 func (i *instance) supervise() {
 	waitErr := i.proc.Wait()
 
@@ -238,6 +312,11 @@ func (i *instance) supervise() {
 	}
 	// Release any in-flight waitExit now the terminal state is set.
 	close(i.exited)
+
+	// The process has exited, so its pipes are at EOF; wait for both scan
+	// goroutines to drain them, then close the pump so Logs() consumers finish.
+	i.logWG.Wait()
+	i.logPump.Close()
 
 	i.mu.Lock()
 	i.closed = true
@@ -264,3 +343,10 @@ func (i *instance) emit(state execution.ServerState, detail string) {
 	default:
 	}
 }
+
+// instance implements the optional log/metrics capabilities the instance manager
+// type-asserts (FR-MON-2, FR-MON-3).
+var (
+	_ execution.LogSource   = (*instance)(nil)
+	_ execution.StatsSource = (*instance)(nil)
+)

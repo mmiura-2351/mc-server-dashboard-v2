@@ -120,6 +120,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		return nil, fmt.Errorf("containerdriver: start container: %w", err)
 	}
 
+	logCtx, logCancel := context.WithCancel(context.Background())
 	inst := &instance{
 		spec:        spec,
 		docker:      d.docker,
@@ -129,7 +130,15 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		events:      make(chan execution.StatusEvent, 8),
 		exited:      make(chan struct{}),
 		state:       execution.StateStarting,
+		logPump:     execution.NewLogPump(spec.ServerID, logBufferLines),
+		logCancel:   logCancel,
 	}
+	// Follow the container's multiplexed log stream into the per-instance pump.
+	// The follow is bound to logCtx so supervise can end it on container exit;
+	// supervise then waits on logWG before closing the pump (FR-MON-2).
+	inst.logWG.Add(1)
+	go inst.captureLogs(logCtx)
+
 	inst.emit(execution.StateStarting, "")
 	inst.set(execution.StateRunning)
 	inst.emit(execution.StateRunning, "")
@@ -137,6 +146,10 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	go inst.supervise()
 	return inst, nil
 }
+
+// logBufferLines bounds the per-instance captured-log buffer; matches the
+// host-process driver's posture (drop-oldest + dropped-count marker, issue #96).
+const logBufferLines = 256
 
 // Sweep removes leftover containers labelled for this Worker, recovering from a
 // crash that left a server's container running or stopped. It is called once at
@@ -197,6 +210,12 @@ type instance struct {
 	// state; waitExit selects on it.
 	exited chan struct{}
 
+	// logPump captures the demuxed container log stream; logWG tracks the capture
+	// goroutine and logCancel ends its follow on container exit.
+	logPump   *execution.LogPump
+	logWG     sync.WaitGroup
+	logCancel context.CancelFunc
+
 	mu       sync.Mutex
 	state    execution.ServerState
 	stopping bool
@@ -210,6 +229,38 @@ func (i *instance) Status() execution.ServerState {
 }
 
 func (i *instance) Events() <-chan execution.StatusEvent { return i.events }
+
+// Logs streams the container's captured console output (execution.LogSource).
+func (i *instance) Logs() <-chan execution.LogEvent { return i.logPump.Logs() }
+
+// captureLogs opens the container's following log stream and demuxes it into the
+// pump until the stream ends (container exit) or logCtx is cancelled. A failure
+// to open the stream is non-fatal: logs are best-effort relay (FR-MON-2), so the
+// goroutine simply exits and the server runs without log capture.
+func (i *instance) captureLogs(ctx context.Context) {
+	defer i.logWG.Done()
+	rc, err := i.docker.Logs(ctx, i.containerID)
+	if err != nil {
+		return
+	}
+	defer func() { _ = rc.Close() }()
+	demuxLogs(rc, i.logPump)
+}
+
+// Sample reads a one-shot resource sample from the Engine stats endpoint
+// (execution.StatsSource, FR-MON-3). An error (daemon unreachable, container
+// gone) makes the manager fall back to an up-only sample.
+func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) {
+	stats, err := i.docker.Stats(ctx, i.containerID)
+	if err != nil {
+		return execution.MetricsSample{}, err
+	}
+	return execution.MetricsSample{
+		ServerID:    i.spec.ServerID,
+		CPUMillis:   stats.CPUMillis,
+		MemoryBytes: stats.MemoryBytes,
+	}, nil
+}
 
 // Stop ends the instance. A graceful stop tries RCON "stop", then `docker stop`
 // (which SIGTERMs then SIGKILLs after stopTimeout inside the daemon), then a
@@ -280,7 +331,7 @@ func (i *instance) waitExit(ctx context.Context, d time.Duration) bool {
 
 // supervise blocks on the container exit and emits the terminal state: stopped
 // when a stop was requested, crashed otherwise (FR-SRV-4). It removes the
-// container afterwards and closes the event stream.
+// container afterwards and closes the event and log streams.
 func (i *instance) supervise() {
 	_, waitErr := i.docker.Wait(context.Background(), i.containerID)
 
@@ -301,6 +352,12 @@ func (i *instance) supervise() {
 	}
 	// Release any in-flight waitExit now the terminal state is set.
 	close(i.exited)
+
+	// End the log follow and wait for the capture goroutine before closing the
+	// pump so Logs() consumers finish cleanly (no goroutine leak).
+	i.logCancel()
+	i.logWG.Wait()
+	i.logPump.Close()
 
 	// Remove the exited container so a later start can reuse the deterministic name.
 	_ = i.docker.Remove(context.Background(), i.containerID)
@@ -333,6 +390,13 @@ func (i *instance) emit(state execution.ServerState, detail string) {
 
 // ensure the driver satisfies the ExecutionDriver Port.
 var _ execution.ExecutionDriver = (*Driver)(nil)
+
+// instance implements the optional log/metrics capabilities the instance manager
+// type-asserts (FR-MON-2, FR-MON-3).
+var (
+	_ execution.LogSource   = (*instance)(nil)
+	_ execution.StatsSource = (*instance)(nil)
+)
 
 // ports reads the server's game and RCON ports from its working-dir
 // server.properties, falling back to the Minecraft defaults when the file is

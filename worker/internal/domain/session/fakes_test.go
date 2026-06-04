@@ -67,6 +67,8 @@ type fakeTransport struct {
 	heartbeats  int
 	results     []CommandResult
 	statuses    []StatusEvent
+	logLines    []LogEvent
+	metrics     []MetricsEvent
 	closed      bool
 	commands    chan Command
 	recvErr     error // returned by RecvCommand once commands drains
@@ -119,6 +121,20 @@ func (t *fakeTransport) SendStatusChange(_ context.Context, event StatusEvent) e
 	return nil
 }
 
+func (t *fakeTransport) SendLogLine(_ context.Context, event LogEvent) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.logLines = append(t.logLines, event)
+	return nil
+}
+
+func (t *fakeTransport) SendMetrics(_ context.Context, event MetricsEvent) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.metrics = append(t.metrics, event)
+	return nil
+}
+
 func (t *fakeTransport) RecvCommand(ctx context.Context) (Command, error) {
 	select {
 	case <-ctx.Done():
@@ -156,6 +172,18 @@ func (t *fakeTransport) statusesCopy() []StatusEvent {
 	return append([]StatusEvent(nil), t.statuses...)
 }
 
+func (t *fakeTransport) logLinesCopy() []LogEvent {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]LogEvent(nil), t.logLines...)
+}
+
+func (t *fakeTransport) metricsCopy() []MetricsEvent {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]MetricsEvent(nil), t.metrics...)
+}
+
 // fakeHandler is an in-memory CommandHandler: it records dispatched commands,
 // returns a canned result, and pushes status events on demand.
 type fakeHandler struct {
@@ -163,10 +191,17 @@ type fakeHandler struct {
 	handled []Command
 	result  CommandResult
 	events  chan StatusEvent
+	logs    chan LogEvent
+	metrics chan MetricsEvent
 }
 
 func newFakeHandler(result CommandResult) *fakeHandler {
-	return &fakeHandler{result: result, events: make(chan StatusEvent, 8)}
+	return &fakeHandler{
+		result:  result,
+		events:  make(chan StatusEvent, 8),
+		logs:    make(chan LogEvent, 8),
+		metrics: make(chan MetricsEvent, 8),
+	}
 }
 
 func (h *fakeHandler) Handle(_ context.Context, cmd Command) CommandResult {
@@ -178,7 +213,9 @@ func (h *fakeHandler) Handle(_ context.Context, cmd Command) CommandResult {
 	return res
 }
 
-func (h *fakeHandler) Events() <-chan StatusEvent { return h.events }
+func (h *fakeHandler) Events() <-chan StatusEvent   { return h.events }
+func (h *fakeHandler) Logs() <-chan LogEvent        { return h.logs }
+func (h *fakeHandler) Metrics() <-chan MetricsEvent { return h.metrics }
 
 func (h *fakeHandler) handledCopy() []Command {
 	h.mu.Lock()

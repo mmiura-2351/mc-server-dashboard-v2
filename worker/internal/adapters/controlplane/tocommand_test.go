@@ -83,3 +83,12 @@ func TestMapErrorCodeFileAccessDenied(t *testing.T) {
 		t.Fatalf("mapErrorCode = %v, want FILE_ACCESS_DENIED", got)
 	}
 }
+
+func TestMapLogStream(t *testing.T) {
+	if got := mapLogStream(session.LogStreamStdout); got != controlplanev1.LogStream_LOG_STREAM_STDOUT {
+		t.Fatalf("stdout mapped to %v", got)
+	}
+	if got := mapLogStream(session.LogStreamStderr); got != controlplanev1.LogStream_LOG_STREAM_STDERR {
+		t.Fatalf("stderr mapped to %v", got)
+	}
+}

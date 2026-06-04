@@ -101,9 +101,40 @@ type StatusEvent struct {
 	Detail   string
 }
 
+// LogStream identifies which output stream a LogEvent came from; the adapter
+// maps it to the wire LogStream enum.
+type LogStream int
+
+const (
+	// LogStreamStdout is the server process's standard output.
+	LogStreamStdout LogStream = iota
+	// LogStreamStderr is the server process's standard error.
+	LogStreamStderr
+)
+
+// LogEvent is one captured line of a server's console output the session emits
+// as a LogLine event (FR-MON-2). Logs are transient relay-only at M1: the
+// Worker streams them and does not store them (REQUIREMENTS.md Section 6.13).
+type LogEvent struct {
+	ServerID string
+	Line     string
+	Stream   LogStream
+}
+
+// MetricsEvent is a best-effort runtime sample the session emits as a Metrics
+// event (FR-MON-3). A field the Worker cannot measure is zero; emitting at all
+// signals the server is up.
+type MetricsEvent struct {
+	ServerID    string
+	CPUMillis   uint32
+	MemoryBytes uint64
+	PlayerCount uint32
+}
+
 // CommandHandler executes the lifecycle/console commands and surfaces observed
-// state transitions. It is the application-layer instance manager; the session
-// stays transport-neutral and forwards its results and events onto the stream.
+// state transitions, log lines, and metrics. It is the application-layer
+// instance manager; the session stays transport-neutral and forwards its
+// results and events onto the stream.
 type CommandHandler interface {
 	// Handle executes cmd and returns the result keyed to cmd.CommandID. It must
 	// not block on long-running work beyond the command's own semantics.
@@ -111,6 +142,12 @@ type CommandHandler interface {
 	// Events streams observed state transitions for all managed servers. The
 	// session forwards each as a StatusChange event.
 	Events() <-chan StatusEvent
+	// Logs streams captured console output for all managed servers. The session
+	// forwards each as a LogLine event (FR-MON-2).
+	Logs() <-chan LogEvent
+	// Metrics streams periodic runtime samples for all running servers. The
+	// session forwards each as a Metrics event (FR-MON-3).
+	Metrics() <-chan MetricsEvent
 }
 
 // Transport is the Port over a single live control-plane stream. One Transport
@@ -129,6 +166,10 @@ type Transport interface {
 	SendCommandResult(ctx context.Context, result CommandResult) error
 	// SendStatusChange emits one StatusChange event (CONTROL_PLANE.md Section 6).
 	SendStatusChange(ctx context.Context, event StatusEvent) error
+	// SendLogLine emits one LogLine event (FR-MON-2).
+	SendLogLine(ctx context.Context, event LogEvent) error
+	// SendMetrics emits one Metrics event (FR-MON-3).
+	SendMetrics(ctx context.Context, event MetricsEvent) error
 	// RecvCommand blocks for the next inbound API command. It returns an error
 	// when the stream ends (clean close or transport failure).
 	RecvCommand(ctx context.Context) (Command, error)

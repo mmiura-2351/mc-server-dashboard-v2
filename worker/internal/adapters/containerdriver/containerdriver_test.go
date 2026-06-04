@@ -3,6 +3,8 @@ package containerdriver
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,10 +33,36 @@ type fakeDocker struct {
 	exitCode int64
 	exitErr  error
 	exited   chan struct{}
+
+	// logBody is the multiplexed stream Logs returns; logErr forces a Logs error.
+	logBody io.Reader
+	logErr  error
+	// stats is returned by Stats; statsErr forces a Stats error.
+	stats    ContainerStats
+	statsErr error
 }
 
 func newFakeDocker() *fakeDocker {
 	return &fakeDocker{exited: make(chan struct{})}
+}
+
+func (f *fakeDocker) Logs(_ context.Context, _ string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.logErr != nil {
+		return nil, f.logErr
+	}
+	body := f.logBody
+	if body == nil {
+		body = strings.NewReader("")
+	}
+	return io.NopCloser(body), nil
+}
+
+func (f *fakeDocker) Stats(_ context.Context, _ string) (ContainerStats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stats, f.statsErr
 }
 
 func (f *fakeDocker) Create(_ context.Context, spec CreateSpec) (string, error) {
@@ -111,6 +139,75 @@ func (f *fakeDocker) killWasCalled() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.killCalled
+}
+
+// The container's demuxed log stream flows through to Logs() as LogEvents; the
+// log channel closes after the container exits and supervise tears down.
+func TestContainerLogCaptureFlowsToLogs(t *testing.T) {
+	docker := newFakeDocker()
+	var body strings.Builder
+	body.Write(frame(dockerStreamStdout, "server starting\n"))
+	body.Write(frame(dockerStreamStderr, "a warning\n"))
+	docker.logBody = strings.NewReader(body.String())
+
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	src, ok := inst.(execution.LogSource)
+	if !ok {
+		t.Fatal("container instance should be a LogSource")
+	}
+
+	// Exit the container so supervise ends the follow, drains, and closes the pump.
+	docker.exit(0, nil)
+
+	var stdout, stderr []string
+	for ev := range src.Logs() {
+		switch ev.Stream {
+		case execution.LogStreamStdout:
+			stdout = append(stdout, ev.Line)
+		case execution.LogStreamStderr:
+			stderr = append(stderr, ev.Line)
+		}
+	}
+	if len(stdout) != 1 || stdout[0] != "server starting" {
+		t.Fatalf("stdout = %v", stdout)
+	}
+	if len(stderr) != 1 || stderr[0] != "a warning" {
+		t.Fatalf("stderr = %v", stderr)
+	}
+}
+
+// Sample forwards the Engine stats sample as a MetricsSample; a stats error
+// surfaces so the manager can fall back to up-only.
+func TestContainerSample(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stats = ContainerStats{CPUMillis: 250, MemoryBytes: 1 << 20}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer docker.exit(0, nil)
+
+	stats, ok := inst.(execution.StatsSource)
+	if !ok {
+		t.Fatal("container instance should be a StatsSource")
+	}
+	got, err := stats.Sample(context.Background())
+	if err != nil {
+		t.Fatalf("Sample: %v", err)
+	}
+	if got.CPUMillis != 250 || got.MemoryBytes != 1<<20 || got.ServerID != "s1" {
+		t.Fatalf("sample = %+v", got)
+	}
+
+	docker.statsErr = errors.New("daemon unreachable")
+	if _, err := stats.Sample(context.Background()); err == nil {
+		t.Fatal("expected Sample to surface a stats error")
+	}
 }
 
 // fakeControl is an in-memory ServerControl.

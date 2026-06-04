@@ -162,6 +162,72 @@ func TestEngineClientListFiltersByLabel(t *testing.T) {
 	}
 }
 
+func TestEngineClientStatsComputesCPU(t *testing.T) {
+	// cpuDelta=2_000_000_000, systemDelta=8_000_000_000, 2 cpus →
+	// (0.25) * 2 * 1000 = 500 millis.
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"cpu_stats": {"cpu_usage": {"total_usage": 3000000000}, "system_cpu_usage": 10000000000, "online_cpus": 2},
+			"precpu_stats": {"cpu_usage": {"total_usage": 1000000000}, "system_cpu_usage": 2000000000},
+			"memory_stats": {"usage": 1048576}
+		}`))
+	})
+	c := d.client(t)
+
+	stats, err := c.Stats(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.CPUMillis != 500 {
+		t.Fatalf("CPUMillis = %d, want 500", stats.CPUMillis)
+	}
+	if stats.MemoryBytes != 1048576 {
+		t.Fatalf("MemoryBytes = %d, want 1048576", stats.MemoryBytes)
+	}
+	req := d.requests[0]
+	if req.method != http.MethodGet || req.path != "/v1.43/containers/abc123/stats" {
+		t.Fatalf("request = %s %s", req.method, req.path)
+	}
+	q, err := url.ParseQuery(req.query)
+	if err != nil {
+		t.Fatalf("parse query: %v", err)
+	}
+	if q.Get("stream") != "false" {
+		t.Fatalf("stream = %q, want false", q.Get("stream"))
+	}
+}
+
+func TestEngineClientLogsStreamsBody(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("multiplexed-bytes"))
+	})
+	c := d.client(t)
+
+	rc, err := c.Logs(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read logs: %v", err)
+	}
+	if string(body) != "multiplexed-bytes" {
+		t.Fatalf("body = %q", body)
+	}
+	req := d.requests[0]
+	if req.method != http.MethodGet || req.path != "/v1.43/containers/abc123/logs" {
+		t.Fatalf("request = %s %s", req.method, req.path)
+	}
+	q, err := url.ParseQuery(req.query)
+	if err != nil {
+		t.Fatalf("parse query: %v", err)
+	}
+	if q.Get("follow") != "true" || q.Get("stdout") != "true" || q.Get("stderr") != "true" {
+		t.Fatalf("query = %q", req.query)
+	}
+}
+
 func TestEngineClientNonUnixHostRejected(t *testing.T) {
 	if _, err := NewEngineClient("tcp://127.0.0.1:2375"); err == nil {
 		t.Fatal("expected NewEngineClient to reject a non-unix host")

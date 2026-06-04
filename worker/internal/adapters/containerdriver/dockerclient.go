@@ -175,6 +175,83 @@ func (c *EngineClient) List(ctx context.Context, labelKey, labelValue string) ([
 	return out, nil
 }
 
+// Logs opens a following stdout+stderr log stream for a running container
+// (FR-MON-2). The container has no TTY, so the body carries Docker's multiplexed
+// stream frames; demuxReader (logdemux.go) splits them back into stdout/stderr.
+// Closing the returned reader ends the follow.
+func (c *EngineClient) Logs(ctx context.Context, id string) (io.ReadCloser, error) {
+	q := url.Values{
+		"follow":     {"true"},
+		"stdout":     {"true"},
+		"stderr":     {"true"},
+		"timestamps": {"false"},
+	}
+	u := "http://docker/" + apiVersion + "/containers/" + id + "/logs?" + q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("containerdriver: build logs request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("containerdriver: GET logs: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("containerdriver: GET logs: status %d: %s", resp.StatusCode, bytes.TrimSpace(msg))
+	}
+	return resp.Body, nil
+}
+
+// Stats reads a one-shot resource sample for a container (FR-MON-3). stream=false
+// returns a single stats JSON object that already carries the precpu snapshot, so
+// CPU usage is computed from one request without holding a streaming connection.
+func (c *EngineClient) Stats(ctx context.Context, id string) (ContainerStats, error) {
+	var raw statsResponse
+	q := url.Values{"stream": {"false"}, "one-shot": {"true"}}
+	if err := c.do(ctx, http.MethodGet, "/containers/"+id+"/stats", q, nil, &raw); err != nil {
+		return ContainerStats{}, err
+	}
+	return raw.toStats(), nil
+}
+
+// statsResponse is the subset of the Engine stats document the driver reads.
+type statsResponse struct {
+	CPUStats struct {
+		CPUUsage struct {
+			TotalUsage uint64 `json:"total_usage"`
+		} `json:"cpu_usage"`
+		SystemCPUUsage uint64 `json:"system_cpu_usage"`
+		OnlineCPUs     uint32 `json:"online_cpus"`
+	} `json:"cpu_stats"`
+	PreCPUStats struct {
+		CPUUsage struct {
+			TotalUsage uint64 `json:"total_usage"`
+		} `json:"cpu_usage"`
+		SystemCPUUsage uint64 `json:"system_cpu_usage"`
+	} `json:"precpu_stats"`
+	MemoryStats struct {
+		Usage uint64 `json:"usage"`
+	} `json:"memory_stats"`
+}
+
+// toStats converts the raw stats document to ContainerStats, computing CPU in
+// thousandths of a core from the cpu/precpu deltas (the formula `docker stats`
+// uses). A zero or negative system delta yields cpu_millis=0.
+func (r statsResponse) toStats() ContainerStats {
+	cpuDelta := float64(r.CPUStats.CPUUsage.TotalUsage) - float64(r.PreCPUStats.CPUUsage.TotalUsage)
+	systemDelta := float64(r.CPUStats.SystemCPUUsage) - float64(r.PreCPUStats.SystemCPUUsage)
+	var cpuMillis uint32
+	if systemDelta > 0 && cpuDelta > 0 {
+		cores := r.CPUStats.OnlineCPUs
+		if cores == 0 {
+			cores = 1
+		}
+		cpuMillis = uint32((cpuDelta / systemDelta) * float64(cores) * 1000)
+	}
+	return ContainerStats{CPUMillis: cpuMillis, MemoryBytes: r.MemoryStats.Usage}
+}
+
 // do performs one Engine API request. body, when non-nil, is JSON-encoded; out,
 // when non-nil, is the JSON-decoded response. A non-2xx status is an error
 // carrying the daemon's message.

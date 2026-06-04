@@ -3,6 +3,7 @@ package containerdriver
 import (
 	"bufio"
 	"context"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -45,6 +46,22 @@ type dockerAPI interface {
 	// List returns the containers carrying the given label key/value pair,
 	// including stopped ones.
 	List(ctx context.Context, labelKey, labelValue string) ([]Container, error)
+	// Logs opens a following stdout+stderr log stream for a running container
+	// (FR-MON-2). The returned reader carries Docker's multiplexed stream frames
+	// (non-TTY); the caller demuxes them. Closing the reader ends the follow.
+	Logs(ctx context.Context, id string) (io.ReadCloser, error)
+	// Stats reads a one-shot resource sample for a running container (FR-MON-3).
+	Stats(ctx context.Context, id string) (ContainerStats, error)
+}
+
+// ContainerStats is a one-shot resource sample from the Engine stats endpoint
+// (FR-MON-3). Fields the daemon does not report are zero.
+type ContainerStats struct {
+	// CPUMillis is CPU usage in thousandths of a core, derived from the cpu/
+	// precpu deltas the stats endpoint reports.
+	CPUMillis uint32
+	// MemoryBytes is the container's resident memory usage.
+	MemoryBytes uint64
 }
 
 // CreateSpec describes a container to create. Only the fields the driver sets are
