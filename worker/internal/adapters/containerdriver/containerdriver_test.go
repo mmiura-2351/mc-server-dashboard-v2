@@ -235,7 +235,7 @@ func images() *ImageSelector {
 func newTestDriver(docker *fakeDocker, ctrl execution.ServerControl, ctrlErr error) *Driver {
 	return New(docker, images(), func(context.Context, execution.InstanceSpec) (execution.ServerControl, error) {
 		return ctrl, ctrlErr
-	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond})
+	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, GameBindIP: "0.0.0.0"})
 }
 
 func spec() execution.InstanceSpec {
@@ -303,6 +303,36 @@ func TestStartCreateSpec(t *testing.T) {
 	}
 	if got.Labels[labelWorkerID] != "w1" || got.Labels[labelServerID] != "s1" {
 		t.Fatalf("Labels = %v, want worker/server labels", got.Labels)
+	}
+}
+
+// Start publishes the game port on the configured GameBindIP while RCON stays on
+// loopback (a control channel that must not be exposed).
+func TestStartGamePortBindIP(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	if _, err := d.Start(context.Background(), spec()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var game, rcon *PortMapping
+	for i := range docker.createSpec.Ports {
+		switch docker.createSpec.Ports[i].ContainerPort {
+		case defaultGamePort:
+			game = &docker.createSpec.Ports[i]
+		case defaultRCONPort:
+			rcon = &docker.createSpec.Ports[i]
+		}
+	}
+	if game == nil || rcon == nil {
+		t.Fatalf("Ports = %v, want game and rcon mappings", docker.createSpec.Ports)
+	}
+	if game.HostIP != "0.0.0.0" {
+		t.Errorf("game HostIP = %q, want configured 0.0.0.0", game.HostIP)
+	}
+	if rcon.HostIP != "127.0.0.1" {
+		t.Errorf("rcon HostIP = %q, want loopback 127.0.0.1", rcon.HostIP)
 	}
 }
 

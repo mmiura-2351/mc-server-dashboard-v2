@@ -42,6 +42,14 @@ const (
 // daemon escalates to SIGKILL.
 const defaultStopTimeout = 30 * time.Second
 
+// defaultGameBindIP is the host interface the game port is published on when
+// Options.GameBindIP is unset: loopback, preserving the historical behavior.
+// rconBindIP is fixed: RCON is a control channel and must not be exposed.
+const (
+	defaultGameBindIP = "127.0.0.1"
+	rconBindIP        = "127.0.0.1"
+)
+
 // controlFunc opens an execution.ServerControl (RCON) for a server, used for the
 // graceful-stop "stop" command. It returns an error when RCON is unavailable; the
 // driver then falls back to `docker stop`.
@@ -55,6 +63,9 @@ type Options struct {
 	// StopTimeout bounds the `docker stop` grace period. Zero uses
 	// defaultStopTimeout.
 	StopTimeout time.Duration
+	// GameBindIP is the host interface the game port is published on. Empty uses
+	// defaultGameBindIP (loopback), preserving the historical behavior.
+	GameBindIP string
 }
 
 // Driver is the container ExecutionDriver.
@@ -64,6 +75,7 @@ type Driver struct {
 	openControl controlFunc
 	workerID    string
 	stopTimeout time.Duration
+	gameBindIP  string
 }
 
 // New builds a container Driver. docker is the Engine seam; images resolves a
@@ -74,12 +86,17 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	if timeout <= 0 {
 		timeout = defaultStopTimeout
 	}
+	gameBindIP := opts.GameBindIP
+	if gameBindIP == "" {
+		gameBindIP = defaultGameBindIP
+	}
 	return &Driver{
 		docker:      docker,
 		images:      images,
 		openControl: openControl,
 		workerID:    opts.WorkerID,
 		stopTimeout: timeout,
+		gameBindIP:  gameBindIP,
 	}
 }
 
@@ -100,12 +117,13 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		Cmd:        serverCmd(spec),
 		WorkingDir: containerWorkDir,
 		Binds:      []string{spec.WorkingDir + ":" + containerWorkDir},
-		// Publish the game and RCON ports to the loopback host interface so the
-		// host-side RCON control func reaches the server the same way it does for a
-		// host process.
+		// The game port binds to the configured host interface (driver.container.
+		// game_bind_ip) so players can reach the server; RCON stays on loopback
+		// unconditionally — it is the host-side control channel and must not be
+		// exposed.
 		Ports: []PortMapping{
-			{ContainerPort: gamePort, HostIP: "127.0.0.1", HostPort: gamePort},
-			{ContainerPort: rconPort, HostIP: "127.0.0.1", HostPort: rconPort},
+			{ContainerPort: gamePort, HostIP: d.gameBindIP, HostPort: gamePort},
+			{ContainerPort: rconPort, HostIP: rconBindIP, HostPort: rconPort},
 		},
 		Labels: d.labels(spec.ServerID),
 	}
@@ -400,7 +418,8 @@ var (
 
 // ports reads the server's game and RCON ports from its working-dir
 // server.properties, falling back to the Minecraft defaults when the file is
-// absent or a key is unset. Both are published to the host loopback.
+// absent or a key is unset. Start publishes the game port on the configured host
+// interface and RCON on loopback.
 func ports(workingDir string) (game, rcon string) {
 	props := readProperties(filepath.Join(workingDir, "server.properties"))
 	game = props["server-port"]
