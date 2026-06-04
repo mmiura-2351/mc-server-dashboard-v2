@@ -87,6 +87,37 @@ class UserId:
 
 
 @dataclass(frozen=True)
+class AuthUser:
+    """The subject of an authorization decision, by id value and admin flag.
+
+    The community domain never imports the identity ``User`` (see :class:`UserId`);
+    the edge projects the authenticated user onto these two fields. ``user_id``
+    drives the Layer-2 role/grant lookup; ``is_platform_admin`` is the separate
+    platform-admin axis evaluated outside any Community (FR-AUTHZ-5).
+    """
+
+    user_id: UserId
+    is_platform_admin: bool = False
+
+
+@dataclass(frozen=True)
+class ResourceRef:
+    """The resource an operation targets, for ``can(user, operation, resource)``.
+
+    Always names the ``community_id`` the operation happens in (the Layer-2
+    scope). ``resource_type`` / ``resource_id`` identify a specific resource
+    (e.g. a server) when the operation is per-resource — they are what a
+    resource grant must match exactly (FR-AUTHZ-2); both ``None`` for a
+    community-level operation. Platform-admin operations ignore this ref
+    entirely (FR-AUTHZ-5).
+    """
+
+    community_id: CommunityId
+    resource_type: str | None = None
+    resource_id: uuid.UUID | None = None
+
+
+@dataclass(frozen=True)
 class CommunityName:
     """A community's display name.
 
