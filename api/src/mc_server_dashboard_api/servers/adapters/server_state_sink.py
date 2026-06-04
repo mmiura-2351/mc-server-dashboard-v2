@@ -34,10 +34,23 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 _LOG = logging.getLogger(__name__)
 
 
-def _parse_uuid(value: str) -> uuid.UUID | None:
+def _parse_id(value: str, *, kind: str) -> uuid.UUID | None:
+    """Parse an id the seam guarantees is a UUID, logging loudly on failure.
+
+    Worker ids are enforced to be UUIDs at registration (issue #99) and server
+    ids are DB-issued UUIDs, so a value that fails to parse here is an invariant
+    violation at the control-plane seam. It is logged at ERROR (not silently
+    skipped) so the broken bridging surfaces instead of dropping reports.
+    """
+
     try:
         return uuid.UUID(value)
     except ValueError:
+        _LOG.error(
+            "control-plane %s is not a UUID; dropping report (invariant violation)",
+            kind,
+            extra={kind: value},
+        )
         return None
 
 
@@ -56,8 +69,8 @@ class ServersServerStateSink(ServerStateSink):
     async def record_observed_state(
         self, *, server_id: str, worker_id: str, state: str
     ) -> None:
-        parsed = _parse_uuid(server_id)
-        parsed_worker = _parse_uuid(worker_id)
+        parsed = _parse_id(server_id, kind="server_id")
+        parsed_worker = _parse_id(worker_id, kind="worker_id")
         if parsed is None or parsed_worker is None:
             return
         observed = ObservedState(state)
@@ -89,7 +102,7 @@ class ServersServerStateSink(ServerStateSink):
             await session.commit()
 
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
-        parsed = _parse_uuid(worker_id)
+        parsed = _parse_id(worker_id, kind="worker_id")
         if parsed is None:
             return
         async with self._session_factory() as session:
@@ -98,7 +111,7 @@ class ServersServerStateSink(ServerStateSink):
             await session.commit()
 
     async def count_running_assignments(self, *, worker_id: str) -> int:
-        parsed = _parse_uuid(worker_id)
+        parsed = _parse_id(worker_id, kind="worker_id")
         if parsed is None:
             return 0
         async with self._session_factory() as session:

@@ -38,6 +38,7 @@ import contextlib
 import datetime as dt
 import hmac
 import logging
+import uuid
 from collections.abc import AsyncIterator
 
 import grpc
@@ -268,10 +269,19 @@ class WorkerSessionServicer(WorkerServiceServicer):
             )
 
         register = first.register
+        # The API persists a server's assigned worker as a UUID column
+        # (assigned_worker_id), and the servers/fleet seam bridges str <-> UUID
+        # at registration. Enforce the format here so a non-UUID worker id is
+        # rejected loudly instead of silently breaking observed-state and
+        # assignment tracking downstream (issue #99).
         try:
             worker_id = WorkerId(register.worker_id)
-        except InvalidWorkerIdError:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid worker id")
+            uuid.UUID(register.worker_id)
+        except (InvalidWorkerIdError, ValueError):
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "worker id must be a UUID (CONFIGURATION.md worker.id)",
+            )
 
         now = self._clock.now()
         session = self._registry.register(

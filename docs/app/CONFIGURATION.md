@@ -235,7 +235,7 @@ can run**, and **where its scratch space is**.
 | `api.tls.insecure` | `false` | | When `true`, dial the control channel in plaintext (no TLS). Local/dev only; the Worker logs a `WARN` at startup. Required to opt out of TLS when `api.tls.ca_file` is unset. |
 | `api.tls.client_cert_file` | — | | Path to the Worker's client certificate, when the control channel uses mTLS. |
 | `api.tls.client_key_file` | — | secret | Path to the Worker's client private key (mTLS). |
-| `worker.id` | *(auto)* | | Stable identifier the Worker registers under; defaults to a generated/host-derived value. |
+| `worker.id` | *(auto)* | | Stable identifier the Worker registers under. **Must be a UUID**: the API persists a server's assigned worker as a UUID column, so registration rejects a non-UUID id with `INVALID_ARGUMENT` (and the Worker fails config load if an explicit `worker.id` is not a UUID). When unset, the Worker generates a UUIDv4 on first boot, persists it at `<worker.scratch_dir>/worker-id` (mode `0600`), and reuses it on later restarts so identity stays stable. **Upgrade impact:** a Worker that previously defaulted to its hostname gets a new UUID identity on first boot after upgrading, so the API sees a brand-new Worker and the old `assigned_worker_id` rows are orphaned (recovered via the disconnect/mark-unknown path; servers restart cleanly on hydrate). This is a one-time transition. |
 
 ¹ `api.tls.ca_file` is required **unless** `api.tls.insecure=true`. With neither
 set, configuration validation fails fast at startup; with `api.tls.insecure=true`

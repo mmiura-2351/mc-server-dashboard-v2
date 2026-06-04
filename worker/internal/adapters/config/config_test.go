@@ -22,7 +22,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret-token",
 		"MCD_WORKER_API_TLS_INSECURE":   "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR": "/var/lib/worker",
+		"MCD_WORKER_WORKER_SCRATCH_DIR": t.TempDir(),
 	})
 
 	cfg, err := Load("", env)
@@ -59,6 +59,7 @@ func TestLoadFailsFastOnMissingRequired(t *testing.T) {
 func TestLoadPrecedenceFileThenEnv(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "worker.toml")
+	scratch := t.TempDir()
 	body := `
 [api]
 grpc_endpoint = "file-endpoint:50051"
@@ -69,7 +70,7 @@ credential = "file-credential"
 insecure = true
 
 [worker]
-scratch_dir = "/file/scratch"
+scratch_dir = "` + scratch + `"
 drivers = ["host-process", "container"]
 max_servers = 4
 metrics_interval_seconds = 30
@@ -104,8 +105,8 @@ level = "debug"
 	if cfg.API.DataPlaneURL != "https://file/data" {
 		t.Errorf("DataPlaneURL = %q, want file value", cfg.API.DataPlaneURL)
 	}
-	if cfg.Worker.ScratchDir != "/file/scratch" {
-		t.Errorf("ScratchDir = %q, want file value", cfg.Worker.ScratchDir)
+	if cfg.Worker.ScratchDir != scratch {
+		t.Errorf("ScratchDir = %q, want file value %q", cfg.Worker.ScratchDir, scratch)
 	}
 	if cfg.Worker.MaxServers != 4 {
 		t.Errorf("MaxServers = %d, want 4", cfg.Worker.MaxServers)
@@ -197,7 +198,7 @@ func TestLoadAcceptsCAFileWithoutInsecure(t *testing.T) {
 		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret",
 		"MCD_WORKER_API_TLS_CA_FILE":    "/etc/ssl/ca.pem",
-		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
+		"MCD_WORKER_WORKER_SCRATCH_DIR": t.TempDir(),
 	})
 
 	cfg, err := Load("", env)
@@ -225,7 +226,7 @@ credential = "secret"
 insecure = true
 
 [worker]
-scratch_dir = "/scratch"
+scratch_dir = "` + t.TempDir() + `"
 
 [worker.java.runtimes]
 17 = "/jvm/17/bin/java"
@@ -250,7 +251,7 @@ func TestLoadJavaRuntimesFromEnv(t *testing.T) {
 		"MCD_WORKER_API_DATA_PLANE_URL":   "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":       "secret",
 		"MCD_WORKER_API_TLS_INSECURE":     "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":   "/scratch",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":   t.TempDir(),
 		"MCD_WORKER_WORKER_JAVA_RUNTIMES": "8=/jvm/8/bin/java, 21=/jvm/21/bin/java",
 	})
 
@@ -291,7 +292,7 @@ credential = "secret"
 insecure = true
 
 [worker]
-scratch_dir = "/scratch"
+scratch_dir = "` + t.TempDir() + `"
 drivers = ["container"]
 
 [driver.container]
@@ -323,7 +324,7 @@ func TestLoadContainerImagesFromEnv(t *testing.T) {
 		"MCD_WORKER_API_DATA_PLANE_URL":           "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":               "secret",
 		"MCD_WORKER_API_TLS_INSECURE":             "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":           "/scratch",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":           t.TempDir(),
 		"MCD_WORKER_WORKER_DRIVERS":               "container",
 		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":      "21=eclipse-temurin:21-jre",
 		"MCD_WORKER_DRIVER_CONTAINER_DOCKER_HOST": "unix:///run/docker.sock",

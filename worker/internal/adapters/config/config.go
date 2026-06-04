@@ -68,8 +68,10 @@ type TLSConfig struct {
 // WorkerConfig is identity, advertised capabilities, and scratch space
 // (CONFIGURATION.md Sections 6.1-6.3).
 type WorkerConfig struct {
-	// ID is the stable identifier the Worker registers under; defaults to the
-	// host name when unset.
+	// ID is the stable identifier the Worker registers under. It must be a UUID
+	// (the API rejects non-UUID worker ids). When unset, a UUID is generated and
+	// persisted at <scratch_dir>/worker-id on first boot and reused thereafter
+	// (see resolveWorkerID).
 	ID string
 	// Drivers is the ExecutionDriver set this Worker advertises.
 	Drivers []string
@@ -192,13 +194,13 @@ func Load(path string, getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
-	if cfg.Worker.ID == "" {
-		if host, err := os.Hostname(); err == nil {
-			cfg.Worker.ID = host
-		}
+	if err := cfg.validate(); err != nil {
+		return Config{}, err
 	}
 
-	if err := cfg.validate(); err != nil {
+	// Resolve worker.id after validate so worker.scratch_dir is guaranteed set:
+	// an unset id is persisted under it (see resolveWorkerID).
+	if err := resolveWorkerID(&cfg); err != nil {
 		return Config{}, err
 	}
 
