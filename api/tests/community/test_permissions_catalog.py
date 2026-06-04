@@ -53,6 +53,7 @@ def test_community_codes_match_appendix_a() -> None:
         "community:read",
         "community:update",
         "community:delete",
+        "audit:read",
     }
 
 

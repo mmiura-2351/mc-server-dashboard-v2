@@ -23,6 +23,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.application.manage_membership import (
     AddMember,
     AssignRole,
@@ -50,6 +53,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.dependencies import (
     get_add_member,
     get_assign_role,
+    get_audit_recorder,
     get_list_members,
     get_remove_member,
     get_unassign_role,
@@ -104,10 +108,11 @@ class MemberResponse(BaseModel):
 async def add_member(
     community_id: uuid.UUID,
     body: AddMemberRequest,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("member:add")))
     ],
     use_case: Annotated[AddMember, Depends(get_add_member)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> MembershipResponse:
     try:
         membership = await use_case(
@@ -124,6 +129,16 @@ async def add_member(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": "already_member"},
         ) from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.MEMBER_ADD,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_USER,
+            target_id=membership.user_id.value,
+        )
+    )
     return MembershipResponse.from_entity(membership)
 
 
@@ -149,10 +164,11 @@ async def list_members(
 async def remove_member(
     community_id: uuid.UUID,
     user_id: uuid.UUID,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("member:remove")))
     ],
     use_case: Annotated[RemoveMember, Depends(get_remove_member)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     try:
         await use_case(community_id=CommunityId(community_id), user_id=UserId(user_id))
@@ -163,6 +179,16 @@ async def remove_member(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": "last_owner"},
         ) from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.MEMBER_REMOVE,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_USER,
+            target_id=user_id,
+        )
+    )
 
 
 @router.post(
@@ -173,21 +199,33 @@ async def assign_role(
     community_id: uuid.UUID,
     user_id: uuid.UUID,
     body: AssignRoleRequest,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("role:manage")))
     ],
     use_case: Annotated[AssignRole, Depends(get_assign_role)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
+    role_id = _parse_role_id(body.role_id)
     try:
         await use_case(
             community_id=CommunityId(community_id),
             user_id=UserId(user_id),
-            role_id=_parse_role_id(body.role_id),
+            role_id=role_id,
         )
     except MembershipNotFoundError as exc:
         raise _not_found() from exc
     except RoleNotFoundError as exc:
         raise _not_found() from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.ROLE_ASSIGN,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_USER,
+            target_id=user_id,
+        )
+    )
 
 
 @router.delete(
@@ -198,10 +236,11 @@ async def unassign_role(
     community_id: uuid.UUID,
     user_id: uuid.UUID,
     role_id: uuid.UUID,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("role:manage")))
     ],
     use_case: Annotated[UnassignRole, Depends(get_unassign_role)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     try:
         await use_case(
@@ -218,6 +257,16 @@ async def unassign_role(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": "last_owner"},
         ) from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.ROLE_UNASSIGN,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_USER,
+            target_id=user_id,
+        )
+    )
 
 
 def _parse_user_id(raw: str) -> UserId:

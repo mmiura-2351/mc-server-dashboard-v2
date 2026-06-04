@@ -20,6 +20,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from mc_server_dashboard_api.audit.api import audit
 from mc_server_dashboard_api.community.api import (
     communities,
     grants,
@@ -342,4 +343,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(workers.router)
     app.include_router(transfers.router)
     app.include_router(versions_api.router)
+    app.include_router(audit.router)
     return app

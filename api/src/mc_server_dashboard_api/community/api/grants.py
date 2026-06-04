@@ -21,6 +21,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.application.manage_grant import (
     CreateGrant,
     ListGrants,
@@ -43,6 +46,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_create_grant,
     get_list_grants,
     get_revoke_grant,
@@ -102,10 +106,11 @@ async def list_grants(
 async def create_grant(
     community_id: uuid.UUID,
     body: CreateGrantRequest,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("grant:manage")))
     ],
     use_case: Annotated[CreateGrant, Depends(get_create_grant)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> GrantResponse:
     try:
         grant = await use_case(
@@ -131,6 +136,16 @@ async def create_grant(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": "grant_exists"},
         ) from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.GRANT_CREATE,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_GRANT,
+            target_id=grant.id.value,
+        )
+    )
     return GrantResponse.from_entity(grant)
 
 
@@ -141,10 +156,11 @@ async def create_grant(
 async def revoke_grant(
     community_id: uuid.UUID,
     grant_id: uuid.UUID,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("grant:manage")))
     ],
     use_case: Annotated[RevokeGrant, Depends(get_revoke_grant)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     try:
         await use_case(
@@ -153,6 +169,16 @@ async def revoke_grant(
         )
     except ResourceGrantNotFoundError as exc:
         raise _not_found() from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.GRANT_REVOKE,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_GRANT,
+            target_id=grant_id,
+        )
+    )
 
 
 def _parse_user_id(raw: str) -> UserId:

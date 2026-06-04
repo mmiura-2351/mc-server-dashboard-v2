@@ -1,0 +1,63 @@
+"""Audit operation codes (the ``operation`` column, DATABASE.md Section 9).
+
+Centralised ``<resource>:<action>`` codes so recording points name one constant
+instead of a stringly-typed literal. Most mirror the Appendix A permission codes
+of the operation they record; the ``auth:*`` codes have no permission counterpart
+(authentication is not permission-gated) but follow the same shape -- the
+``operation`` column is free text, so this is a naming convention, not a catalog
+constraint.
+"""
+
+from __future__ import annotations
+
+from typing import Final
+
+# Authentication (FR-AUTH-*): no permission counterpart; see module docstring.
+AUTH_LOGIN: Final = "auth:login"
+AUTH_LOGOUT: Final = "auth:logout"
+AUTH_REGISTER: Final = "auth:register"
+
+# Community provisioning/management (FR-COMM-*).
+COMMUNITY_PROVISION: Final = "community:provision"
+COMMUNITY_UPDATE: Final = "community:update"
+COMMUNITY_DELETE: Final = "community:delete"
+
+# Membership + role assignment (FR-MEM-*).
+MEMBER_ADD: Final = "member:add"
+MEMBER_REMOVE: Final = "member:remove"
+ROLE_ASSIGN: Final = "role:assign"
+ROLE_UNASSIGN: Final = "role:unassign"
+
+# Role / grant CRUD (FR-AUTHZ-*).
+ROLE_CREATE: Final = "role:create"
+ROLE_UPDATE: Final = "role:update"
+ROLE_DELETE: Final = "role:delete"
+GRANT_CREATE: Final = "grant:create"
+GRANT_REVOKE: Final = "grant:revoke"
+
+# Server CRUD + lifecycle + RCON (FR-SRV-*).
+SERVER_CREATE: Final = "server:create"
+SERVER_UPDATE: Final = "server:update"
+SERVER_DELETE: Final = "server:delete"
+SERVER_START: Final = "server:start"
+SERVER_STOP: Final = "server:stop"
+SERVER_RESTART: Final = "server:restart"
+SERVER_COMMAND: Final = "server:command"
+
+# Backup create/restore/delete (FR-BAK-*).
+BACKUP_CREATE: Final = "backup:create"
+BACKUP_RESTORE: Final = "backup:restore"
+BACKUP_DELETE: Final = "backup:delete"
+
+# Worker drain set/clear (FR-WRK-5).
+WORKER_DRAIN_SET: Final = "worker:drain_set"
+WORKER_DRAIN_CLEAR: Final = "worker:drain_clear"
+
+# Target-type names (the ``target_type`` column).
+TARGET_COMMUNITY: Final = "community"
+TARGET_USER: Final = "user"
+TARGET_ROLE: Final = "role"
+TARGET_GRANT: Final = "grant"
+TARGET_SERVER: Final = "server"
+TARGET_BACKUP: Final = "backup"
+TARGET_WORKER: Final = "worker"

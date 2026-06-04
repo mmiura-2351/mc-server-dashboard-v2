@@ -388,3 +388,46 @@ forbidden_modules = [
     "mc_server_dashboard_api.core",
     "httpx",
 ]
+
+# --- audit context ---------------------------------------------------------
+# Mirrors the other contexts' shape (ARCHITECTURE.md Section 2.2): a layered
+# contract pins domain <- application <- api, and the forbidden contracts keep
+# adapters at the edge (the SQLAlchemy AuditWriter / AuditQuery and the
+# must-not-raise recorder are bound to Ports only in the wiring module) and the
+# domain dependency-free, including no import of any other context (events,
+# actor/community/target are plain id values; DATABASE.md Section 9). The audit
+# *query* api imports the community domain's AuthUser/Permission to reuse the
+# two-layer authorization seam at the edge, which the api layer is free to do.
+[[tool.importlinter.contracts]]
+name = "audit context layers (domain <- application <- api; adapters at the edge)"
+type = "layers"
+layers = [
+    "mc_server_dashboard_api.audit.api",
+    "mc_server_dashboard_api.audit.application",
+    "mc_server_dashboard_api.audit.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "audit domain and application do not import adapters"
+type = "forbidden"
+source_modules = [
+    "mc_server_dashboard_api.audit.domain",
+    "mc_server_dashboard_api.audit.application",
+]
+forbidden_modules = ["mc_server_dashboard_api.audit.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "audit domain imports nothing internal (incl. other contexts)"
+type = "forbidden"
+source_modules = ["mc_server_dashboard_api.audit.domain"]
+forbidden_modules = [
+    "mc_server_dashboard_api.audit.adapters",
+    "mc_server_dashboard_api.audit.application",
+    "mc_server_dashboard_api.audit.api",
+    "mc_server_dashboard_api.community",
+    "mc_server_dashboard_api.identity",
+    "mc_server_dashboard_api.fleet",
+    "mc_server_dashboard_api.servers",
+    "mc_server_dashboard_api.storage",
+    "mc_server_dashboard_api.core",
+]

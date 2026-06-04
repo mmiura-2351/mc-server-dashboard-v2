@@ -18,6 +18,14 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from mc_server_dashboard_api.audit.adapters.clock import (
+    SystemClock as AuditSystemClock,
+)
+from mc_server_dashboard_api.audit.adapters.query import SqlAlchemyAuditQuery
+from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
+from mc_server_dashboard_api.audit.adapters.writer import SqlAlchemyAuditWriter
+from mc_server_dashboard_api.audit.application.list_audit_log import ListAuditLog
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.adapters.clock import (
     SystemClock as CommunitySystemClock,
 )
@@ -327,6 +335,28 @@ def get_database_ping(request: Request) -> DatabasePing:
     """Bind the :class:`DatabasePing` Port to its SQLAlchemy adapter."""
 
     return SqlAlchemyDatabasePing(get_engine(request))
+
+
+def get_audit_recorder(request: Request) -> AuditRecorder:
+    """Bind the must-not-raise :class:`AuditRecorder` (FR-AUD-2).
+
+    Wraps the SQLAlchemy ``AuditWriter`` (own short transaction per write,
+    independent of any business UoW) in the logging recorder that swallows write
+    failures. Routes inject this and call it *after* their UoW commit with a typed
+    :class:`AuditEvent`.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return LoggingAuditRecorder(
+        SqlAlchemyAuditWriter(session_factory, clock=AuditSystemClock())
+    )
+
+
+def get_list_audit_log(request: Request) -> ListAuditLog:
+    """Assemble the :class:`ListAuditLog` use case (audit query, FR-AUD-3)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListAuditLog(query=SqlAlchemyAuditQuery(session_factory))
 
 
 def _build_password_hasher(password: PasswordSettings) -> PasswordHasher:

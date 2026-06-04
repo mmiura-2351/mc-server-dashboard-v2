@@ -17,7 +17,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_list_workers,
     get_set_worker_drain,
     require_platform_admin,
@@ -26,6 +30,7 @@ from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.registry import WorkerSnapshot
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from mc_server_dashboard_api.identity.domain.entities import User
 
 router = APIRouter()
 
@@ -85,24 +90,44 @@ async def list_workers(
 @router.put(
     "/workers/{worker_id}/drain",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_platform_admin)],
 )
 async def set_worker_drain(
     worker_id: str,
     use_case: Annotated[SetWorkerDrain, Depends(get_set_worker_drain)],
+    user: Annotated[User, Depends(require_platform_admin)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     if not use_case(worker_id=WorkerId(worker_id), draining=True):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    # Worker ids are not UUIDs; the worker is named by the operation code, not a
+    # UUID target_id (DATABASE.md Section 9 target_id is a UUID soft reference).
+    await recorder.record(
+        AuditEvent(
+            operation=ops.WORKER_DRAIN_SET,
+            outcome=Outcome.SUCCESS,
+            actor_id=user.id.value,
+            target_type=ops.TARGET_WORKER,
+        )
+    )
 
 
 @router.delete(
     "/workers/{worker_id}/drain",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_platform_admin)],
 )
 async def clear_worker_drain(
     worker_id: str,
     use_case: Annotated[SetWorkerDrain, Depends(get_set_worker_drain)],
+    user: Annotated[User, Depends(require_platform_admin)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     if not use_case(worker_id=WorkerId(worker_id), draining=False):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    await recorder.record(
+        AuditEvent(
+            operation=ops.WORKER_DRAIN_CLEAR,
+            outcome=Outcome.SUCCESS,
+            actor_id=user.id.value,
+            target_type=ops.TARGET_WORKER,
+        )
+    )

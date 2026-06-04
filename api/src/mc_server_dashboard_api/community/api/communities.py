@@ -25,6 +25,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.application.list_my_communities import (
     ListMyCommunities,
 )
@@ -50,6 +53,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_current_user,
     get_delete_community,
     get_list_my_communities,
@@ -92,6 +96,8 @@ class CommunityResponse(BaseModel):
 async def provision_community(
     body: ProvisionCommunityRequest,
     use_case: Annotated[ProvisionCommunity, Depends(get_provision_community)],
+    user: Annotated[User, Depends(get_current_user)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> CommunityResponse:
     try:
         community = await use_case(
@@ -112,6 +118,16 @@ async def provision_community(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"reason": "invalid_name"},
         ) from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.COMMUNITY_PROVISION,
+            outcome=Outcome.SUCCESS,
+            actor_id=user.id.value,
+            community_id=community.id.value,
+            target_type=ops.TARGET_COMMUNITY,
+            target_id=community.id.value,
+        )
+    )
     return CommunityResponse.from_entity(community)
 
 
@@ -143,10 +159,11 @@ async def read_community(
 async def rename_community(
     community_id: uuid.UUID,
     body: RenameCommunityRequest,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("community:update")))
     ],
     use_case: Annotated[RenameCommunity, Depends(get_rename_community)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> CommunityResponse:
     try:
         community = await use_case(
@@ -164,6 +181,16 @@ async def rename_community(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"reason": "invalid_name"},
         ) from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.COMMUNITY_UPDATE,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community.id.value,
+            target_type=ops.TARGET_COMMUNITY,
+            target_id=community.id.value,
+        )
+    )
     return CommunityResponse.from_entity(community)
 
 
@@ -173,15 +200,26 @@ async def rename_community(
 )
 async def delete_community(
     community_id: uuid.UUID,
-    _authorized: Annotated[
+    authorized: Annotated[
         AuthUser, Depends(require_permission(Permission("community:delete")))
     ],
     use_case: Annotated[DeleteCommunity, Depends(get_delete_community)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     try:
         await use_case(community_id=CommunityId(community_id))
     except CommunityNotFoundError as exc:
         raise _not_found() from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.COMMUNITY_DELETE,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_COMMUNITY,
+            target_id=community_id,
+        )
+    )
 
 
 def _parse_user_id(raw: str) -> UserId:
