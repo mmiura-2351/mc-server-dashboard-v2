@@ -278,6 +278,67 @@ async def test_write_file_overwrites_and_retains_prior_version(
     )
 
 
+async def test_write_file_before_any_publish_initializes_first_version(
+    harness: StorageHarness,
+) -> None:
+    """An at-rest write on a never-snapshotted server publishes the first version.
+
+    A server that crashed before its first snapshot has no published working set;
+    a write must initialize the first published version containing just that file
+    (issue #205), not raise. The written file is then readable and hydratable.
+    """
+
+    community, server = new_scope()
+    await harness.storage.write_file(
+        community, server, RelPath("eula.txt"), b"eula=true"
+    )
+
+    assert (
+        await harness.storage.read_file(community, server, RelPath("eula.txt"))
+        == b"eula=true"
+    )
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"eula.txt": b"eula=true"}
+
+
+async def test_write_file_before_any_publish_retains_no_version(
+    harness: StorageHarness,
+) -> None:
+    """The initial write creates a fresh file, so it retains no prior version."""
+
+    community, server = new_scope()
+    await harness.storage.write_file(
+        community, server, RelPath("eula.txt"), b"eula=true"
+    )
+    assert (
+        await harness.storage.list_file_versions(community, server, RelPath("eula.txt"))
+        == []
+    )
+
+
+async def test_list_dir_before_any_publish_is_empty(
+    harness: StorageHarness,
+) -> None:
+    """An at-rest listing on a never-snapshotted server is empty, not an error.
+
+    The unpublished working set is treated as empty (issue #205), mirroring the
+    data plane's JAR-only hydrate posture.
+    """
+
+    community, server = new_scope()
+    assert await harness.storage.list_dir(community, server, RelPath(".")) == []
+
+
+async def test_read_file_before_any_publish_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    """Reading a file on a never-snapshotted server keeps the 404 mapping (#205)."""
+
+    community, server = new_scope()
+    with pytest.raises(NotFoundError):
+        await harness.storage.read_file(community, server, RelPath("eula.txt"))
+
+
 async def test_write_file_creates_new_file_without_version(
     harness: StorageHarness,
 ) -> None:

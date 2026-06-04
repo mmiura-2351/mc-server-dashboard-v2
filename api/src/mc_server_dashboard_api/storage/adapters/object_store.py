@@ -645,9 +645,13 @@ class ObjectStorage(Storage):
         sub = self._safe_subkey(rel_path)
         dir_suffix = sub + "/" if sub else ""
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
-                client, community_id, server_id
-            )
+            server_prefix = self._server_prefix(community_id, server_id)
+            snapshot_prefix = await self._read_pointer(client, server_prefix)
+            # A never-snapshotted server has an empty working set, not a missing one
+            # (issue #205): list it as empty rather than raising, mirroring the data
+            # plane's JAR-only hydrate posture for the unpublished state.
+            if snapshot_prefix is None:
+                return []
             objs = await client.list_objects(snapshot_prefix + dir_suffix)
         if not objs and sub:
             # A prefix with no members is an empty (non-existent) directory; the
@@ -664,9 +668,16 @@ class ObjectStorage(Storage):
     ) -> None:
         sub = self._safe_subkey(rel_path)
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
-                client, community_id, server_id
-            )
+            server_prefix = self._server_prefix(community_id, server_id)
+            snapshot_prefix = await self._read_pointer(client, server_prefix)
+            if snapshot_prefix is None:
+                # A never-snapshotted server has no live prefix to edit in place
+                # (issue #205). Initialize the first published version containing
+                # just this file through the same pointer-flip publish path a
+                # snapshot uses, so a concurrent snapshot publish (its own staging
+                # prefix + flip) cannot corrupt it (Section 4.2).
+                await self._publish_initial(client, community_id, server_id, sub, data)
+                return
             key = snapshot_prefix + sub
             # Capture the prior version BEFORE overwriting (Section 4.4/5).
             if await client.head_object(key) is not None:
@@ -682,6 +693,34 @@ class ObjectStorage(Storage):
                 self._pointer_key(community_id, server_id),
                 json.dumps({"snapshot": snapshot_prefix}).encode(),
             )
+
+    async def _publish_initial(
+        self,
+        client: S3Client,
+        community_id: CommunityId,
+        server_id: ServerId,
+        sub: str,
+        data: bytes,
+    ) -> None:
+        """Publish the first version of a never-snapshotted server (issue #205).
+
+        Stage just ``sub`` under a fresh ``incoming/`` prefix, then publish it
+        through :meth:`_publish` — the same pointer-flip path a snapshot commit
+        uses. The staging prefix is pinned with an active-staging lease for the
+        life of the operation so a concurrent sweep does not GC it (issue #160).
+        """
+
+        incoming = self._incoming_prefix(community_id, server_id, uuid.uuid4().hex)
+        self._register_staging(incoming)
+        try:
+            await client.put_object(incoming + sub, data)
+            staged = await client.list_objects(incoming)
+            await self._publish(client, community_id, server_id, incoming, staged)
+        except BaseException:
+            await _delete_prefix(client, incoming)
+            raise
+        finally:
+            self._release_staging(incoming)
 
     # --- file version retention / rollback (Section 3.5, Section 5) ---------
 

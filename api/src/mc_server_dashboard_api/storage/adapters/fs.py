@@ -544,6 +544,11 @@ class FsStorage(Storage):
     def _list_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> list[DirEntry]:
+        # A never-snapshotted server has an empty working set, not a missing one
+        # (issue #205): list it as empty rather than raising, mirroring the data
+        # plane's JAR-only hydrate posture for the unpublished state.
+        if not self._current_link(community_id, server_id).is_symlink():
+            return []
         current = self._current_dir(community_id, server_id)
         target = self._safe_target(current, rel_path)
         if not target.is_dir():
@@ -578,6 +583,15 @@ class FsStorage(Storage):
         rel_path: RelPath,
         data: bytes,
     ) -> None:
+        # A never-snapshotted server has no live snapshot to edit in place (issue
+        # #205). Initialize the first published version containing just this file,
+        # through the same atomic-publish path a snapshot uses: stage the file into
+        # an incoming/ dir, then flip ``current`` onto it. A snapshot publishing
+        # concurrently stages into its own incoming/ dir and flips independently —
+        # last flip wins, neither corrupts the other (Section 4.2).
+        if not self._current_link(community_id, server_id).is_symlink():
+            self._publish_initial(community_id, server_id, rel_path, data)
+            return
         current = self._current_dir(community_id, server_id)
         target = self._safe_target(current, rel_path)
         # Capture the prior version BEFORE overwriting (Section 4.4/5), so a crash
@@ -587,6 +601,35 @@ class FsStorage(Storage):
         self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
         target.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write(target, data)
+
+    def _publish_initial(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: RelPath,
+        data: bytes,
+    ) -> None:
+        """Publish the first version of a never-snapshotted server (issue #205).
+
+        Stage just ``rel_path`` into a fresh ``incoming/`` dir, then publish it
+        through :meth:`_publish` — the same symlink-flip path a snapshot commit
+        uses. The staging dir is pinned with an active-staging lease for the life
+        of the operation so a concurrent sweep does not reclaim it (issue #183).
+        """
+
+        staging = self._staging_dir(community_id, server_id, uuid.uuid4().hex)
+        staging.mkdir(parents=True, exist_ok=False)
+        self._register_staging(staging)
+        try:
+            target = staging.joinpath(*rel_path.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_write(target, data)
+            self._publish(community_id, server_id, staging)
+        except BaseException:
+            _rmtree(staging)
+            raise
+        finally:
+            self._release_staging(staging)
 
     def _atomic_write(self, target: Path, data: bytes) -> None:
         """temp-sibling + fsync + atomic rename (Section 4.4)."""
