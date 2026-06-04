@@ -360,6 +360,41 @@ async def test_log_line_is_published_to_real_time_events(harness: _Harness) -> N
     await call.done_writing()
 
 
+async def test_emitted_at_is_propagated_to_published_event(
+    harness: _Harness,
+) -> None:
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+
+    emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
+    message = _status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING)
+    message.emitted_at.FromDatetime(emitted)
+    await call.write(message)
+    await _wait_for_published(harness, 1)
+
+    _server_id, event = harness.real_time_events.published[0]
+    assert event.emitted_at == emitted
+    await call.done_writing()
+
+
+async def test_unset_emitted_at_falls_back_to_none(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+
+    # No emitted_at set on the message: the relayed event carries None, so the
+    # transport falls back to receive time.
+    await call.write(_status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING))
+    await _wait_for_published(harness, 1)
+
+    _server_id, event = harness.real_time_events.published[0]
+    assert event.emitted_at is None
+    await call.done_writing()
+
+
 async def test_metrics_is_published_to_real_time_events(harness: _Harness) -> None:
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))

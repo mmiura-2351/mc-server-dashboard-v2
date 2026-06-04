@@ -11,9 +11,20 @@ with the same close code, indistinguishable from one another.
 Close codes (application range, RFC 6455 4000-4999) mirror the REST status the
 same condition would produce:
 
+- ``4400`` — a malformed request: ``?streams=`` is present but names an unknown
+  stream (the REST 422-equivalent). An *omitted/blank* ``streams`` still means
+  "all three streams"; only a present-but-invalid token is rejected, so a typo
+  fails loudly instead of silently subscribing to everything;
 - ``4401`` — unauthenticated (missing / invalid / expired token);
 - ``4403`` — authenticated member without ``server:read`` on the resource;
 - ``4404`` — not a member, or the server does not exist in this community.
+
+Authorization is re-checked mid-stream: the two-layer gate is re-run every
+:data:`_REAUTHZ_INTERVAL_SECONDS` while the socket is idle, so a member removed
+or a grant revoked after accept stops receiving on the next interval instead of
+keeping events until disconnect. The re-check is two indexed queries and runs in
+the receive loop's idle path, so it never blocks frame delivery; on failure the
+socket closes with the same code the accept-time gate would have used.
 
 Delivery is best-effort and decoupled from REST (FR-MON-4): if no event ever
 arrives, the socket simply stays quiet; a slow client that overflows its buffer
@@ -23,6 +34,7 @@ subscriber, so a closed socket never affects the control plane or REST.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import uuid
 from typing import Annotated
@@ -68,12 +80,19 @@ router = APIRouter()
 _SERVER_RESOURCE_TYPE = "server"
 _SERVER_READ = Permission("server:read")
 
+_CLOSE_BAD_REQUEST = 4400
 _CLOSE_UNAUTHENTICATED = 4401
 _CLOSE_FORBIDDEN = 4403
 _CLOSE_NOT_FOUND = 4404
 
+# How often the two-layer authorization gate is re-run while the socket is idle.
+# A constant, not a config knob: the check is two indexed queries, and a minute
+# is a tight-enough bound on how long a removed member can keep receiving without
+# adding query load. Re-checking only when idle keeps it off the delivery path.
+_REAUTHZ_INTERVAL_SECONDS = 60.0
+
 # The streams a client may subscribe to (the gap marker is always delivered and
-# is never selectable). An unknown ?streams= token is ignored.
+# is never selectable).
 _SUBSCRIBABLE: dict[str, EventStream] = {
     EventStream.STATUS.value: EventStream.STATUS,
     EventStream.LOG.value: EventStream.LOG,
@@ -81,19 +100,27 @@ _SUBSCRIBABLE: dict[str, EventStream] = {
 }
 
 
+class _UnknownStreamError(ValueError):
+    """Raised when ``?streams=`` is present but names an unknown stream."""
+
+
 def _parse_streams(raw: str | None) -> frozenset[EventStream]:
     """Map a comma-separated ``streams`` query to the subscribable set.
 
-    Defaults to all three streams when omitted/blank; unknown tokens are dropped.
+    Omitted/blank means all three streams. A present token that names no known
+    stream raises :class:`_UnknownStreamError` so a typo is rejected rather than
+    silently widening the subscription to everything.
     """
 
     if not raw:
         return frozenset(_SUBSCRIBABLE.values())
-    selected = {
-        _SUBSCRIBABLE[token]
-        for token in (t.strip() for t in raw.split(","))
-        if token in _SUBSCRIBABLE
-    }
+    selected = set()
+    for token in (t.strip() for t in raw.split(",")):
+        if not token:
+            continue
+        if token not in _SUBSCRIBABLE:
+            raise _UnknownStreamError(token)
+        selected.add(_SUBSCRIBABLE[token])
     return frozenset(selected) or frozenset(_SUBSCRIBABLE.values())
 
 
@@ -118,12 +145,86 @@ async def server_events(
         is_platform_admin=user.is_platform_admin,
     )
 
+    # The two-layer gate, applied before accept; re-applied mid-stream below.
+    denied = await _authorize(
+        auth_user=auth_user,
+        community=community,
+        community_id=community_id,
+        server_id=server_id,
+        visibility=visibility,
+        checker=checker,
+        read_server=read_server,
+    )
+    if denied is not None:
+        await websocket.close(code=denied)
+        return
+
+    # A malformed ?streams= is rejected before accept (the REST 422-equivalent),
+    # matching the accept-time rejection style. Omitted/blank still means "all".
+    try:
+        streams = _parse_streams(websocket.query_params.get("streams"))
+    except _UnknownStreamError:
+        await websocket.close(code=_CLOSE_BAD_REQUEST)
+        return
+
+    await websocket.accept()
+    # The bus is keyed by the worker-reported server id string (the UUID's text
+    # form, as it arrives on the control-plane stream).
+    subscription = bus.subscribe(server_id=str(server_id), streams=streams)
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    subscription.__anext__(), timeout=_REAUTHZ_INTERVAL_SECONDS
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                # Idle window elapsed: re-run the gate without touching delivery.
+                # A revoked subscriber is closed with the accept-time code.
+                denied = await _authorize(
+                    auth_user=auth_user,
+                    community=community,
+                    community_id=community_id,
+                    server_id=server_id,
+                    visibility=visibility,
+                    checker=checker,
+                    read_server=read_server,
+                )
+                if denied is not None:
+                    await websocket.close(code=denied)
+                    return
+                continue
+            await websocket.send_json(_frame(event))
+    except WebSocketDisconnect:
+        # Client went away; fall through to clean up the subscription.
+        pass
+    finally:
+        await subscription.aclose()
+
+
+async def _authorize(
+    *,
+    auth_user: AuthUser,
+    community: CommunityId,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    visibility: MembershipVisibility,
+    checker: PermissionChecker,
+    read_server: ReadServer,
+) -> int | None:
+    """Run the two-layer gate; return a close code on denial, else ``None``.
+
+    Layer-1 membership and the cross-community existence check both collapse to
+    ``4404`` (no existence signal, Section 6.4); a member lacking ``server:read``
+    is ``4403``. Used both before accept and on the mid-stream re-check.
+    """
+
     # Layer-1: a non-member gets no existence signal (same posture as REST 404).
     if not await visibility.is_member(
         user_id=auth_user.user_id, community_id=community
     ):
-        await websocket.close(code=_CLOSE_NOT_FOUND)
-        return
+        return _CLOSE_NOT_FOUND
 
     # Layer-2: per-resource server:read (a grant on this server opens it).
     resource = ResourceRef(
@@ -132,8 +233,7 @@ async def server_events(
         resource_id=server_id,
     )
     if not await checker.can(user=auth_user, operation=_SERVER_READ, resource=resource):
-        await websocket.close(code=_CLOSE_FORBIDDEN)
-        return
+        return _CLOSE_FORBIDDEN
 
     # A server outside this community is reported as not-found, indistinguishable
     # from a wholly unknown one (no cross-community existence signal).
@@ -143,29 +243,22 @@ async def server_events(
             server_id=ServerId(server_id),
         )
     except ServerNotFoundError:
-        await websocket.close(code=_CLOSE_NOT_FOUND)
-        return
-
-    streams = _parse_streams(websocket.query_params.get("streams"))
-    await websocket.accept()
-    # The bus is keyed by the worker-reported server id string (the UUID's text
-    # form, as it arrives on the control-plane stream).
-    subscription = bus.subscribe(server_id=str(server_id), streams=streams)
-    try:
-        async for event in subscription:
-            await websocket.send_json(_frame(event))
-    except WebSocketDisconnect:
-        # Client went away; fall through to clean up the subscription.
-        pass
-    finally:
-        await subscription.aclose()
+        return _CLOSE_NOT_FOUND
+    return None
 
 
 def _frame(event: RealTimeEvent) -> dict[str, object]:
-    """Render an event as the wire frame ``{stream, ts, payload}`` (Section 6.13)."""
+    """Render an event as the wire frame ``{stream, ts, payload}`` (Section 6.13).
 
+    ``ts`` carries the Worker's authoritative ``emitted_at`` when the event has
+    one, so a queued subscriber sees true event time; it falls back to the
+    relay's send time when the Worker left ``emitted_at`` unset/zero (and for the
+    adapter-synthesised gap marker, which has none).
+    """
+
+    ts = event.emitted_at or dt.datetime.now(dt.timezone.utc)
     return {
         "stream": event.stream.value,
-        "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "ts": ts.isoformat(),
         "payload": event.payload,
     }

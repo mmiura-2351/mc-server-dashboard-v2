@@ -17,6 +17,7 @@ types — the fleet domain never imports the ``mcsd`` stubs.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 import enum
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -45,10 +46,16 @@ class RealTimeEvent:
     change carries ``state``/``detail``; a log line carries ``line``/``stream``);
     the adapter maps the proto to this shape at the transport edge. A ``GAP``
     event carries an empty payload.
+
+    ``emitted_at`` is the Worker's authoritative clock reading for the event
+    (``WorkerMessage.emitted_at``), so a queued subscriber sees the true event
+    time rather than the relay's send time. It is ``None`` when the Worker left
+    the proto field unset/zero; the transport then falls back to receive time.
     """
 
     stream: EventStream
     payload: dict[str, object] = field(default_factory=dict)
+    emitted_at: dt.datetime | None = None
 
 
 class EventSubscription(AsyncIterator[RealTimeEvent], abc.ABC):

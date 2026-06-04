@@ -104,6 +104,23 @@ _LOG_STREAM_BY_PROTO: dict[int, str] = {
 }
 
 
+def _emitted_at_from_proto(message: pb.WorkerMessage) -> dt.datetime | None:
+    """Return the Worker's authoritative event time, or None when unset/zero.
+
+    A WorkerMessage omits ``emitted_at`` (or leaves it at the zero Timestamp)
+    when the Worker does not stamp it; the relay then falls back to receive
+    time downstream, so this returns None for both cases. The returned datetime
+    is timezone-aware (UTC), matching the proto Timestamp contract.
+    """
+
+    if not message.HasField("emitted_at"):
+        return None
+    emitted = message.emitted_at.ToDatetime(tzinfo=dt.timezone.utc)
+    if emitted == dt.datetime.fromtimestamp(0, tz=dt.timezone.utc):
+        return None
+    return emitted
+
+
 def _capabilities_from_proto(caps: pb.WorkerCapabilities) -> WorkerCapabilities:
     drivers = {
         _DRIVER_BY_KIND[kind] for kind in caps.drivers if kind in _DRIVER_BY_KIND
@@ -274,17 +291,23 @@ class WorkerSessionServicer(WorkerServiceServicer):
             return
         if payload != "event":
             return
+        # The Worker's authoritative event time, carried once on the enclosing
+        # message; relayed so a queued subscriber sees true event time rather
+        # than the relay's send time. None when the Worker left it unset/zero.
+        emitted_at = _emitted_at_from_proto(message)
         event = message.event.WhichOneof("event")
         if event == "heartbeat":
             self._registry.record_heartbeat(worker_id, self._clock.now())
         elif event == "status_change":
-            await self._reconcile_status(worker_id, message.event)
+            await self._reconcile_status(worker_id, message.event, emitted_at)
         elif event == "log_line":
-            self._relay_log(message.event)
+            self._relay_log(message.event, emitted_at)
         elif event == "metrics":
-            self._relay_metrics(message.event)
+            self._relay_metrics(message.event, emitted_at)
 
-    async def _reconcile_status(self, worker_id: WorkerId, event: pb.Event) -> None:
+    async def _reconcile_status(
+        self, worker_id: WorkerId, event: pb.Event, emitted_at: dt.datetime | None
+    ) -> None:
         state = _STATE_BY_PROTO.get(event.status_change.state)
         if state is None or not event.server_id:
             return
@@ -299,10 +322,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
             event=RealTimeEvent(
                 stream=EventStream.STATUS,
                 payload={"state": state, "detail": event.status_change.detail},
+                emitted_at=emitted_at,
             ),
         )
 
-    def _relay_log(self, event: pb.Event) -> None:
+    def _relay_log(self, event: pb.Event, emitted_at: dt.datetime | None) -> None:
         """Relay a server log line to subscribed clients (FR-MON-2)."""
 
         if not event.server_id:
@@ -315,10 +339,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     "line": event.log_line.line,
                     "stream": _LOG_STREAM_BY_PROTO.get(event.log_line.stream, "stdout"),
                 },
+                emitted_at=emitted_at,
             ),
         )
 
-    def _relay_metrics(self, event: pb.Event) -> None:
+    def _relay_metrics(self, event: pb.Event, emitted_at: dt.datetime | None) -> None:
         """Relay a runtime-metrics sample to subscribed clients (FR-MON-3)."""
 
         if not event.server_id:
@@ -332,6 +357,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     "memory_bytes": event.metrics.memory_bytes,
                     "player_count": event.metrics.player_count,
                 },
+                emitted_at=emitted_at,
             ),
         )
 
