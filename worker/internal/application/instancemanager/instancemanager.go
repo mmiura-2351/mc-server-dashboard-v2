@@ -36,7 +36,7 @@ type controlFunc func(ctx context.Context, serverID string) (execution.ServerCon
 // Transfer is the data-plane Port: move a server's working set between the API's
 // authoritative Storage and the local working dir (FR-DATA-3/4). The trigger
 // command carries the URL + token; the bytes ride the HTTP data plane, off the
-// control-plane stream (CONTROL_PLANE.md Section 5.2).
+// control-plane stream (CONTROL_PLANE.md Section 5).
 type Transfer interface {
 	// Hydrate downloads the working set from url into workingDir (an empty/204
 	// response leaves it empty).
