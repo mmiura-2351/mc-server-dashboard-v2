@@ -198,6 +198,81 @@ def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
     assert _read_tar(published) == {"keep.txt": b"prior"}
 
 
+def test_snapshot_under_declared_length_aborts_mid_stream(tmp_path: Path) -> None:
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+
+    body = _tar_bytes({"world/level.dat": b"more-than-declared"})
+    # Declare fewer bytes than the body carries: the counter must trip as soon as
+    # the streamed count passes the declared length, aborting before the over-long
+    # body is spooled in full, and the prior authoritative copy must survive.
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={**_auth(), "Content-Length": str(len(body) - 10)},
+        )
+    assert resp.status_code == 400
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    published = asyncio.run(_read())
+    assert _read_tar(published) == {"keep.txt": b"prior"}
+
+
+def test_snapshot_over_cap_body_aborts_mid_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    # Shrink the cap so a small body can exercise the mid-stream cap abort: the
+    # declared length is under the cap (passes the header gate) but the streamed
+    # bytes run past it, so the counter must trip to a 413 and preserve the prior
+    # snapshot.
+    monkeypatch.setattr(transfers, "_MAX_SNAPSHOT_BYTES", 8)
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+
+    body = b"x" * 64
+    # Declare exactly the cap (passes the `> cap` header gate) while the body runs
+    # well past it, so the abort can only come from the mid-stream cap check.
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={**_auth(), "Content-Length": "8"},
+        )
+    assert resp.status_code == 413
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    published = asyncio.run(_read())
+    assert _read_tar(published) == {"keep.txt": b"prior"}
+
+
 def test_snapshot_requires_content_length(tmp_path: Path) -> None:
     client, _ = _setup(tmp_path)
     community, server = _scope()

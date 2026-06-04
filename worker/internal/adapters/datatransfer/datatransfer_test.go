@@ -165,6 +165,69 @@ func TestSnapshotPacksAndUploadsWithContentLength(t *testing.T) {
 	}
 }
 
+func TestSnapshotStreamsLargeWorkingSetWithMatchingContentLength(t *testing.T) {
+	// A multi-chunk working set must upload with a Content-Length that matches the
+	// streamed byte count without the client buffering the whole tar in RAM. The
+	// fake API counts the body as it arrives (never holding it all) and compares.
+	srcDir := t.TempDir()
+	const fileSize = 4 << 20 // 4 MiB, several HTTP chunks
+	big := make([]byte, fileSize)
+	for i := range big {
+		big[i] = byte(i)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "world.dat"), big, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotLen, counted int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLen = r.ContentLength
+		counted, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(srv.Client())
+	if err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if gotLen <= fileSize {
+		t.Fatalf("Content-Length = %d, want > %d (a tar of a %d-byte file)", gotLen, fileSize, fileSize)
+	}
+	if gotLen != counted {
+		t.Fatalf("Content-Length = %d, streamed bytes = %d (must match)", gotLen, counted)
+	}
+}
+
+func TestSnapshotRemovesSpoolFile(t *testing.T) {
+	// The temp spool must not linger in the scratch root after a snapshot.
+	srcDir := filepath.Join(t.TempDir(), "server")
+	if err := os.MkdirAll(srcDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "server.properties"), []byte("p"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(srv.Client())
+	if err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(srcDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "server" {
+			t.Fatalf("leftover entry in scratch root: %q", e.Name())
+		}
+	}
+}
+
 func TestSnapshotEmptyDirUploadsEmptyTar(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

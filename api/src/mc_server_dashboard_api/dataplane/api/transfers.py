@@ -135,6 +135,12 @@ async def publish_snapshot(
     is 413, and a streamed-byte count that does not match Content-Length is 400 —
     in every reject path the staged transfer is aborted, so ``current/`` keeps the
     prior authoritative copy (FR-DATA-6, STORAGE.md Section 4.1).
+
+    The cap and the declared length are both enforced *during* streaming, not only
+    against the header: an under-declaring client (small Content-Length, longer
+    body) or one that over-runs the cap is aborted as soon as the counted bytes
+    cross the boundary, so a misdeclared length cannot spool the whole body to disk
+    before the mismatch is caught.
     """
 
     if content_length is None:
@@ -150,7 +156,7 @@ async def publish_snapshot(
 
     scope = (CommunityId(community_id), ServerId(server_id))
     handle = await storage.begin_snapshot(*scope)
-    counter = _ByteCounter(request.stream())
+    counter = _ByteCounter(request.stream(), declared=content_length)
     try:
         await storage.write_snapshot(handle, counter.stream())
         if counter.count != content_length:
@@ -165,6 +171,23 @@ async def publish_snapshot(
         await storage.commit_snapshot(handle)
     except HTTPException:
         raise
+    except _CapExceeded:
+        # Counted bytes ran past the 50 GiB cap mid-stream: abort and reject before
+        # the disk fills. (An over-run that stays under the cap surfaces as the
+        # length mismatch above.)
+        await storage.abort_snapshot(handle)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="snapshot_too_large",
+        ) from None
+    except _DeclaredLengthExceeded:
+        # An under-declaring client streamed more than its Content-Length: abort
+        # mid-stream rather than spooling the whole over-long body first.
+        await storage.abort_snapshot(handle)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="length_mismatch",
+        ) from None
     except IncompleteTransferError:
         await storage.abort_snapshot(handle)
         raise HTTPException(
@@ -177,16 +200,34 @@ async def publish_snapshot(
         raise
 
 
-class _ByteCounter:
-    """Tee a request body stream, tallying the bytes that pass through."""
+class _CapExceeded(Exception):
+    """Counted bytes ran past the absolute snapshot cap mid-stream."""
 
-    def __init__(self, source: AsyncIterator[bytes]) -> None:
+
+class _DeclaredLengthExceeded(Exception):
+    """Counted bytes ran past the client's declared Content-Length mid-stream."""
+
+
+class _ByteCounter:
+    """Tee a request body stream, tallying the bytes that pass through.
+
+    The tally is checked against the absolute cap and the client's declared length
+    on every chunk: an under-declaring (or runaway) client is stopped as soon as it
+    crosses a boundary, before the over-long body can be spooled to disk in full.
+    """
+
+    def __init__(self, source: AsyncIterator[bytes], declared: int) -> None:
         self._source = source
+        self._declared = declared
         self.count = 0
 
     async def stream(self) -> AsyncIterator[bytes]:
         async for chunk in self._source:
             self.count += len(chunk)
+            if self.count > _MAX_SNAPSHOT_BYTES:
+                raise _CapExceeded
+            if self.count > self._declared:
+                raise _DeclaredLengthExceeded
             yield chunk
 
 

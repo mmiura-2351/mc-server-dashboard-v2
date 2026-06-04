@@ -10,9 +10,10 @@
 //     discipline so a hostile archive cannot escape the working dir. A 204 No
 //     Content means the server has no published working set yet; the Worker treats
 //     it as an empty dir and launches fresh.
-//   - Snapshot: pack the working dir into a tar and POST it with a Content-Length
-//     so the API's "proven complete" gate can verify the streamed byte count
-//     (STORAGE.md Section 4.1, FR-DATA-6).
+//   - Snapshot: pack the working dir into a tar spooled to a temp file (so RAM
+//     stays bounded for multi-GB worlds), Stat it for a Content-Length, then
+//     stream the file as the request body so the API's "proven complete" gate
+//     can verify the streamed byte count (STORAGE.md Section 4.1, FR-DATA-6).
 //
 // Transport security mirrors the control channel (CONFIGURATION.md Section 6.1):
 // the same CA bundle / mTLS / insecure-dev posture is reused via the injected
@@ -22,7 +23,6 @@ package datatransfer
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -80,24 +80,42 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) error 
 	return nil
 }
 
-// Snapshot packs srcDir into a tar and uploads it to url. The tar is buffered to
-// compute a Content-Length so the API can verify the transfer is complete; a
-// Minecraft working set is small enough that a memory buffer is acceptable at M1
-// (delta/streamed snapshot is deferred, FR-DATA-5).
+// Snapshot packs srcDir into a tar and uploads it to url. The tar is spooled to a
+// temp file (in srcDir's parent, i.e. the scratch root, so it shares srcDir's
+// filesystem) rather than a memory buffer: a multi-GB world times the bounded
+// concurrent transfers would otherwise pin gigabytes of RAM. The file is Stat'd
+// for the Content-Length the API's proven-complete gate matches, streamed as the
+// request body, and removed on every path (delta/streamed snapshot is deferred,
+// FR-DATA-5).
 func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) error {
-	var buf bytes.Buffer
-	if err := packTar(srcDir, &buf); err != nil {
+	spool, err := os.CreateTemp(filepath.Dir(srcDir), "snapshot-*.tar")
+	if err != nil {
+		return fmt.Errorf("datatransfer: create snapshot spool: %w", err)
+	}
+	defer func() {
+		_ = spool.Close()
+		_ = os.Remove(spool.Name())
+	}()
+
+	if err := packTar(srcDir, spool); err != nil {
 		return fmt.Errorf("datatransfer: pack: %w", err)
 	}
+	size, err := spool.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("datatransfer: size snapshot spool: %w", err)
+	}
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("datatransfer: rewind snapshot spool: %w", err)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, spool)
 	if err != nil {
 		return fmt.Errorf("datatransfer: build snapshot request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/x-tar")
 	// Set an explicit length so the API's proven-complete gate can match it.
-	req.ContentLength = int64(buf.Len())
+	req.ContentLength = size
 
 	resp, err := c.http.Do(req)
 	if err != nil {

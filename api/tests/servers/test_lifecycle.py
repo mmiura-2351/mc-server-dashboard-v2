@@ -167,13 +167,19 @@ async def test_start_with_no_eligible_worker_is_typed_error() -> None:
     assert cp.dispatched == []
 
 
-async def test_start_dispatch_failure_compensates() -> None:
+async def test_start_hydrate_failure_compensates_without_dispatching_start() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
+    # The hydrate dispatch fails; the launch must never be attempted (FR-DATA-4:
+    # the working set must be in place before the process starts).
     cp = FakeControlPlane(
         place_to=WorkerId(worker),
-        outcome=CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy"),
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="busy"
+            )
+        },
     )
     use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
 
@@ -182,6 +188,37 @@ async def test_start_dispatch_failure_compensates() -> None:
             community_id=CommunityId(community), server_id=ServerId(server_id)
         )
 
+    # Only hydrate was dispatched; start was never reached.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate"]
+    reverted = uow.servers.by_id[ServerId(server_id)]
+    assert reverted.desired_state is DesiredState.STOPPED
+    assert reverted.assigned_worker_id is None
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_start_failure_after_successful_hydrate_compensates() -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    # Hydrate succeeds, then the launch fails: both dispatches ran, and the
+    # committed intent must still be compensated.
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="busy"
+            )
+        },
+    )
+    use_case = StartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate", "start"]
     reverted = uow.servers.by_id[ServerId(server_id)]
     assert reverted.desired_state is DesiredState.STOPPED
     assert reverted.assigned_worker_id is None

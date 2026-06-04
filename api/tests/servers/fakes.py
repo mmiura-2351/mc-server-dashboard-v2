@@ -175,10 +175,14 @@ class FakeControlPlane(ControlPlane):
         *,
         place_to: WorkerId | None = None,
         outcome: CommandOutcome | None = None,
+        outcomes: dict[str, CommandOutcome] | None = None,
         raise_unavailable: bool = False,
     ) -> None:
         self._place_to = place_to
         self._outcome = outcome or CommandOutcome(status=CommandStatus.OK)
+        # Per-kind overrides let a test fail one dispatch (e.g. start) while another
+        # succeeds (e.g. hydrate); kinds absent here fall back to ``outcome``.
+        self._outcomes = outcomes or {}
         self._raise_unavailable = raise_unavailable
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
         self.incremented: list[WorkerId] = []
@@ -203,7 +207,7 @@ class FakeControlPlane(ControlPlane):
 
             raise WorkerUnavailableError(str(worker_id.value))
         self.dispatched.append((kind, worker_id, server_id))
-        return self._outcome
+        return self._outcomes.get(kind, self._outcome)
 
     async def start(
         self,

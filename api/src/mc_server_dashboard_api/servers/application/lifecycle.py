@@ -28,10 +28,13 @@ divergence shows up as ``desired_state`` not matching the Worker-reported
 is a reconciler's job, tracked separately; the in-line compensation above covers
 only the case where the dispatch *ran* and the Worker refused it.
 
-M1 stub posture: ``StartServer`` carries the JAR relpath and MC version the
-contract defines, but hydrate is deferred to epic #8. The Worker's working set is
-the Worker's concern until then; we send a conventional ``server.jar`` relpath and
-the server's recorded MC version (FR-EXE-5: the Worker picks the Java runtime).
+Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
+``StartServer`` first drives the Worker to pull the authoritative working set from
+Storage (a server with no published working set yet hydrates to an empty dir, the
+data-plane endpoint being 204), then dispatches the launch; either step failing
+compensates the committed intent. The launch carries a conventional ``server.jar``
+relpath and the server's recorded MC version (FR-EXE-5: the Worker picks the Java
+runtime).
 """
 
 from __future__ import annotations
@@ -65,8 +68,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 
 _LOG = logging.getLogger(__name__)
 
-# The conventional JAR path inside a hydrated working set. Hydrate is epic #8; at
-# M1 we send this fixed relpath so the command is contract-complete.
+# The conventional JAR path inside a hydrated working set. The Worker launches
+# against this relpath once the working set is hydrated (see __call__).
 _DEFAULT_JAR_RELPATH = "server.jar"
 
 
