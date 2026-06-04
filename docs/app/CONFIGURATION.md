@@ -164,6 +164,7 @@ marks keys with no default.
 | `database.url` | *required* | secret | Connection string for the persistence adapter (may embed credentials). Model owned by DATABASE.md (#15). |
 | `storage.backend` | `fs` | | Selector for the `Storage` Port (Section 4): `fs` / `remote-fs` / `object`. |
 | `storage.fs.root` | `./data` | | Root directory when `storage.backend = fs`. |
+| `storage.version_retention` | `10` | | Maximum per-file prior versions retained for rollback; the oldest beyond this count are pruned (STORAGE.md Section 5). |
 | `storage.remote_fs.*` | — | partly | Mount/endpoint settings when `storage.backend = remote-fs`; secret members masked. Detail in STORAGE.md (#17). |
 | `storage.object.endpoint` | — | | Object-store endpoint when `storage.backend = object`. |
 | `storage.object.bucket` | — | | Object-store bucket/container. |

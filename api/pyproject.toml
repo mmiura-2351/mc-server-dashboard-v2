@@ -296,3 +296,30 @@ forbidden_modules = [
     "mc_server_dashboard_api.fleet",
     "mc_server_dashboard_api.core",
 ]
+
+# --- storage context -------------------------------------------------------
+# The storage context (#104) owns only domain + adapters in M1 (no application /
+# api quadrant yet: the data-plane consumers land in later sub-issues of epic #8).
+# So there is no layered contract to add yet; the forbidden contracts below keep
+# the Storage adapter (filesystem code) at the edge — bound to the Port only in
+# the wiring module — and the domain (the Port + value objects) dependency-free,
+# including no import of any other context: Storage returns opaque keys/handles
+# and never queries another context (STORAGE.md Section 1.1).
+[[tool.importlinter.contracts]]
+name = "storage domain does not import adapters"
+type = "forbidden"
+source_modules = ["mc_server_dashboard_api.storage.domain"]
+forbidden_modules = ["mc_server_dashboard_api.storage.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "storage domain imports nothing internal (incl. other contexts)"
+type = "forbidden"
+source_modules = ["mc_server_dashboard_api.storage.domain"]
+forbidden_modules = [
+    "mc_server_dashboard_api.storage.adapters",
+    "mc_server_dashboard_api.community",
+    "mc_server_dashboard_api.identity",
+    "mc_server_dashboard_api.fleet",
+    "mc_server_dashboard_api.servers",
+    "mc_server_dashboard_api.core",
+]
