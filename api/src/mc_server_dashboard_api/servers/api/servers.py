@@ -54,6 +54,11 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.domain.config_bounds import (
+    ConfigInvalidShapeError,
+    ConfigTooLargeError,
+    validate_config,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
@@ -96,12 +101,15 @@ class CreateServerRequest(BaseModel):
     mc_version: str = Field(min_length=1)
     server_type: str = Field(min_length=1)
     execution_backend: str = Field(min_length=1)
-    config: dict[str, Any] = Field(default_factory=dict)
+    # Typed ``Any`` (not ``dict``) so a non-object top level reaches
+    # ``validate_config`` and yields the typed ``config_invalid_shape`` 422 rather
+    # than Pydantic's generic validation error.
+    config: Any = Field(default_factory=dict)
 
 
 class UpdateServerRequest(BaseModel):
     name: str | None = None
-    config: dict[str, Any] | None = None
+    config: Any = None
     execution_backend: str | None = None
 
 
@@ -166,6 +174,7 @@ async def create_server(
     use_case: Annotated[CreateServer, Depends(get_create_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
+    config = _validated_config(body.config)
     try:
         server = await use_case(
             community_id=CommunityId(community_id),
@@ -174,7 +183,7 @@ async def create_server(
             mc_version=body.mc_version,
             server_type=body.server_type,
             execution_backend=body.execution_backend,
-            config=body.config,
+            config=config,
         )
     except UnsupportedEditionError as exc:
         # The catalog is Java-only at M1 (FR-VER-1): a non-java edition is rejected
@@ -260,12 +269,13 @@ async def update_server(
     use_case: Annotated[UpdateServer, Depends(get_update_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
+    config = None if body.config is None else _validated_config(body.config)
     try:
         server = await use_case(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
             name=body.name,
-            config=body.config,
+            config=config,
             execution_backend=body.execution_backend,
         )
     except ServerNotFoundError as exc:
@@ -492,6 +502,17 @@ async def _record(
             target_id=server_id,
         )
     )
+
+
+def _validated_config(config: Any) -> dict[str, Any]:
+    """Bound the client config blob before it is staged (issue #94)."""
+
+    try:
+        return validate_config(config)
+    except ConfigTooLargeError as exc:
+        raise _unprocessable("config_too_large") from exc
+    except ConfigInvalidShapeError as exc:
+        raise _unprocessable("config_invalid_shape") from exc
 
 
 def _unprocessable(reason: str) -> HTTPException:

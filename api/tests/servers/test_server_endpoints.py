@@ -47,6 +47,10 @@ from mc_server_dashboard_api.dependencies import (
     get_update_server,
 )
 from mc_server_dashboard_api.servers.application.manage_server import ReadServer
+from mc_server_dashboard_api.servers.domain.config_bounds import (
+    MAX_CONFIG_BYTES,
+    MAX_CONFIG_DEPTH,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
@@ -389,6 +393,103 @@ def test_delete_success_is_204() -> None:
     client = next(_client(app))
     resp = client.delete(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
     assert resp.status_code == 204
+
+
+# --- config payload bounds (issue #94) -------------------------------------
+
+
+def test_create_at_size_bound_is_accepted() -> None:
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    app = _app(member=True, allow=True, create=_FakeUseCase(result=server))
+    client = next(_client(app))
+    overhead = len('{"k": ""}')
+    body = _create_body()
+    body["config"] = {"k": "a" * (MAX_CONFIG_BYTES - overhead)}
+    resp = client.post(f"/communities/{community}/servers", json=body)
+    assert resp.status_code == 201
+
+
+def test_create_over_size_bound_is_422_too_large() -> None:
+    app = _app(member=True, allow=True, create=_FakeUseCase())
+    client = next(_client(app))
+    body = _create_body()
+    body["config"] = {"k": "a" * (MAX_CONFIG_BYTES + 1)}
+    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "config_too_large"
+
+
+def test_create_deeply_nested_config_is_422_invalid_shape() -> None:
+    app = _app(member=True, allow=True, create=_FakeUseCase())
+    client = next(_client(app))
+    node: dict[str, object] = {"leaf": 1}
+    for _ in range(MAX_CONFIG_DEPTH):
+        node = {"nested": node}
+    body = _create_body()
+    body["config"] = node
+    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "config_invalid_shape"
+
+
+def test_create_non_object_config_is_422_invalid_shape() -> None:
+    app = _app(member=True, allow=True, create=_FakeUseCase())
+    client = next(_client(app))
+    body = _create_body()
+    body["config"] = ["not", "an", "object"]
+    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "config_invalid_shape"
+
+
+def test_update_over_size_bound_is_422_too_large() -> None:
+    app = _app(member=True, allow=True, update=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": {"k": "a" * (MAX_CONFIG_BYTES + 1)}},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "config_too_large"
+
+
+def test_update_deeply_nested_config_is_422_invalid_shape() -> None:
+    app = _app(member=True, allow=True, update=_FakeUseCase())
+    client = next(_client(app))
+    node: dict[str, object] = {"leaf": 1}
+    for _ in range(MAX_CONFIG_DEPTH):
+        node = {"nested": node}
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": node},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "config_invalid_shape"
+
+
+def test_update_non_object_config_is_422_invalid_shape() -> None:
+    app = _app(member=True, allow=True, update=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": "not-an-object"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "config_invalid_shape"
+
+
+def test_update_at_size_bound_is_accepted() -> None:
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    app = _app(member=True, allow=True, update=_FakeUseCase(result=server))
+    client = next(_client(app))
+    overhead = len('{"k": ""}')
+    resp = client.patch(
+        f"/communities/{community}/servers/{uuid.uuid4()}",
+        json={"config": {"k": "a" * (MAX_CONFIG_BYTES - overhead)}},
+    )
+    assert resp.status_code == 200
 
 
 # --- per-resource grant + cross-community isolation (real checker) ----------
