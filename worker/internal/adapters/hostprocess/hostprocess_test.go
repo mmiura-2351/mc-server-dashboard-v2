@@ -256,12 +256,13 @@ func TestStopOnCrashedIsPromptNoOp(t *testing.T) {
 	}
 }
 
-// A process that crashes mid-graceful-stop satisfies the Stop wait via the
-// crashed terminal state rather than timing out.
+// A process that exits mid-graceful-stop releases the Stop wait via close(exited)
+// rather than timing out. The stop is already in flight, so supervise records the
+// terminal state as stopped.
 func TestStopWaitSatisfiedByCrash(t *testing.T) {
 	proc := newFakeProcess()
-	// RCON "stop" does not exit the process; instead it crashes shortly after, so
-	// waitExit must complete on the crashed terminal state.
+	// RCON "stop" does not exit the process immediately; the process exits shortly
+	// after, and waitExit completes when supervise closes exited.
 	ctrl := &fakeControl{onStop: func() {
 		go func() {
 			time.Sleep(5 * time.Millisecond)

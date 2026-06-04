@@ -198,10 +198,10 @@ func (i *instance) tryRCONStop(ctx context.Context) bool {
 }
 
 // waitExit reports whether the process reached a terminal state within d. The
-// supervisor goroutine observes the actual exit and closes i.exited, so any
-// terminal state (stopped or, when a process crashes mid-graceful-stop, crashed)
-// satisfies the wait. It returns false if the stop timeout elapses or ctx is
-// cancelled first.
+// supervisor goroutine observes the actual exit and closes i.exited; the wait is
+// released by that close regardless of the recorded terminal state (stopped when
+// a stop is in flight, otherwise crashed). It returns false if the stop timeout
+// elapses or ctx is cancelled first.
 func (i *instance) waitExit(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
