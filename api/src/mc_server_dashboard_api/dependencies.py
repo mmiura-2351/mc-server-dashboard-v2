@@ -150,6 +150,7 @@ from mc_server_dashboard_api.servers.application.manage_server import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane as ServersControlPlane,
 )
+from mc_server_dashboard_api.storage.domain.port import Storage
 
 
 def get_engine(request: Request) -> AsyncEngine:
@@ -164,6 +165,17 @@ def get_settings(request: Request) -> Settings:
 
     settings: Settings = request.app.state.settings
     return settings
+
+
+def get_storage(request: Request) -> Storage:
+    """Return the process-wide :class:`Storage` Port adapter from app state.
+
+    Bound to the config-selected backend by the app factory; the data-plane
+    endpoints stream hydrate/snapshot bytes through it (issue #106).
+    """
+
+    storage: Storage = request.app.state.storage
+    return storage
 
 
 def get_worker_registry(request: Request) -> WorkerRegistry:
@@ -613,13 +625,22 @@ def get_fleet_control_plane(request: Request) -> FleetControlPlane:
 
 
 def get_servers_control_plane(
+    request: Request,
     registry: Annotated[WorkerRegistry, Depends(get_worker_registry)],
     fleet_control_plane: Annotated[FleetControlPlane, Depends(get_fleet_control_plane)],
 ) -> ServersControlPlane:
-    """Bind the servers control-plane seam to the registry + fleet control plane."""
+    """Bind the servers control-plane seam to the registry + fleet control plane.
 
+    The data-plane base URL and the shared Worker credential (the transfer token)
+    are passed so the seam can build hydrate/snapshot transfer URLs (issue #106).
+    """
+
+    settings = get_settings(request)
     return FleetControlPlaneAdapter(
-        registry=registry, control_plane=fleet_control_plane
+        registry=registry,
+        control_plane=fleet_control_plane,
+        data_plane_base_url=settings.server.public_base_url,
+        worker_credential=settings.control.worker_credential,
     )
 
 

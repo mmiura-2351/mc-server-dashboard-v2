@@ -120,7 +120,11 @@ async def test_start_places_sets_running_and_dispatches() -> None:
 
     assert result.desired_state is DesiredState.RUNNING
     assert result.assigned_worker_id == WorkerId(worker)
-    assert cp.dispatched == [("start", WorkerId(worker), ServerId(server_id))]
+    # Hydrate precedes the launch (FR-DATA-4), then StartServer dispatches.
+    assert cp.dispatched == [
+        ("hydrate", WorkerId(worker), ServerId(server_id)),
+        ("start", WorkerId(worker), ServerId(server_id)),
+    ]
     assert cp.incremented == [WorkerId(worker)]
     assert cp.decremented == []
 
@@ -232,8 +236,12 @@ async def test_two_sequential_starts_second_is_conflict() -> None:
             community_id=CommunityId(community), server_id=ServerId(server_id)
         )
 
-    # Exactly one placement/dispatch happened across both attempts.
-    assert cp.dispatched == [("start", WorkerId(worker), ServerId(server_id))]
+    # Exactly one placement/dispatch happened across both attempts (the lone
+    # successful start hydrates then launches).
+    assert cp.dispatched == [
+        ("hydrate", WorkerId(worker), ServerId(server_id)),
+        ("start", WorkerId(worker), ServerId(server_id)),
+    ]
     assert cp.incremented == [WorkerId(worker)]
 
 
@@ -313,8 +321,47 @@ async def test_stop_sets_stopped_dispatches_and_decrements() -> None:
     )
 
     assert result.desired_state is DesiredState.STOPPED
-    assert cp.dispatched == [("stop", WorkerId(worker), ServerId(server_id))]
+    # A graceful stop quiesces the process, then takes a final snapshot
+    # (FR-DATA-4, FR-DATA-7).
+    assert cp.dispatched == [
+        ("stop", WorkerId(worker), ServerId(server_id)),
+        ("snapshot", WorkerId(worker), ServerId(server_id)),
+    ]
     assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_stop_succeeds_even_when_final_snapshot_fails() -> None:
+    # A failing final snapshot must not fail the stop itself: the server is down
+    # and the stop already succeeded; the snapshot is best-effort (FR-DATA-7).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotFails(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            return CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="boom")
+
+    cp = _SnapshotFails()
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.desired_state is DesiredState.STOPPED
+    assert ("stop", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+    assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
 
 
 async def test_stop_when_already_stopped_is_conflict() -> None:

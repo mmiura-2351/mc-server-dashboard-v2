@@ -107,10 +107,35 @@ class ServerCommandCommand:
     line: str
 
 
-# The union of commands the lifecycle layer dispatches. Hydrate/snapshot and
-# file access are deferred to later epics and intentionally not modelled here.
+@dataclass(frozen=True)
+class HydrateCommand:
+    """Trigger the Worker to pull its working set from the data plane (FR-DATA-4).
+
+    Carries the API-terminated HTTP transfer URL and a short-lived token; the
+    bulk bytes never traverse the control-plane stream (CONTROL_PLANE.md §5.2).
+    """
+
+    transfer_url: str
+    transfer_token: str
+
+
+@dataclass(frozen=True)
+class SnapshotCommand:
+    """Trigger the Worker to push its working set to the data plane (FR-DATA-4)."""
+
+    transfer_url: str
+    transfer_token: str
+
+
+# The union of commands the lifecycle layer dispatches. File access (ReadFile /
+# EditFile) is deferred to epic #9 and intentionally not modelled here.
 Command = (
-    StartServerCommand | StopServerCommand | RestartServerCommand | ServerCommandCommand
+    StartServerCommand
+    | StopServerCommand
+    | RestartServerCommand
+    | ServerCommandCommand
+    | HydrateCommand
+    | SnapshotCommand
 )
 
 

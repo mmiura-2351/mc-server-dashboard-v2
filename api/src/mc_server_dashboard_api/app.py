@@ -31,6 +31,7 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_session_factory,
 )
 from mc_server_dashboard_api.core.api import health
+from mc_server_dashboard_api.dataplane.api import transfers
 from mc_server_dashboard_api.fleet.adapters.clock import SystemClock as FleetSystemClock
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
@@ -206,4 +207,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(grants.router)
     app.include_router(servers.router)
     app.include_router(workers.router)
+    app.include_router(transfers.router)
     return app

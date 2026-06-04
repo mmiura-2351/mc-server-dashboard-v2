@@ -230,3 +230,13 @@ class FakeControlPlane(ControlPlane):
         self, *, worker_id: WorkerId, server_id: ServerId, line: str
     ) -> CommandOutcome:
         return await self._record("command", worker_id, server_id)
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        return await self._record("hydrate", worker_id, server_id)
+
+    async def snapshot(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        return await self._record("snapshot", worker_id, server_id)

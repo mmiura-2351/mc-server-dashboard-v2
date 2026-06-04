@@ -113,6 +113,24 @@ class StartServer:
             await self.uow.commit()
 
         self.control_plane.increment_assignment(worker_id=worker_id)
+        # Hydrate the working set BEFORE the launch (FR-DATA-4): the API drives a
+        # pull of the authoritative working set from Storage to the Worker's
+        # scratch, then the Worker launches against it. A server with no published
+        # working set yet hydrates to an empty dir (the data-plane endpoint is 204
+        # and the Worker starts fresh), so this is not an error.
+        try:
+            hydrate = await self.control_plane.hydrate(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
+        except WorkerUnavailableError as exc:
+            await self._compensate(community_id, server_id, worker_id, original=exc)
+            raise
+        if not hydrate.success:
+            failure = CommandDispatchError(hydrate.message or hydrate.status.value)
+            await self._compensate(community_id, server_id, worker_id, original=failure)
+            raise failure
         try:
             outcome = await self.control_plane.start(
                 worker_id=worker_id,
@@ -219,6 +237,31 @@ class StopServer:
         )
         if not outcome.success:
             raise CommandDispatchError(outcome.message or outcome.status.value)
+        # Final snapshot AFTER the process has exited (the graceful stop above
+        # only returns once the Worker reports the process gone), so the captured
+        # working set is quiescent (FR-DATA-4, FR-DATA-7). A snapshot failure is
+        # logged, not raised: the stop itself already succeeded and the server is
+        # down; bounding the loss window is best-effort, and a reconciler/next
+        # interval can re-snapshot. (The Worker self-addresses no Storage; the API
+        # drives the snapshot because only it knows the (community, server) scope.)
+        try:
+            snapshot = await self.control_plane.snapshot(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
+            if not snapshot.success:
+                _LOG.warning(
+                    "final snapshot on graceful stop failed for server %s: %s",
+                    server_id.value,
+                    snapshot.message or snapshot.status.value,
+                )
+        except WorkerUnavailableError:
+            _LOG.warning(
+                "final snapshot on graceful stop could not reach the Worker for "
+                "server %s; the stop succeeded but the working set was not captured",
+                server_id.value,
+            )
         return server
 
 

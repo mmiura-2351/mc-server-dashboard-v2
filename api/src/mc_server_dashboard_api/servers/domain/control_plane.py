@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.errors import ServerError
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
     ExecutionBackend,
     ServerId,
     WorkerId,
@@ -115,3 +116,20 @@ class ControlPlane(abc.ABC):
         self, *, worker_id: WorkerId, server_id: ServerId, line: str
     ) -> CommandOutcome:
         """Forward an RCON/console line and await the output (FR-SRV-5)."""
+
+    @abc.abstractmethod
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        """Trigger a working-set hydrate before launch and await it (FR-DATA-4).
+
+        The adapter addresses the data-plane endpoint for ``(community_id,
+        server_id)`` and hands the Worker the URL + a short-lived token; the bulk
+        bytes move off the control-plane stream (CONTROL_PLANE.md Section 5.2).
+        """
+
+    @abc.abstractmethod
+    async def snapshot(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        """Trigger a working-set snapshot and await it (FR-DATA-4, FR-DATA-7)."""
