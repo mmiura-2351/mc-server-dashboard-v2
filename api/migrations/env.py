@@ -18,10 +18,17 @@ from mc_server_dashboard_api.community.adapters import models as _community_mode
 from mc_server_dashboard_api.config import load_settings
 from mc_server_dashboard_api.core.adapters.database import Base, create_engine
 from mc_server_dashboard_api.identity.adapters import models as _identity_models
+from mc_server_dashboard_api.servers.adapters import backup_models as _backup_models
 from mc_server_dashboard_api.servers.adapters import models as _servers_models
 
 # Importing the models registers their tables on ``Base.metadata`` for autogenerate.
-_ = (_identity_models, _community_models, _servers_models, _audit_models)
+_ = (
+    _identity_models,
+    _community_models,
+    _servers_models,
+    _backup_models,
+    _audit_models,
+)
 
 target_metadata = Base.metadata
 
