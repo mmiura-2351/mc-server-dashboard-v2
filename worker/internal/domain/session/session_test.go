@@ -192,6 +192,89 @@ func TestUnsupportedCommandIsAcknowledged(t *testing.T) {
 	<-done
 }
 
+func TestLifecycleCommandDispatchedToHandler(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true, Output: "ok"})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	transport.commands <- Command{CommandID: "cmd-1", ServerID: "srv-1", Kind: "StartServer"}
+
+	waitFor(t, func() bool { return len(handler.handledCopy()) == 1 })
+	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
+
+	got := transport.resultsCopy()[0]
+	if got.CommandID != "cmd-1" || !got.Success || got.Output != "ok" {
+		t.Fatalf("dispatched result = %+v, want success cmd-1 output ok", got)
+	}
+
+	cancel()
+	<-done
+}
+
+func TestUnhandledCommandStillUnsupportedWithHandler(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	transport.commands <- Command{CommandID: "cmd-2", ServerID: "srv-1", Kind: "HydrateTrigger"}
+
+	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
+	got := transport.resultsCopy()[0]
+	if got.Success {
+		t.Fatal("HydrateTrigger should remain unsupported even with a handler")
+	}
+	if len(handler.handledCopy()) != 0 {
+		t.Fatal("HydrateTrigger should not reach the handler")
+	}
+
+	cancel()
+	<-done
+}
+
+func TestStatusEventsForwardedAsStatusChange(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool {
+		transport.mu.Lock()
+		defer transport.mu.Unlock()
+		return transport.registers == 1
+	})
+
+	handler.events <- StatusEvent{ServerID: "srv-1", State: "running"}
+
+	waitFor(t, func() bool { return len(transport.statusesCopy()) == 1 })
+	got := transport.statusesCopy()[0]
+	if got.ServerID != "srv-1" || got.State != "running" {
+		t.Fatalf("forwarded status = %+v, want srv-1 running", got)
+	}
+
+	cancel()
+	<-done
+}
+
 func TestCleanShutdownOnCancel(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}

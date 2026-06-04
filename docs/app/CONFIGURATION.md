@@ -246,8 +246,26 @@ section fixes only what the operator configures.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `worker.scratch_dir` | *required* | | Local scratch directory where the Worker hydrates a server's working set and runs it (REQUIREMENTS.md FR-DATA-4); the `WorkingDir` Port's root (ARCHITECTURE.md Section 5.2). |
+| `worker.java.runtimes` | *(empty)* | | Map of Java **major version** to the `java` binary path for it; the `JavaRuntimeSelector` picks the entry matching a server's Minecraft version (REQUIREMENTS.md FR-EXE-5, ARCHITECTURE.md Section 7.3). See below. |
 | `driver.container.docker_host` | *(daemon default)* | | Docker daemon endpoint when the `container` driver is enabled. |
-| `java.install_dir` | *(auto-discover)* | | Directory of installed Java runtimes the `JavaRuntimeSelector` chooses from per server (REQUIREMENTS.md FR-EXE-5). |
+| `java.install_dir` | *(auto-discover)* | | Directory of installed Java runtimes for future auto-discovery of `worker.java.runtimes`; not yet implemented. |
+
+The `worker.java.runtimes` map keys are Java major versions; values are absolute
+paths to the matching `java` binary. The Worker maps a server's Minecraft version
+to a required Java major (legacy
+[JAVA_COMPATIBILITY.md](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/JAVA_COMPATIBILITY.md)
+reference) and launches that runtime; a version with no configured runtime fails
+the launch.
+
+```toml
+[worker.java.runtimes]
+8  = "/usr/lib/jvm/temurin-8/bin/java"
+17 = "/usr/lib/jvm/temurin-17/bin/java"
+21 = "/usr/lib/jvm/temurin-21/bin/java"
+```
+
+The environment-variable form is a comma-separated `major=path` list:
+`MCD_WORKER_WORKER_JAVA_RUNTIMES="17=/jvm/17/bin/java,21=/jvm/21/bin/java"`.
 
 ### 6.4 Observability
 

@@ -76,6 +76,17 @@ type WorkerConfig struct {
 	MaxServers uint32
 	// ScratchDir is the local working-set root.
 	ScratchDir string
+	// Java holds the Java-runtime selection inputs.
+	Java JavaConfig
+}
+
+// JavaConfig configures the JavaRuntimeSelector (CONFIGURATION.md Section 6.3,
+// FR-EXE-5).
+type JavaConfig struct {
+	// Runtimes maps a Java major version to the absolute java binary path for it
+	// (e.g. 21 -> /usr/lib/jvm/temurin-21/bin/java). The selector picks the entry
+	// for the major a server's Minecraft version requires.
+	Runtimes map[int]string
 }
 
 // LogConfig is the observability surface (CONFIGURATION.md Section 6.4).
@@ -104,6 +115,11 @@ type fileConfig struct {
 		Drivers    []string `toml:"drivers"`
 		MaxServers *uint32  `toml:"max_servers"`
 		ScratchDir *string  `toml:"scratch_dir"`
+		Java       struct {
+			// Runtimes maps a Java major (as a string key, e.g. "21") to the java
+			// binary path. TOML table keys are strings; they are parsed to ints.
+			Runtimes map[string]string `toml:"runtimes"`
+		} `toml:"java"`
 	} `toml:"worker"`
 	Log struct {
 		Level  *string `toml:"level"`
@@ -187,6 +203,13 @@ func applyFile(cfg *Config, path string) error {
 		cfg.Worker.MaxServers = *fc.Worker.MaxServers
 	}
 	setString(&cfg.Worker.ScratchDir, fc.Worker.ScratchDir)
+	if fc.Worker.Java.Runtimes != nil {
+		runtimes, err := parseRuntimes(fc.Worker.Java.Runtimes)
+		if err != nil {
+			return err
+		}
+		cfg.Worker.Java.Runtimes = runtimes
+	}
 	setString(&cfg.Log.Level, fc.Log.Level)
 	setString(&cfg.Log.Format, fc.Log.Format)
 
@@ -225,7 +248,52 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 		cfg.Worker.MaxServers = uint32(n)
 	}
 
+	// WORKER_JAVA_RUNTIMES is a comma-separated list of major=path pairs, e.g.
+	// "17=/jvm/17/bin/java,21=/jvm/21/bin/java".
+	if v := getenv(EnvPrefix + "WORKER_JAVA_RUNTIMES"); v != "" {
+		runtimes, err := parseRuntimePairs(v)
+		if err != nil {
+			return fmt.Errorf("config: %sWORKER_JAVA_RUNTIMES: %w", EnvPrefix, err)
+		}
+		cfg.Worker.Java.Runtimes = runtimes
+	}
+
 	return nil
+}
+
+// parseRuntimes converts a string-keyed Java-runtimes map (from TOML) to an
+// int-keyed one, erroring on a non-integer major.
+func parseRuntimes(in map[string]string) (map[int]string, error) {
+	out := make(map[int]string, len(in))
+	for k, path := range in {
+		major, err := strconv.Atoi(k)
+		if err != nil {
+			return nil, fmt.Errorf("config: worker.java.runtimes: key %q is not a Java major version: %w", k, err)
+		}
+		out[major] = path
+	}
+	return out, nil
+}
+
+// parseRuntimePairs parses a comma-separated major=path list into a runtimes map.
+func parseRuntimePairs(v string) (map[int]string, error) {
+	out := map[int]string{}
+	for _, pair := range strings.Split(v, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		key, path, ok := strings.Cut(pair, "=")
+		if !ok {
+			return nil, fmt.Errorf("entry %q is not in major=path form", pair)
+		}
+		major, err := strconv.Atoi(strings.TrimSpace(key))
+		if err != nil {
+			return nil, fmt.Errorf("entry %q has a non-integer Java major: %w", pair, err)
+		}
+		out[major] = strings.TrimSpace(path)
+	}
+	return out, nil
 }
 
 // validate enforces the required keys with no default (CONFIGURATION.md Section

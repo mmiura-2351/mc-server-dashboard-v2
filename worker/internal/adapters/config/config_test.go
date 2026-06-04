@@ -190,6 +190,72 @@ func TestLoadAcceptsCAFileWithoutInsecure(t *testing.T) {
 	}
 }
 
+func TestLoadJavaRuntimesFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "worker.toml")
+	body := `
+[api]
+grpc_endpoint = "api:50051"
+data_plane_url = "https://api/data"
+credential = "secret"
+
+[api.tls]
+insecure = true
+
+[worker]
+scratch_dir = "/scratch"
+
+[worker.java.runtimes]
+17 = "/jvm/17/bin/java"
+21 = "/jvm/21/bin/java"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path, emptyEnv)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Worker.Java.Runtimes[17] != "/jvm/17/bin/java" || cfg.Worker.Java.Runtimes[21] != "/jvm/21/bin/java" {
+		t.Fatalf("Java.Runtimes = %v, want 17 and 21 entries", cfg.Worker.Java.Runtimes)
+	}
+}
+
+func TestLoadJavaRuntimesFromEnv(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":    "api:50051",
+		"MCD_WORKER_API_DATA_PLANE_URL":   "https://api/data",
+		"MCD_WORKER_API_CREDENTIAL":       "secret",
+		"MCD_WORKER_API_TLS_INSECURE":     "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":   "/scratch",
+		"MCD_WORKER_WORKER_JAVA_RUNTIMES": "8=/jvm/8/bin/java, 21=/jvm/21/bin/java",
+	})
+
+	cfg, err := Load("", env)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Worker.Java.Runtimes[8] != "/jvm/8/bin/java" || cfg.Worker.Java.Runtimes[21] != "/jvm/21/bin/java" {
+		t.Fatalf("Java.Runtimes = %v, want 8 and 21 entries", cfg.Worker.Java.Runtimes)
+	}
+}
+
+func TestLoadRejectsMalformedJavaRuntimesEnv(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":    "api:50051",
+		"MCD_WORKER_API_DATA_PLANE_URL":   "https://api/data",
+		"MCD_WORKER_API_CREDENTIAL":       "secret",
+		"MCD_WORKER_API_TLS_INSECURE":     "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":   "/scratch",
+		"MCD_WORKER_WORKER_JAVA_RUNTIMES": "notamajor=/jvm/java",
+	})
+
+	if _, err := Load("", env); err == nil {
+		t.Fatal("Load() with non-integer Java major: want error, got nil")
+	}
+}
+
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
