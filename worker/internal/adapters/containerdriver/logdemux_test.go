@@ -122,17 +122,35 @@ func TestDemuxLogsRejectsOversizedFrame(t *testing.T) {
 	}
 }
 
-// A frame at exactly the cap is accepted (boundary).
+// A frame whose declared size equals the cap is accepted (boundary): only
+// size > maxFrameBytes is rejected. The payload is exactly maxFrameBytes and a
+// short newline-terminated line is appended so a complete line follows it; the
+// demux must read past the at-cap payload and emit that trailing line, proving
+// the frame was not rejected as oversized.
 func TestDemuxLogsAcceptsFrameAtCap(t *testing.T) {
+	atCap := make([]byte, maxFrameBytes)
+	for i := range atCap {
+		atCap[i] = 'a'
+	}
+	atCap[len(atCap)-1] = '\n' // terminate the at-cap line so it is emitted whole.
+
 	var buf bytes.Buffer
-	buf.Write(frame(dockerStreamStdout, "line at cap\n"))
+	hdr := make([]byte, dockerStreamHeaderLen)
+	hdr[0] = dockerStreamStdout
+	binary.BigEndian.PutUint32(hdr[4:], maxFrameBytes)
+	buf.Write(hdr)
+	buf.Write(atCap)
+	buf.Write(frame(dockerStreamStdout, "after at-cap\n"))
 
 	pump := execution.NewLogPump("s1", 16)
 	go func() { demuxLogs(&buf, pump); pump.Close() }()
 
 	got := drainLogs(pump)
-	if len(got) != 1 || got[0].Line != "line at cap" {
-		t.Fatalf("got %v, want the line", got)
+	if len(got) != 2 {
+		t.Fatalf("got %d line(s), want 2 (at-cap frame accepted + the line after it)", len(got))
+	}
+	if got[1].Line != "after at-cap" {
+		t.Fatalf("trailing line = %q, want the line after the at-cap frame", got[1].Line)
 	}
 }
 

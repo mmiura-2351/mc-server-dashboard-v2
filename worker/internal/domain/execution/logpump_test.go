@@ -62,6 +62,19 @@ func TestLogPumpScanTruncatesOversizedLineAndContinues(t *testing.T) {
 	}
 }
 
+// A final line with no trailing newline (the stream ends at EOF mid-line) is
+// still emitted: Scan flushes the trailing partial when ReadSlice returns EOF.
+func TestLogPumpScanEmitsUnterminatedFinalLine(t *testing.T) {
+	p := NewLogPump("s1", 16)
+	p.Scan(strings.NewReader("abc"), LogStreamStdout)
+	p.Close()
+
+	got := drainLogs(p.Logs())
+	if len(got) != 1 || got[0].Line != "abc" {
+		t.Fatalf("got %+v, want one line %q", got, "abc")
+	}
+}
+
 // summarize renders just the line lengths so a failure does not dump megabytes.
 func summarize(evs []LogEvent) []int {
 	out := make([]int, len(evs))
