@@ -500,9 +500,12 @@ off the gRPC stream: hydrate = GET + stream-unpack into the instance working dir
 rejected, mirroring the API-side `filter="data"` discipline); snapshot = pack the
 working dir into a tar and POST it with a `Content-Length`. Transport security
 (CA bundle / mTLS / dev-insecure) mirrors the control channel
-(CONFIGURATION.md Section 6.1). Hydrate/snapshot run **off** the session's serial
-receive loop under a bounded concurrency cap, so a slow transfer never delays
-another server's lifecycle command (issue #95).
+(CONFIGURATION.md Section 6.1). The session routes every server-scoped command —
+hydrate/snapshot as well as lifecycle/file commands — to a per-server lane off
+the receive loop: one server's commands run serially (start/stop never
+interleave), but distinct servers' lanes run concurrently under a bounded
+concurrency cap, so a slow transfer or graceful stop never delays another
+server's command (issue #95).
 
 **Lifecycle wiring (FR-DATA-4).** `StartServer` hydrates before the launch (the
 API issues a hydrate trigger, then `StartServer`); a graceful `StopServer` takes

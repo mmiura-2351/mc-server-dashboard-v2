@@ -356,6 +356,156 @@ func TestSlowSnapshotDoesNotBlockOtherCommands(t *testing.T) {
 	<-done
 }
 
+// laneHandler blocks any command (regardless of kind) whose ServerID matches
+// blockServer until released, and records the order in which it handles each
+// command per server. It models a slow graceful Stop on one server.
+type laneHandler struct {
+	mu          sync.Mutex
+	handled     []Command
+	blockServer string
+	release     chan struct{}
+}
+
+func newLaneHandler(blockServer string) *laneHandler {
+	return &laneHandler{blockServer: blockServer, release: make(chan struct{})}
+}
+
+func (h *laneHandler) Handle(ctx context.Context, cmd Command) CommandResult {
+	if cmd.ServerID == h.blockServer {
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+		}
+	}
+	h.mu.Lock()
+	h.handled = append(h.handled, cmd)
+	h.mu.Unlock()
+	return CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+func (h *laneHandler) Events() <-chan StatusEvent   { return nil }
+func (h *laneHandler) Logs() <-chan LogEvent        { return nil }
+func (h *laneHandler) Metrics() <-chan MetricsEvent { return nil }
+
+func (h *laneHandler) handledIDs() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ids := make([]string, len(h.handled))
+	for i, c := range h.handled {
+		ids[i] = c.CommandID
+	}
+	return ids
+}
+
+// A slow graceful Stop on s1 (a lifecycle command, handled inline before issue
+// #95) must not delay a command for a different server s2: per-server lanes run
+// concurrently across servers (issue #95).
+func TestSlowStopDoesNotBlockOtherServer(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newLaneHandler("s1")
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// A slow stop on s1, then a stop for a different server s2.
+	transport.commands <- Command{CommandID: "stop-s1", ServerID: "s1", Kind: "StopServer"}
+	transport.commands <- Command{CommandID: "stop-s2", ServerID: "s2", Kind: "StopServer"}
+
+	// s2 must complete while s1 is still blocked.
+	waitFor(t, func() bool {
+		for _, res := range transport.resultsCopy() {
+			if res.CommandID == "stop-s2" && res.Success {
+				return true
+			}
+		}
+		return false
+	})
+
+	for _, res := range transport.resultsCopy() {
+		if res.CommandID == "stop-s1" {
+			t.Fatal("s1 stop answered before release; lanes did not run concurrently")
+		}
+	}
+
+	close(handler.release)
+	waitFor(t, func() bool {
+		for _, res := range transport.resultsCopy() {
+			if res.CommandID == "stop-s1" && res.Success {
+				return true
+			}
+		}
+		return false
+	})
+
+	cancel()
+	<-done
+}
+
+// Commands for the SAME server stay strictly ordered even under a burst: a lane
+// executes its server's commands serially in arrival order (issue #95).
+func TestSameServerCommandsStayOrdered(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	// Block nothing; we only care about handling order.
+	handler := newLaneHandler("")
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	const n = 20
+	want := make([]string, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("c%02d", i)
+		want[i] = id
+		transport.commands <- Command{CommandID: id, ServerID: "s1", Kind: "ServerCommand", Line: id}
+	}
+
+	waitFor(t, func() bool { return len(handler.handledIDs()) == n })
+
+	got := handler.handledIDs()
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("same-server handling order = %v, want %v", got, want)
+		}
+	}
+
+	cancel()
+	<-done
+}
+
+// After a server's lane goes idle, its goroutine and map entry are torn down so
+// an ever-growing roster of servers does not leak goroutines (issue #95).
+func TestIdleLaneIsTornDown(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newLaneHandler("")
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	transport.commands <- Command{CommandID: "c1", ServerID: "s1", Kind: "ServerCommand"}
+	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
+
+	// Once the command is answered the lane should drain and remove itself.
+	waitFor(t, func() bool { return r.laneCount() == 0 })
+
+	cancel()
+	<-done
+}
+
 func TestStatusEventsForwardedAsStatusChange(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
