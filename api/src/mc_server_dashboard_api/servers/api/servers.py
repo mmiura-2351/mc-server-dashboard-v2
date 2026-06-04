@@ -56,6 +56,7 @@ from mc_server_dashboard_api.servers.application.manage_server import (
 )
 from mc_server_dashboard_api.servers.domain.config_bounds import (
     ConfigInvalidShapeError,
+    ConfigNullValueError,
     ConfigTooLargeError,
     validate_config,
 )
@@ -528,6 +529,8 @@ def _validated_config(config: Any) -> dict[str, Any]:
         return validate_config(config)
     except ConfigTooLargeError as exc:
         raise _unprocessable("config_too_large") from exc
+    except ConfigNullValueError as exc:
+        raise _unprocessable("config_null_value") from exc
     except ConfigInvalidShapeError as exc:
         raise _unprocessable("config_invalid_shape") from exc
 

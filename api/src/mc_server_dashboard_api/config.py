@@ -40,8 +40,11 @@ class ServerSettings(_Section):
     """HTTP + control-plane transport (CONFIGURATION.md Section 5.1)."""
 
     host: str = "0.0.0.0"
-    http_port: int = 8000
-    grpc_port: int = 50051
+    # 0..65535: 0 is the conventional "bind an OS-assigned ephemeral port" value
+    # (used by the gRPC server's ``add_insecure_port`` in tests), so it is allowed;
+    # only a negative or above-65535 port is rejected.
+    http_port: int = Field(default=8000, ge=0, le=65535)
+    grpc_port: int = Field(default=50051, ge=0, le=65535)
     # Externally reachable base URL of the API's HTTP data plane, advertised to
     # Workers in the hydrate/snapshot transfer triggers (CONFIGURATION.md
     # Section 5.1, REQUIREMENTS.md Section 5.2). Declared optional so a process
@@ -70,11 +73,14 @@ class ControlSettings(_Section):
     """
 
     enabled: bool = True
-    heartbeat_timeout_seconds: int = 30
+    # A zero/negative liveness window would mark every Worker offline immediately;
+    # require a positive number of seconds.
+    heartbeat_timeout_seconds: int = Field(default=30, gt=0)
     # Deadline for a dispatched ApiCommand to be answered by a CommandResult
     # (CONTROL_PLANE.md Section 4.2); a command unanswered within it is a typed
-    # timeout the lifecycle layer treats as a failure.
-    command_timeout_seconds: int = 30
+    # timeout the lifecycle layer treats as a failure. A zero/negative deadline
+    # would fail every command immediately.
+    command_timeout_seconds: int = Field(default=30, gt=0)
     worker_credential: str | None = None
 
 
@@ -131,7 +137,9 @@ class StorageSettings(_Section):
     backend: Literal["fs", "remote-fs", "object"] = "fs"
     fs: StorageFsSettings = Field(default_factory=StorageFsSettings)
     object: StorageObjectSettings = Field(default_factory=StorageObjectSettings)
-    version_retention: int = 10
+    # 0 retains no prior versions (keep only the live file); a negative count is
+    # meaningless.
+    version_retention: int = Field(default=10, ge=0)
 
 
 class SnapshotSettings(_Section):
@@ -144,8 +152,8 @@ class SnapshotSettings(_Section):
     interval is clamped to at least this value.
     """
 
-    default_interval_seconds: int = 3600
-    min_interval_seconds: int = 300
+    default_interval_seconds: int = Field(default=3600, gt=0)
+    min_interval_seconds: int = Field(default=300, gt=0)
 
 
 class BackupSettings(_Section):
@@ -158,7 +166,7 @@ class BackupSettings(_Section):
     cadence is measured in hours; it defaults to five minutes.
     """
 
-    schedule_tick_seconds: int = 300
+    schedule_tick_seconds: int = Field(default=300, gt=0)
 
 
 class PasswordSettings(_Section):
@@ -170,8 +178,8 @@ class PasswordSettings(_Section):
     """
 
     hash: Literal["argon2", "bcrypt"] = "argon2"
-    min_length: int = 12
-    max_length: int = 128
+    min_length: int = Field(default=12, gt=0)
+    max_length: int = Field(default=128, gt=0)
     require_complexity: bool = True
     check_common_list: bool = True
     forbid_user_info: bool = True
@@ -189,10 +197,13 @@ class TokenSettings(_Section):
     routers without a key (Section 3, fail-fast on a missing required secret).
     """
 
-    algorithm: str = "HS256"
+    # Constrained to the supported algorithms so a miscased/typo value fails at
+    # load rather than slipping past the HS256 key-length floor below and only
+    # failing at first JWT use (CONFIGURATION.md Section 5.3).
+    algorithm: Literal["HS256", "RS256"] = "HS256"
     signing_key: str | None = None
-    access_ttl_seconds: int = 900
-    refresh_ttl_seconds: int = 1209600
+    access_ttl_seconds: int = Field(default=900, gt=0)
+    refresh_ttl_seconds: int = Field(default=1209600, gt=0)
 
     @model_validator(mode="after")
     def _enforce_hs256_key_length(self) -> TokenSettings:
@@ -222,13 +233,20 @@ class BruteForceSettings(_Section):
     """
 
     enabled: bool = True
-    username_threshold: int = 5
-    username_window_seconds: int = 900
-    ip_threshold: int = 20
-    ip_window_seconds: int = 300
-    lockout_base_seconds: int = 900
-    lockout_max_seconds: int = 86400
-    delay_ms: int = 200
+    # Thresholds must be >= 1 (a 0 threshold would lock out on the first attempt);
+    # windows and lockout durations must be > 0 (a 0 window never accumulates, so
+    # a threshold never trips and protection is silently disabled).
+    username_threshold: int = Field(default=5, ge=1)
+    username_window_seconds: int = Field(default=900, gt=0)
+    ip_threshold: int = Field(default=20, ge=1)
+    ip_window_seconds: int = Field(default=300, gt=0)
+    lockout_base_seconds: int = Field(default=900, gt=0)
+    lockout_max_seconds: int = Field(default=86400, gt=0)
+    # The artificial failure delay against timing enumeration (SECURITY.md
+    # Section 2). >= 0: 0 explicitly disables the delay; a negative value is
+    # meaningless. Disabling it forgoes the timing-uniformity guarantee, so it is
+    # an explicit operator choice rather than a silent default.
+    delay_ms: int = Field(default=200, ge=0)
     # How often the background loop prunes ``login_attempt`` rows older than the
     # longest sliding window, independent of login events (SECURITY.md Section 3).
     # A failures-only attack never triggers the on-success prune, so this keeps
