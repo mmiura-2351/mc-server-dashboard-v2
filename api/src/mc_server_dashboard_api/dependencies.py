@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -98,6 +98,7 @@ from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorker
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     ControlPlane as FleetControlPlane,
 )
+from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
 from mc_server_dashboard_api.identity.adapters.client_ip import (
     forwarded_for_header,
@@ -313,6 +314,18 @@ def get_worker_registry(request: Request) -> WorkerRegistry:
 
     registry: WorkerRegistry = request.app.state.worker_registry
     return registry
+
+
+def get_real_time_events(websocket: WebSocket) -> RealTimeEvents:
+    """Return the process-wide in-process real-time event bus from app state.
+
+    The same instance the control-plane gRPC servicer publishes onto; the
+    WebSocket events endpoint subscribes through it (FR-MON-1..4). Injected from
+    the ``WebSocket`` connection, the only consumer of this Port.
+    """
+
+    bus: RealTimeEvents = websocket.app.state.real_time_events
+    return bus
 
 
 def get_list_workers(
@@ -555,6 +568,44 @@ def _unauthenticated() -> HTTPException:
         detail="invalid_token",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def _ws_access_token(websocket: WebSocket) -> str | None:
+    """Resolve the Bearer access token from a WebSocket handshake.
+
+    Browsers cannot set request headers on a WebSocket upgrade, so the token is
+    accepted from the ``token`` query parameter; the ``Authorization: Bearer``
+    header is also honoured for non-browser clients (and the test client).
+    """
+
+    header = websocket.headers.get("authorization")
+    if header is not None and header.startswith("Bearer "):
+        return header[len("Bearer ") :]
+    return websocket.query_params.get("token")
+
+
+async def get_current_user_ws(websocket: WebSocket) -> User | None:
+    """The authenticated user behind a WebSocket handshake, or ``None``.
+
+    Returns ``None`` for a missing/malformed/expired token rather than raising:
+    a WebSocket route must reject by closing the connection with a policy code
+    (it cannot return an HTTP status once the upgrade is in flight), so the route
+    decides the close, not an exception (Section 6.13).
+    """
+
+    token = _ws_access_token(websocket)
+    if token is None:
+        return None
+    settings: Settings = websocket.app.state.settings
+    engine: AsyncEngine = websocket.app.state.engine
+    use_case = AuthenticateRequest(
+        uow=SqlAlchemyUnitOfWork(create_session_factory(engine)),
+        tokens=_build_token_service(settings.auth.token, SystemClock()),
+    )
+    try:
+        return await use_case(access_token=token)
+    except InvalidAccessTokenError:
+        return None
 
 
 # --- authorization (community context, Section 6.4) ------------------------

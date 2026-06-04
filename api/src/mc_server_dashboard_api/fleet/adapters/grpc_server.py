@@ -16,7 +16,9 @@ CONTROL_PLANE.md Section 4:
    ``Event{StatusChange}`` reconciles the server's observed state through the
    :class:`ServerStateSink` (FR-SRV-4); ``CommandResult`` resolves the pending
    correlation so a dispatched command's awaiter unblocks (CONTROL_PLANE.md
-   Sections 3, 5). ``LogLine`` / ``Metrics`` are accepted and ignored (epic #10).
+   Sections 3, 5). ``StatusChange`` / ``LogLine`` / ``Metrics`` are relayed to
+   subscribed clients through the :class:`RealTimeEvents` Port (FR-MON-1..3); the
+   publish is non-blocking, so a slow subscriber never back-pressures the stream.
    The API may also push ``ApiCommand`` messages on this stream: they ride the
    Worker's outbound queue, drained by the ``Session`` generator.
 4. **Disconnect.** When the stream ends (clean close or transport error) the
@@ -46,6 +48,11 @@ from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.control_plane import WorkerNotConnectedError
 from mc_server_dashboard_api.fleet.domain.entities import Worker
 from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
+from mc_server_dashboard_api.fleet.domain.real_time_events import (
+    EventStream,
+    RealTimeEvent,
+    RealTimeEvents,
+)
 from mc_server_dashboard_api.fleet.domain.registry import SessionToken, WorkerRegistry
 from mc_server_dashboard_api.fleet.domain.server_state_sink import ServerStateSink
 from mc_server_dashboard_api.fleet.domain.value_objects import (
@@ -89,6 +96,13 @@ _DRIVER_BY_KIND: dict[int, DriverKind] = {
     pb.EXECUTION_DRIVER_KIND_CONTAINER: DriverKind.CONTAINER,
 }
 
+# Map the wire log-stream enum onto the relayed payload string (FR-MON-2). An
+# unspecified value is relayed as "stdout" — the conservative default.
+_LOG_STREAM_BY_PROTO: dict[int, str] = {
+    pb.LOG_STREAM_STDOUT: "stdout",
+    pb.LOG_STREAM_STDERR: "stderr",
+}
+
 
 def _capabilities_from_proto(caps: pb.WorkerCapabilities) -> WorkerCapabilities:
     drivers = {
@@ -117,6 +131,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         heartbeat_timeout: dt.timedelta,
         control_plane: ControlPlaneState,
         state_sink: ServerStateSink,
+        real_time_events: RealTimeEvents,
     ) -> None:
         self._registry = registry
         self._clock = clock
@@ -124,6 +139,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self._heartbeat_interval = heartbeat_timeout / _HEARTBEAT_INTERVAL_DIVISOR
         self._control_plane = control_plane
         self._state_sink = state_sink
+        self._real_time_events = real_time_events
 
     async def Session(  # noqa: N802 (gRPC-generated method name)
         self,
@@ -263,8 +279,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
             self._registry.record_heartbeat(worker_id, self._clock.now())
         elif event == "status_change":
             await self._reconcile_status(worker_id, message.event)
-        # LogLine / Metrics are accepted and ignored; their consumers are later
-        # epics (#10).
+        elif event == "log_line":
+            self._relay_log(message.event)
+        elif event == "metrics":
+            self._relay_metrics(message.event)
 
     async def _reconcile_status(self, worker_id: WorkerId, event: pb.Event) -> None:
         state = _STATE_BY_PROTO.get(event.status_change.state)
@@ -272,6 +290,49 @@ class WorkerSessionServicer(WorkerServiceServicer):
             return
         await self._state_sink.record_observed_state(
             server_id=event.server_id, worker_id=worker_id.value, state=state
+        )
+        # Relay the observed transition to subscribed clients (FR-MON-1). The
+        # publish is synchronous and best-effort: it never awaits subscriber
+        # consumption, so a slow client cannot back-pressure this session path.
+        self._real_time_events.publish(
+            server_id=event.server_id,
+            event=RealTimeEvent(
+                stream=EventStream.STATUS,
+                payload={"state": state, "detail": event.status_change.detail},
+            ),
+        )
+
+    def _relay_log(self, event: pb.Event) -> None:
+        """Relay a server log line to subscribed clients (FR-MON-2)."""
+
+        if not event.server_id:
+            return
+        self._real_time_events.publish(
+            server_id=event.server_id,
+            event=RealTimeEvent(
+                stream=EventStream.LOG,
+                payload={
+                    "line": event.log_line.line,
+                    "stream": _LOG_STREAM_BY_PROTO.get(event.log_line.stream, "stdout"),
+                },
+            ),
+        )
+
+    def _relay_metrics(self, event: pb.Event) -> None:
+        """Relay a runtime-metrics sample to subscribed clients (FR-MON-3)."""
+
+        if not event.server_id:
+            return
+        self._real_time_events.publish(
+            server_id=event.server_id,
+            event=RealTimeEvent(
+                stream=EventStream.METRICS,
+                payload={
+                    "cpu_millis": event.metrics.cpu_millis,
+                    "memory_bytes": event.metrics.memory_bytes,
+                    "player_count": event.metrics.player_count,
+                },
+            ),
         )
 
     def _register_ack(self, *, correlation_id: str) -> pb.ApiMessage:
@@ -288,6 +349,7 @@ def make_grpc_server(
     heartbeat_timeout: dt.timedelta,
     control_plane: ControlPlaneState,
     state_sink: ServerStateSink,
+    real_time_events: RealTimeEvents,
     host: str,
     port: int,
 ) -> aio.Server:
@@ -301,6 +363,7 @@ def make_grpc_server(
         heartbeat_timeout=heartbeat_timeout,
         control_plane=control_plane,
         state_sink=state_sink,
+        real_time_events=real_time_events,
     )
     add_WorkerServiceServicer_to_server(servicer, server)
     server.add_insecure_port(f"{host}:{port}")

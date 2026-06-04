@@ -46,7 +46,11 @@ from mcsd.controlplane.v1.control_plane_pb2_grpc import (
     WorkerServiceStub,
     add_WorkerServiceServicer_to_server,
 )
-from tests.fleet.fakes import FakeClock, FakeServerStateSink
+from tests.fleet.fakes import (
+    FakeClock,
+    FakeServerStateSink,
+    RecordingRealTimeEvents,
+)
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _TIMEOUT = dt.timedelta(seconds=30)
@@ -85,6 +89,7 @@ class _Harness:
             heartbeat_timeout=_TIMEOUT,
             control_plane=self.state,
             state_sink=FakeServerStateSink(),
+            real_time_events=RecordingRealTimeEvents(),
         )
         add_WorkerServiceServicer_to_server(servicer, server)
         port = server.add_insecure_port("127.0.0.1:0")

@@ -40,7 +40,11 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
     GrpcControlPlane,
 )
 from mc_server_dashboard_api.fleet.adapters.grpc_server import make_grpc_server
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
 from mc_server_dashboard_api.identity.api import auth, users
 from mc_server_dashboard_api.logging import configure_logging
@@ -227,6 +231,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state_sink = ServersServerStateSink(
             create_session_factory(engine), clock=ServersSystemClock()
         )
+        # Process-wide in-process real-time event bus (FR-MON-1..4): the gRPC
+        # servicer publishes status/log/metrics events onto it; the WebSocket
+        # endpoint subscribes per server. Best-effort and decoupled from REST —
+        # if it is empty, clients simply miss live events (graceful degradation).
+        real_time_events = InProcessRealTimeEvents()
+        app.state.real_time_events = real_time_events
         logging.getLogger(__name__).info(
             "api starting", extra={"config": settings.masked_dump()}
         )
@@ -245,6 +255,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 heartbeat_timeout=heartbeat_timeout,
                 control_plane=control_plane_state,
                 state_sink=state_sink,
+                real_time_events=real_time_events,
                 host=settings.server.host,
                 port=settings.server.grpc_port,
             )
@@ -341,6 +352,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(server_files.router)
     app.include_router(server_backups.router)
     app.include_router(workers.router)
+    app.include_router(server_events.router)
     app.include_router(transfers.router)
     app.include_router(versions_api.router)
     app.include_router(audit.router)
