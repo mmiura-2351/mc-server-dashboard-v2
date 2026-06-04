@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/config"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/datatransfer"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/hostprocess"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/javaruntime"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
@@ -77,6 +79,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	transferClient, err := buildTransferClient(cfg.API)
+	if err != nil {
+		return err
+	}
+	manager.WithTransfer(datatransfer.New(transferClient))
 	runner := session.NewRunner(dialer, caps, sysClock, logger, session.WithCommandHandler(manager))
 
 	// Cancel the run context on SIGINT/SIGTERM for a clean stream shutdown.
@@ -179,6 +186,23 @@ func dial(api config.APIConfig, logger *slog.Logger) (*grpc.ClientConn, error) {
 		return nil, fmt.Errorf("dial API %q: %w", api.GRPCEndpoint, err)
 	}
 	return conn, nil
+}
+
+// buildTransferClient builds the HTTP client for the data plane, mirroring the
+// control channel's TLS posture (CONFIGURATION.md Section 6.1): the same CA
+// bundle / mTLS pair verifies the API, and api.tls.insecure=true selects a
+// plaintext client for local/dev. The control plane already validated that
+// exactly one of CA-file / insecure is set.
+func buildTransferClient(api config.APIConfig) (*http.Client, error) {
+	transport := &http.Transport{}
+	if api.TLS.CAFile != "" {
+		tlsCfg, err := buildTLSConfig(api.TLS)
+		if err != nil {
+			return nil, err
+		}
+		transport.TLSClientConfig = tlsCfg
+	}
+	return &http.Client{Transport: transport}, nil
 }
 
 // buildTLSConfig assembles the control-channel TLS config from the CA bundle and

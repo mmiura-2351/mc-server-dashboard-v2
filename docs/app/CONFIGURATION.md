@@ -149,7 +149,7 @@ marks keys with no default.
 | `server.host` | `0.0.0.0` | | Bind address for the HTTP API (REST + data-plane endpoint). |
 | `server.http_port` | `8000` | | Port for the HTTP API. |
 | `server.grpc_port` | `50051` | | Port the control-plane gRPC server listens on for Worker-initiated streams (REQUIREMENTS.md Section 5.1). |
-| `server.public_base_url` | *required* | | Externally reachable base URL of the API's data-plane HTTP endpoint, handed to Workers for hydrate/snapshot transfer (REQUIREMENTS.md Section 5.2). |
+| `server.public_base_url` | *required for hydrate/snapshot* | | Externally reachable base URL of the API's data-plane HTTP endpoint, handed to Workers for hydrate/snapshot transfer (REQUIREMENTS.md Section 5.2, STORAGE.md Section 8). Optional in code so a process that never dispatches a transfer need not set it; a lifecycle command that needs it fails fast when it is unset. |
 | `control.enabled` | `true` | | Whether the API hosts the control-plane gRPC server in this process (REQUIREMENTS.md Section 5.1). When `true`, `control.worker_credential` is required (fail-fast). |
 | `control.worker_credential` | *required when enabled* | secret | Shared credential a Worker must present (`authorization: Bearer <credential>` metadata) to authenticate its stream (REQUIREMENTS.md NFR-SEC-1); the API-side counterpart of the Worker's `api.credential` (Section 6.1). |
 | `control.tls.cert_file` | *required* | | Path to the control-channel TLS certificate (REQUIREMENTS.md NFR-SEC-1). |

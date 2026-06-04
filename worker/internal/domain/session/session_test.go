@@ -230,16 +230,97 @@ func TestUnhandledCommandStillUnsupportedWithHandler(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = r.Run(ctx); close(done) }()
 
-	transport.commands <- Command{CommandID: "cmd-2", ServerID: "srv-1", Kind: "HydrateTrigger"}
+	// ReadFile is not handled yet (epic #9); it must stay unsupported and never
+	// reach the handler, even with one wired.
+	transport.commands <- Command{CommandID: "cmd-2", ServerID: "srv-1", Kind: "ReadFile"}
 
 	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
 	got := transport.resultsCopy()[0]
 	if got.Success {
-		t.Fatal("HydrateTrigger should remain unsupported even with a handler")
+		t.Fatal("ReadFile should remain unsupported even with a handler")
 	}
 	if len(handler.handledCopy()) != 0 {
-		t.Fatal("HydrateTrigger should not reach the handler")
+		t.Fatal("ReadFile should not reach the handler")
 	}
+
+	cancel()
+	<-done
+}
+
+// blockingHandler blocks SnapshotTrigger on a release channel so a test can hold
+// one in flight while sending another command; all other commands return at once.
+type blockingHandler struct {
+	mu          sync.Mutex
+	handled     []Command
+	releaseSnap chan struct{}
+	events      chan StatusEvent
+}
+
+func newBlockingHandler() *blockingHandler {
+	return &blockingHandler{releaseSnap: make(chan struct{}), events: make(chan StatusEvent)}
+}
+
+func (h *blockingHandler) Handle(ctx context.Context, cmd Command) CommandResult {
+	if cmd.Kind == "SnapshotTrigger" {
+		select {
+		case <-h.releaseSnap:
+		case <-ctx.Done():
+		}
+	}
+	h.mu.Lock()
+	h.handled = append(h.handled, cmd)
+	h.mu.Unlock()
+	return CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+func (h *blockingHandler) Events() <-chan StatusEvent { return h.events }
+
+// A slow snapshot for one server must not block a fast command (e.g. a stop of
+// another server) — the long-running transfer runs off the serial receive loop
+// (issue #95).
+func TestSlowSnapshotDoesNotBlockOtherCommands(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newBlockingHandler()
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// A snapshot that blocks, then a stop for a different server.
+	transport.commands <- Command{CommandID: "snap", ServerID: "s1", Kind: "SnapshotTrigger"}
+	transport.commands <- Command{CommandID: "stop", ServerID: "s2", Kind: "StopServer"}
+
+	// The stop must complete and answer while the snapshot is still blocked.
+	waitFor(t, func() bool {
+		for _, r := range transport.resultsCopy() {
+			if r.CommandID == "stop" && r.Success {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The snapshot has not answered yet (still blocked).
+	for _, r := range transport.resultsCopy() {
+		if r.CommandID == "snap" {
+			t.Fatal("snapshot answered before release; it did not block as set up")
+		}
+	}
+
+	// Release the snapshot; it now completes too.
+	close(handler.releaseSnap)
+	waitFor(t, func() bool {
+		for _, r := range transport.resultsCopy() {
+			if r.CommandID == "snap" && r.Success {
+				return true
+			}
+		}
+		return false
+	})
 
 	cancel()
 	<-done

@@ -234,6 +234,8 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INVALID_STATE
 	case session.CommandErrorDriverUnavailable:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE
+	case session.CommandErrorTransferFailed:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_TRANSFER_FAILED
 	default:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
 	}
@@ -277,6 +279,12 @@ func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
 		out.Force = c.Stop.GetForce()
 	case *controlplanev1.ApiCommand_ServerCommand:
 		out.Line = c.ServerCommand.GetLine()
+	case *controlplanev1.ApiCommand_Hydrate:
+		out.TransferURL = c.Hydrate.GetTransferUrl()
+		out.TransferToken = c.Hydrate.GetTransferToken()
+	case *controlplanev1.ApiCommand_Snapshot:
+		out.TransferURL = c.Snapshot.GetTransferUrl()
+		out.TransferToken = c.Snapshot.GetTransferToken()
 	}
 	return out
 }

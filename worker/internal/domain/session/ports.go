@@ -45,6 +45,11 @@ type Command struct {
 	Force bool
 	// Line is the console/RCON line for ServerCommand.
 	Line string
+	// TransferURL addresses the API HTTP data plane for a HydrateTrigger /
+	// SnapshotTrigger; the bulk bytes move there, off this stream (Section 5.2).
+	TransferURL string
+	// TransferToken is the short-lived credential authorizing one transfer.
+	TransferToken string
 }
 
 // CommandResult answers a Command. A failure carries an ErrorCode and message;
@@ -73,6 +78,9 @@ const (
 	// CommandErrorDriverUnavailable marks a requested driver this Worker does not
 	// offer.
 	CommandErrorDriverUnavailable
+	// CommandErrorTransferFailed marks a failed hydrate/snapshot data-plane
+	// transfer (CONTROL_PLANE.md Section 7).
+	CommandErrorTransferFailed
 )
 
 // StatusEvent is an observed server-state transition the session emits as a
