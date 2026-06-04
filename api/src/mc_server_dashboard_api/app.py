@@ -8,6 +8,7 @@ adapters (ARCHITECTURE.md Section 2.1, CONFIGURATION.md Section 1).
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import os
@@ -47,6 +48,7 @@ from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
 from mc_server_dashboard_api.servers.api import servers
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 
 # Optional TOML config file location, overridable per deployment.
 _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
@@ -55,6 +57,26 @@ _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
 def _resolve_config_file() -> Path | None:
     raw = os.environ.get(_CONFIG_FILE_ENV)
     return Path(raw) if raw else None
+
+
+def _build_storage(settings: Settings) -> FsStorage:
+    """Bind the :class:`Storage` Port to the config-selected adapter (STORAGE.md §7).
+
+    Only ``fs`` is implemented in M1 (and ``remote-fs`` reuses it via a POSIX
+    mount, Section 7.2). The ``object`` backend lands in a later sub-issue (#105);
+    selecting an unimplemented backend fails fast at boot rather than starting with
+    no working store (CONFIGURATION.md Section 3).
+    """
+
+    if settings.storage.backend in ("fs", "remote-fs"):
+        return FsStorage(
+            Path(settings.storage.fs.root),
+            version_retention=settings.storage.version_retention,
+        )
+    raise ValueError(
+        f"storage.backend {settings.storage.backend!r} has no adapter yet "
+        "(only 'fs'/'remote-fs' are implemented in M1)"
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -75,6 +97,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "control.worker_credential is required when control.enabled is true"
         )
 
+    # Bind the Storage Port to the config-selected backend now, so an unsupported
+    # backend (or, by construction, a missing fs root) fails fast at boot rather
+    # than on first use (CONFIGURATION.md Section 3; STORAGE.md Section 7).
+    storage = _build_storage(settings)
+
     configure_logging(settings.log.level, settings.log.format)
 
     heartbeat_timeout = dt.timedelta(seconds=settings.control.heartbeat_timeout_seconds)
@@ -84,6 +111,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine = create_engine(settings.database.url)
         app.state.engine = engine
         app.state.settings = settings
+        app.state.storage = storage
+        # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
+        # note): reclaim any staging dir or superseded snapshot left by a crash
+        # before this process serves. Idempotent and keyed off the live ``current``
+        # target, so it never reclaims authoritative data. Runs off the event loop.
+        await asyncio.to_thread(storage.sweep)
         registry = InMemoryWorkerRegistry(
             clock=FleetSystemClock(), heartbeat_timeout=heartbeat_timeout
         )

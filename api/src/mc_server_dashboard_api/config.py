@@ -80,6 +80,32 @@ class DatabaseSettings(_Section):
     url: str
 
 
+class StorageFsSettings(_Section):
+    """Filesystem-backend settings (CONFIGURATION.md Section 5.2).
+
+    ``root`` is the directory the ``fs`` adapter roots its tree at (STORAGE.md
+    Section 2). Only read when ``storage.backend = fs``.
+    """
+
+    root: str = "./data"
+
+
+class StorageSettings(_Section):
+    """Storage adapter selection + tuning (CONFIGURATION.md Section 5.2).
+
+    ``backend`` selects the :class:`Storage` Port adapter; ``fs`` is the M1 default
+    and the only one implemented here. ``remote-fs`` and ``object`` are admitted by
+    the selector so their adapters can be bound without a config-schema change
+    (#105+); choosing one before its adapter lands fails fast at the edge.
+    ``version_retention`` bounds per-file retained versions (STORAGE.md Section 5,
+    the count-bounded retention knob).
+    """
+
+    backend: Literal["fs", "remote-fs", "object"] = "fs"
+    fs: StorageFsSettings = Field(default_factory=StorageFsSettings)
+    version_retention: int = 10
+
+
 class PasswordSettings(_Section):
     """Password hashing + policy (CONFIGURATION.md Sections 5.3 and 7.1).
 
@@ -176,6 +202,7 @@ class Settings(BaseSettings):
     control: ControlSettings = Field(default_factory=ControlSettings)
     log: LogSettings = Field(default_factory=LogSettings)
     database: DatabaseSettings
+    storage: StorageSettings = Field(default_factory=StorageSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
 
     @classmethod
@@ -210,6 +237,7 @@ class Settings(BaseSettings):
             "control": control,
             "log": self.log.model_dump(),
             "database": {"url": _MASK},
+            "storage": self.storage.model_dump(),
             "auth": auth,
         }
 
