@@ -51,6 +51,33 @@ class DatabaseSettings(_Section):
     url: str
 
 
+class PasswordSettings(_Section):
+    """Password hashing + policy (CONFIGURATION.md Sections 5.3 and 7.1).
+
+    ``hash`` selects the :class:`PasswordHasher` adapter (Section 4); the rest
+    are the password-policy knobs enforced at registration (SECURITY.md
+    Section 1). Defaults are the proven legacy baseline (Section 7.1).
+    """
+
+    hash: Literal["argon2", "bcrypt"] = "argon2"
+    min_length: int = 12
+    max_length: int = 128
+    require_complexity: bool = True
+    check_common_list: bool = True
+    forbid_user_info: bool = True
+    forbid_simple_patterns: bool = True
+
+
+class AuthSettings(_Section):
+    """Authentication configuration (CONFIGURATION.md Section 5.3 / 7).
+
+    Only the password sub-group is modelled here; token and brute-force knobs
+    land with their features.
+    """
+
+    password: PasswordSettings = Field(default_factory=PasswordSettings)
+
+
 class Settings(BaseSettings):
     """The fully-resolved configuration injected into the wiring layer."""
 
@@ -69,6 +96,7 @@ class Settings(BaseSettings):
     server: ServerSettings = Field(default_factory=ServerSettings)
     log: LogSettings = Field(default_factory=LogSettings)
     database: DatabaseSettings
+    auth: AuthSettings = Field(default_factory=AuthSettings)
 
     @classmethod
     def settings_customise_sources(
@@ -91,6 +119,7 @@ class Settings(BaseSettings):
             "server": self.server.model_dump(),
             "log": self.log.model_dump(),
             "database": {"url": _MASK},
+            "auth": self.auth.model_dump(),
         }
 
 

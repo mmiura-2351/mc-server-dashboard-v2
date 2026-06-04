@@ -25,6 +25,11 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.50,<3",   # 2026-05-24
     "asyncpg>=0.31.0,<0.32",            # 2025-11-24
     "alembic>=1.18.4,<2",               # 2026-02-10
+    # Password-hashing adapters behind the PasswordHasher Port (FR-AUTH-3,
+    # CONFIGURATION.md Section 5.3). argon2 is the default selector; bcrypt is
+    # the alternative. Both released well outside the 7-day cooldown (Section 3).
+    "argon2-cffi>=25.1.0,<26",          # 2025-06-03
+    "bcrypt>=5.0.0,<6",                 # 2025-09-25
 ]
 
 [dependency-groups]
@@ -129,15 +134,27 @@ forbidden_modules = [
 ]
 
 # --- identity context ------------------------------------------------------
-# The identity context has only domain + adapters quadrants in M1 (no use cases
-# or HTTP edge yet; those land with #55/#56). The contracts below pin the same
-# inward dependency rule: adapters are bound to Ports only in the wiring module
-# and must not be imported by the domain, and the domain depends on nothing
-# internal -- not its own adapters, and not another bounded context.
+# Mirrors the core context's shape (ARCHITECTURE.md Section 2.2): a layered
+# contract pins domain <- application <- api, and the forbidden contracts keep
+# adapters at the edge (bound to Ports only in the wiring module) and the domain
+# dependency-free. The registration use case + HTTP edge land here with #55.
 [[tool.importlinter.contracts]]
-name = "identity domain does not import adapters"
+name = "identity context layers (domain <- application <- api; adapters at the edge)"
+type = "layers"
+layers = [
+    "mc_server_dashboard_api.identity.api",
+    "mc_server_dashboard_api.identity.application",
+    "mc_server_dashboard_api.identity.domain",
+]
+
+# Adapters must not be imported by domain or application (ARCHITECTURE.md 2.1).
+[[tool.importlinter.contracts]]
+name = "identity domain and application do not import adapters"
 type = "forbidden"
-source_modules = ["mc_server_dashboard_api.identity.domain"]
+source_modules = [
+    "mc_server_dashboard_api.identity.domain",
+    "mc_server_dashboard_api.identity.application",
+]
 forbidden_modules = ["mc_server_dashboard_api.identity.adapters"]
 
 [[tool.importlinter.contracts]]
@@ -145,6 +162,8 @@ name = "identity domain imports nothing internal (incl. other contexts)"
 type = "forbidden"
 source_modules = ["mc_server_dashboard_api.identity.domain"]
 forbidden_modules = [
+    "mc_server_dashboard_api.identity.application",
     "mc_server_dashboard_api.identity.adapters",
+    "mc_server_dashboard_api.identity.api",
     "mc_server_dashboard_api.core",
 ]

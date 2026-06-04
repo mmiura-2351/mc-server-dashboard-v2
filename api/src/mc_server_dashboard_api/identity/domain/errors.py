@@ -17,3 +17,23 @@ class InvalidUsernameError(IdentityError):
 
 class InvalidEmailError(IdentityError):
     """An email address failed its validation rules (e.g. no ``@``)."""
+
+
+class PasswordPolicyError(IdentityError):
+    """A password failed the policy (SECURITY.md Section 1).
+
+    ``reason`` names the rule that failed (a stable, machine-readable code) so
+    the edge can report *which* rule failed without ever echoing the password.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class UsernameAlreadyExistsError(IdentityError):
+    """Registration hit the case-insensitive username uniqueness constraint."""
+
+
+class EmailAlreadyExistsError(IdentityError):
+    """Registration hit the email uniqueness constraint."""
