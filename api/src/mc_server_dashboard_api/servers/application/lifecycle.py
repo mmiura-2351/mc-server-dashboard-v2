@@ -35,6 +35,19 @@ data-plane endpoint being 204), then dispatches the launch; either step failing
 compensates the committed intent. The launch carries a conventional ``server.jar``
 relpath and the server's recorded MC version (FR-EXE-5: the Worker picks the Java
 runtime).
+
+Assignment stickiness after dispatch (the orphan-placement invariant, issue #101).
+ONCE A START COMMAND HAS BEEN SENT FOR A SERVER, THE RECONCILER NEVER PLACES IT ON
+A DIFFERENT WORKER until the assignment is cleared by an authoritative path (a stop,
+or worker-disconnect handling). The reconciler's ``place_and_start`` therefore
+distinguishes WHERE a launch failed: a pre-dispatch failure (placement, jar
+provisioning, a failed hydrate) is safe to ``_unassign`` for a later re-place, but a
+post-dispatch failure — a failed start outcome, or a timeout/lost-response
+``WorkerUnavailableError`` whose command MAY have been applied — KEEPS the
+assignment so the next tick redispatches to the SAME Worker (where an
+``INVALID_STATE`` resolves the lost-response case as already-running). The Worker's
+double-start guard is per-process, so re-placing a started server elsewhere would
+spawn a second live instance.
 """
 
 from __future__ import annotations
@@ -74,6 +87,19 @@ _LOG = logging.getLogger(__name__)
 # The conventional JAR path inside a hydrated working set. The Worker launches
 # against this relpath once the working set is hydrated (see __call__).
 _DEFAULT_JAR_RELPATH = "server.jar"
+
+
+@dataclass
+class _Dispatch:
+    """Mutable marker recording whether a start command was sent (issue #101).
+
+    Threaded into :meth:`StartServer._launch` so the orphan-placement path can read
+    the dispatch boundary on both the normal-return and exception paths: once the
+    start command MAY have reached the Worker, the assignment must stick (the
+    reconciler must never re-place a started server on a different Worker).
+    """
+
+    attempted: bool = False
 
 
 async def _load(
@@ -158,8 +184,24 @@ class StartServer:
         dispatch of :meth:`__call__`; only the entry guard differs (desired is
         already running, the server is unassigned) and the failure handling does NOT
         revert the desired state — the running intent is authoritative and was not
-        created here; we only undo the assignment we just made so a later tick
-        re-places. Raises the same typed errors as a normal start.
+        created here. Raises the same typed errors as a normal start.
+
+        Assignment stickiness after dispatch (the invariant this path guarantees):
+        ONCE A START COMMAND HAS BEEN SENT FOR A SERVER, THE RECONCILER NEVER PLACES
+        IT ON A DIFFERENT WORKER until the assignment is cleared by an authoritative
+        path (a stop, or worker-disconnect handling). So the failure handling keys on
+        WHERE the launch failed:
+
+        - Before the start command was dispatched (placement, jar provisioning, a
+          failed hydrate) -> safe: ``_unassign`` so a later tick re-places. No start
+          ever reached a Worker, so re-placing elsewhere cannot double-start.
+        - After the start was dispatched (a failed outcome, or a timeout/lost-response
+          ``WorkerUnavailableError`` — the command MAY have been applied) -> KEEP the
+          assignment. Subsequent ticks then take the ``redispatch_start`` path to the
+          SAME Worker, where an ``INVALID_STATE`` (already running) resolves the
+          lost-response case as converged. Re-placing elsewhere here is the bug: the
+          Worker's double-start guard is per-process, so two Workers = two live
+          instances of one server.
         """
 
         async with self.uow:
@@ -191,14 +233,28 @@ class StartServer:
             await self.uow.commit()
 
         self.control_plane.increment_assignment(worker_id=worker_id)
+        dispatch = _Dispatch()
         try:
-            outcome = await self._launch(server, community_id, server_id, worker_id)
+            outcome = await self._launch(
+                server, community_id, server_id, worker_id, dispatch
+            )
         except WorkerUnavailableError as exc:
-            await self._unassign(community_id, server_id, worker_id, original=exc)
+            # A timeout/lost-response AFTER the start was sent (dispatch.attempted)
+            # MAY have been applied by the Worker: keep the assignment so the next
+            # tick redispatches to the SAME Worker (stickiness invariant). Only a
+            # pre-dispatch unavailable (a failed hydrate) is safe to unassign.
+            if not dispatch.attempted:
+                await self._unassign(community_id, server_id, worker_id, original=exc)
             raise
         if not outcome.success:
             failure = CommandDispatchError(outcome.message or outcome.status.value)
-            await self._unassign(community_id, server_id, worker_id, original=failure)
+            # A failed START outcome may reflect a command the Worker partially
+            # applied; keep the assignment for a same-Worker redispatch. A failed
+            # HYDRATE outcome (not dispatched) never reached the start, so unassign.
+            if not dispatch.attempted:
+                await self._unassign(
+                    community_id, server_id, worker_id, original=failure
+                )
             raise failure
         return server
 
@@ -241,8 +297,18 @@ class StartServer:
         community_id: CommunityId,
         server_id: ServerId,
         worker_id: WorkerId,
+        dispatch: _Dispatch | None = None,
     ) -> CommandOutcome:
         """Hydrate the working set then dispatch the launch; return the outcome.
+
+        ``dispatch`` is an optional marker the caller passes to learn whether the
+        start command was actually *sent* to the Worker — the dispatch boundary the
+        orphan-placement path keys its failure handling on (issue #101). It is
+        flipped to ``attempted`` immediately before ``control_plane.start`` is
+        called, so the caller can read it in BOTH the normal-return path and the
+        ``except WorkerUnavailableError`` path: a timeout/lost-response on the start
+        call means the command MAY have reached the Worker, and the marker reflects
+        that even though the exception unwinds past this method.
 
         Hydrate the working set BEFORE the launch (FR-DATA-4): the API drives a pull
         of the authoritative working set from Storage to the Worker's scratch, then
@@ -262,6 +328,8 @@ class StartServer:
         )
         if not hydrate.success:
             return hydrate
+        if dispatch is not None:
+            dispatch.attempted = True
         return await self.control_plane.start(
             worker_id=worker_id,
             server_id=server_id,
@@ -346,15 +414,26 @@ class StartServer:
         *,
         original: Exception,
     ) -> None:
-        """Undo only the assignment after a failed orphan re-placement (issue #101).
+        """Undo only the assignment after a failed PRE-DISPATCH orphan placement.
+
+        Called by ``place_and_start`` only when the failure happened BEFORE the start
+        command was sent (a failed hydrate): no start ever reached a Worker, so
+        clearing the assignment to let a later tick re-place elsewhere cannot
+        double-start (issue #101's stickiness invariant). A post-dispatch failure
+        does NOT call this — the assignment must stick for a same-Worker redispatch.
 
         Unlike :meth:`_compensate`, the desired state is **left running**: the
         running intent is authoritative and was not created by this reconcile path,
         so a dispatch failure must not silently flip it to stopped — it only means
         the freshly-chosen Worker did not take the launch. We clear the assignment
         (and decrement its load iff the revert matched) so a later tick re-places on
-        a fresh Worker. A failed compensation is logged, not masked; the row is left
-        diverged for the next tick.
+        a fresh Worker.
+
+        A failed unassign-commit is benign: it is logged (not masked) and the row is
+        left assigned + desired=running, so the next tick sees an assigned orphan and
+        takes the ``redispatch_start`` path to the SAME Worker — exactly the
+        post-dispatch behavior, which is safe. We do not decrement the load in that
+        case (the DB state is unknown; the reconnect rebuild reconciles it).
         """
 
         reverted = False

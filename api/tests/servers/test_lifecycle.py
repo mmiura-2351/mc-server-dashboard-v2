@@ -24,6 +24,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
+    WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -781,9 +782,10 @@ async def test_place_and_start_assigns_an_orphan_and_dispatches() -> None:
     assert uow.servers.by_id[ServerId(server_id)].desired_state is DesiredState.RUNNING
 
 
-async def test_place_and_start_failed_dispatch_keeps_running_intent() -> None:
-    # A failed dispatch on the orphan path must NOT flip desired to stopped: the
-    # running intent is authoritative. Only the assignment is undone.
+async def test_place_and_start_pre_dispatch_failure_unassigns() -> None:
+    # A failure BEFORE the start command is sent (here a failed hydrate) must NOT
+    # flip desired to stopped (the running intent is authoritative) but IS safe to
+    # unassign so a later tick re-places: no start ever reached a Worker (#101).
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -797,7 +799,9 @@ async def test_place_and_start_failed_dispatch_keeps_running_intent() -> None:
     )
     cp = FakeControlPlane(
         place_to=WorkerId(worker),
-        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom"),
+        outcomes={
+            "hydrate": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+        },
     )
     with pytest.raises(CommandDispatchError):
         await _start_server(uow, cp).place_and_start(
@@ -807,6 +811,69 @@ async def test_place_and_start_failed_dispatch_keeps_running_intent() -> None:
     assert stored.desired_state is DesiredState.RUNNING
     assert stored.assigned_worker_id is None
     assert cp.decremented == [WorkerId(worker)]
+    # The start was never sent.
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+
+
+async def test_place_and_start_lost_response_keeps_assignment() -> None:
+    # The lost-response case (#101): hydrate succeeds, then the start command is
+    # SENT but its response is lost (WorkerUnavailableError, i.e. CommandTimedOut).
+    # The Worker MAY have applied it, so the assignment MUST stick (no unassign,
+    # no decrement) — the next tick redispatches to the SAME Worker, never re-places
+    # on a different one. Re-placing here would spawn a second live instance.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"start"})
+    with pytest.raises(WorkerUnavailableError):
+        await _start_server(uow, cp).place_and_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    # Assignment retained: the started server stays on the SAME Worker.
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert cp.decremented == []
+    # The start command was attempted (sent) before the response was lost.
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
+async def test_place_and_start_failed_start_outcome_keeps_assignment() -> None:
+    # A failed START outcome (not an exception) may also reflect a partially-applied
+    # command, so the assignment sticks for a same-Worker redispatch (#101).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+        },
+    )
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp).place_and_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert cp.decremented == []
 
 
 async def test_redispatch_start_replays_launch_without_increment() -> None:

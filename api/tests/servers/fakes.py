@@ -296,6 +296,7 @@ class FakeControlPlane(ControlPlane):
         outcome: CommandOutcome | None = None,
         outcomes: dict[str, CommandOutcome] | None = None,
         raise_unavailable: bool = False,
+        unavailable_kinds: set[str] | None = None,
         connected: dict[WorkerId, bool] | None = None,
     ) -> None:
         self._place_to = place_to
@@ -304,6 +305,10 @@ class FakeControlPlane(ControlPlane):
         # succeeds (e.g. hydrate); kinds absent here fall back to ``outcome``.
         self._outcomes = outcomes or {}
         self._raise_unavailable = raise_unavailable
+        # Per-kind WorkerUnavailableError: a test can make only ``start`` raise
+        # (a timeout/lost response) while ``hydrate`` succeeds, exercising the
+        # post-dispatch stickiness path (issue #101).
+        self._unavailable_kinds = unavailable_kinds or set()
         # Worker-connectivity map for the scheduler's skip-disconnected path; a
         # worker absent here is treated as connected.
         self._connected = connected or {}
@@ -326,11 +331,16 @@ class FakeControlPlane(ControlPlane):
     async def _record(
         self, kind: str, worker_id: WorkerId, server_id: ServerId
     ) -> CommandOutcome:
-        if self._raise_unavailable:
+        if self._raise_unavailable or kind in self._unavailable_kinds:
             from mc_server_dashboard_api.servers.domain.control_plane import (
                 WorkerUnavailableError,
             )
 
+            # Record the per-kind raise so a test can assert the dispatch was
+            # attempted (e.g. start sent, response lost); the global flag keeps its
+            # original no-record behavior.
+            if kind in self._unavailable_kinds:
+                self.dispatched.append((kind, worker_id, server_id))
             raise WorkerUnavailableError(str(worker_id.value))
         self.dispatched.append((kind, worker_id, server_id))
         return self._outcomes.get(kind, self._outcome)

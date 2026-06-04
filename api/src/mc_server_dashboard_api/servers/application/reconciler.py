@@ -17,7 +17,14 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   double-start with ``INVALID_STATE``; we only replay when the Worker is not
   already running it.
 - ``desired=running``, no assigned Worker (compensation-failure orphan) -> run
-  the normal placement + dispatch path.
+  the normal placement + dispatch path. Assignment stickiness invariant (issue
+  #101): once ``place_and_start`` has SENT a start command for this server it KEEPS
+  the assignment even on a timeout/lost-response failure, so subsequent ticks take
+  the ``redispatch_start`` path to the SAME Worker rather than re-placing on a
+  different one. The reconciler never places a started server on a different Worker
+  until an authoritative path (stop, worker-disconnect) clears the assignment —
+  otherwise the Worker's per-process double-start guard would not catch a second
+  live instance on another Worker.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
   the stop.
 - Disconnected Worker -> skip: ``observed=unknown`` is expected while the Worker

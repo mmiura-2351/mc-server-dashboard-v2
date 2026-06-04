@@ -21,6 +21,7 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
+    WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -130,6 +131,60 @@ async def test_running_intent_orphan_places_and_starts() -> None:
     assert cp.incremented == [_WORKER]
     # The orphan is now assigned.
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+async def test_orphan_start_lost_response_never_replaces_on_another_worker() -> None:
+    # The double-placement bug (#101): an orphan's start is SENT but its response is
+    # lost (WorkerUnavailableError, i.e. CommandTimedOut). The Worker MAY have
+    # applied it. The reconciler MUST keep the assignment and, on the next tick,
+    # redispatch to the SAME Worker — it must NEVER place the server on a different
+    # Worker (which the per-process double-start guard would not catch -> two live
+    # instances of one server).
+    class _StartLostThenOk(FakeControlPlane):
+        """Place once; the first start raises (lost response), later starts succeed."""
+
+        def __init__(self) -> None:
+            super().__init__(place_to=_WORKER)
+            self.places = 0
+            self._start_calls = 0
+
+        async def place(self, *, backend: ExecutionBackend) -> WorkerId:
+            self.places += 1
+            return _WORKER
+
+        async def start(self, **kwargs: object) -> CommandOutcome:
+            self._start_calls += 1
+            if self._start_calls == 1:
+                self.dispatched.append(("start", _WORKER, kwargs["server_id"]))  # type: ignore[arg-type]
+                raise WorkerUnavailableError("lost response")
+            return await super().start(**kwargs)  # type: ignore[arg-type]
+
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=None,
+    )
+    uow.servers.seed(server)
+    cp = _StartLostThenOk()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    # Tick 1: orphan placed, start sent, response lost -> assignment RETAINED.
+    await reconciler.tick()
+    stored = uow.servers.by_id[server.id]
+    assert stored.assigned_worker_id == _WORKER
+    assert cp.places == 1
+
+    # Tick 2 (past the backoff window): the server is now an ASSIGNED stale-running
+    # candidate, so the reconciler takes redispatch_start to the SAME Worker. No
+    # second placement happens.
+    clock.set(_NOW + dt.timedelta(seconds=3601))
+    await reconciler.tick()
+    assert cp.places == 1  # never re-placed on a different Worker
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+    # Both starts targeted the same Worker.
+    assert [w for k, w, _ in cp.dispatched if k == "start"] == [_WORKER, _WORKER]
 
 
 async def test_stopped_intent_observed_running_redispatches_stop() -> None:

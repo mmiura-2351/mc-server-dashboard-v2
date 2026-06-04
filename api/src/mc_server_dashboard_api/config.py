@@ -192,6 +192,18 @@ class ReconcilerSettings(_Section):
     backoff_base_seconds: int = Field(default=30, gt=0)
     backoff_max_seconds: int = Field(default=3600, gt=0)
 
+    @model_validator(mode="after")
+    def _enforce_backoff_ordering(self) -> ReconcilerSettings:
+        # The exponential backoff caps the per-server delay at backoff_max_seconds;
+        # a max below the base would clamp the very first retry below its base,
+        # making the cap meaningless. Reject the inverted range at load (fail-fast).
+        if self.backoff_max_seconds < self.backoff_base_seconds:
+            raise ValueError(
+                "reconciler.backoff_max_seconds must be >= "
+                "reconciler.backoff_base_seconds"
+            )
+        return self
+
 
 class PasswordSettings(_Section):
     """Password hashing + policy (CONFIGURATION.md Sections 5.3 and 7.1).
