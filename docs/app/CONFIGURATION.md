@@ -218,10 +218,15 @@ can run**, and **where its scratch space is**.
 | `api.grpc_endpoint` | *required* | | Address of the API control-plane gRPC server the Worker dials to open its persistent stream (REQUIREMENTS.md Section 5.1). |
 | `api.data_plane_url` | *required* | | Base URL of the API's HTTP data-plane endpoint for hydrate/snapshot transfer (REQUIREMENTS.md FR-DATA-3). May be discovered from the API at registration; this key is the fallback/override. |
 | `api.credential` | *required* | secret | The Worker's credential for authenticating to the API (REQUIREMENTS.md NFR-SEC-1, FR-WRK-1). |
-| `api.tls.ca_file` | *required* | | Path to the CA bundle used to verify the API's control-channel TLS (REQUIREMENTS.md NFR-SEC-1). |
+| `api.tls.ca_file` | *required¹* | | Path to the CA bundle used to verify the API's control-channel TLS (REQUIREMENTS.md NFR-SEC-1). |
+| `api.tls.insecure` | `false` | | When `true`, dial the control channel in plaintext (no TLS). Local/dev only; the Worker logs a `WARN` at startup. Required to opt out of TLS when `api.tls.ca_file` is unset. |
 | `api.tls.client_cert_file` | — | | Path to the Worker's client certificate, when the control channel uses mTLS. |
 | `api.tls.client_key_file` | — | secret | Path to the Worker's client private key (mTLS). |
 | `worker.id` | *(auto)* | | Stable identifier the Worker registers under; defaults to a generated/host-derived value. |
+
+¹ `api.tls.ca_file` is required **unless** `api.tls.insecure=true`. With neither
+set, configuration validation fails fast at startup; with `api.tls.insecure=true`
+the Worker dials plaintext (local/dev only). Production must set `api.tls.ca_file`.
 
 ### 6.2 Advertised capabilities
 
