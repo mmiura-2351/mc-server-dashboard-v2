@@ -79,7 +79,8 @@ def _changed_config_keys(current: dict[str, Any], incoming: dict[str, Any]) -> s
     return {
         key
         for key in current.keys() | incoming.keys()
-        if current.get(key) != incoming.get(key)
+        if (key in current) != (key in incoming)
+        or current.get(key) != incoming.get(key)
     }
 
 

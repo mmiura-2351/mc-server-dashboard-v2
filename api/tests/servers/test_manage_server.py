@@ -486,6 +486,52 @@ async def test_update_removing_unsafe_key_rejected_while_running() -> None:
     assert uow.commits == 0
 
 
+async def test_update_adding_null_unsafe_key_rejected_while_running() -> None:
+    # Adding an unsafe key with a JSON null value is a key-PRESENCE change, even
+    # though both sides .get() to None. It must keep the at-rest gate so a null
+    # add cannot be smuggled past on a running server (issue #115).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotStoppedError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+            community_id=community,
+            server_id=server.id,
+            config={
+                "motd": "hi",
+                "feature_flag": None,
+                "snapshot_interval_seconds": 600,
+            },
+        )
+    assert uow.commits == 0
+
+
+async def test_update_removing_null_unsafe_key_rejected_while_running() -> None:
+    # Removing an existing null-valued unsafe key is a key-PRESENCE change even
+    # though both sides .get() to None. It must keep the at-rest gate (issue #115).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    server.config = {"motd": "hi", "feature_flag": None}
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotStoppedError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "hi", "snapshot_interval_seconds": 600},
+        )
+    assert uow.commits == 0
+
+
 async def test_update_rejects_name_clash_in_community() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
