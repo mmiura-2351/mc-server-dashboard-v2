@@ -125,6 +125,9 @@ from mc_server_dashboard_api.identity.domain.errors import InvalidAccessTokenErr
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
+from mc_server_dashboard_api.servers.adapters.backup_store import (
+    StorageBackupStoreAdapter,
+)
 from mc_server_dashboard_api.servers.adapters.clock import (
     SystemClock as ServersSystemClock,
 )
@@ -142,6 +145,12 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
 )
 from mc_server_dashboard_api.servers.adapters.version_validator import (
     CatalogVersionValidator,
+)
+from mc_server_dashboard_api.servers.application.backups import (
+    CreateBackup,
+    DeleteBackup,
+    ListBackups,
+    RestoreBackup,
 )
 from mc_server_dashboard_api.servers.application.files import (
     ListDir,
@@ -162,6 +171,12 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ListServers,
     ReadServer,
     UpdateServer,
+)
+from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
+    SnapshotServer,
+)
+from mc_server_dashboard_api.servers.domain.backup_store import (
+    BackupArchiveStore,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane as ServersControlPlane,
@@ -893,6 +908,71 @@ def get_rollback_file(
     return RollbackFile(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+    )
+
+
+def get_servers_backup_store(
+    storage: Annotated[Storage, Depends(get_storage)],
+) -> BackupArchiveStore:
+    """Bind the servers backup seam to the authoritative Storage backup slice."""
+
+    return StorageBackupStoreAdapter(storage=storage)
+
+
+def get_create_backup(
+    request: Request,
+    control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
+    backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+) -> CreateBackup:
+    """Assemble the :class:`CreateBackup` use case (backup:create).
+
+    Binds the RCON/snapshot seam (running path) and the Storage backup seam; the
+    on-demand snapshot hook is the :class:`SnapshotServer` use case (PR #114).
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return CreateBackup(
+        uow=ServersUnitOfWork(session_factory),
+        control_plane=control_plane,
+        backup_store=backup_store,
+        snapshot_server=SnapshotServer(
+            uow=ServersUnitOfWork(session_factory),
+            control_plane=control_plane,
+        ),
+        clock=ServersSystemClock(),
+    )
+
+
+def get_list_backups(request: Request) -> ListBackups:
+    """Assemble the :class:`ListBackups` use case (backup:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListBackups(uow=ServersUnitOfWork(session_factory))
+
+
+def get_restore_backup(
+    request: Request,
+    backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+) -> RestoreBackup:
+    """Assemble the :class:`RestoreBackup` use case (backup:restore)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RestoreBackup(
+        uow=ServersUnitOfWork(session_factory),
+        backup_store=backup_store,
+    )
+
+
+def get_delete_backup(
+    request: Request,
+    backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+) -> DeleteBackup:
+    """Assemble the :class:`DeleteBackup` use case (backup:delete)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteBackup(
+        uow=ServersUnitOfWork(session_factory),
+        backup_store=backup_store,
     )
 
 

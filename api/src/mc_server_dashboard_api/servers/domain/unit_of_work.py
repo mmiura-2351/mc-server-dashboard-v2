@@ -13,6 +13,9 @@ from __future__ import annotations
 import abc
 from types import TracebackType
 
+from mc_server_dashboard_api.servers.domain.backup_repository import (
+    BackupRepository,
+)
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
@@ -24,6 +27,7 @@ class UnitOfWork(abc.ABC):
 
     servers: ServerRepository
     resource_grants: ResourceGrantSweeper
+    backups: BackupRepository
 
     @abc.abstractmethod
     async def __aenter__(self) -> UnitOfWork:

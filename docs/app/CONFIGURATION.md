@@ -198,7 +198,18 @@ for the full cadence model.
 | `snapshot.default_interval_seconds` | `3600` | | Global default periodic snapshot interval applied to every running server. |
 | `snapshot.min_interval_seconds` | `300` | | Lower bound a per-server override may not go below (guards against snapshot thrash). |
 
-### 5.5 Observability
+### 5.5 Backup cadence
+
+The API drives scheduled backups (REQUIREMENTS.md FR-BAK-3). The per-server
+schedule itself is a server-config key edited through the server-configuration
+API (`backup_interval_hours`, see Section 8); this only tunes how often the
+background scheduler wakes to check which servers are due.
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `backup.schedule_tick_seconds` | `300` | | Loop resolution of the scheduled-backup scheduler: how often it wakes to check which servers are due. Coarse, since backup cadence is measured in hours. |
+
+### 5.6 Observability
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
@@ -379,6 +390,13 @@ periodic dimensions; event-driven snapshots are behavioural, not configured.
 The effective periodic interval for a running server is its per-server override
 if set, otherwise the global default. The interval bounds the RPO: a crash may
 lose up to one interval of changes (REQUIREMENTS.md FR-DATA-5).
+
+Scheduled backups follow the same per-server pattern: each server may carry a
+`backup_interval_hours` schedule on its `Server` config blob (DATABASE.md
+Section 8), edited through the server-configuration API rather than this static
+file. It must be a positive integer; the scheduler wakes every
+`backup.schedule_tick_seconds` (Section 5.5) to back up servers whose schedule
+is due.
 
 ---
 

@@ -22,6 +22,7 @@ from mc_server_dashboard_api.servers.application.manage_server import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
+    InvalidBackupScheduleError,
     InvalidSnapshotIntervalError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -305,6 +306,34 @@ async def test_update_rejects_snapshot_interval_override_below_floor() -> None:
             community_id=community,
             server_id=server.id,
             config={"snapshot_interval_seconds": 60},
+        )
+    assert uow.commits == 0
+
+
+async def test_update_accepts_backup_schedule_override() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    updated = await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+        community_id=community,
+        server_id=server.id,
+        config={"backup_interval_hours": 6},
+    )
+    assert updated.config["backup_interval_hours"] == 6
+    assert uow.commits == 1
+
+
+async def test_update_rejects_invalid_backup_schedule_override() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(InvalidBackupScheduleError):
+        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+            community_id=community,
+            server_id=server.id,
+            config={"backup_interval_hours": 0},
         )
     assert uow.commits == 0
 

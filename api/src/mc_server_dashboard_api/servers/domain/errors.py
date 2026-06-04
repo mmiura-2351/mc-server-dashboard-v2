@@ -159,3 +159,32 @@ class ServerFilesUnsettledError(ServerError):
     restarting, crashed, or otherwise not settled in either resting state has no
     well-defined target. The edge maps this to 409 rather than guessing.
     """
+
+
+class BackupNotFoundError(ServerError):
+    """A backup operation targeted a backup that does not exist for the server.
+
+    Raised by restore/delete when the backup id is unknown or belongs to a server
+    outside the path community: reported as not-found so no cross-community
+    existence signal leaks (FR-COMM-3), the same posture as a missing server. The
+    edge maps this to 404.
+    """
+
+
+class BackupUnsettledError(ServerError):
+    """A create-backup hit a server in a transitional state (Section 6.9).
+
+    The 6.9 policy archives a *stopped* server directly from Storage and a
+    *running* server via save-all -> snapshot -> archive; a server that is
+    starting, stopping, restarting, crashed, or otherwise not settled in either
+    resting state has no well-defined source. The edge maps this to 409.
+    """
+
+
+class InvalidBackupScheduleError(ServerError):
+    """A per-server backup-schedule override was invalid (FR-BAK-3).
+
+    The schedule (``config['backup_interval_hours']``) must be a positive integer
+    when present; a non-integer or non-positive value is rejected. The edge maps
+    this to 422.
+    """

@@ -12,6 +12,11 @@ import datetime as dt
 import uuid
 from dataclasses import replace
 
+from mc_server_dashboard_api.servers.domain.backup import Backup, BackupId
+from mc_server_dashboard_api.servers.domain.backup_repository import (
+    BackupRepository,
+)
+from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
@@ -19,6 +24,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import BackupNotFoundError
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     JarProvisioningError,
@@ -188,6 +194,9 @@ class FakeServerRepository(ServerRepository):
             and server.assigned_worker_id is not None
         ]
 
+    async def list_all(self) -> list[Server]:
+        return [replace(server) for server in self.by_id.values()]
+
     async def delete(self, server_id: ServerId) -> None:
         self.by_id.pop(server_id, None)
 
@@ -202,19 +211,44 @@ class FakeResourceGrantSweeper(ResourceGrantSweeper):
         self.swept.append((resource_type, resource_id))
 
 
+class FakeBackupRepository(BackupRepository):
+    def __init__(self) -> None:
+        self.by_id: dict[BackupId, Backup] = {}
+
+    def seed(self, backup: Backup) -> None:
+        self.by_id[backup.id] = backup
+
+    async def add(self, backup: Backup) -> None:
+        self.by_id[backup.id] = backup
+
+    async def get_by_id(self, backup_id: BackupId) -> Backup | None:
+        backup = self.by_id.get(backup_id)
+        return None if backup is None else replace(backup)
+
+    async def list_for_server(self, server_id: ServerId) -> list[Backup]:
+        rows = [replace(b) for b in self.by_id.values() if b.server_id == server_id]
+        return sorted(rows, key=lambda b: b.created_at, reverse=True)
+
+    async def delete(self, backup_id: BackupId) -> None:
+        self.by_id.pop(backup_id, None)
+
+
 class FakeUnitOfWork(UnitOfWork):
     # Narrow the Port-declared attribute types to the concrete fakes so tests can
     # reach their inspection helpers without casts.
     servers: FakeServerRepository
     resource_grants: FakeResourceGrantSweeper
+    backups: FakeBackupRepository
 
     def __init__(
         self,
         servers: FakeServerRepository | None = None,
         resource_grants: FakeResourceGrantSweeper | None = None,
+        backups: FakeBackupRepository | None = None,
     ) -> None:
         self.servers = servers or FakeServerRepository()
         self.resource_grants = resource_grants or FakeResourceGrantSweeper()
+        self.backups = backups or FakeBackupRepository()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":
@@ -334,3 +368,46 @@ class FakeControlPlane(ControlPlane):
         content: bytes,
     ) -> CommandOutcome:
         return await self._record("edit_file", worker_id, server_id)
+
+
+class FakeBackupArchiveStore(BackupArchiveStore):
+    """In-memory backup-archive seam for the backup use-case tests.
+
+    Records every operation and tracks the archives that "exist" so a test can
+    assert create -> ref, restore-of-known-ref, idempotent delete, and the
+    delete-ordering (archive removed before the metadata row). ``create_from_current``
+    mints a fresh ref; ``missing`` makes the next create raise the
+    no-working-set error.
+    """
+
+    def __init__(self, *, missing: bool = False) -> None:
+        self._missing = missing
+        self.archives: set[str] = set()
+        self.created: list[ServerId] = []
+        self.restored: list[tuple[ServerId, str]] = []
+        self.deleted: list[tuple[ServerId, str]] = []
+        self._counter = 0
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> str:
+        if self._missing:
+            raise BackupNotFoundError(str(server_id.value))
+        self._counter += 1
+        ref = f"archive-{self._counter}"
+        self.archives.add(ref)
+        self.created.append(server_id)
+        return ref
+
+    async def restore(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        if storage_ref not in self.archives:
+            raise BackupNotFoundError(storage_ref)
+        self.restored.append((server_id, storage_ref))
+
+    async def delete(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        self.archives.discard(storage_ref)
+        self.deleted.append((server_id, storage_ref))

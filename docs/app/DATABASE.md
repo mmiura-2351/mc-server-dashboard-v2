@@ -421,6 +421,7 @@ this row only points at them.
 | `storage_ref` | text | locator of the archive in `Storage` (opaque to the DB) |
 | `size_bytes` | bigint nullable | recorded archive size |
 | `source` | text | `manual` / `scheduled` / `event` (CHECK enum) |
+| `created_by` | uuid nullable | the user who triggered the backup; **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
 | `created_at` | timestamptz | |
 
 Constraints: index on `(server_id, created_at)` for listing a server's backups
