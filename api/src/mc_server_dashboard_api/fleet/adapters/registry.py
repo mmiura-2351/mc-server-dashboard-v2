@@ -19,6 +19,7 @@ import datetime as dt
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.entities import Worker
 from mc_server_dashboard_api.fleet.domain.registry import (
+    SessionToken,
     WorkerRegistry,
     WorkerSnapshot,
 )
@@ -32,18 +33,28 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         self._clock = clock
         self._timeout = heartbeat_timeout
         self._workers: dict[WorkerId, Worker] = {}
+        # The Session currently owning each worker id; a monotonic counter mints
+        # fresh tokens so a reconnect always supersedes the prior Session.
+        self._sessions: dict[WorkerId, SessionToken] = {}
+        self._next_session: SessionToken = 0
 
-    def register(self, worker: Worker) -> None:
+    def register(self, worker: Worker) -> SessionToken:
         self._workers[worker.id] = worker
+        session = self._next_session
+        self._next_session += 1
+        self._sessions[worker.id] = session
+        return session
 
     def record_heartbeat(self, worker_id: WorkerId, at: dt.datetime) -> None:
         worker = self._workers.get(worker_id)
         if worker is not None:
             self._workers[worker_id] = worker.with_heartbeat(at)
 
-    def mark_disconnected(self, worker_id: WorkerId) -> None:
+    def mark_disconnected(self, worker_id: WorkerId, session: SessionToken) -> None:
         worker = self._workers.get(worker_id)
-        if worker is not None:
+        # Ignore a teardown from a stale Session: the worker has reconnected on a
+        # newer one and must stay online (CONTROL_PLANE.md Section 4.4).
+        if worker is not None and self._sessions.get(worker_id) == session:
             self._workers[worker_id] = worker.disconnect()
 
     def list_workers(self) -> list[WorkerSnapshot]:

@@ -37,7 +37,7 @@ from grpc import aio
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.entities import Worker
 from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
-from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
+from mc_server_dashboard_api.fleet.domain.registry import SessionToken, WorkerRegistry
 from mc_server_dashboard_api.fleet.domain.value_objects import (
     DriverKind,
     HostResources,
@@ -106,13 +106,17 @@ class WorkerSessionServicer(WorkerServiceServicer):
     ) -> AsyncIterator[pb.ApiMessage]:
         await self._authenticate(context)
 
-        worker_id, correlation_id = await self._register(request_iterator, context)
+        worker_id, correlation_id, session = await self._register(
+            request_iterator, context
+        )
         try:
             yield self._register_ack(correlation_id=correlation_id)
             async for message in request_iterator:
                 self._handle(worker_id, message)
         finally:
-            self._registry.mark_disconnected(worker_id)
+            # Pass this Session's token so a delayed teardown only offlines the
+            # Worker if it has not reconnected on a newer Session (Section 4.4).
+            self._registry.mark_disconnected(worker_id, session)
             _LOG.info("worker disconnected", extra={"worker_id": worker_id.value})
 
     async def _authenticate(
@@ -139,7 +143,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self,
         request_iterator: AsyncIterator[pb.WorkerMessage],
         context: aio.ServicerContext,
-    ) -> tuple[WorkerId, str]:
+    ) -> tuple[WorkerId, str, SessionToken]:
         try:
             first = await request_iterator.__anext__()
         except StopAsyncIteration:
@@ -161,7 +165,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid worker id")
 
         now = self._clock.now()
-        self._registry.register(
+        session = self._registry.register(
             Worker(
                 id=worker_id,
                 version=register.worker_version,
@@ -171,7 +175,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             )
         )
         _LOG.info("worker registered", extra={"worker_id": worker_id.value})
-        return worker_id, first.correlation_id
+        return worker_id, first.correlation_id, session
 
     def _handle(self, worker_id: WorkerId, message: pb.WorkerMessage) -> None:
         if message.WhichOneof("payload") != "event":

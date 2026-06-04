@@ -73,9 +73,9 @@ def test_heartbeat_refreshes_liveness() -> None:
 def test_disconnect_marks_offline_within_window() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
 
-    registry.mark_disconnected(WorkerId("worker-1"))
+    registry.mark_disconnected(WorkerId("worker-1"), session)
 
     # Still well inside the heartbeat window, but disconnect forces offline.
     assert registry.list_workers()[0].status is WorkerStatus.OFFLINE
@@ -84,12 +84,30 @@ def test_disconnect_marks_offline_within_window() -> None:
 def test_reregistration_replaces_prior_record() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
-    registry.mark_disconnected(WorkerId("worker-1"))
+    first = registry.register(make_worker(at=_T0))
+    registry.mark_disconnected(WorkerId("worker-1"), first)
 
     # A fresh Session re-registers from scratch (CONTROL_PLANE.md Section 4.4).
     registry.register(make_worker(at=_T0, version="2.0.0"))
 
+    workers = registry.list_workers()
+    assert len(workers) == 1
+    assert workers[0].status is WorkerStatus.ONLINE
+    assert workers[0].version == "2.0.0"
+
+
+def test_stale_session_disconnect_does_not_offline_reregistered_worker() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    # Session A registers, then the same id re-registers on a new Session B
+    # (reconnect with backoff, CONTROL_PLANE.md Section 4.4).
+    session_a = registry.register(make_worker(at=_T0))
+    registry.register(make_worker(at=_T0, version="2.0.0"))
+
+    # Session A's delayed teardown fires after B is the current session.
+    registry.mark_disconnected(WorkerId("worker-1"), session_a)
+
+    # The freshly re-registered Worker must stay ONLINE.
     workers = registry.list_workers()
     assert len(workers) == 1
     assert workers[0].status is WorkerStatus.ONLINE

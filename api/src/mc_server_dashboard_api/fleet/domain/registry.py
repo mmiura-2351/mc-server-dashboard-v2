@@ -23,6 +23,12 @@ from mc_server_dashboard_api.fleet.domain.value_objects import (
     WorkerId,
 )
 
+# An opaque per-registration token. Each ``register`` call mints a fresh token
+# identifying that Session's record; ``mark_disconnected`` carries it back so a
+# stale stream's teardown only offlines the Worker if its Session is still the
+# current one (CONTROL_PLANE.md Section 4.4, reconnect race).
+SessionToken = int
+
 
 @dataclass(frozen=True)
 class WorkerSnapshot:
@@ -40,8 +46,13 @@ class WorkerRegistry(abc.ABC):
     """Port: the live registry of connected Workers and their liveness."""
 
     @abc.abstractmethod
-    def register(self, worker: Worker) -> None:
-        """Add or replace the record for ``worker.id`` (FR-WRK-1)."""
+    def register(self, worker: Worker) -> SessionToken:
+        """Add or replace the record for ``worker.id`` (FR-WRK-1).
+
+        Return a fresh :data:`SessionToken` identifying this registration; the
+        caller passes it back to :meth:`mark_disconnected` so a stale Session's
+        teardown cannot offline a Worker that has since reconnected.
+        """
 
     @abc.abstractmethod
     def record_heartbeat(self, worker_id: WorkerId, at: dt.datetime) -> None:
@@ -51,10 +62,14 @@ class WorkerRegistry(abc.ABC):
         """
 
     @abc.abstractmethod
-    def mark_disconnected(self, worker_id: WorkerId) -> None:
+    def mark_disconnected(self, worker_id: WorkerId, session: SessionToken) -> None:
         """Mark the Worker offline because its stream ended (FR-WRK-4).
 
-        A disconnect for an unknown Worker is ignored.
+        Only the Session that is still current for ``worker_id`` may offline it:
+        a disconnect whose ``session`` no longer matches the current record is
+        ignored, so a stale stream's delayed teardown cannot offline a Worker
+        that has reconnected on a newer Session (CONTROL_PLANE.md Section 4.4). A
+        disconnect for an unknown Worker is ignored.
         """
 
     @abc.abstractmethod

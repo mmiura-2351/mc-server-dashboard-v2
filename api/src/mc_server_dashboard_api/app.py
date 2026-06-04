@@ -92,6 +92,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 port=settings.server.grpc_port,
             )
             await grpc_server.start()
+            app.state.grpc_server = grpc_server
             logging.getLogger(__name__).info(
                 "control-plane gRPC server started",
                 extra={"port": settings.server.grpc_port},

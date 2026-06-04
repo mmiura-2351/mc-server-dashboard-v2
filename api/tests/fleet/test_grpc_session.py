@@ -184,6 +184,31 @@ async def test_disconnect_marks_offline(harness: _Harness) -> None:
     assert snapshot.status is WorkerStatus.OFFLINE
 
 
+async def test_stale_session_teardown_keeps_reconnected_worker_online(
+    harness: _Harness,
+) -> None:
+    # Session A registers worker-1; a real client reconnect (PR #84 backoff)
+    # re-registers the same id on Session B while A's teardown is still pending.
+    stub = await harness.start()
+    call_a = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call_a.write(_register_message())
+    await call_a.read()  # ack
+
+    call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call_b.write(_register_message())
+    await call_b.read()  # ack
+
+    # Session A tears down after B is the current Session.
+    await call_a.done_writing()
+    while await call_a.read() is not aio.EOF:
+        pass
+
+    # The freshly re-registered Worker (Session B) must stay ONLINE.
+    snapshot = harness.registry.list_workers()[0]
+    assert snapshot.status is WorkerStatus.ONLINE
+    await call_b.done_writing()
+
+
 async def _drain_until_heartbeat_recorded(harness: _Harness) -> None:
     import asyncio
 
