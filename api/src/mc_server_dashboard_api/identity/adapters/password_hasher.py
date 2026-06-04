@@ -44,7 +44,16 @@ class BcryptPasswordHasher(PasswordHasher):
         return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode("utf-8")
 
     def verify(self, plaintext: str, password_hash: str) -> bool:
-        encoded = self._encode(plaintext)
+        encoded = plaintext.encode("utf-8")
+        if len(encoded) > _BCRYPT_MAX_BYTES:
+            # Login input is attacker-controlled, so unlike hash() this path is
+            # reachable. It must NOT raise: a ValueError would 500 the auth
+            # route, breaking the uniform-401 + artificial-delay posture and
+            # turning the length into an oracle. Returning False leaks nothing —
+            # in this greenfield system no stored hash was ever created from
+            # truncated input, so a >72-byte presentation can never match a
+            # legitimate hash; False is the correct, non-oracle answer.
+            return False
         return bcrypt.checkpw(encoded, password_hash.encode("utf-8"))
 
     @staticmethod
