@@ -22,7 +22,10 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.identity.application.issue_tokens import issue_token_pair
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.clock import Clock
-from mc_server_dashboard_api.identity.domain.errors import InvalidRefreshTokenError
+from mc_server_dashboard_api.identity.domain.errors import (
+    InvalidRefreshTokenError,
+    RefreshTokenReuseError,
+)
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 
@@ -49,7 +52,10 @@ class RefreshSession:
                     stored.user_id, revoked_at=now
                 )
                 await self.uow.commit()
-                raise InvalidRefreshTokenError
+                # Distinguishable from a plain bad token so the route can record
+                # the family-revocation as a DENIED security event (FR-AUD-1),
+                # attributed to the affected user.
+                raise RefreshTokenReuseError(stored.user_id.value)
 
             await self.uow.refresh_tokens.revoke(token_hash, revoked_at=now)
             pair = await issue_token_pair(

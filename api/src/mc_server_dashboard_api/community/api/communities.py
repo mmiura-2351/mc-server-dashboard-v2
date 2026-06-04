@@ -104,16 +104,19 @@ async def provision_community(
             name=body.name, owner_user_id=_parse_user_id(body.owner_user_id)
         )
     except OwnerUserNotFoundError as exc:
+        await _record_provision_failure(recorder, user)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"reason": "owner_not_found"},
         ) from exc
     except CommunityAlreadyExistsError as exc:
+        await _record_provision_failure(recorder, user)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": "name_taken"},
         ) from exc
     except InvalidCommunityNameError as exc:
+        await _record_provision_failure(recorder, user)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"reason": "invalid_name"},
@@ -218,6 +221,23 @@ async def delete_community(
             community_id=community_id,
             target_type=ops.TARGET_COMMUNITY,
             target_id=community_id,
+        )
+    )
+
+
+async def _record_provision_failure(recorder: AuditRecorder, user: User) -> None:
+    """Record a refused community provisioning attempt (issue #131; FR-AUD-1).
+
+    A platform-admin action that was rejected (unknown owner, name taken, invalid
+    name) — security-relevant, so the trail shows the attempt. No community was
+    created, so there is no target id; the row is attributed to the admin actor.
+    """
+
+    await recorder.record(
+        AuditEvent(
+            operation=ops.COMMUNITY_PROVISION,
+            outcome=Outcome.DENIED,
+            actor_id=user.id.value,
         )
     )
 

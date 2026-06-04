@@ -55,8 +55,10 @@ async def test_login_success_issues_pair_and_persists_refresh() -> None:
     uow.users.seed(user)
     delay = RecordingFailureDelay()
 
-    pair = await _login(uow, delay)(username="alice", password=_PASSWORD)
+    result = await _login(uow, delay)(username="alice", password=_PASSWORD)
 
+    assert result.user_id == user.id.value
+    pair = result.pair
     assert pair.access_token == f"access::{user.id.value}"
     assert pair.refresh_token == "refresh-secret-1"
     stored = uow.refresh_tokens.by_hash["hash::refresh-secret-1"]
@@ -184,11 +186,11 @@ async def test_expired_lockout_allows_login() -> None:
         "alice", locked_until=_NOW - dt.timedelta(seconds=1), lockout_count=1
     )
 
-    pair = await _login(uow, RecordingFailureDelay(), attempts)(
+    result = await _login(uow, RecordingFailureDelay(), attempts)(
         username="alice", password=_PASSWORD, ip="198.51.100.1"
     )
 
-    assert pair.access_token
+    assert result.pair.access_token
 
 
 async def test_repeat_lockout_backoff_doubles() -> None:

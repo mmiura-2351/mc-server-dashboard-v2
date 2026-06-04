@@ -16,6 +16,12 @@ from typing import Final
 AUTH_LOGIN: Final = "auth:login"
 AUTH_LOGOUT: Final = "auth:logout"
 AUTH_REGISTER: Final = "auth:register"
+AUTH_REFRESH: Final = "auth:refresh"
+# Reuse of an already-rotated refresh token: a security event distinct from a
+# routine rotation, recorded as a DENIED outcome (token-theft / replay signal,
+# SECURITY.md). Kept a separate code so the family-revocation trail is queryable
+# apart from ordinary refresh activity.
+AUTH_REFRESH_REUSE: Final = "auth:refresh_reuse"
 
 # Community provisioning/management (FR-COMM-*).
 COMMUNITY_PROVISION: Final = "community:provision"

@@ -371,21 +371,11 @@ async def start_server(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
-    except InvalidLifecycleTransitionError as exc:
-        raise _conflict("invalid_transition") from exc
-    except LifecycleTransitionConflictError as exc:
-        raise _conflict("transition_conflict") from exc
-    except NoEligibleWorkerError as exc:
-        raise _service_unavailable("no_eligible_worker") from exc
-    except WorkerUnavailableError as exc:
-        raise _service_unavailable("worker_unavailable") from exc
-    except JarProvisioningError as exc:
-        # The resolved JAR could not be fetched/verified/stored: the start failed
-        # before placement (FR-VER-3). Transient (source down) or integrity
-        # (hash mismatch); surfaced as a typed 503 so a retry is invited.
-        raise _service_unavailable("jar_unavailable") from exc
-    except CommandDispatchError as exc:
-        raise _conflict("command_failed") from exc
+    except _LIFECYCLE_FAILURES as exc:
+        await _record_op_failure(
+            recorder, ops.SERVER_START, authorized, community_id, server_id, exc
+        )
+        raise _lifecycle_http_error(exc) from exc
     await _record(recorder, ops.SERVER_START, authorized, community_id, server.id.value)
     return ServerResponse.from_entity(server)
 
@@ -414,14 +404,11 @@ async def stop_server(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
-    except InvalidLifecycleTransitionError as exc:
-        raise _conflict("invalid_transition") from exc
-    except LifecycleTransitionConflictError as exc:
-        raise _conflict("transition_conflict") from exc
-    except WorkerUnavailableError as exc:
-        raise _service_unavailable("worker_unavailable") from exc
-    except CommandDispatchError as exc:
-        raise _conflict("command_failed") from exc
+    except _LIFECYCLE_FAILURES as exc:
+        await _record_op_failure(
+            recorder, ops.SERVER_STOP, authorized, community_id, server_id, exc
+        )
+        raise _lifecycle_http_error(exc) from exc
     await _record(recorder, ops.SERVER_STOP, authorized, community_id, server.id.value)
     return ServerResponse.from_entity(server)
 
@@ -450,14 +437,11 @@ async def restart_server(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
-    except InvalidLifecycleTransitionError as exc:
-        raise _conflict("invalid_transition") from exc
-    except LifecycleTransitionConflictError as exc:
-        raise _conflict("transition_conflict") from exc
-    except WorkerUnavailableError as exc:
-        raise _service_unavailable("worker_unavailable") from exc
-    except CommandDispatchError as exc:
-        raise _conflict("command_failed") from exc
+    except _LIFECYCLE_FAILURES as exc:
+        await _record_op_failure(
+            recorder, ops.SERVER_RESTART, authorized, community_id, server_id, exc
+        )
+        raise _lifecycle_http_error(exc) from exc
     await _record(
         recorder, ops.SERVER_RESTART, authorized, community_id, server.id.value
     )
@@ -490,12 +474,11 @@ async def send_server_command(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
-    except ServerNotRunningError as exc:
-        raise _conflict("server_not_running") from exc
-    except WorkerUnavailableError as exc:
-        raise _service_unavailable("worker_unavailable") from exc
-    except CommandDispatchError as exc:
-        raise _conflict("command_failed") from exc
+    except _LIFECYCLE_FAILURES as exc:
+        await _record_op_failure(
+            recorder, ops.SERVER_COMMAND, authorized, community_id, server_id, exc
+        )
+        raise _lifecycle_http_error(exc) from exc
     await _record(recorder, ops.SERVER_COMMAND, authorized, community_id, server_id)
     return ServerCommandResponse(output=output)
 
@@ -513,6 +496,61 @@ async def _record(
         AuditEvent(
             operation=operation,
             outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_SERVER,
+            target_id=server_id,
+        )
+    )
+
+
+# Failed lifecycle/command attempts worth a row (issue #131): a refused state
+# transition (DENIED) or a transient fleet/provisioning failure (ERROR). Each
+# entry maps the typed domain error to its audit outcome and HTTP rendering, so
+# the four lifecycle/command routes share one classification and stay thin.
+# ``ServerNotFoundError`` is excluded on purpose (a 404 keeps the
+# no-existence-signal posture; it is not a security-relevant refusal of a real
+# resource).
+_LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
+    InvalidLifecycleTransitionError: (Outcome.DENIED, "invalid_transition"),
+    LifecycleTransitionConflictError: (Outcome.DENIED, "transition_conflict"),
+    CommandDispatchError: (Outcome.DENIED, "command_failed"),
+    ServerNotRunningError: (Outcome.DENIED, "server_not_running"),
+    NoEligibleWorkerError: (Outcome.ERROR, "no_eligible_worker"),
+    WorkerUnavailableError: (Outcome.ERROR, "worker_unavailable"),
+    JarProvisioningError: (Outcome.ERROR, "jar_unavailable"),
+}
+_LIFECYCLE_FAILURES = tuple(_LIFECYCLE_CLASSIFICATION)
+# The transient (ERROR) reasons render as 503; the refusals (DENIED) as 409.
+_SERVICE_UNAVAILABLE_REASONS = {
+    "no_eligible_worker",
+    "worker_unavailable",
+    "jar_unavailable",
+}
+
+
+def _lifecycle_http_error(exc: Exception) -> HTTPException:
+    _, reason = _LIFECYCLE_CLASSIFICATION[type(exc)]
+    if reason in _SERVICE_UNAVAILABLE_REASONS:
+        return _service_unavailable(reason)
+    return _conflict(reason)
+
+
+async def _record_op_failure(
+    recorder: AuditRecorder,
+    operation: str,
+    authorized: AuthUser,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    exc: Exception,
+) -> None:
+    """Record a failed privileged server op (FR-AUD-1): DENIED or ERROR per ``exc``."""
+
+    outcome, _ = _LIFECYCLE_CLASSIFICATION[type(exc)]
+    await recorder.record(
+        AuditEvent(
+            operation=operation,
+            outcome=outcome,
             actor_id=authorized.user_id.value,
             community_id=community_id,
             target_type=ops.TARGET_SERVER,

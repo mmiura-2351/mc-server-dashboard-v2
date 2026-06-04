@@ -13,7 +13,10 @@ import pytest
 
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken
-from mc_server_dashboard_api.identity.domain.errors import InvalidRefreshTokenError
+from mc_server_dashboard_api.identity.domain.errors import (
+    InvalidRefreshTokenError,
+    RefreshTokenReuseError,
+)
 from mc_server_dashboard_api.identity.domain.value_objects import RefreshTokenId, UserId
 from tests.identity.fakes import FakeClock, FakeTokenService, FakeUnitOfWork
 
@@ -100,9 +103,14 @@ async def test_reuse_after_rotation_revokes_the_family() -> None:
     sibling_hash = _seed_token(uow, secret="sibling-secret")
     clock = FakeClock(_NOW)
 
-    with pytest.raises(InvalidRefreshTokenError):
+    with pytest.raises(RefreshTokenReuseError) as exc_info:
         await _refresh(uow, clock)(refresh_token="old-secret")
 
+    # The reuse error carries the affected user so the route can attribute the
+    # family-revocation audit record (FR-AUD-1).
+    assert exc_info.value.user_id == _USER.value
+    # It stays an InvalidRefreshTokenError so the edge keeps the uniform 401.
+    assert isinstance(exc_info.value, InvalidRefreshTokenError)
     # The still-active sibling is revoked too (family revoke), and committed.
     assert uow.refresh_tokens.by_hash[sibling_hash].revoked_at == _NOW
     # The already-revoked token keeps its original revocation time.

@@ -27,6 +27,7 @@ only; it is never surfaced to the caller.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from dataclasses import dataclass
 from typing import NoReturn
 
@@ -60,6 +61,20 @@ REASON_WRONG_PASSWORD = "wrong_password"
 
 
 @dataclass(frozen=True)
+class LoginResult:
+    """A successful login: the issued token pair plus the authenticated user id.
+
+    The ``user_id`` lets the route attribute the ``auth:login`` SUCCESS audit row
+    to the actor (FR-AUD-1) without re-querying. A login *failure* never surfaces
+    a user id (enumeration defence, SECURITY.md Section 2), so it is carried only
+    on the success result, not threaded through the error path.
+    """
+
+    pair: TokenPair
+    user_id: uuid.UUID
+
+
+@dataclass(frozen=True)
 class Login:
     """Authenticate a username/password and mint a session token pair."""
 
@@ -75,7 +90,7 @@ class Login:
 
     async def __call__(
         self, *, username: str, password: str, ip: str | None = None
-    ) -> TokenPair:
+    ) -> LoginResult:
         name = Username(username)
         key = name.key
         now = self.clock.now()
@@ -101,6 +116,7 @@ class Login:
                 now=now,
                 refresh_ttl=self.refresh_ttl,
             )
+            user_id = user.id.value
             await self.uow.commit()
 
         if self.brute_force.enabled:
@@ -109,7 +125,7 @@ class Login:
             )
             await self.attempts.clear_lockout(key)
             await self._prune(now=now)
-        return pair
+        return LoginResult(pair=pair, user_id=user_id)
 
     async def _blocked_reason(
         self, username: str, ip: str | None, *, now: dt.datetime
