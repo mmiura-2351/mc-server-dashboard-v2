@@ -21,10 +21,17 @@ from mc_server_dashboard_api.fleet.domain.value_objects import (
 
 
 class WorkerStatus(enum.Enum):
-    """A Worker's liveness as seen by the API."""
+    """A Worker's liveness as seen by the API.
+
+    ``DRAINING`` is an administrative state layered on a live Worker: it is still
+    connected and heartbeating, but excluded from placement (FR-WRK-5). Liveness
+    wins over drain — a draining Worker that disconnects or times out reports
+    ``OFFLINE``.
+    """
 
     ONLINE = "online"
     OFFLINE = "offline"
+    DRAINING = "draining"
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,7 @@ class Worker:
     registered_at: dt.datetime
     last_heartbeat_at: dt.datetime
     disconnected: bool = False
+    draining: bool = False
 
     def with_heartbeat(self, at: dt.datetime) -> Worker:
         """Return a copy whose liveness is refreshed to heartbeat time ``at``."""
@@ -54,11 +62,27 @@ class Worker:
 
         return replace(self, disconnected=True)
 
+    def start_draining(self) -> Worker:
+        """Return a copy marked draining (excluded from placement, FR-WRK-5)."""
+
+        return replace(self, draining=True)
+
+    def stop_draining(self) -> Worker:
+        """Return a copy with drain cleared (placement-eligible again)."""
+
+        return replace(self, draining=False)
+
     def status(self, *, now: dt.datetime, timeout: dt.timedelta) -> WorkerStatus:
-        """Derive liveness at ``now`` for the given heartbeat ``timeout``."""
+        """Derive liveness at ``now`` for the given heartbeat ``timeout``.
+
+        Liveness wins over drain: a disconnected or timed-out Worker is
+        ``OFFLINE`` even while draining.
+        """
 
         if self.disconnected:
             return WorkerStatus.OFFLINE
         if now - self.last_heartbeat_at > timeout:
             return WorkerStatus.OFFLINE
+        if self.draining:
+            return WorkerStatus.DRAINING
         return WorkerStatus.ONLINE

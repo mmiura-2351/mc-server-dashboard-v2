@@ -11,7 +11,7 @@ import datetime as dt
 
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
-from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, WorkerId
 from tests.fleet.fakes import FakeClock, make_worker
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -121,3 +121,119 @@ def test_heartbeat_for_unknown_worker_is_ignored() -> None:
     registry.record_heartbeat(WorkerId("ghost"), _T0)
 
     assert registry.list_workers() == []
+
+
+# --- drain state (FR-WRK-5) ------------------------------------------------
+
+
+def test_set_draining_makes_worker_report_draining() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    registry.set_draining(WorkerId("worker-1"), True)
+
+    assert registry.list_workers()[0].status is WorkerStatus.DRAINING
+
+
+def test_clear_draining_returns_worker_to_online() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.set_draining(WorkerId("worker-1"), True)
+
+    registry.set_draining(WorkerId("worker-1"), False)
+
+    assert registry.list_workers()[0].status is WorkerStatus.ONLINE
+
+
+def test_set_draining_for_unknown_worker_is_ignored() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+
+    registry.set_draining(WorkerId("ghost"), True)
+
+    assert registry.list_workers() == []
+
+
+def test_draining_survives_heartbeat() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.set_draining(WorkerId("worker-1"), True)
+
+    registry.record_heartbeat(WorkerId("worker-1"), _T0 + dt.timedelta(seconds=5))
+
+    assert registry.list_workers()[0].status is WorkerStatus.DRAINING
+
+
+# --- assignment tracking (load) --------------------------------------------
+
+
+def test_new_worker_starts_with_zero_assigned() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    assert registry.list_workers()[0].assigned_count == 0
+
+
+def test_increment_and_decrement_assignment() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    registry.increment_assignment(WorkerId("worker-1"))
+    registry.increment_assignment(WorkerId("worker-1"))
+    registry.decrement_assignment(WorkerId("worker-1"))
+
+    assert registry.list_workers()[0].assigned_count == 1
+
+
+def test_reregistration_resets_assignment_count() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    first = registry.register(make_worker(at=_T0))
+    registry.increment_assignment(WorkerId("worker-1"))
+    registry.mark_disconnected(WorkerId("worker-1"), first)
+
+    registry.register(make_worker(at=_T0))
+
+    assert registry.list_workers()[0].assigned_count == 0
+
+
+# --- placement candidates ---------------------------------------------------
+
+
+def test_candidates_include_online_worker_with_load() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0, max_servers=4))
+    registry.increment_assignment(WorkerId("worker-1"))
+
+    candidates = registry.candidates_for_placement()
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.worker_id == WorkerId("worker-1")
+    assert candidate.drivers == frozenset({DriverKind.HOST_PROCESS})
+    assert candidate.capacity == 4
+    assert candidate.load == 1
+
+
+def test_candidates_exclude_draining_worker() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.set_draining(WorkerId("worker-1"), True)
+
+    assert registry.candidates_for_placement() == []
+
+
+def test_candidates_exclude_offline_worker() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    session = registry.register(make_worker(at=_T0))
+    registry.mark_disconnected(WorkerId("worker-1"), session)
+
+    assert registry.candidates_for_placement() == []

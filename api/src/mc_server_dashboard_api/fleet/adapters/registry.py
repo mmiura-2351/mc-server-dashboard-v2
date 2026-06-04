@@ -17,7 +17,8 @@ from __future__ import annotations
 import datetime as dt
 
 from mc_server_dashboard_api.fleet.domain.clock import Clock
-from mc_server_dashboard_api.fleet.domain.entities import Worker
+from mc_server_dashboard_api.fleet.domain.entities import Worker, WorkerStatus
+from mc_server_dashboard_api.fleet.domain.placement import PlacementCandidate
 from mc_server_dashboard_api.fleet.domain.registry import (
     SessionToken,
     WorkerRegistry,
@@ -37,9 +38,14 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # fresh tokens so a reconnect always supersedes the prior Session.
         self._sessions: dict[WorkerId, SessionToken] = {}
         self._next_session: SessionToken = 0
+        # Per-worker assigned-server count, the placement 'load' axis (FR-WRK-3).
+        # Reset on (re)registration: a fresh connection starts with no servers
+        # placed on it (epic #7 will re-place after hydrate).
+        self._assignments: dict[WorkerId, int] = {}
 
     def register(self, worker: Worker) -> SessionToken:
         self._workers[worker.id] = worker
+        self._assignments[worker.id] = 0
         session = self._next_session
         self._next_session += 1
         self._sessions[worker.id] = session
@@ -57,6 +63,34 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         if worker is not None and self._sessions.get(worker_id) == session:
             self._workers[worker_id] = worker.disconnect()
 
+    def set_draining(self, worker_id: WorkerId, draining: bool) -> None:
+        worker = self._workers.get(worker_id)
+        if worker is not None:
+            self._workers[worker_id] = (
+                worker.start_draining() if draining else worker.stop_draining()
+            )
+
+    def increment_assignment(self, worker_id: WorkerId) -> None:
+        if worker_id in self._assignments:
+            self._assignments[worker_id] += 1
+
+    def decrement_assignment(self, worker_id: WorkerId) -> None:
+        if self._assignments.get(worker_id, 0) > 0:
+            self._assignments[worker_id] -= 1
+
+    def candidates_for_placement(self) -> list[PlacementCandidate]:
+        now = self._clock.now()
+        return [
+            PlacementCandidate(
+                worker_id=worker.id,
+                drivers=worker.capabilities.drivers,
+                capacity=worker.capabilities.max_servers,
+                load=self._assignments[worker.id],
+            )
+            for worker in self._workers.values()
+            if worker.status(now=now, timeout=self._timeout) is WorkerStatus.ONLINE
+        ]
+
     def list_workers(self) -> list[WorkerSnapshot]:
         now = self._clock.now()
         return [
@@ -67,6 +101,7 @@ class InMemoryWorkerRegistry(WorkerRegistry):
                 registered_at=worker.registered_at,
                 last_heartbeat_at=worker.last_heartbeat_at,
                 status=worker.status(now=now, timeout=self._timeout),
+                assigned_count=self._assignments[worker.id],
             )
             for worker in self._workers.values()
         ]

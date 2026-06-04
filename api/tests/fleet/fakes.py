@@ -30,13 +30,15 @@ def make_worker(
     worker_id: str = "worker-1",
     version: str = "1.0.0",
     at: dt.datetime,
+    drivers: frozenset[DriverKind] = frozenset({DriverKind.HOST_PROCESS}),
+    max_servers: int = 4,
 ) -> Worker:
     return Worker(
         id=WorkerId(worker_id),
         version=version,
         capabilities=WorkerCapabilities(
-            drivers=frozenset({DriverKind.HOST_PROCESS}),
-            max_servers=4,
+            drivers=drivers,
+            max_servers=max_servers,
             resources=HostResources(cpu_cores=8, memory_bytes=16_000_000_000),
         ),
         registered_at=at,

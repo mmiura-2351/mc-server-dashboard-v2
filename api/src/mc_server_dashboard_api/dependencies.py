@@ -86,6 +86,7 @@ from mc_server_dashboard_api.core.adapters.database import (
 )
 from mc_server_dashboard_api.core.domain.health import DatabasePing
 from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
+from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
 from mc_server_dashboard_api.identity.adapters.client_ip import (
     forwarded_for_header,
@@ -154,6 +155,14 @@ def get_list_workers(
     """Assemble the :class:`ListWorkers` use case (platform-admin only)."""
 
     return ListWorkers(registry=registry)
+
+
+def get_set_worker_drain(
+    registry: Annotated[WorkerRegistry, Depends(get_worker_registry)],
+) -> SetWorkerDrain:
+    """Assemble the :class:`SetWorkerDrain` use case (platform-admin only)."""
+
+    return SetWorkerDrain(registry=registry)
 
 
 def get_database_ping(request: Request) -> DatabasePing:
