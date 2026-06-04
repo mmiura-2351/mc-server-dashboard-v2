@@ -35,13 +35,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.command_dispatch import (
+    dispatch_failure,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
     CommandStatus,
     ControlPlane,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
-    CommandDispatchError,
     FileTooLargeError,
     InvalidFilePathError,
     ServerFileNotFoundError,
@@ -83,16 +86,20 @@ def _is_running(server: Server) -> bool:
     )
 
 
-def _map_file_status(server_id: ServerId, status: CommandStatus, message: str) -> None:
-    """Translate a Worker file-command failure to a servers file error."""
+def _map_file_status(server_id: ServerId, kind: str, outcome: CommandOutcome) -> None:
+    """Translate a Worker file-command failure to a servers file error.
 
-    if status is CommandStatus.SERVER_NOT_FOUND:
+    ``kind`` is the command label (the calling use case) so an unmapped failure
+    is logged once with server and kind context before raising (issue #200).
+    """
+
+    if outcome.status is CommandStatus.SERVER_NOT_FOUND:
         # The Worker reports a missing target file (or no such running server);
         # either way the path the caller asked for is not there.
         raise ServerFileNotFoundError(str(server_id.value))
-    if status is CommandStatus.FILE_ACCESS_DENIED:
-        raise InvalidFilePathError(message or str(server_id.value))
-    raise CommandDispatchError(message or status.value)
+    if outcome.status is CommandStatus.FILE_ACCESS_DENIED:
+        raise InvalidFilePathError(outcome.message or str(server_id.value))
+    raise dispatch_failure(server_id=server_id, kind=kind, outcome=outcome)
 
 
 @dataclass(frozen=True)
@@ -121,7 +128,7 @@ class ReadFile:
                 rel_path=rel_path,
             )
             if not outcome.success:
-                _map_file_status(server_id, outcome.status, outcome.message)
+                _map_file_status(server_id, "ReadFile", outcome)
             return outcome.file_content
         raise ServerFilesUnsettledError(str(server_id.value))
 
@@ -173,7 +180,7 @@ class ListDir:
                 rel_path=rel_path,
             )
             if not outcome.success:
-                _map_file_status(server_id, outcome.status, outcome.message)
+                _map_file_status(server_id, "ListDir", outcome)
             listing = outcome.listing
             cp_entries = () if listing is None else listing.entries
             return DirListing(
@@ -225,7 +232,7 @@ class WriteFile:
                 content=content,
             )
             if not outcome.success:
-                _map_file_status(server_id, outcome.status, outcome.message)
+                _map_file_status(server_id, "WriteFile", outcome)
             return
         # A crashed server (desired=RUNNING, observed=CRASHED) lands here -> 409,
         # not an at-rest Storage edit. Rationale: every (re)start hydrates the

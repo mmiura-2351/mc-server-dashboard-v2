@@ -9,6 +9,7 @@ and the due math honours the default / override / floor.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 
 import pytest
@@ -221,3 +222,32 @@ async def test_on_demand_snapshot_failed_dispatch_raises() -> None:
         await SnapshotServer(uow=uow, control_plane=cp)(
             community_id=server.community_id, server_id=server.id
         )
+
+
+async def test_on_demand_snapshot_failure_logs_warning_with_server_and_kind(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A failed on-demand snapshot dispatch turns into a CommandDispatchError; the
+    # Worker's message is logged at WARN with server_id and command kind context
+    # so the failure is diagnosable, while the raw message stays out of the HTTP
+    # body (issue #200).
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="boom")
+    )
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(CommandDispatchError),
+    ):
+        await SnapshotServer(uow=uow, control_plane=cp)(
+            community_id=server.community_id, server_id=server.id
+        )
+
+    record = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    message = record.getMessage()
+    assert "boom" in message
+    assert "SnapshotServer" in message
+    assert str(server.id.value) in message

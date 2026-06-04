@@ -18,6 +18,7 @@ Storage), per TESTING.md Section 4. Verifies:
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 
 import pytest
@@ -197,6 +198,44 @@ async def test_create_running_save_all_failure_fails_create() -> None:
     # No snapshot and no archive when save-all failed.
     assert [kind for kind, *_ in control_plane.dispatched] == ["command"]
     assert archive.created == []
+
+
+async def test_create_running_save_all_failure_logs_warning_with_server_and_kind(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A failed save-all dispatch turns into a CommandDispatchError; the Worker's
+    # message is logged at WARN with server_id and command kind context so the
+    # failure is diagnosable, while the raw message stays out of the HTTP body
+    # (issue #200).
+    server = _running()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    uow = FakeUnitOfWork(servers=repo)
+    control_plane = FakeControlPlane(
+        outcomes={
+            "command": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="rcon refused"
+            )
+        }
+    )
+    archive = FakeBackupArchiveStore()
+    create = _make_create(uow, control_plane, archive)
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(CommandDispatchError),
+    ):
+        await create(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            source=BackupSource.MANUAL,
+        )
+
+    record = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    message = record.getMessage()
+    assert "rcon refused" in message
+    assert "SaveAll" in message
+    assert str(server.id.value) in message
 
 
 async def test_create_transitional_server_is_unsettled() -> None:
