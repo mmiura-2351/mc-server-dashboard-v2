@@ -60,6 +60,10 @@ class ControlSettings(_Section):
 
     enabled: bool = True
     heartbeat_timeout_seconds: int = 30
+    # Deadline for a dispatched ApiCommand to be answered by a CommandResult
+    # (CONTROL_PLANE.md Section 4.2); a command unanswered within it is a typed
+    # timeout the lifecycle layer treats as a failure.
+    command_timeout_seconds: int = 30
     worker_credential: str | None = None
 
 

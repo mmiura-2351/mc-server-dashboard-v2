@@ -1,0 +1,173 @@
+"""Fleet-backed adapter for the servers :class:`ControlPlane` seam.
+
+Binds the lifecycle layer's control-plane Port to the real fleet machinery: the
+:class:`WorkerRegistry` (placement + load tracking) and the fleet
+:class:`fleet ControlPlane <...fleet.domain.control_plane.ControlPlane>` (command
+dispatch over the gRPC stream). This is an adapter-layer composition across
+bounded contexts (mirroring the servers UnitOfWork reusing the community
+resource-grant adapter); the servers *domain* and *application* never import the
+fleet context (import-linter contract).
+
+The driver-spelling map lives here, at the seam: the servers
+:class:`ExecutionBackend` uses the underscore spelling DATABASE.md's CHECK enum
+mandates (``host_process``); the fleet :class:`DriverKind` uses the hyphen
+spelling (``host-process``). The two enums are deliberately not shared, so the
+mapping is an adapter concern (servers/domain/value_objects.py).
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    CommandResult,
+    CommandResultCode,
+    CommandTimedOutError,
+    RestartServerCommand,
+    ServerCommandCommand,
+    StartServerCommand,
+    StopServerCommand,
+    WorkerNotConnectedError,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    ControlPlane as FleetControlPlane,
+)
+from mc_server_dashboard_api.fleet.domain.placement import place
+from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
+from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
+    CommandStatus,
+    ControlPlane,
+    WorkerUnavailableError,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    ExecutionBackend,
+    ServerId,
+    WorkerId,
+)
+
+# Map the servers backend enum (underscore spelling) to the fleet driver enum
+# (hyphen spelling). The two are intentionally distinct domain types.
+_DRIVER_BY_BACKEND: dict[ExecutionBackend, DriverKind] = {
+    ExecutionBackend.HOST_PROCESS: DriverKind.HOST_PROCESS,
+    ExecutionBackend.CONTAINER: DriverKind.CONTAINER,
+}
+
+# Map the fleet result code to the servers outcome status (same names, distinct
+# enums on either side of the seam).
+_STATUS_BY_CODE: dict[CommandResultCode, CommandStatus] = {
+    CommandResultCode.OK: CommandStatus.OK,
+    CommandResultCode.SERVER_NOT_FOUND: CommandStatus.SERVER_NOT_FOUND,
+    CommandResultCode.INVALID_STATE: CommandStatus.INVALID_STATE,
+    CommandResultCode.DRIVER_UNAVAILABLE: CommandStatus.DRIVER_UNAVAILABLE,
+    CommandResultCode.FILE_ACCESS_DENIED: CommandStatus.FILE_ACCESS_DENIED,
+    CommandResultCode.TRANSFER_FAILED: CommandStatus.TRANSFER_FAILED,
+    CommandResultCode.INTERNAL: CommandStatus.INTERNAL,
+}
+
+
+def _to_outcome(result: CommandResult) -> CommandOutcome:
+    return CommandOutcome(
+        status=_STATUS_BY_CODE[result.code],
+        message=result.message,
+        output=result.output,
+    )
+
+
+def _fleet_worker(worker_id: WorkerId) -> FleetWorkerId:
+    return FleetWorkerId(str(worker_id.value))
+
+
+def _servers_worker(worker_id: FleetWorkerId) -> WorkerId:
+    # The fleet worker id is the registry key string; servers persist it as a
+    # plain UUID (PM ruling on #93: no worker table, assigned_worker_id is a UUID).
+    # At M1 a Worker is expected to register with a UUID-format id so the two
+    # sides round-trip; the seam is the single place that bridges str <-> UUID.
+    return WorkerId(uuid.UUID(worker_id.value))
+
+
+class FleetControlPlaneAdapter(ControlPlane):
+    """Bind the servers control-plane seam to the registry + fleet control plane."""
+
+    def __init__(
+        self,
+        *,
+        registry: WorkerRegistry,
+        control_plane: FleetControlPlane,
+    ) -> None:
+        self._registry = registry
+        self._control_plane = control_plane
+
+    async def place(self, *, backend: ExecutionBackend) -> WorkerId | None:
+        chosen = place(
+            self._registry.candidates_for_placement(),
+            required_driver=_DRIVER_BY_BACKEND[backend],
+        )
+        if isinstance(chosen, FleetWorkerId):
+            return _servers_worker(chosen)
+        return None
+
+    def increment_assignment(self, *, worker_id: WorkerId) -> None:
+        self._registry.increment_assignment(_fleet_worker(worker_id))
+
+    def decrement_assignment(self, *, worker_id: WorkerId) -> None:
+        self._registry.decrement_assignment(_fleet_worker(worker_id))
+
+    async def start(
+        self,
+        *,
+        worker_id: WorkerId,
+        server_id: ServerId,
+        backend: ExecutionBackend,
+        jar_relpath: str,
+        minecraft_version: str,
+    ) -> CommandOutcome:
+        return await self._dispatch(
+            worker_id,
+            server_id,
+            StartServerCommand(
+                driver=_DRIVER_BY_BACKEND[backend],
+                jar_relpath=jar_relpath,
+                minecraft_version=minecraft_version,
+            ),
+        )
+
+    async def stop(
+        self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+    ) -> CommandOutcome:
+        return await self._dispatch(
+            worker_id, server_id, StopServerCommand(force=force)
+        )
+
+    async def restart(
+        self, *, worker_id: WorkerId, server_id: ServerId
+    ) -> CommandOutcome:
+        return await self._dispatch(worker_id, server_id, RestartServerCommand())
+
+    async def command(
+        self, *, worker_id: WorkerId, server_id: ServerId, line: str
+    ) -> CommandOutcome:
+        return await self._dispatch(
+            worker_id, server_id, ServerCommandCommand(line=line)
+        )
+
+    async def _dispatch(
+        self,
+        worker_id: WorkerId,
+        server_id: ServerId,
+        command: StartServerCommand
+        | StopServerCommand
+        | RestartServerCommand
+        | ServerCommandCommand,
+    ) -> CommandOutcome:
+        try:
+            result = await self._control_plane.dispatch(
+                worker_id=_fleet_worker(worker_id),
+                server_id=str(server_id.value),
+                command=command,
+            )
+        except (WorkerNotConnectedError, CommandTimedOutError) as exc:
+            raise WorkerUnavailableError(str(worker_id.value)) from exc
+        return _to_outcome(result)

@@ -12,11 +12,16 @@ CONTROL_PLANE.md Section 4:
    (FR-WRK-1); anything else aborts with ``FAILED_PRECONDITION``. On success the
    Worker is added to the :class:`WorkerRegistry` and the API replies
    ``RegisterAck{accepted, heartbeat_interval}``.
-3. **Steady state.** ``Event{Heartbeat}`` refreshes liveness (FR-WRK-2); other
-   events (status / log / metrics) are accepted and ignored — their consumers
-   are later epics (#10). Command sending is out of scope (#82+).
+3. **Steady state.** ``Event{Heartbeat}`` refreshes liveness (FR-WRK-2);
+   ``Event{StatusChange}`` reconciles the server's observed state through the
+   :class:`ServerStateSink` (FR-SRV-4); ``CommandResult`` resolves the pending
+   correlation so a dispatched command's awaiter unblocks (CONTROL_PLANE.md
+   Sections 3, 5). ``LogLine`` / ``Metrics`` are accepted and ignored (epic #10).
+   The API may also push ``ApiCommand`` messages on this stream: they ride the
+   Worker's outbound queue, drained by the ``Session`` generator.
 4. **Disconnect.** When the stream ends (clean close or transport error) the
-   Worker is marked offline (FR-WRK-4).
+   Worker is marked offline and its servers' observed state set to ``unknown``
+   (FR-WRK-4).
 
 Only this module (and the wiring layer) touches grpcio; the domain and
 application layers stay transport-free (ARCHITECTURE.md Section 2.1). The
@@ -26,6 +31,8 @@ the few interactions with them are annotated pragmatically.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
 import hmac
 import logging
@@ -34,10 +41,13 @@ from collections.abc import AsyncIterator
 import grpc
 from grpc import aio
 
+from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
 from mc_server_dashboard_api.fleet.domain.clock import Clock
+from mc_server_dashboard_api.fleet.domain.control_plane import WorkerNotConnectedError
 from mc_server_dashboard_api.fleet.domain.entities import Worker
 from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
 from mc_server_dashboard_api.fleet.domain.registry import SessionToken, WorkerRegistry
+from mc_server_dashboard_api.fleet.domain.server_state_sink import ServerStateSink
 from mc_server_dashboard_api.fleet.domain.value_objects import (
     DriverKind,
     HostResources,
@@ -51,6 +61,18 @@ from mcsd.controlplane.v1.control_plane_pb2_grpc import (
 )
 
 _LOG = logging.getLogger(__name__)
+
+# Map the wire observed-state enum onto the sink's state string (CONTROL_PLANE.md
+# Section 6). An unspecified/unknown value has no mapping and is dropped — a
+# well-behaved Worker only reports the documented states.
+_STATE_BY_PROTO: dict[int, str] = {
+    pb.SERVER_STATE_STARTING: "starting",
+    pb.SERVER_STATE_RUNNING: "running",
+    pb.SERVER_STATE_STOPPING: "stopping",
+    pb.SERVER_STATE_STOPPED: "stopped",
+    pb.SERVER_STATE_RESTARTING: "restarting",
+    pb.SERVER_STATE_CRASHED: "crashed",
+}
 
 # Metadata key carrying the shared Worker credential (NFR-SEC-1). gRPC lowercases
 # metadata keys; the value is "Bearer <credential>" by convention.
@@ -93,11 +115,15 @@ class WorkerSessionServicer(WorkerServiceServicer):
         clock: Clock,
         worker_credential: str,
         heartbeat_timeout: dt.timedelta,
+        control_plane: ControlPlaneState,
+        state_sink: ServerStateSink,
     ) -> None:
         self._registry = registry
         self._clock = clock
         self._credential = worker_credential
         self._heartbeat_interval = heartbeat_timeout / _HEARTBEAT_INTERVAL_DIVISOR
+        self._control_plane = control_plane
+        self._state_sink = state_sink
 
     async def Session(  # noqa: N802 (gRPC-generated method name)
         self,
@@ -109,15 +135,61 @@ class WorkerSessionServicer(WorkerServiceServicer):
         worker_id, correlation_id, session = await self._register(
             request_iterator, context
         )
+        # The registry resets this Worker's load to zero on (re)registration;
+        # rebuild it from the authoritative running-server tally so placement is
+        # correct after a reconnect (epic #7 reconciliation obligation).
+        await self._rebuild_assignments(worker_id)
+        outbound = self._control_plane.open_session(worker_id)
+        # Read inbound events/results in a background task while this generator
+        # yields the Worker's outbound commands; both share the one stream.
+        reader = asyncio.ensure_future(self._read_inbound(worker_id, request_iterator))
         try:
             yield self._register_ack(correlation_id=correlation_id)
-            async for message in request_iterator:
-                self._handle(worker_id, message)
+            while True:
+                outbound_get = asyncio.ensure_future(outbound.get())
+                done, _ = await asyncio.wait(
+                    {outbound_get, reader}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if outbound_get in done:
+                    yield outbound_get.result()
+                else:
+                    # The inbound stream ended; stop yielding and tear down.
+                    outbound_get.cancel()
+                    break
         finally:
+            reader.cancel()
+            # Retrieve the reader's outcome so a transport error it raised is not
+            # logged as an unretrieved task exception; a cancellation is expected.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await reader
+            self._control_plane.close_session(worker_id, outbound)
+            # Fail this worker's in-flight commands immediately: its outbound
+            # stream is gone, so they can never be answered. Awaiters get a typed
+            # WorkerNotConnectedError now instead of riding the full timeout.
+            self._control_plane.fail_worker_pending(
+                worker_id, WorkerNotConnectedError(worker_id.value)
+            )
             # Pass this Session's token so a delayed teardown only offlines the
             # Worker if it has not reconnected on a newer Session (Section 4.4).
             self._registry.mark_disconnected(worker_id, session)
+            await self._state_sink.mark_worker_servers_unknown(
+                worker_id=worker_id.value
+            )
             _LOG.info("worker disconnected", extra={"worker_id": worker_id.value})
+
+    async def _read_inbound(
+        self,
+        worker_id: WorkerId,
+        request_iterator: AsyncIterator[pb.WorkerMessage],
+    ) -> None:
+        async for message in request_iterator:
+            await self._handle(worker_id, message)
+
+    async def _rebuild_assignments(self, worker_id: WorkerId) -> None:
+        count = await self._state_sink.count_running_assignments(
+            worker_id=worker_id.value
+        )
+        self._registry.set_assignment(worker_id, count)
 
     async def _authenticate(
         self,
@@ -177,15 +249,30 @@ class WorkerSessionServicer(WorkerServiceServicer):
         _LOG.info("worker registered", extra={"worker_id": worker_id.value})
         return worker_id, first.correlation_id, session
 
-    def _handle(self, worker_id: WorkerId, message: pb.WorkerMessage) -> None:
-        if message.WhichOneof("payload") != "event":
-            # Command results have no API-side consumer yet (#82+); accept and
-            # ignore so a well-behaved Worker is never disconnected for them.
+    async def _handle(self, worker_id: WorkerId, message: pb.WorkerMessage) -> None:
+        payload = message.WhichOneof("payload")
+        if payload == "command_result":
+            # Match the result to its in-flight command by command_id, carried as
+            # the enclosing message's correlation_id (CONTROL_PLANE.md Section 3).
+            self._control_plane.resolve(message.correlation_id, message.command_result)
             return
-        if message.event.WhichOneof("event") == "heartbeat":
+        if payload != "event":
+            return
+        event = message.event.WhichOneof("event")
+        if event == "heartbeat":
             self._registry.record_heartbeat(worker_id, self._clock.now())
-        # StatusChange / LogLine / Metrics are accepted and ignored; their
-        # consumers are later epics (#10).
+        elif event == "status_change":
+            await self._reconcile_status(worker_id, message.event)
+        # LogLine / Metrics are accepted and ignored; their consumers are later
+        # epics (#10).
+
+    async def _reconcile_status(self, worker_id: WorkerId, event: pb.Event) -> None:
+        state = _STATE_BY_PROTO.get(event.status_change.state)
+        if state is None or not event.server_id:
+            return
+        await self._state_sink.record_observed_state(
+            server_id=event.server_id, worker_id=worker_id.value, state=state
+        )
 
     def _register_ack(self, *, correlation_id: str) -> pb.ApiMessage:
         ack = pb.RegisterAck(accepted=True)
@@ -199,6 +286,8 @@ def make_grpc_server(
     clock: Clock,
     worker_credential: str,
     heartbeat_timeout: dt.timedelta,
+    control_plane: ControlPlaneState,
+    state_sink: ServerStateSink,
     host: str,
     port: int,
 ) -> aio.Server:
@@ -210,6 +299,8 @@ def make_grpc_server(
         clock=clock,
         worker_credential=worker_credential,
         heartbeat_timeout=heartbeat_timeout,
+        control_plane=control_plane,
+        state_sink=state_sink,
     )
     add_WorkerServiceServicer_to_server(servicer, server)
     server.add_insecure_port(f"{host}:{port}")

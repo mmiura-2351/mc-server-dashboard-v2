@@ -105,6 +105,17 @@ class WorkerRegistry(abc.ABC):
         """
 
     @abc.abstractmethod
+    def set_assignment(self, worker_id: WorkerId, count: int) -> None:
+        """Set the Worker's assigned-server count to ``count`` (absolute load).
+
+        Used to rebuild the count after a (re)registration reset it to zero: the
+        lifecycle layer tallies the Worker's running servers from authoritative
+        storage and writes the truth back here, so placement load is correct
+        after a reconnect (epic #7 reconciliation obligation). A call for an
+        unknown Worker is ignored.
+        """
+
+    @abc.abstractmethod
     def candidates_for_placement(self) -> list[PlacementCandidate]:
         """Return the placement-eligible Workers as :class:`PlacementCandidate`.
 

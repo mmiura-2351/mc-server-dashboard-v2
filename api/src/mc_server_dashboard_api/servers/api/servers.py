@@ -29,8 +29,18 @@ from mc_server_dashboard_api.dependencies import (
     get_delete_server,
     get_list_servers,
     get_read_server,
+    get_restart_server,
+    get_send_server_command,
+    get_start_server,
+    get_stop_server,
     get_update_server,
     require_permission,
+)
+from mc_server_dashboard_api.servers.application.lifecycle import (
+    RestartServer,
+    SendServerCommand,
+    StartServer,
+    StopServer,
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
     CreateServer,
@@ -39,12 +49,20 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    WorkerUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
     ExecutionBackendImmutableError,
+    InvalidLifecycleTransitionError,
     InvalidServerNameError,
+    LifecycleTransitionConflictError,
+    NoEligibleWorkerError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
+    ServerNotRunningError,
     ServerNotStoppedError,
     UnknownExecutionBackendError,
     UnknownServerTypeError,
@@ -69,6 +87,14 @@ class UpdateServerRequest(BaseModel):
     name: str | None = None
     config: dict[str, Any] | None = None
     execution_backend: str | None = None
+
+
+class ServerCommandRequest(BaseModel):
+    line: str = Field(min_length=1)
+
+
+class ServerCommandResponse(BaseModel):
+    output: str
 
 
 class ServerResponse(BaseModel):
@@ -250,9 +276,157 @@ async def delete_server(
         raise _conflict("server_not_stopped") from exc
 
 
+@router.post("/communities/{community_id}/servers/{server_id}/start")
+async def start_server(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("server:start"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[StartServer, Depends(get_start_server)],
+) -> ServerResponse:
+    try:
+        server = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidLifecycleTransitionError as exc:
+        raise _conflict("invalid_transition") from exc
+    except LifecycleTransitionConflictError as exc:
+        raise _conflict("transition_conflict") from exc
+    except NoEligibleWorkerError as exc:
+        raise _service_unavailable("no_eligible_worker") from exc
+    except WorkerUnavailableError as exc:
+        raise _service_unavailable("worker_unavailable") from exc
+    except CommandDispatchError as exc:
+        raise _conflict("command_failed") from exc
+    return ServerResponse.from_entity(server)
+
+
+@router.post("/communities/{community_id}/servers/{server_id}/stop")
+async def stop_server(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("server:stop"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[StopServer, Depends(get_stop_server)],
+) -> ServerResponse:
+    try:
+        server = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidLifecycleTransitionError as exc:
+        raise _conflict("invalid_transition") from exc
+    except LifecycleTransitionConflictError as exc:
+        raise _conflict("transition_conflict") from exc
+    except WorkerUnavailableError as exc:
+        raise _service_unavailable("worker_unavailable") from exc
+    except CommandDispatchError as exc:
+        raise _conflict("command_failed") from exc
+    return ServerResponse.from_entity(server)
+
+
+@router.post("/communities/{community_id}/servers/{server_id}/restart")
+async def restart_server(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("server:restart"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[RestartServer, Depends(get_restart_server)],
+) -> ServerResponse:
+    try:
+        server = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidLifecycleTransitionError as exc:
+        raise _conflict("invalid_transition") from exc
+    except LifecycleTransitionConflictError as exc:
+        raise _conflict("transition_conflict") from exc
+    except WorkerUnavailableError as exc:
+        raise _service_unavailable("worker_unavailable") from exc
+    except CommandDispatchError as exc:
+        raise _conflict("command_failed") from exc
+    return ServerResponse.from_entity(server)
+
+
+@router.post("/communities/{community_id}/servers/{server_id}/command")
+async def send_server_command(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    body: ServerCommandRequest,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("server:command"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[SendServerCommand, Depends(get_send_server_command)],
+) -> ServerCommandResponse:
+    try:
+        output = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            line=body.line,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerNotRunningError as exc:
+        raise _conflict("server_not_running") from exc
+    except WorkerUnavailableError as exc:
+        raise _service_unavailable("worker_unavailable") from exc
+    except CommandDispatchError as exc:
+        raise _conflict("command_failed") from exc
+    return ServerCommandResponse(output=output)
+
+
 def _unprocessable(reason: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={"reason": reason},
+    )
+
+
+def _service_unavailable(reason: str) -> HTTPException:
+    # Placement found no Worker, or the assigned Worker is gone / timed out: a
+    # transient fleet-capacity condition, not a client-state conflict. 503 tells
+    # the client to retry once the fleet has capacity again (FR-WRK-3/4).
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail={"reason": reason},
     )
 
