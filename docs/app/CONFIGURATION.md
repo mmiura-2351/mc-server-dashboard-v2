@@ -209,7 +209,24 @@ background scheduler wakes to check which servers are due.
 |---|---|---|---|
 | `backup.schedule_tick_seconds` | `300` | | Loop resolution of the scheduled-backup scheduler: how often it wakes to check which servers are due. Coarse, since backup cadence is measured in hours. Must be positive. |
 
-### 5.6 Observability
+### 5.6 Divergence reconciler
+
+The API runs a background reconciler that re-dispatches durable-but-unsent
+lifecycle intent so a desired/observed divergence converges (REQUIREMENTS.md
+FR-SRV-3/4). Two windows the in-line lifecycle path leaves open are closed here:
+a start/stop committed just before a crash (never dispatched) and a
+compensation-failure orphan (`desired=running` with no assigned Worker). The loop
+is gated on the control plane like the snapshot/backup schedulers — with no Worker
+channel there is nothing to re-dispatch.
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `reconciler.interval_seconds` | `60` | | Loop resolution: how often the reconciler scans for diverged servers. Must be positive. |
+| `reconciler.grace_seconds` | `120` | | How long a divergence must persist (measured from the last Worker report) before it is acted on, so the normal in-flight lifecycle path has time to converge first. Must be positive. |
+| `reconciler.backoff_base_seconds` | `30` | | Base of the per-server exponential backoff after a failed re-dispatch; the wait doubles per consecutive failure. Must be positive. |
+| `reconciler.backoff_max_seconds` | `3600` | | Cap on the per-server backoff wait. Must be positive. |
+
+### 5.7 Observability
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|

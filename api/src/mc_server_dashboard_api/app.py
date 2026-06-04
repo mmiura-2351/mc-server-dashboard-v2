@@ -72,6 +72,12 @@ from mc_server_dashboard_api.servers.adapters.clock import (
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.jar_provisioner import (
+    CatalogJarProvisioner,
+)
+from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
+    run_reconciler_loop,
+)
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
@@ -86,6 +92,11 @@ from mc_server_dashboard_api.servers.application.backup_scheduler import (
     RunBackupScheduleTick,
 )
 from mc_server_dashboard_api.servers.application.backups import CreateBackup
+from mc_server_dashboard_api.servers.application.lifecycle import (
+    StartServer,
+    StopServer,
+)
+from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
     SnapshotServer,
@@ -97,10 +108,13 @@ from mc_server_dashboard_api.storage.adapters.object_client import (
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.versions.adapters.composite import CompositeCatalog
 from mc_server_dashboard_api.versions.adapters.http_fetcher import HttpxJsonFetcher
+from mc_server_dashboard_api.versions.adapters.http_jar_fetcher import HttpxJarFetcher
 from mc_server_dashboard_api.versions.adapters.paper import PaperCatalog
 from mc_server_dashboard_api.versions.adapters.retry_cache import RetryCachingFetcher
+from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
 from mc_server_dashboard_api.versions.adapters.vanilla import VanillaCatalog
 from mc_server_dashboard_api.versions.api import versions as versions_api
+from mc_server_dashboard_api.versions.application.ensure_jar import EnsureJar
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.value_objects import (
     ServerType as CatalogServerType,
@@ -257,6 +271,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         grpc_server = None
         snapshot_task: asyncio.Task[None] | None = None
         backup_task: asyncio.Task[None] | None = None
+        reconciler_task: asyncio.Task[None] | None = None
         # Periodic login_attempt prune (SECURITY.md Section 3). Ungated on the
         # control plane: unlike the snapshot/backup loops it drives only the
         # database, so it must run on every API process to keep the append-only
@@ -356,12 +371,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             logging.getLogger(__name__).info("backup scheduler started")
+            # Run the periodic divergence reconciler as a lifespan task (issue
+            # #101), alongside the snapshot/backup schedulers. Gated on the control
+            # plane like them: it re-dispatches durable-but-unsent lifecycle intent
+            # (a start/stop committed before a crash, or a compensation-failure
+            # orphan), which needs a Worker channel to act on. It reuses the same
+            # StartServer/StopServer use cases and control-plane adapter as the HTTP
+            # path so the re-dispatch is identical to a normal lifecycle command.
+            reconciler_control_plane = FleetControlPlaneAdapter(
+                registry=registry,
+                control_plane=app.state.control_plane,
+                data_plane_base_url=settings.server.public_base_url,
+                worker_credential=settings.control.worker_credential,
+            )
+            reconciler = RunReconcilerTick(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+                start_server=StartServer(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    control_plane=reconciler_control_plane,
+                    clock=ServersSystemClock(),
+                    jar_provisioner=CatalogJarProvisioner(
+                        ensure_jar=EnsureJar(
+                            catalog=version_catalog,
+                            fetcher=HttpxJarFetcher(),
+                            pool=StorageJarPool(jars=storage),
+                        )
+                    ),
+                ),
+                stop_server=StopServer(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    control_plane=reconciler_control_plane,
+                    clock=ServersSystemClock(),
+                ),
+                control_plane=reconciler_control_plane,
+                clock=ServersSystemClock(),
+                grace_seconds=settings.reconciler.grace_seconds,
+                backoff_base_seconds=settings.reconciler.backoff_base_seconds,
+                backoff_max_seconds=settings.reconciler.backoff_max_seconds,
+            )
+            reconciler_task = asyncio.create_task(
+                run_reconciler_loop(
+                    reconciler,
+                    tick_seconds=settings.reconciler.interval_seconds,
+                )
+            )
+            logging.getLogger(__name__).info("divergence reconciler started")
         try:
             yield
         finally:
             prune_attempts_task.cancel()
             with suppress(asyncio.CancelledError):
                 await prune_attempts_task
+            if reconciler_task is not None:
+                reconciler_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reconciler_task
             if backup_task is not None:
                 backup_task.cancel()
                 with suppress(asyncio.CancelledError):

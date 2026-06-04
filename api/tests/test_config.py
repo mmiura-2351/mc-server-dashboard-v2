@@ -229,6 +229,10 @@ def test_token_ttl_must_be_positive(
         ("snapshot", "default_interval_seconds", 0),
         ("snapshot", "min_interval_seconds", 0),
         ("backup", "schedule_tick_seconds", 0),
+        ("reconciler", "interval_seconds", 0),
+        ("reconciler", "grace_seconds", 0),
+        ("reconciler", "backoff_base_seconds", 0),
+        ("reconciler", "backoff_max_seconds", 0),
     ],
 )
 def test_numeric_setting_rejects_out_of_range(
@@ -297,6 +301,32 @@ def test_snapshot_cadence_from_toml(
     settings = load_settings(config_file=cfg)
     assert settings.snapshot.default_interval_seconds == 1800
     assert settings.snapshot.min_interval_seconds == 60
+
+
+def test_reconciler_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.reconciler.interval_seconds == 60
+    assert settings.reconciler.grace_seconds == 120
+    assert settings.reconciler.backoff_base_seconds == 30
+    assert settings.reconciler.backoff_max_seconds == 3600
+
+
+def test_reconciler_from_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[reconciler]\n"
+        "interval_seconds = 30\n"
+        "grace_seconds = 90\n"
+        "backoff_base_seconds = 15\n"
+        "backoff_max_seconds = 1800\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.reconciler.interval_seconds == 30
+    assert settings.reconciler.grace_seconds == 90
+    assert settings.reconciler.backoff_base_seconds == 15
+    assert settings.reconciler.backoff_max_seconds == 1800
 
 
 def test_proxy_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -134,11 +134,100 @@ class StartServer:
             await self.uow.commit()
 
         self.control_plane.increment_assignment(worker_id=worker_id)
-        # Hydrate the working set BEFORE the launch (FR-DATA-4): the API drives a
-        # pull of the authoritative working set from Storage to the Worker's
-        # scratch, then the Worker launches against it. A server with no published
-        # working set yet hydrates to an empty dir (the data-plane endpoint is 204
-        # and the Worker starts fresh), so this is not an error.
+        await self._hydrate_and_start(server, community_id, server_id, worker_id)
+        return server
+
+    async def place_and_start(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> Server:
+        """Place a desired-running, unassigned server and dispatch its start.
+
+        The reconciler's compensation-failure orphan path (issue #101): the start
+        intent already committed (``desired_state=running``) but the server has no
+        assigned Worker, so the normal placement+dispatch never completed. This
+        reuses the exact placement, CAS-assignment, load-increment, and
+        hydrate-then-start dispatch of :meth:`__call__`; only the entry guard
+        differs (desired is already running, the server is unassigned). Raises the
+        same typed errors as a normal start (no eligible Worker, dispatch refusal),
+        and compensates the assignment on dispatch failure.
+        """
+
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+            if (
+                server.desired_state is not DesiredState.RUNNING
+                or server.assigned_worker_id is not None
+            ):
+                # Not an orphan (already assigned, or no longer desired-running):
+                # nothing for this path to reconcile.
+                raise InvalidLifecycleTransitionError(str(server_id.value))
+            jar_key = await self._ensure_jar(server)
+            worker_id = await self.control_plane.place(backend=server.execution_backend)
+            if worker_id is None:
+                raise NoEligibleWorkerError(str(server_id.value))
+            server.assigned_worker_id = worker_id
+            server.config = {**server.config, JAR_KEY_CONFIG_FIELD: jar_key}
+            server.updated_at = self.clock.now()
+            applied = await self.uow.servers.update_lifecycle(
+                server,
+                expected_from=DesiredState.RUNNING,
+                require_unassigned=True,
+            )
+            if not applied:
+                # A concurrent assignment (a real start or another reconcile tick)
+                # won the compare-and-set; abort before dispatch or any count
+                # change so the lost race causes no double placement.
+                raise LifecycleTransitionConflictError(str(server_id.value))
+            await self.uow.commit()
+
+        self.control_plane.increment_assignment(worker_id=worker_id)
+        await self._hydrate_and_start(server, community_id, server_id, worker_id)
+        return server
+
+    async def redispatch_start(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> Server:
+        """Re-send hydrate-then-start to an assigned, desired-running server.
+
+        The reconciler's stale-intent path (issue #101): the start intent committed
+        and a Worker is assigned, but the launch was never sent (crash between
+        commit and dispatch) or the Worker is not actually running it. The intent
+        and assignment stand; only the dispatch is replayed. The placement load was
+        already counted on the original assignment, so this does not increment it
+        again. On dispatch failure the assignment is compensated, mirroring the
+        normal start failure path.
+        """
+
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+            if (
+                server.desired_state is not DesiredState.RUNNING
+                or server.assigned_worker_id is None
+            ):
+                raise InvalidLifecycleTransitionError(str(server_id.value))
+            worker_id = server.assigned_worker_id
+
+        await self._hydrate_and_start(server, community_id, server_id, worker_id)
+        return server
+
+    async def _hydrate_and_start(
+        self,
+        server: Server,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+    ) -> None:
+        """Hydrate the working set then dispatch the launch, compensating on failure.
+
+        Shared by the normal start (:meth:`__call__`) and the reconciler's
+        re-dispatch paths. Hydrate the working set BEFORE the launch (FR-DATA-4):
+        the API drives a pull of the authoritative working set from Storage to the
+        Worker's scratch, then the Worker launches against it. A server with no
+        published working set yet hydrates to an empty dir (the data-plane endpoint
+        is 204 and the Worker starts fresh), so this is not an error. Either step
+        failing compensates the committed intent and re-raises.
+        """
+
         try:
             hydrate = await self.control_plane.hydrate(
                 worker_id=worker_id,
@@ -167,7 +256,6 @@ class StartServer:
             failure = CommandDispatchError(outcome.message or outcome.status.value)
             await self._compensate(community_id, server_id, worker_id, original=failure)
             raise failure
-        return server
 
     async def _ensure_jar(self, server: Server) -> str:
         """Ensure the resolved JAR is pooled; return its content key (FR-VER-3).
@@ -309,6 +397,38 @@ class StopServer:
                 "server %s; the stop succeeded but the working set was not captured",
                 server_id.value,
             )
+        return server
+
+    async def redispatch_stop(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> Server:
+        """Re-send the stop command to an assigned, desired-stopped server.
+
+        The reconciler's stale-intent path (issue #101): the stop intent committed
+        (``desired_state=stopped``) and a Worker is still assigned, but the stop was
+        never delivered (crash between commit and dispatch) so the Worker keeps the
+        process running (observed=running). The intent stands; only the dispatch is
+        replayed. The placement-load decrement is **not** repeated here: the
+        original stop either already decremented it, or the in-memory count was lost
+        to the crash and is rebuilt from the authoritative tally on reconnect — so
+        decrementing again would drive the count below the true running total. A
+        failed dispatch raises so the caller retries on a later tick.
+        """
+
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+            if (
+                server.desired_state is not DesiredState.STOPPED
+                or server.assigned_worker_id is None
+            ):
+                raise InvalidLifecycleTransitionError(str(server_id.value))
+            worker_id = server.assigned_worker_id
+
+        outcome = await self.control_plane.stop(
+            worker_id=worker_id, server_id=server_id
+        )
+        if not outcome.success:
+            raise CommandDispatchError(outcome.message or outcome.status.value)
         return server
 
 

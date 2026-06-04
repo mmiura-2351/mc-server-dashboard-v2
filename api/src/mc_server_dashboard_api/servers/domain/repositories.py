@@ -130,6 +130,30 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def list_reconcilable(self) -> list[Server]:
+        """Return servers whose desired/observed states may have diverged (issue #101).
+
+        The candidate set the periodic divergence reconciler iterates: servers
+        where the operator's intent and the last Worker-reported reality could be
+        out of step and an intent re-dispatch may be owed. Three shapes qualify:
+
+        - ``desired=running`` with an observed state that is neither ``starting``
+          nor ``running`` (a start that was never delivered, or a crash that the
+          Worker reported);
+        - ``desired=running`` with no assigned Worker (a compensation-failure
+          orphan: the intent committed but placement never stuck);
+        - ``desired=stopped`` with ``observed=running`` (a stop that was never
+          delivered).
+
+        Aligned servers (``running``/``starting`` under a running intent, settled
+        ``stopped`` under a stopped intent) are excluded so the reconciler's tick
+        cost scales with divergence, not fleet size. The grace-window and
+        Worker-connectivity decisions are applied by the reconciler use case on the
+        returned candidates. Spans all communities — a process-wide background
+        task, not scoped to one community.
+        """
+
+    @abc.abstractmethod
     async def delete(self, server_id: ServerId) -> None:
         """Delete the server row (its grants are swept separately, Section 10)."""
 

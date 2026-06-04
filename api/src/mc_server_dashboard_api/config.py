@@ -169,6 +169,30 @@ class BackupSettings(_Section):
     schedule_tick_seconds: int = Field(default=300, gt=0)
 
 
+class ReconcilerSettings(_Section):
+    """Desired/observed divergence reconciler (issue #101).
+
+    The reconciler periodically re-dispatches durable-but-unsent lifecycle intent
+    (a start/stop committed before a crash, or a compensation-failure orphan) so a
+    desired/observed divergence converges instead of lingering. It is gated on the
+    control plane like the snapshot/backup loops — with no Worker channel there is
+    nothing to re-dispatch.
+
+    ``interval_seconds`` is the loop resolution: how often it wakes to scan for
+    diverged servers. ``grace_seconds`` is how long a divergence must persist
+    before it is acted on, giving the normal in-flight lifecycle path time to
+    converge (a mid-launch start reports ``starting``, not a divergence) before the
+    reconciler intervenes. ``backoff_base_seconds`` / ``backoff_max_seconds`` bound
+    the per-server exponential backoff that prevents a persistently failing server
+    from being retried every tick.
+    """
+
+    interval_seconds: int = Field(default=60, gt=0)
+    grace_seconds: int = Field(default=120, gt=0)
+    backoff_base_seconds: int = Field(default=30, gt=0)
+    backoff_max_seconds: int = Field(default=3600, gt=0)
+
+
 class PasswordSettings(_Section):
     """Password hashing + policy (CONFIGURATION.md Sections 5.3 and 7.1).
 
@@ -301,6 +325,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     backup: BackupSettings = Field(default_factory=BackupSettings)
+    reconciler: ReconcilerSettings = Field(default_factory=ReconcilerSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
 
     @classmethod
@@ -345,6 +370,7 @@ class Settings(BaseSettings):
             "storage": storage,
             "snapshot": self.snapshot.model_dump(),
             "backup": self.backup.model_dump(),
+            "reconciler": self.reconciler.model_dump(),
             "auth": auth,
         }
 

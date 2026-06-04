@@ -197,6 +197,23 @@ class FakeServerRepository(ServerRepository):
     async def list_all(self) -> list[Server]:
         return [replace(server) for server in self.by_id.values()]
 
+    async def list_reconcilable(self) -> list[Server]:
+        out: list[Server] = []
+        for server in self.by_id.values():
+            running = server.desired_state is DesiredState.RUNNING
+            stopped = server.desired_state is DesiredState.STOPPED
+            stale_running = running and server.observed_state not in (
+                ObservedState.STARTING,
+                ObservedState.RUNNING,
+            )
+            orphan = running and server.assigned_worker_id is None
+            stop_undelivered = (
+                stopped and server.observed_state is ObservedState.RUNNING
+            )
+            if stale_running or orphan or stop_undelivered:
+                out.append(replace(server))
+        return out
+
     async def delete(self, server_id: ServerId) -> None:
         self.by_id.pop(server_id, None)
 
