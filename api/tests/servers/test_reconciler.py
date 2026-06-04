@@ -353,3 +353,38 @@ async def test_unknown_observed_with_connected_worker_redispatches_start() -> No
     clock = FakeClock(_NOW)
     await _reconciler(uow, cp, clock).tick()
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
+async def test_invalid_state_convergence_stops_reselecting_the_row() -> None:
+    # The API-restart self-heal (issue #213): desired=running, assigned,
+    # observed=unknown (Register carries no instance list, steady-state instances
+    # emit no events). The first post-grace tick redispatches start; the live
+    # Worker rejects the launch with INVALID_STATE, which redispatch_start records
+    # as observed=running. That convergence must take the row out of the
+    # reconcilable set so the NEXT tick dispatches nothing -- without the observed
+    # write no StatusChange ever arrives and the reconciler hot-loops forever.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcomes={
+            "start": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="running"
+            )
+        }
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    # The row converged to observed=running and is no longer reconcilable.
+    assert uow.servers.by_id[server.id].observed_state is ObservedState.RUNNING
+    assert await uow.servers.list_reconcilable() == []
+    # A subsequent tick re-selects nothing and dispatches nothing.
+    cp.dispatched.clear()
+    await reconciler.tick()
+    assert cp.dispatched == []

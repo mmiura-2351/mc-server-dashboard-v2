@@ -1162,11 +1162,17 @@ async def test_redispatch_start_replays_launch_without_increment() -> None:
         )
     )
     cp = FakeControlPlane()
-    await _start_server(uow, cp).redispatch_start(
+    result = await _start_server(uow, cp).redispatch_start(
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
     assert cp.incremented == []
+    # Genuine success writes NO observed state: the Worker's StatusChange(running)
+    # converges the cache (issue #213). The seeded observed/observed_at stand.
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.CRASHED
+    assert stored.observed_at is None
+    assert result.observed_state is ObservedState.CRASHED
 
 
 async def test_redispatch_start_invalid_state_is_treated_as_running() -> None:
@@ -1191,7 +1197,18 @@ async def test_redispatch_start_invalid_state_is_treated_as_running() -> None:
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
     assert result.desired_state is DesiredState.RUNNING
-    assert uow.servers.by_id[ServerId(server_id)].desired_state is DesiredState.RUNNING
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    # INVALID_STATE is positive evidence the instance is live, and the worker does
+    # no transition so no StatusChange will ever arrive to repair observed: record
+    # observed=running here, on the row and the returned entity, or the reconciler
+    # re-selects this divergence and redispatches forever (issue #213). No unassign:
+    # the live instance keeps its Worker.
+    assert stored.observed_state is ObservedState.RUNNING
+    assert stored.observed_at == _NOW
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert result.observed_state is ObservedState.RUNNING
+    assert result.observed_at == _NOW
 
 
 async def test_redispatch_start_failure_keeps_running_intent() -> None:
