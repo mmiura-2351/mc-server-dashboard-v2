@@ -20,6 +20,9 @@ adapter-internal (STORAGE.md Section 2): gzip in M1, with zstd deferred.
 
 Blocking filesystem/tar work runs in a worker thread via
 :func:`asyncio.to_thread` so the async Port methods do not stall the event loop.
+The hydrate stream is generated incrementally on a producer thread; a failure
+there is re-raised to the async consumer so a truncated transfer ends with an
+error rather than a silent EOF.
 """
 
 from __future__ import annotations
@@ -86,6 +89,10 @@ class FsStorage(Storage):
     ``version_retention`` bounds per-file retained versions (Section 5; the config
     key is owned by CONFIGURATION.md #16). ``failure_seam`` is the crash-injection
     hook for tests (Section 4.3); production uses the no-op default.
+    ``tar_member_hook`` is a test-only seam invoked just before each working-set
+    member is added to the hydrate tar, so a test can inject a deterministic
+    producer-thread failure and prove it surfaces to the consumer; production
+    leaves it ``None``.
     """
 
     def __init__(
@@ -94,10 +101,12 @@ class FsStorage(Storage):
         *,
         version_retention: int = _DEFAULT_VERSION_RETENTION,
         failure_seam: FailureSeam | None = None,
+        tar_member_hook: Callable[[Path], None] | None = None,
     ) -> None:
         self._root = root
         self._version_retention = version_retention
         self._seam = failure_seam or FailureSeam()
+        self._tar_member_hook = tar_member_hook
         # Active-reader leases: a snapshot directory an open hydrate stream is
         # reading is held here (refcounted) so a concurrent publish/sweep does not
         # reclaim it out from under the reader. Guarded by ``_lease_lock`` because
@@ -232,12 +241,17 @@ class FsStorage(Storage):
     def open_hydrate_source(
         self, community_id: CommunityId, server_id: ServerId
     ) -> ByteStream:
-        current = self._current_dir(community_id, server_id)
-        # Register an active-reader lease on the resolved snapshot before any byte
-        # is read, so a concurrent commit/sweep skips it; the stream releases the
-        # lease when it finishes, is closed, or raises (Section 4.2 reader safety).
-        self._acquire_lease(current)
-        return _tar_stream(current, lambda: self._release_lease(current))
+        # The live snapshot is resolved and leased on the FIRST iteration, not at
+        # open time: a caller that opens the stream but never iterates/closes it
+        # must not pin a snapshot forever (otherwise reclaim + sweep are starved).
+        # Re-resolving on first read also means the leased snapshot is exactly the
+        # one whose bytes are streamed (Section 4.2 reader safety).
+        def _open() -> tuple[Path, Callable[[], None]]:
+            current = self._current_dir(community_id, server_id)
+            self._acquire_lease(current)
+            return current, lambda: self._release_lease(current)
+
+        return _tar_stream(_open, self._tar_member_hook)
 
     async def begin_snapshot(
         self, community_id: CommunityId, server_id: ServerId
@@ -656,44 +670,72 @@ def _fsync_dir(path: Path) -> None:
 
 
 def _tar_stream(
-    directory: Path, on_close: Callable[[], None] | None = None
+    open_source: Callable[[], tuple[Path, Callable[[], None]]],
+    member_hook: Callable[[Path], None] | None = None,
 ) -> AsyncIterator[bytes]:
-    """Stream a tar of ``directory``'s contents (working-set hydrate egress).
+    """Stream a tar of the hydrate working set (incremental, error-surfacing).
+
+    ``open_source`` is called on the first iteration: it resolves the live
+    snapshot directory and takes the active-reader lease, returning the directory
+    and the matching lease-release callback. Deferring it to first iteration
+    means a stream that is opened but never consumed never pins a snapshot.
 
     The tar is generated incrementally in stream mode (``w|``) by a worker thread
     writing into one end of an ``os.pipe``; the generator reads bounded ``_CHUNK``
     blocks from the other end, so peak memory is one pipe buffer plus one chunk —
-    never the whole (multi-GB) working set. ``on_close`` (the active-reader lease
-    release) is invoked exactly once when the stream finishes, is closed early, or
-    raises.
+    never the whole (multi-GB) working set.
+
+    A producer-thread failure is captured and **re-raised to the consumer** after
+    the writer is joined, so a partial tar surfaces as an error rather than a
+    clean (silently truncated) EOF. The lease is released exactly once when the
+    stream finishes, is closed early, or raises.
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        read_fd, write_fd = os.pipe()
-        writer = threading.Thread(
-            target=_tar_into_fd, args=(directory, write_fd), daemon=True
-        )
-        writer.start()
+        directory, on_close = await asyncio.to_thread(open_source)
         try:
-            while True:
-                chunk = await asyncio.to_thread(os.read, read_fd, _CHUNK)
-                if not chunk:
-                    return
-                yield chunk
+            read_fd, write_fd = os.pipe()
+            holder: list[BaseException] = []
+            writer = threading.Thread(
+                target=_tar_into_fd,
+                args=(directory, write_fd, member_hook, holder),
+                daemon=True,
+            )
+            writer.start()
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(os.read, read_fd, _CHUNK)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                # Closing the read end unblocks a writer parked on a full pipe (its
+                # next write raises BrokenPipeError, which the writer swallows), so
+                # join never hangs on early consumer close.
+                os.close(read_fd)
+                await asyncio.to_thread(writer.join)
+            # The writer finished and we drained to EOF: if it failed mid-tar, the
+            # EOF we saw was a truncation, so re-raise its error to the consumer.
+            if holder:
+                raise holder[0]
         finally:
-            # Closing the read end unblocks a writer parked on a full pipe (its next
-            # write raises BrokenPipeError, which the writer swallows), so join never
-            # hangs on early consumer close.
-            os.close(read_fd)
-            await asyncio.to_thread(writer.join)
-            if on_close is not None:
-                on_close()
+            on_close()
 
     return _gen()
 
 
-def _tar_into_fd(directory: Path, write_fd: int) -> None:
-    """Write a tar of ``directory`` into ``write_fd`` (stream mode), then close it."""
+def _tar_into_fd(
+    directory: Path,
+    write_fd: int,
+    member_hook: Callable[[Path], None] | None,
+    holder: list[BaseException],
+) -> None:
+    """Write a tar of ``directory`` into ``write_fd`` (stream mode), then close it.
+
+    Any failure other than the consumer closing early is recorded in ``holder``
+    so the consumer can re-raise it instead of mistaking the closed pipe for a
+    clean end of stream.
+    """
 
     try:
         with (
@@ -701,10 +743,14 @@ def _tar_into_fd(directory: Path, write_fd: int) -> None:
             tarfile.open(fileobj=out, mode="w|") as tar,
         ):
             for child in sorted(directory.iterdir(), key=lambda p: p.name):
+                if member_hook is not None:
+                    member_hook(child)
                 tar.add(child, arcname=child.name)
     except BrokenPipeError:
         # The consumer closed early; nothing more to write.
         pass
+    except BaseException as exc:  # noqa: BLE001 - surfaced to the consumer below
+        holder.append(exc)
 
 
 def _file_stream(path: Path) -> AsyncIterator[bytes]:
