@@ -1,9 +1,10 @@
 # Release Policy
 
 Versioning and release conventions for Minecraft Server Dashboard v2. This
-document fixes the *policy*; the release **automation** (tooling, the version
-source-of-truth file, release-notes generation) is set up as the toolchain lands
-and is marked *(forthcoming)* below.
+document fixes the *policy*. The version source-of-truth, release-notes
+generation, and the tag-driven release workflow are in place (Sections 3 and 4).
+Building and publishing deployable artifacts stays aspirational until a
+packaging/deployment design exists, and is marked *(forthcoming)* below.
 
 > **One version for the whole monorepo.** `api/`, `worker/`, and `proto/` ship
 > together and are kept in lock-step (see [`CONTRIBUTING.md`](CONTRIBUTING.md)
@@ -72,21 +73,70 @@ A curated `CHANGELOG.md` may be reintroduced if external consumers appear or at
 `1.0.0`. Until then, the generated notes on each GitHub Release are the
 changelog.
 
-## 4. Release flow (policy)
+## 4. Release flow
+
+### 4.1 Version source of truth: the git tag
+
+**The git tag is the single authority for the version.** There is no version
+file to bump and no separate field to keep in sync — the `vX.Y.Z` tag on a
+commit *is* the release version. This is the simplest correct choice at this
+stage: one repository-wide SemVer (per the monorepo note above), releases cut by
+tag push (Section 4.3), and nothing that can drift out of step.
+
+Components do not embed a hard-coded version today. When packaging exists,
+`api/` and `worker/` derive their version from the tag at build time
+(`git describe`, Go `-ldflags`, a setuptools-scm-style mechanism, etc.) rather
+than from a checked-in constant.
+
+**Alternatives considered and rejected:**
+
+- *A top-level `VERSION` file as the authority.* Adds a bump-and-commit step
+  before every tag and a second place that can disagree with the tag. It buys
+  nothing while there are no build artifacts that must read a version offline.
+- *Per-module versions.* Rejected by policy: the components ship in lock-step
+  and share one repository-wide version (see the monorepo note above).
+
+### 4.2 Release flow (policy)
 
 1. Develop and merge PRs normally; each PR has a clear imperative title and a
    category label, and a release-affecting change signals the intended bump
    (MAJOR / MINOR / PATCH).
-2. Cut a release by: bumping the repository-wide version, tagging `vX.Y.Z`, and
-   publishing the GitHub Release with notes generated from the PRs merged since
-   the previous tag (Section 3).
-3. A release builds and publishes both components (`api/`, `worker/`) from the
-   same tagged commit, so the `api/` and `worker/` artifacts of a release come
-   from one source revision.
+2. Cut a release by tagging `vX.Y.Z` on a green `main` commit and pushing the
+   tag; the release workflow publishes the GitHub Release with notes generated
+   from the PRs merged since the previous tag (Section 3).
+3. *(forthcoming)* A release builds and publishes both components (`api/`,
+   `worker/`) from the same tagged commit, so the `api/` and `worker/` artifacts
+   of a release come from one source revision. This stays aspirational until a
+   packaging/deployment design lands (no Dockerfiles or publish targets exist
+   yet); the workflow in Section 4.3 only publishes the GitHub Release.
 
-The concrete mechanics — where the version number is stored, whether bumping and
-tagging are automated, and how the GitHub Release is published — are
-*(forthcoming)* and will be documented here once the release tooling is chosen.
+### 4.3 Cutting a release (operator steps)
+
+The release is published by
+[`.github/workflows/release.yml`](../../.github/workflows/release.yml), which
+runs on push of any `v*` tag. To cut a release:
+
+1. Pick the commit to release — normally the latest `main` — and confirm its CI
+   is green.
+2. Tag it (annotated) and push the tag:
+
+   ```sh
+   git fetch origin
+   git tag -a vX.Y.Z -m "vX.Y.Z" origin/main      # or a specific <sha>
+   git push origin vX.Y.Z
+   ```
+
+3. The workflow then, for that tag:
+   - **validates** the tag is well-formed SemVer (`vX.Y.Z` or `vX.Y.Z-rc.N`,
+     no leading zeros) and **fails** the release if it is not;
+   - **checks monotonicity** — the tag must sort strictly above the highest
+     existing release tag (the first-ever release is allowed);
+   - **creates the GitHub Release** with `gh release create --generate-notes`
+     (so the notes use [`.github/release.yml`](../../.github/release.yml)),
+     marking any `-rc.N` tag as a GitHub pre-release.
+
+   No manual step in the GitHub UI is needed. If validation fails, delete the
+   bad tag (`git push origin :refs/tags/vX.Y.Z`) and push a corrected one.
 
 ## 5. Hotfix
 
@@ -97,7 +147,11 @@ the main line.
 
 ## 6. Open decisions
 
-- **Version source-of-truth** in the monorepo (a top-level version file vs. the
-  git tag as the authority, and how `api/` and `worker/` read it at build time).
-- **Release automation** tool (the release-notes grouping/exclusion config is
-  set; see Section 3).
+- **Artifact build/publish** for `api/` and `worker/` (Section 4.2 item 3):
+  deferred until a packaging/deployment design exists.
+- **Automated version bumping / PR-driven release cutting:** not adopted —
+  manual tag push (Section 4.3) is the flow for now.
+
+Resolved: the **version source of truth** is the git tag (Section 4.1), and the
+**release automation** is the tag-driven workflow (Section 4.3) plus the
+release-notes config (Section 3).
