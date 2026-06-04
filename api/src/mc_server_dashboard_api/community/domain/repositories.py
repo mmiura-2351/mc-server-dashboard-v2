@@ -82,7 +82,10 @@ class MembershipRepository(abc.ABC):
 
     @abc.abstractmethod
     async def delete(self, membership_id: MembershipId) -> None:
-        """Delete the membership, cascading its ``membership_role`` rows (§10)."""
+        """Delete the membership, cascading its ``membership_role`` rows.
+
+        See Section 10.
+        """
 
     @abc.abstractmethod
     async def assign_role(self, membership_id: MembershipId, role_id: RoleId) -> None:
@@ -165,10 +168,11 @@ class ResourceGrantRepository(abc.ABC):
     async def delete_for_user_in_community(
         self, user_id: UserId, community_id: CommunityId
     ) -> None:
-        """Delete all of ``user_id``'s grants in ``community_id`` (FR-MEM-3, §10).
+        """Delete all of ``user_id``'s grants in ``community_id``.
 
-        Called by the remove-member use case in the same transaction as the
-        membership deletion, since grants FK ``user_id`` (not ``membership_id``).
+        Implements FR-MEM-3 (Section 10). Called by the remove-member use case in
+        the same transaction as the membership deletion, since grants FK
+        ``user_id`` (not ``membership_id``).
         """
 
     @abc.abstractmethod

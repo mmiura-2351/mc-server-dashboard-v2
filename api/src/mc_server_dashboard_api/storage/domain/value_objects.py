@@ -85,7 +85,10 @@ class SnapshotId:
 
 @dataclass(frozen=True)
 class VersionId:
-    """An opaque id naming one retained prior content of a file (STORAGE.md §5)."""
+    """An opaque id naming one retained prior content of a file.
+
+    See STORAGE.md Section 5.
+    """
 
     value: str
 

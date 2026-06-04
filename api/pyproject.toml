@@ -11,11 +11,11 @@ dependencies = [
     # gRPC + message code. The protobuf major is bounded to 6 to match the
     # generator (grpcio-tools 1.80.0 emits protobuf-6 code). grpcio 1.81.0
     # (2026-06-01) is inside the 7-day cooldown as of this change, so cap below
-    # it; lift the cap to <2 once it ages out (docs/dev/DEPENDENCIES.md §3).
+    # it; lift the cap to <2 once it ages out (docs/dev/DEPENDENCIES.md Section 3).
     "grpcio>=1.80.0,<1.81",
     "protobuf>=6.31.1,<7",
     # API framework stack (ARCHITECTURE.md Section 7.4). 0.x libraries cap the
-    # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md §1). All
+    # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
     # versions respect the 7-day cooldown (Section 3): released on/before
     # 2026-05-28 as of this change.
     "fastapi>=0.136.3,<0.137",          # 2026-05-23

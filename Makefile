@@ -42,6 +42,7 @@ test: api-test worker-test
 # docs/ convention gate (docs/README.md Conventions): relative links resolve,
 # no section-mark glyph, no 'v1' versioning term. Pure stdlib python3, no deps.
 docs-check:
+	python3 scripts/check_docs.py --self-test
 	python3 scripts/check_docs.py
 
 # ---------------------------------------------------------------------------

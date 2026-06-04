@@ -1,4 +1,4 @@
-"""The aioboto3-backed :class:`~.object_store.S3Client` (STORAGE.md §7.3).
+"""The aioboto3-backed :class:`~.object_store.S3Client` (STORAGE.md Section 7.3).
 
 The single module that imports the S3 client library, so the dependency stays at
 the very edge: :class:`ObjectStorage` depends only on the narrow
@@ -156,10 +156,11 @@ async def _iter_body(body: Any) -> AsyncIterator[bytes]:
 def make_s3_client_factory(
     *, endpoint: str, bucket: str, access_key: str, secret_key: str
 ) -> S3ClientFactory:
-    """Build an :class:`S3ClientFactory` over an aioboto3 session (STORAGE.md §7.3).
+    """Build an :class:`S3ClientFactory` over an aioboto3 session.
 
-    Each returned context manager opens an S3 client against the configured
-    S3-compatible endpoint and yields a bucket-scoped :class:`S3Client`.
+    See STORAGE.md Section 7.3. Each returned context manager opens an S3 client
+    against the configured S3-compatible endpoint and yields a bucket-scoped
+    :class:`S3Client`.
     """
 
     session = aioboto3.Session(

@@ -2,7 +2,7 @@
 
 The fleet adapter must translate the domain :class:`HydrateCommand` /
 :class:`SnapshotCommand` into the wire ``HydrateTrigger`` / ``SnapshotTrigger``
-payloads carrying the transfer URL + token (CONTROL_PLANE.md Section 5.2).
+payloads carrying the transfer URL + token (CONTROL_PLANE.md Section 5).
 """
 
 from __future__ import annotations

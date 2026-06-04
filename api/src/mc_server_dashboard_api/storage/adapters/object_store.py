@@ -1,4 +1,4 @@
-"""The object-storage ``Storage`` adapter (``ObjectStorage``), STORAGE.md §7.3.
+"""The object-storage ``Storage`` adapter (``ObjectStorage``), STORAGE.md Section 7.3.
 
 Realizes the full :class:`~...domain.port.Storage` Port over an S3-compatible
 object store. The Section 2 tree is a **key-prefix scheme**, not directories
@@ -598,7 +598,7 @@ class ObjectStorage(Storage):
                 )
             self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
             # PUT the new object, then re-write the pointer so the published state
-            # stays named explicitly; the pointer PUT is the atomic point (§4.4).
+            # stays named explicitly; the pointer PUT is the atomic point (Section 4.4).
             await client.put_object(key, data)
             self._seam.reach(PublishPhase.AFTER_FILE_TEMP_WRITE)
             await client.put_object(

@@ -60,7 +60,10 @@ class SnapshotHandle(abc.ABC):
 
 
 class WorkingSetStore(abc.ABC):
-    """Port slice: working-set hydrate egress + snapshot ingest (STORAGE.md §3.1)."""
+    """Port slice: working-set hydrate egress + snapshot ingest.
+
+    See STORAGE.md Section 3.1.
+    """
 
     @abc.abstractmethod
     def open_hydrate_source(
@@ -135,7 +138,10 @@ class JarStore(abc.ABC):
 
 
 class BackupStore(abc.ABC):
-    """Port slice: backup archive create/list/restore/delete (STORAGE.md §3.3)."""
+    """Port slice: backup archive create/list/restore/delete.
+
+    See STORAGE.md Section 3.3.
+    """
 
     @abc.abstractmethod
     async def create_backup_from_current(
@@ -172,7 +178,10 @@ class BackupStore(abc.ABC):
 
 
 class FileStore(abc.ABC):
-    """Port slice: authoritative-copy file read/edit for stopped servers (§3.4)."""
+    """Port slice: authoritative-copy file read/edit for stopped servers.
+
+    See Section 3.4.
+    """
 
     @abc.abstractmethod
     async def read_file(

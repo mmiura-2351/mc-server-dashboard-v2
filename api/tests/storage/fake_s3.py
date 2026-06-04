@@ -1,4 +1,4 @@
-"""A minimal in-memory S3 stub for the object-adapter tests (STORAGE.md §7.3).
+"""A minimal in-memory S3 stub for the object-adapter tests (STORAGE.md Section 7.3).
 
 Implements exactly the :class:`~...adapters.object_store.S3Client` surface the
 adapter uses, backed by a shared ``dict`` of key -> bytes. A single store is
