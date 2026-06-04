@@ -623,6 +623,65 @@ async def test_stop_lost_race_is_conflict_without_dispatch_or_count() -> None:
     assert uow.commits == 0
 
 
+async def test_stop_invalid_state_converges_to_stopped() -> None:
+    # Stopping a server the worker no longer runs (e.g. crashed on the EULA,
+    # issue #197): the worker has no such instance and answers INVALID_STATE.
+    # That is a no-op stop, not a failure -> converge observed to stopped and
+    # report success rather than surfacing command_failed.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.INVALID_STATE)}
+    )
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.desired_state is DesiredState.STOPPED
+    assert result.observed_state is ObservedState.STOPPED
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.STOPPED
+    # No live instance to snapshot: the stop dispatched, the snapshot did not.
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop"]
+    assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_stop_other_failure_still_surfaces_command_error() -> None:
+    # A genuine stop dispatch failure (not INVALID_STATE) must still raise.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")}
+    )
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+
 # --- restart ---------------------------------------------------------------
 
 

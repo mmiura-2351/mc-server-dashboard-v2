@@ -42,9 +42,9 @@ def _server(*, desired: DesiredState, observed: ObservedState) -> Server:
 
 @pytest.mark.parametrize(
     "observed",
-    [ObservedState.STOPPED, ObservedState.UNKNOWN],
+    [ObservedState.STOPPED, ObservedState.UNKNOWN, ObservedState.CRASHED],
 )
-def test_at_rest_when_desired_stopped_and_observed_stopped_or_unknown(
+def test_at_rest_when_desired_stopped_and_observed_stopped_unknown_or_crashed(
     observed: ObservedState,
 ) -> None:
     assert _server(desired=DesiredState.STOPPED, observed=observed).is_at_rest()
@@ -55,8 +55,8 @@ def test_at_rest_when_desired_stopped_and_observed_stopped_or_unknown(
     [
         (DesiredState.RUNNING, ObservedState.RUNNING),
         (DesiredState.RUNNING, ObservedState.STOPPED),
+        (DesiredState.RUNNING, ObservedState.CRASHED),
         (DesiredState.STOPPED, ObservedState.RUNNING),
-        (DesiredState.STOPPED, ObservedState.CRASHED),
         (DesiredState.STOPPED, ObservedState.STOPPING),
     ],
 )

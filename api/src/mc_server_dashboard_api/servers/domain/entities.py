@@ -55,12 +55,16 @@ class Server:
         """Return whether the server is fully stopped for edits/deletion.
 
         At rest means the operator wants it stopped *and* the last observed state
-        is one with no live working set to diverge from: ``stopped`` or the
-        API-inferred ``unknown`` (the owning Worker is gone). Config/name edits
-        and deletion are gated on this (Section 6.9 spirit).
+        is one with no live working set to diverge from: ``stopped``, the
+        API-inferred ``unknown`` (the owning Worker is gone), or ``crashed`` (the
+        process died, so there is no live working set — strictly safer than
+        ``unknown``, where the Worker may still hold a live instance we cannot
+        see). Config/name edits and deletion are gated on this (Section 6.9
+        spirit).
         """
 
         return self.desired_state is DesiredState.STOPPED and self.observed_state in (
             ObservedState.STOPPED,
             ObservedState.UNKNOWN,
+            ObservedState.CRASHED,
         )

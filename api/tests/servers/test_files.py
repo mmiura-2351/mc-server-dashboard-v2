@@ -290,6 +290,50 @@ async def test_read_unknown_observed_is_at_rest() -> None:
     )
 
 
+async def test_crashed_observed_is_at_rest_for_read_write_and_list() -> None:
+    # desired=stopped + observed=crashed (the EULA-crash case, issue #197): a
+    # crashed process has no live working set, so file ops branch to Storage
+    # instead of 409 server_unsettled. Covers read, write, and list in one place.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+        ),
+    )
+    store = FakeFileStore()
+    store.files["eula.txt"] = b"eula=false"
+    store.dirs[""] = [FileEntry(name="eula.txt", is_dir=False, size=10)]
+    cp = FakeControlPlane()
+
+    read_out = await ReadFile(uow=uow, control_plane=cp, file_store=store)(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="eula.txt",
+    )
+    assert read_out == b"eula=false"
+
+    await WriteFile(uow=uow, control_plane=cp, file_store=store)(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="eula.txt",
+        content=b"eula=true",
+    )
+    assert store.files["eula.txt"] == b"eula=true"
+
+    listing = await ListDir(uow=uow, control_plane=cp, file_store=store)(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="",
+    )
+    assert [e.name for e in listing.entries] == ["eula.txt"]
+    assert cp.dispatched == []  # never touched the worker
+
+
 async def test_read_missing_server_is_not_found() -> None:
     uow = FakeUnitOfWork()
     use_case = ReadFile(
