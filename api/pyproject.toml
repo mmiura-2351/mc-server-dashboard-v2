@@ -127,3 +127,24 @@ forbidden_modules = [
     "mc_server_dashboard_api.core.adapters",
     "mc_server_dashboard_api.core.api",
 ]
+
+# --- identity context ------------------------------------------------------
+# The identity context has only domain + adapters quadrants in M1 (no use cases
+# or HTTP edge yet; those land with #55/#56). The contracts below pin the same
+# inward dependency rule: adapters are bound to Ports only in the wiring module
+# and must not be imported by the domain, and the domain depends on nothing
+# internal -- not its own adapters, and not another bounded context.
+[[tool.importlinter.contracts]]
+name = "identity domain does not import adapters"
+type = "forbidden"
+source_modules = ["mc_server_dashboard_api.identity.domain"]
+forbidden_modules = ["mc_server_dashboard_api.identity.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "identity domain imports nothing internal (incl. other contexts)"
+type = "forbidden"
+source_modules = ["mc_server_dashboard_api.identity.domain"]
+forbidden_modules = [
+    "mc_server_dashboard_api.identity.adapters",
+    "mc_server_dashboard_api.core",
+]
