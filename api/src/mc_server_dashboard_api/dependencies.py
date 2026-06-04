@@ -9,6 +9,8 @@ FastAPI's ``Depends``; tests override the providers to inject fakes.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
+from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from typing import Annotated
 
@@ -16,6 +18,26 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from mc_server_dashboard_api.community.adapters.permission_checker import (
+    RepositoryMembershipVisibility,
+    RoleGrantPermissionChecker,
+)
+from mc_server_dashboard_api.community.adapters.unit_of_work import (
+    SqlAlchemyUnitOfWork as CommunityUnitOfWork,
+)
+from mc_server_dashboard_api.community.domain.permission_checker import (
+    MembershipVisibility,
+    PermissionChecker,
+)
+from mc_server_dashboard_api.community.domain.value_objects import (
+    AuthUser,
+    CommunityId,
+    Permission,
+    ResourceRef,
+)
+from mc_server_dashboard_api.community.domain.value_objects import (
+    UserId as CommunityUserId,
+)
 from mc_server_dashboard_api.config import (
     BruteForceSettings,
     PasswordSettings,
@@ -279,3 +301,131 @@ def _unauthenticated() -> HTTPException:
         detail="invalid_token",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+# --- authorization (community context, Section 6.4) ------------------------
+
+
+def get_membership_visibility(request: Request) -> MembershipVisibility:
+    """Bind the Layer-1 :class:`MembershipVisibility` Port to its evaluator."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RepositoryMembershipVisibility(CommunityUnitOfWork(session_factory))
+
+
+def get_permission_checker(request: Request) -> PermissionChecker:
+    """Bind the Layer-2 :class:`PermissionChecker` Port to the role+grant evaluator."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RoleGrantPermissionChecker(CommunityUnitOfWork(session_factory))
+
+
+def _to_auth_user(user: User) -> AuthUser:
+    """Project the identity ``User`` onto the community-domain authorization subject."""
+
+    return AuthUser(
+        user_id=CommunityUserId(user.id.value),
+        is_platform_admin=user.is_platform_admin,
+    )
+
+
+def require_permission(
+    operation: Permission,
+    *,
+    resource_type: str | None = None,
+    resource_id_param: str | None = None,
+) -> Callable[..., Awaitable[AuthUser]]:
+    """Build a dependency enforcing the two-layer check for ``operation``.
+
+    The dependency reads ``community_id`` from the path, runs Layer-1 visibility
+    (non-member -> 404, no existence signal), then Layer-2 ``can`` for
+    ``operation`` (member without the permission -> 403). For per-resource
+    operations, pass ``resource_type`` and the path-parameter name carrying the
+    resource id (``resource_id_param``) so the grant lookup is scoped to the
+    exact resource (FR-AUTHZ-2). Returns the authorized :class:`AuthUser`.
+
+    ``resource_type`` and ``resource_id_param`` are both-or-neither: pass both
+    for a per-resource check or neither for a community-level check. Passing
+    exactly one is a wiring mistake that would silently degrade a per-resource
+    operation to a community-level grant lookup, so it raises here at
+    dependency-construction time (fail-fast, before any request).
+
+    Route convention: the community path segment must be named ``community_id``
+    (see ``_dependency`` below); #69+ routes are expected to follow this.
+    """
+
+    if (resource_type is None) != (resource_id_param is None):
+        raise ValueError(
+            "require_permission: resource_type and resource_id_param are "
+            "both-or-neither; pass both for a per-resource check or neither "
+            f"for a community-level check (got resource_type={resource_type!r}, "
+            f"resource_id_param={resource_id_param!r})"
+        )
+
+    async def _dependency(
+        community_id: uuid.UUID,
+        request: Request,
+        user: Annotated[User, Depends(get_current_user)],
+        visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
+        checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
+    ) -> AuthUser:
+        auth_user = _to_auth_user(user)
+        community = CommunityId(community_id)
+
+        if not await visibility.is_member(
+            user_id=auth_user.user_id, community_id=community
+        ):
+            raise _not_found()
+
+        resource_id = _resource_id_from_path(request, resource_id_param)
+        resource = ResourceRef(
+            community_id=community,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+        if not await checker.can(
+            user=auth_user, operation=operation, resource=resource
+        ):
+            raise _forbidden()
+        return auth_user
+
+    return _dependency
+
+
+async def require_platform_admin(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Dependency requiring the platform-admin axis (FR-AUTHZ-5).
+
+    This axis lives outside any Community, so it is decided directly on the
+    user's ``is_platform_admin`` flag; a non-admin gets 403.
+    """
+
+    if not user.is_platform_admin:
+        raise _forbidden()
+    return user
+
+
+def _resource_id_from_path(request: Request, param: str | None) -> uuid.UUID | None:
+    if param is None:
+        return None
+    if param not in request.path_params:
+        # Fail-closed by design: a per-resource check whose route does not
+        # declare the named path param is a server-side misconfiguration. Raise
+        # a diagnosable RuntimeError (-> 500) instead of an opaque KeyError.
+        raise RuntimeError(
+            f"require_permission: path param {param!r} is not declared by route "
+            f"{request.url.path!r}; the route must include a "
+            f"{{{param}}} path segment"
+        )
+    raw = request.path_params[param]
+    return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
+
+
+def _not_found() -> HTTPException:
+    # Layer-1: non-members get no existence signal (FR-COMM-3, Section 6.4).
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+
+
+def _forbidden() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")

@@ -23,8 +23,17 @@ class InvalidPermissionError(CommunityError):
     """A permission code is not a well-formed ``<resource>:<action>`` string.
 
     This is the lightweight shape check only; the authoritative catalog
-    (REQUIREMENTS.md Appendix A) is validated by the ``PermissionChecker`` that
-    lands with the next sub-issue (#68).
+    (REQUIREMENTS.md Appendix A) is checked separately by
+    :func:`~mc_server_dashboard_api.community.domain.permissions.require_known_permission`.
+    """
+
+
+class UnknownPermissionError(CommunityError):
+    """A shape-valid permission code is absent from the authoritative catalog.
+
+    Raised when an operation code (REQUIREMENTS.md Appendix A) is checked against
+    the catalog and not found — e.g. a role/grant carrying a code no operation
+    uses, or a permission requirement naming a non-existent operation.
     """
 
 
