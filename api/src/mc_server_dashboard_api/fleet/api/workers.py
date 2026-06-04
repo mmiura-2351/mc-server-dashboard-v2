@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from mc_server_dashboard_api.dependencies import (
@@ -91,7 +91,8 @@ async def set_worker_drain(
     worker_id: str,
     use_case: Annotated[SetWorkerDrain, Depends(get_set_worker_drain)],
 ) -> None:
-    use_case(worker_id=WorkerId(worker_id), draining=True)
+    if not use_case(worker_id=WorkerId(worker_id), draining=True):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
 
 
 @router.delete(
@@ -103,4 +104,5 @@ async def clear_worker_drain(
     worker_id: str,
     use_case: Annotated[SetWorkerDrain, Depends(get_set_worker_drain)],
 ) -> None:
-    use_case(worker_id=WorkerId(worker_id), draining=False)
+    if not use_case(worker_id=WorkerId(worker_id), draining=False):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")

@@ -34,6 +34,8 @@ class PlacementCandidate:
     load: int
 
     def can_host(self, *, required_driver: DriverKind, needed: int) -> bool:
+        if needed <= 0:
+            raise ValueError("needed must be positive")
         if required_driver not in self.drivers:
             return False
         if self.capacity == 0:

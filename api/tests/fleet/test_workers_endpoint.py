@@ -106,3 +106,15 @@ def test_clear_drain_returns_worker_to_online() -> None:
 
     worker = client.get("/workers").json()["workers"][0]
     assert worker["status"] == "online"
+
+
+def test_set_drain_unknown_worker_is_404() -> None:
+    app, _ = _app(platform_admin=True, seed=False)
+    client = next(_client(app))
+    assert client.put("/workers/ghost/drain").status_code == 404
+
+
+def test_clear_drain_unknown_worker_is_404() -> None:
+    app, _ = _app(platform_admin=True, seed=False)
+    client = next(_client(app))
+    assert client.delete("/workers/ghost/drain").status_code == 404

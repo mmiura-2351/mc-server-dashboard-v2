@@ -147,13 +147,50 @@ def test_clear_draining_returns_worker_to_online() -> None:
     assert registry.list_workers()[0].status is WorkerStatus.ONLINE
 
 
-def test_set_draining_for_unknown_worker_is_ignored() -> None:
+def test_set_draining_unknown_worker_reports_not_found() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
 
-    registry.set_draining(WorkerId("ghost"), True)
+    found = registry.set_draining(WorkerId("ghost"), True)
 
+    assert found is False
     assert registry.list_workers() == []
+
+
+def test_set_draining_known_worker_reports_found() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    assert registry.set_draining(WorkerId("worker-1"), True) is True
+
+
+def test_drain_survives_reregistration() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    first = registry.register(make_worker(at=_T0))
+    registry.set_draining(WorkerId("worker-1"), True)
+    registry.mark_disconnected(WorkerId("worker-1"), first)
+
+    # The Go agent reconnects automatically; the operator's drain intent must
+    # not evaporate on the re-registration.
+    registry.register(make_worker(at=_T0))
+
+    assert registry.list_workers()[0].status is WorkerStatus.DRAINING
+    assert registry.candidates_for_placement() == []
+
+
+def test_cleared_drain_does_not_resurrect_on_reregistration() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    first = registry.register(make_worker(at=_T0))
+    registry.set_draining(WorkerId("worker-1"), True)
+    registry.set_draining(WorkerId("worker-1"), False)
+    registry.mark_disconnected(WorkerId("worker-1"), first)
+
+    registry.register(make_worker(at=_T0))
+
+    assert registry.list_workers()[0].status is WorkerStatus.ONLINE
 
 
 def test_draining_survives_heartbeat() -> None:

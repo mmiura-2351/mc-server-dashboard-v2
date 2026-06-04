@@ -8,6 +8,8 @@ is pure: it takes candidate snapshots and returns a chosen ``WorkerId`` or a
 
 from __future__ import annotations
 
+import pytest
+
 from mc_server_dashboard_api.fleet.domain.placement import (
     NoEligibleWorker,
     PlacementCandidate,
@@ -86,3 +88,10 @@ def test_tie_break_is_lexicographic_worker_id() -> None:
 def test_empty_candidate_list_is_no_eligible_worker() -> None:
     result = place([], required_driver=DriverKind.HOST_PROCESS)
     assert isinstance(result, NoEligibleWorker)
+
+
+def test_can_host_rejects_non_positive_needed() -> None:
+    with pytest.raises(ValueError):
+        _candidate("worker-1").can_host(
+            required_driver=DriverKind.HOST_PROCESS, needed=0
+        )

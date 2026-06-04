@@ -81,12 +81,13 @@ class WorkerRegistry(abc.ABC):
         """
 
     @abc.abstractmethod
-    def set_draining(self, worker_id: WorkerId, draining: bool) -> None:
+    def set_draining(self, worker_id: WorkerId, draining: bool) -> bool:
         """Set or clear the Worker's drain flag (FR-WRK-5).
 
         A draining Worker stays connected and heartbeating but is excluded from
         placement. Clearing it (``draining=False``) makes the Worker eligible
-        again. A call for an unknown Worker is ignored.
+        again. Returns ``True`` if the Worker was found, ``False`` otherwise, so
+        the endpoint can map an unknown id to 404.
         """
 
     @abc.abstractmethod

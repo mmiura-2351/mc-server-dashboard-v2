@@ -18,5 +18,6 @@ from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 class SetWorkerDrain:
     registry: WorkerRegistry
 
-    def __call__(self, *, worker_id: WorkerId, draining: bool) -> None:
-        self.registry.set_draining(worker_id, draining)
+    def __call__(self, *, worker_id: WorkerId, draining: bool) -> bool:
+        """Return ``True`` if the Worker exists, ``False`` for an unknown id."""
+        return self.registry.set_draining(worker_id, draining)
