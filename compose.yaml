@@ -81,8 +81,10 @@ services:
       MCD_WORKER_WORKER_DRIVERS: container
       MCD_WORKER_WORKER_SCRATCH_DIR: ${MCSD_SCRATCH_DIR}
       # Per-Java-major base images for the Minecraft server containers the worker
-      # creates. Extend as the version matrix needs.
-      MCD_WORKER_DRIVER_CONTAINER_IMAGES: "21=eclipse-temurin:21-jre,17=eclipse-temurin:17-jre,8=eclipse-temurin:8-jre"
+      # creates. Covers every Java major the worker's bracket table can resolve
+      # (javaruntime.MajorsFor): 8/11/16/17/21/25. Temurin ships no `16-jre` tag,
+      # so major 16 uses `eclipse-temurin:16-jdk` (the closest correct image).
+      MCD_WORKER_DRIVER_CONTAINER_IMAGES: "25=eclipse-temurin:25-jre,21=eclipse-temurin:21-jre,17=eclipse-temurin:17-jre,16=eclipse-temurin:16-jdk,11=eclipse-temurin:11-jre,8=eclipse-temurin:8-jre"
     # The Docker socket is how the container driver creates sibling MC containers.
     # group_add gives the worker process the host docker group so it can use the
     # socket without running privileged.
