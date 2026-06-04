@@ -355,3 +355,36 @@ func TestEngineClientInspectDecodesLabelsAndState(t *testing.T) {
 		t.Fatalf("request = %s %s", req.method, req.path)
 	}
 }
+
+// A 404 from Inspect is surfaced as errNotFound so the driver treats the
+// conflict as already resolved and retries the create (issue #229).
+func TestEngineClientInspectNotFoundIsTyped(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"No such container: mcsd-s1"}`))
+	})
+	c := d.client(t)
+
+	_, err := c.Inspect(context.Background(), "mcsd-s1")
+	if !errors.Is(err, errNotFound) {
+		t.Fatalf("Inspect err = %v, want errNotFound", err)
+	}
+}
+
+// A non-404 Inspect failure is not reported as not-found, so the driver keeps the
+// conservative fallback (issue #229).
+func TestEngineClientInspectNonNotFoundIsNotTyped(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"boom"}`))
+	})
+	c := d.client(t)
+
+	_, err := c.Inspect(context.Background(), "mcsd-s1")
+	if err == nil {
+		t.Fatal("expected Inspect to fail")
+	}
+	if errors.Is(err, errNotFound) {
+		t.Fatalf("Inspect err = %v, want a plain error (not errNotFound)", err)
+	}
+}

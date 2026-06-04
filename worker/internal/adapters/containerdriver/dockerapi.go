@@ -17,6 +17,14 @@ import (
 // retry.
 var errNameConflict = errors.New("containerdriver: container name already in use")
 
+// errNotFound is the error Inspect returns when the daemon answers 404 because
+// the named container no longer exists. During conflict resolution the driver
+// matches it with errors.Is to mean the conflict is already resolved — the async
+// exit-watcher removed the container between the create's 409 and the inspect —
+// so it retries the create directly instead of taking the conservative fallback
+// (issue #229).
+var errNotFound = errors.New("containerdriver: container not found")
+
 // Container label keys. The worker-id label scopes the startup orphan sweep to
 // this Worker's containers; the server-id label identifies which server a
 // container runs.

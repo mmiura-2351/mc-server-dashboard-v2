@@ -155,6 +155,12 @@ func (c *EngineClient) Inspect(ctx context.Context, name string) (ContainerInfo,
 		} `json:"Config"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/containers/"+name+"/json", nil, nil, &resp); err != nil {
+		var status statusError
+		if errors.As(err, &status) && status.code == http.StatusNotFound {
+			// Surface a typed not-found so the driver treats the conflict as already
+			// resolved and retries the create (issue #229); keep the daemon message.
+			return ContainerInfo{}, fmt.Errorf("%w: %v", errNotFound, err)
+		}
 		return ContainerInfo{}, err
 	}
 	return ContainerInfo{ID: resp.ID, Labels: resp.Config.Labels, Running: resp.State.Running}, nil
