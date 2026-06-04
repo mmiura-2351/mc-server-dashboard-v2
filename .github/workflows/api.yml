@@ -23,6 +23,24 @@ defaults:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # PostgreSQL service for the DB-touching integration tests
+    # (tests/integration). Image digest-pinned per docs/dev/DEPENDENCIES.md
+    # (pinning + 7-day cooldown).
+    services:
+      postgres:
+        # postgres:17.6-alpine (pushed 2025-10-24, outside the cooldown).
+        image: postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_USER: mcsd
+          POSTGRES_PASSWORD: mcsd
+          POSTGRES_DB: mcsd_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mcsd"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       # Action versions are pinned to a commit SHA per
       # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
@@ -51,4 +69,9 @@ jobs:
         run: uv run lint-imports
 
       - name: Test (pytest)
+        # MCD_TEST_DATABASE_URL enables the DB-touching integration tests
+        # (tests/integration) against the Postgres service; the unit suite is
+        # hermetic and ignores it.
+        env:
+          MCD_TEST_DATABASE_URL: postgresql+asyncpg://mcsd:mcsd@localhost:5432/mcsd_test
         run: uv run pytest
