@@ -116,7 +116,7 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
         ),
         refresh_ttl=_REFRESH_TTL,
     )
-    pair = await login(username="alice", password=_PASSWORD)
+    pair = (await login(username="alice", password=_PASSWORD)).pair
 
     refresh = RefreshSession(
         uow=SqlAlchemyUnitOfWork(factory),

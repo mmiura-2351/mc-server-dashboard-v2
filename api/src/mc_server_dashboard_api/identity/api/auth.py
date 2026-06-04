@@ -30,6 +30,7 @@ from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
     InvalidRefreshTokenError,
+    RefreshTokenReuseError,
 )
 
 router = APIRouter()
@@ -67,11 +68,11 @@ async def login(
     client_ip: Annotated[str | None, Depends(get_client_ip)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> TokenResponse:
-    # The acting user id is intentionally not surfaced here (enumeration defence,
-    # SECURITY.md Section 2): the username/IP forensic record lives in the
-    # login_attempt table; this row captures the auth event + outcome (FR-AUD-1).
+    # On SUCCESS the row is actor-attributed (FR-AUD-1); on FAILURE actor_id
+    # stays None (enumeration defence, SECURITY.md Section 2): the username/IP
+    # forensic record lives in the login_attempt table.
     try:
-        pair = await use_case(
+        result = await use_case(
             username=body.username, password=body.password, ip=client_ip
         )
     except InvalidCredentialsError as exc:
@@ -79,19 +80,45 @@ async def login(
             AuditEvent(operation=ops.AUTH_LOGIN, outcome=Outcome.DENIED)
         )
         raise _unauthorized() from exc
-    await recorder.record(AuditEvent(operation=ops.AUTH_LOGIN, outcome=Outcome.SUCCESS))
-    return TokenResponse.from_pair(pair)
+    await recorder.record(
+        AuditEvent(
+            operation=ops.AUTH_LOGIN,
+            outcome=Outcome.SUCCESS,
+            actor_id=result.user_id,
+        )
+    )
+    return TokenResponse.from_pair(result.pair)
 
 
 @router.post("/auth/refresh")
 async def refresh(
     body: RefreshRequest,
     use_case: Annotated[RefreshSession, Depends(get_refresh_session)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> TokenResponse:
+    # Reuse of an already-rotated token (RefreshTokenReuseError) triggers a family
+    # revocation in the use case; record it as a DENIED security event attributed
+    # to the affected user (FR-AUD-1). A plain unknown/expired token raises the
+    # base InvalidRefreshTokenError and is not audited (proportionate: it is not a
+    # token-theft signal). Both map to the same uniform 401 (no client signal).
     try:
         pair = await use_case(refresh_token=body.refresh_token)
+    except RefreshTokenReuseError as exc:
+        await recorder.record(
+            AuditEvent(
+                operation=ops.AUTH_REFRESH_REUSE,
+                outcome=Outcome.DENIED,
+                actor_id=exc.user_id,
+                target_type=ops.TARGET_USER,
+                target_id=exc.user_id,
+            )
+        )
+        raise _unauthorized() from exc
     except InvalidRefreshTokenError as exc:
         raise _unauthorized() from exc
+    await recorder.record(
+        AuditEvent(operation=ops.AUTH_REFRESH, outcome=Outcome.SUCCESS)
+    )
     return TokenResponse.from_pair(pair)
 
 

@@ -35,5 +35,13 @@ async def upgrade_head(url: str) -> None:
     await asyncio.to_thread(_run, "head", direction="up", url=url)
 
 
+async def upgrade_to(revision: str, url: str) -> None:
+    await asyncio.to_thread(_run, revision, direction="up", url=url)
+
+
+async def downgrade_to(revision: str, url: str) -> None:
+    await asyncio.to_thread(_run, revision, direction="down", url=url)
+
+
 async def downgrade_base(url: str) -> None:
     await asyncio.to_thread(_run, "base", direction="down", url=url)

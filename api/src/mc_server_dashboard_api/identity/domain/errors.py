@@ -6,6 +6,8 @@ They carry no framework type and are translated to transport errors at the edge.
 
 from __future__ import annotations
 
+import uuid
+
 
 class IdentityError(Exception):
     """Base class for identity-domain invariant violations."""
@@ -54,3 +56,17 @@ class InvalidAccessTokenError(IdentityError):
 
 class InvalidRefreshTokenError(IdentityError):
     """A presented refresh token is unknown, revoked, or expired (FR-AUTH-2)."""
+
+
+class RefreshTokenReuseError(InvalidRefreshTokenError):
+    """An already-rotated refresh token was presented again (token reuse).
+
+    A subclass of :class:`InvalidRefreshTokenError` so the edge still maps it to
+    the same uniform 401 (no signal that distinguishes reuse from a plain bad
+    token to the client). It carries ``user_id`` so the route can attribute the
+    family-revocation audit record to the affected user (a security event).
+    """
+
+    def __init__(self, user_id: "uuid.UUID") -> None:
+        super().__init__()
+        self.user_id = user_id

@@ -8,6 +8,7 @@ The use cases are overridden with fakes so no database or JWT lib is touched
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from collections.abc import Callable, Iterator
 
 from fastapi.testclient import TestClient
@@ -22,7 +23,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     BcryptPasswordHasher,
 )
-from mc_server_dashboard_api.identity.application.login import Login
+from mc_server_dashboard_api.identity.application.login import Login, LoginResult
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
@@ -85,7 +86,12 @@ _PROVIDERS = {
 
 
 def test_login_returns_token_pair() -> None:
-    fake = _Fake(result=TokenPair(access_token="acc", refresh_token="ref"))
+    fake = _Fake(
+        result=LoginResult(
+            pair=TokenPair(access_token="acc", refresh_token="ref"),
+            user_id=uuid.uuid4(),
+        )
+    )
     client = next(_client(login=fake))
     resp = client.post("/auth/login", json={"username": "alice", "password": "pw"})
     assert resp.status_code == 200
@@ -99,7 +105,12 @@ def test_login_returns_token_pair() -> None:
 def test_login_passes_resolved_client_ip_to_use_case() -> None:
     # With proxy trust off (default), the resolved IP is the immediate peer; the
     # endpoint must forward it to the use case for the per-IP counter.
-    fake = _Fake(result=TokenPair(access_token="acc", refresh_token="ref"))
+    fake = _Fake(
+        result=LoginResult(
+            pair=TokenPair(access_token="acc", refresh_token="ref"),
+            user_id=uuid.uuid4(),
+        )
+    )
     client = next(_client(login=fake))
     client.post("/auth/login", json={"username": "alice", "password": "pw"})
     assert fake.calls == [{"username": "alice", "password": "pw", "ip": "testclient"}]

@@ -1,9 +1,10 @@
 """Representative recording coverage (FR-AUD-1).
 
 Proves the recorder is invoked from the routes with the right operation code and
-outcome for a representative sample across contexts: auth (login success and
-failure), community provisioning, server create, and worker drain. The recorder
-is faked, so this asserts the edge wiring, not persistence (covered separately).
+outcome for a representative sample across contexts: auth (login success/failure,
+refresh success, refresh-reuse denial), community provisioning, server create, a
+failed privileged server op (DENIED/ERROR), and worker drain. The recorder is
+faked, so this asserts the edge wiring, not persistence (covered separately).
 """
 
 from __future__ import annotations
@@ -38,11 +39,22 @@ from mc_server_dashboard_api.dependencies import (
     get_membership_visibility,
     get_permission_checker,
     get_provision_community,
+    get_refresh_session,
     get_set_worker_drain,
+    get_start_server,
 )
+from mc_server_dashboard_api.identity.application.login import LoginResult
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
-from mc_server_dashboard_api.identity.domain.errors import InvalidCredentialsError
+from mc_server_dashboard_api.identity.domain.errors import (
+    InvalidCredentialsError,
+    InvalidRefreshTokenError,
+    RefreshTokenReuseError,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    LifecycleTransitionConflictError,
+    NoEligibleWorkerError,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
@@ -108,11 +120,14 @@ def _base_app(recorder: RecordingAuditRecorder, *, platform_admin: bool = False)
     return app, user
 
 
-def test_login_success_records_success() -> None:
+def test_login_success_records_success_with_actor() -> None:
     recorder = RecordingAuditRecorder()
     app, _ = _base_app(recorder)
+    actor = uuid.uuid4()
     app.dependency_overrides[get_login] = lambda: _FakeUseCase(
-        result=TokenPair(access_token="a", refresh_token="r")
+        result=LoginResult(
+            pair=TokenPair(access_token="a", refresh_token="r"), user_id=actor
+        )
     )
     client = next(_client(app))
 
@@ -122,9 +137,11 @@ def test_login_success_records_success() -> None:
     assert len(recorder.events) == 1
     assert recorder.events[0].operation == ops.AUTH_LOGIN
     assert recorder.events[0].outcome is Outcome.SUCCESS
+    # Success is now actor-attributable (FR-AUD-1).
+    assert recorder.events[0].actor_id == actor
 
 
-def test_login_failure_records_denied() -> None:
+def test_login_failure_records_denied_without_actor() -> None:
     recorder = RecordingAuditRecorder()
     app, _ = _base_app(recorder)
     app.dependency_overrides[get_login] = lambda: _FakeUseCase(
@@ -138,6 +155,59 @@ def test_login_failure_records_denied() -> None:
     assert len(recorder.events) == 1
     assert recorder.events[0].operation == ops.AUTH_LOGIN
     assert recorder.events[0].outcome is Outcome.DENIED
+    # Failure stays unattributed (enumeration defence, SECURITY.md Section 2).
+    assert recorder.events[0].actor_id is None
+
+
+def test_refresh_success_records_success() -> None:
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    app.dependency_overrides[get_refresh_session] = lambda: _FakeUseCase(
+        result=TokenPair(access_token="a2", refresh_token="r2")
+    )
+    client = next(_client(app))
+
+    resp = client.post("/auth/refresh", json={"refresh_token": "r1"})
+
+    assert resp.status_code == 200
+    assert len(recorder.events) == 1
+    assert recorder.events[0].operation == ops.AUTH_REFRESH
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+
+
+def test_refresh_reuse_records_denied_with_actor() -> None:
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    affected = uuid.uuid4()
+    app.dependency_overrides[get_refresh_session] = lambda: _FakeUseCase(
+        error=RefreshTokenReuseError(affected)
+    )
+    client = next(_client(app))
+
+    resp = client.post("/auth/refresh", json={"refresh_token": "reused"})
+
+    assert resp.status_code == 401
+    assert len(recorder.events) == 1
+    event = recorder.events[0]
+    assert event.operation == ops.AUTH_REFRESH_REUSE
+    assert event.outcome is Outcome.DENIED
+    assert event.actor_id == affected
+    assert event.target_id == affected
+
+
+def test_refresh_invalid_token_records_nothing() -> None:
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    app.dependency_overrides[get_refresh_session] = lambda: _FakeUseCase(
+        error=InvalidRefreshTokenError()
+    )
+    client = next(_client(app))
+
+    resp = client.post("/auth/refresh", json={"refresh_token": "stale"})
+
+    assert resp.status_code == 401
+    # A plain bad/expired token is not a security event: no row (proportionate).
+    assert recorder.events == []
 
 
 def test_provision_community_records_success() -> None:
@@ -210,6 +280,42 @@ def test_create_server_records_success() -> None:
     assert event.actor_id == user.id.value
     assert event.community_id == _COMMUNITY
     assert event.target_id == server.id.value
+
+
+def test_start_server_transition_conflict_records_denied() -> None:
+    recorder = RecordingAuditRecorder()
+    app, user = _base_app(recorder)
+    app.dependency_overrides[get_start_server] = lambda: _FakeUseCase(
+        error=LifecycleTransitionConflictError()
+    )
+    client = next(_client(app))
+
+    resp = client.post(f"/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
+
+    assert resp.status_code == 409
+    assert len(recorder.events) == 1
+    event = recorder.events[0]
+    assert event.operation == ops.SERVER_START
+    # A refused state transition is a DENIED outcome (issue #131).
+    assert event.outcome is Outcome.DENIED
+    assert event.actor_id == user.id.value
+    assert event.community_id == _COMMUNITY
+
+
+def test_start_server_no_eligible_worker_records_error() -> None:
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    app.dependency_overrides[get_start_server] = lambda: _FakeUseCase(
+        error=NoEligibleWorkerError()
+    )
+    client = next(_client(app))
+
+    resp = client.post(f"/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
+
+    assert resp.status_code == 503
+    assert len(recorder.events) == 1
+    # A transient fleet failure is an ERROR outcome (issue #131).
+    assert recorder.events[0].outcome is Outcome.ERROR
 
 
 def test_set_worker_drain_records_success() -> None:

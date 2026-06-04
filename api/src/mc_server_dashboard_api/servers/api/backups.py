@@ -119,10 +119,34 @@ async def create_backup(
         # Nothing published to archive (no working set yet).
         raise _not_found() from exc
     except BackupUnsettledError as exc:
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.DENIED,
+            authorized,
+            community_id,
+            server_id,
+        )
         raise _conflict("server_unsettled") from exc
     except WorkerUnavailableError as exc:
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            server_id,
+        )
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.DENIED,
+            authorized,
+            community_id,
+            server_id,
+        )
         raise _conflict("command_failed") from exc
     await _record(
         recorder, ops.BACKUP_CREATE, authorized, community_id, backup.id.value
@@ -192,6 +216,15 @@ async def restore_backup(
     except BackupNotFoundError as exc:
         raise _not_found() from exc
     except ServerNotStoppedError as exc:
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.DENIED,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
         raise _conflict("server_not_stopped") from exc
     await _record(recorder, ops.BACKUP_RESTORE, authorized, community_id, backup_id)
 
@@ -249,6 +282,36 @@ async def _record(
             community_id=community_id,
             target_type=ops.TARGET_BACKUP,
             target_id=backup_id,
+        )
+    )
+
+
+async def _record_failure(
+    recorder: AuditRecorder,
+    operation: str,
+    outcome: Outcome,
+    authorized: AuthUser,
+    community_id: uuid.UUID,
+    target_id: uuid.UUID,
+    *,
+    target_type: str = ops.TARGET_SERVER,
+) -> None:
+    """Record a failed privileged backup operation (issue #131; FR-AUD-1).
+
+    A refused attempt (``DENIED`` — server unsettled / not stopped / dispatch
+    refused) or a transient fleet failure (``ERROR`` — worker unreachable). A
+    create failure has no backup id yet, so it targets the server; a restore
+    failure targets the backup.
+    """
+
+    await recorder.record(
+        AuditEvent(
+            operation=operation,
+            outcome=outcome,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=target_type,
+            target_id=target_id,
         )
     )
 
