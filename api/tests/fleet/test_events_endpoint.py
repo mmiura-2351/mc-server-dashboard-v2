@@ -10,6 +10,7 @@ and that a client disconnect cleans up its subscription (no leak).
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import Iterator
 
@@ -222,6 +223,141 @@ def test_slow_consumer_receives_a_gap_frame() -> None:
         second = ws.receive_json()
     assert first["stream"] == "gap"
     assert second["payload"] == {"state": "2"}
+
+
+# --- frame ts carries the worker's emitted_at -----------------------------
+
+
+def test_frame_ts_uses_worker_emitted_at() -> None:
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
+    with client.websocket_connect(_url(community, server)) as ws:
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(
+                stream=EventStream.STATUS,
+                payload={"state": "running"},
+                emitted_at=emitted,
+            ),
+        )
+        frame = ws.receive_json()
+    assert frame["ts"] == emitted.isoformat()
+
+
+def test_frame_ts_falls_back_to_receive_time_when_unset() -> None:
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    before = dt.datetime.now(dt.timezone.utc)
+    with client.websocket_connect(_url(community, server)) as ws:
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(
+                stream=EventStream.STATUS, payload={"state": "running"}
+            ),
+        )
+        frame = ws.receive_json()
+    after = dt.datetime.now(dt.timezone.utc)
+    ts = dt.datetime.fromisoformat(frame["ts"])
+    assert before <= ts <= after
+
+
+# --- streams parameter: omitted=all, present-but-invalid=rejected ----------
+
+
+def test_unknown_stream_token_is_rejected_before_accept() -> None:
+    bus = InProcessRealTimeEvents()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    community, server = uuid.uuid4(), uuid.uuid4()
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server, streams="bogus")):
+            pass
+    assert exc.value.code == 4400
+    # Rejected before accept, so no subscription was ever created.
+    assert bus.subscriber_count(str(server)) == 0
+
+
+def test_omitted_streams_subscribes_to_all() -> None:
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    url = f"/communities/{community}/servers/{server}/events"
+    cases: list[tuple[EventStream, dict[str, object]]] = [
+        (EventStream.STATUS, {"state": "running"}),
+        (EventStream.LOG, {"line": "hi"}),
+        (EventStream.METRICS, {"cpu_millis": 1}),
+    ]
+    with client.websocket_connect(url) as ws:
+        for stream, payload in cases:
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(stream=stream, payload=payload),
+            )
+        delivered = {ws.receive_json()["stream"] for _ in range(3)}
+    assert delivered == {"status", "log", "metrics"}
+
+
+# --- mid-stream revocation -------------------------------------------------
+
+
+class _FlippableChecker(PermissionChecker):
+    """Allows until ``revoke()`` is called, then denies (mid-stream revocation)."""
+
+    def __init__(self) -> None:
+        self._allow = True
+
+    def revoke(self) -> None:
+        self._allow = False
+
+    async def can(
+        self, *, user: AuthUser, operation: Permission, resource: ResourceRef
+    ) -> bool:
+        return self._allow
+
+
+def test_mid_stream_revocation_closes_with_policy_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Shrink the idle re-check window so the test does not wait a real minute.
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    checker = _FlippableChecker()
+    app = create_app()
+    user = make_user()
+    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=True
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: checker
+    app.dependency_overrides[get_read_server] = lambda: _FakeReadServer(found=True)
+    app.dependency_overrides[get_real_time_events] = lambda: bus
+    client = next(_client(app))
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            # A frame published before the flip is still delivered.
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+            frame = ws.receive_json()
+            assert frame["payload"] == {"state": "running"}
+            # Revoke; the next idle re-check must close the socket.
+            checker.revoke()
+            ws.receive_json()
+    assert exc.value.code == 4403
 
 
 def test_disconnect_cleans_up_subscription() -> None:
