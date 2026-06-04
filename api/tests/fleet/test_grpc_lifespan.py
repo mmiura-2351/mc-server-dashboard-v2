@@ -20,6 +20,38 @@ from mcsd.controlplane.v1.control_plane_pb2_grpc import WorkerServiceStub
 
 _CREDENTIAL = "shared-worker-secret"
 
+# Connection-level statuses that mean "the transport went away", not "the
+# server made a per-call decision". Under full-suite load a channel can emit a
+# GOAWAY (surfacing as INTERNAL/UNAVAILABLE) before the per-call abort's
+# trailing status is read, masking the real rejection code (issue #187).
+_GOAWAY_CODES = frozenset({grpc.StatusCode.INTERNAL, grpc.StatusCode.UNAVAILABLE})
+
+
+async def _rejection_code(
+    port: int, metadata: list[tuple[str, str]]
+) -> grpc.StatusCode:
+    """Return the terminal status of a rejected ``Session``, GOAWAY-tolerant.
+
+    The server's per-call abort is authoritative, but a connection-level GOAWAY
+    can race it and surface as INTERNAL/UNAVAILABLE instead (issue #187). That
+    is a transport artifact, not the rejection: retry once on a *fresh* channel,
+    which cannot inherit the prior connection's teardown. One retry is enough —
+    two independent GOAWAYs back-to-back would itself be a real bug worth a
+    failure.
+    """
+
+    async def _drive() -> grpc.StatusCode:
+        async with aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = WorkerServiceStub(channel).Session(metadata=metadata)
+            with pytest.raises(aio.AioRpcError) as exc:
+                await call.read()
+            return exc.value.code()
+
+    code = await _drive()
+    if code in _GOAWAY_CODES:
+        code = await _drive()
+    return code
+
 
 async def test_lifespan_starts_and_stops_grpc_server(
     monkeypatch: pytest.MonkeyPatch,
@@ -51,12 +83,8 @@ async def test_lifespan_starts_and_stops_grpc_server(
         assert bound_port is not None and bound_port > 0
 
         # It actually serves: dial the ephemeral port and exercise the auth gate.
-        async with aio.insecure_channel(f"127.0.0.1:{bound_port}") as channel:
-            stub = WorkerServiceStub(channel)
-            call = stub.Session(metadata=[("authorization", "Bearer wrong")])
-            with pytest.raises(aio.AioRpcError) as exc:
-                await call.read()
-            assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
+        code = await _rejection_code(bound_port, [("authorization", "Bearer wrong")])
+        assert code == grpc.StatusCode.UNAUTHENTICATED
 
     # After lifespan exit the server is stopped: the port no longer accepts.
     async with aio.insecure_channel(f"127.0.0.1:{bound_port}") as channel:
