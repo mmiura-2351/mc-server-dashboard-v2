@@ -50,6 +50,7 @@ from mc_server_dashboard_api.servers.application.manage_server import ReadServer
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
+    InvalidBackupScheduleError,
     InvalidSnapshotIntervalError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -345,6 +346,21 @@ def test_update_snapshot_interval_below_floor_is_422() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["reason"] == "invalid_snapshot_interval"
+
+
+def test_update_backup_interval_invalid_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=InvalidBackupScheduleError("0")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": {"backup_interval_hours": 0}},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "invalid_backup_schedule"
 
 
 def test_delete_while_running_is_409() -> None:

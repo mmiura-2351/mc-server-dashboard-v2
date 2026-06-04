@@ -25,6 +25,11 @@ refused save-all, a Storage error) are logged and left for the next tick: a
 server's next-due instant advances only on a successful backup, so a failure is
 naturally retried, bounding the cadence by the interval rather than dropping the
 backup.
+
+The on-demand snapshot a running-path backup takes does **not** advance the
+snapshot scheduler's separate due-tracking, so the next periodic snapshot may
+still fire shortly after a backup — idempotent and harmless, just a redundant
+snapshot.
 """
 
 from __future__ import annotations
