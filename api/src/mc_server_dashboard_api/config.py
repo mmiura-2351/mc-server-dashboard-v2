@@ -32,10 +32,35 @@ class _Section(BaseModel):
 
 
 class ServerSettings(_Section):
-    """HTTP transport (CONFIGURATION.md Section 5.1)."""
+    """HTTP + control-plane transport (CONFIGURATION.md Section 5.1)."""
 
     host: str = "0.0.0.0"
     http_port: int = 8000
+    grpc_port: int = 50051
+
+
+class ControlSettings(_Section):
+    """Control-plane (Worker channel) settings (CONFIGURATION.md Section 5.1).
+
+    ``enabled`` gates whether the API hosts the control-plane gRPC server in
+    this process; ``heartbeat_timeout_seconds`` is the liveness window past
+    which a Worker missing heartbeats is marked offline (FR-WRK-2). The
+    ``heartbeat_interval`` the API advertises in ``RegisterAck`` is derived from
+    the timeout so a Worker normally beats several times before the window
+    lapses.
+
+    ``worker_credential`` is the shared secret a Worker presents to authenticate
+    its stream (NFR-SEC-1); it is the API-side counterpart of the Worker's
+    ``api.credential`` (CONFIGURATION.md Section 6.1). Like the token signing key
+    it is declared optional here so a process that disables the control plane
+    need not supply it; the app factory fails fast when the control plane is
+    enabled without a credential (Section 3, fail-fast on a missing required
+    secret).
+    """
+
+    enabled: bool = True
+    heartbeat_timeout_seconds: int = 30
+    worker_credential: str | None = None
 
 
 class LogSettings(_Section):
@@ -144,6 +169,7 @@ class Settings(BaseSettings):
     )
 
     server: ServerSettings = Field(default_factory=ServerSettings)
+    control: ControlSettings = Field(default_factory=ControlSettings)
     log: LogSettings = Field(default_factory=LogSettings)
     database: DatabaseSettings
     auth: AuthSettings = Field(default_factory=AuthSettings)
@@ -170,8 +196,14 @@ class Settings(BaseSettings):
         # it whenever present. ``None`` (no key configured) is not a secret.
         if auth["token"]["signing_key"] is not None:
             auth["token"]["signing_key"] = _MASK
+        control = self.control.model_dump()
+        # The Worker credential is a secret (CONFIGURATION.md Section 5.1); mask
+        # it whenever present. ``None`` (control plane disabled) is not a secret.
+        if control["worker_credential"] is not None:
+            control["worker_credential"] = _MASK
         return {
             "server": self.server.model_dump(),
+            "control": control,
             "log": self.log.model_dump(),
             "database": {"url": _MASK},
             "auth": auth,

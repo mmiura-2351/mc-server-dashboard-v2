@@ -18,3 +18,8 @@ def _dummy_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     # Section 5.3); a dummy value satisfies the fail-fast check. Tests that need
     # to verify the missing-key behaviour clear it explicitly.
     monkeypatch.setenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", "test-signing-key")
+    # Disable the control-plane gRPC server by default so building the app under
+    # TestClient does not bind a port (CONFIGURATION.md Section 5.1). The fleet
+    # gRPC integration tests construct the server directly; tests that need the
+    # control-plane fail-fast behaviour set these explicitly.
+    monkeypatch.setenv("MCD_API_CONTROL__ENABLED", "false")
