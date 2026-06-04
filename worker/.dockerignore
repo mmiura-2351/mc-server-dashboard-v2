@@ -1,0 +1,9 @@
+# Keep the build context small: local tool installs, compiled binaries, and test
+# artifacts must not leak into the image build.
+.bin/
+*.test
+*.out
+coverage.txt
+/worker
+Dockerfile
+.dockerignore

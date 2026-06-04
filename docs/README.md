@@ -47,6 +47,7 @@ Docs are split by intent:
 | [`dev/RELEASING.md`](dev/RELEASING.md) | Versioning policy (a single repository-wide SemVer version), tag naming, and generated release notes (no hand-maintained CHANGELOG). The tag-driven release workflow; the git tag is the version source of truth. |
 | [`dev/DEPENDENCIES.md`](dev/DEPENDENCIES.md) | Pinning style, the 7-day supply-chain cooldown, security-update handling, and the automated-update policy across the Python and Go ecosystems. |
 | [`dev/DEVELOPMENT.md`](dev/DEVELOPMENT.md) | Day-to-day developer workflow: prerequisites and first-time setup, the common command table (root unified commands + per-module READMEs), where code lives, the import-direction rules and how to run them, and the proto regeneration loop. |
+| [`dev/DEPLOYMENT.md`](dev/DEPLOYMENT.md) | Single-host Docker Compose deployment: the `db` / `api` / `worker` stack, `.env` setup, bring-up and first-run admin bootstrap, how Minecraft server ports reach clients, control-plane TLS guidance, and the upgrade and backup procedures. |
 
 ---
 

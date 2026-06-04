@@ -1,0 +1,3 @@
+# Local deployment environment: holds secrets and host-specific values.
+# Only the committed template (.env.example) is tracked.
+.env

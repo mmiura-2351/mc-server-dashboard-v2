@@ -1,0 +1,101 @@
+# Single-host container deployment for mc-server-dashboard v2 (issue #189).
+#
+# Services:
+#   db      — PostgreSQL, the API's authoritative metadata store.
+#   migrate — one-shot `alembic upgrade head` (same image as api), runs after db.
+#   api     — the FastAPI app + control-plane gRPC server, runs after migrate.
+#   worker  — the execution agent; container driver only, talks to the host
+#             Docker daemon via the mounted socket and creates sibling Minecraft
+#             containers.
+#
+# Secrets and host-specific values come from .env (see .env.example). MC server
+# containers are NOT compose services: the worker creates them at runtime.
+# See docs/dev/DEPLOYMENT.md.
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: ./api
+    image: mcsd-api:dev
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      MCD_API_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: ./api
+    image: mcsd-api:dev
+    restart: unless-stopped
+    environment:
+      MCD_API_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      MCD_API_AUTH__TOKEN__SIGNING_KEY: ${MCD_API_AUTH__TOKEN__SIGNING_KEY}
+      MCD_API_CONTROL__WORKER_CREDENTIAL: ${MCD_API_CONTROL__WORKER_CREDENTIAL}
+      # Plaintext gRPC control listener on the private compose network. Cross-host
+      # workers require real TLS instead (see docs/dev/DEPLOYMENT.md).
+      MCD_API_CONTROL__TLS__INSECURE: "true"
+      # The HTTP data-plane base URL advertised to workers for hydrate/snapshot
+      # transfers. On the compose network the worker reaches the api by service
+      # name.
+      MCD_API_SERVER__PUBLIC_BASE_URL: http://api:8000
+      MCD_API_STORAGE__BACKEND: fs
+      MCD_API_STORAGE__FS__ROOT: /data/storage
+    volumes:
+      - api-storage:/data/storage
+    ports:
+      - "${API_HTTP_PORT}:8000"      # HTTP REST + /data-plane
+      - "${API_GRPC_PORT}:50051"     # gRPC control plane
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: ./worker
+    image: mcsd-worker:dev
+    restart: unless-stopped
+    environment:
+      MCD_WORKER_API_GRPC_ENDPOINT: api:50051
+      MCD_WORKER_API_DATA_PLANE_URL: http://api:8000
+      MCD_WORKER_API_CREDENTIAL: ${MCD_API_CONTROL__WORKER_CREDENTIAL}
+      # Plaintext control + data-plane dial on the private compose network.
+      MCD_WORKER_API_TLS_INSECURE: "true"
+      MCD_WORKER_WORKER_DRIVERS: container
+      MCD_WORKER_WORKER_SCRATCH_DIR: ${MCSD_SCRATCH_DIR}
+      # Per-Java-major base images for the Minecraft server containers the worker
+      # creates. Extend as the version matrix needs.
+      MCD_WORKER_DRIVER_CONTAINER_IMAGES: "21=eclipse-temurin:21-jre,17=eclipse-temurin:17-jre,8=eclipse-temurin:8-jre"
+    # The Docker socket is how the container driver creates sibling MC containers.
+    # group_add gives the worker process the host docker group so it can use the
+    # socket without running privileged.
+    group_add:
+      - "${DOCKER_GID}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The scratch dir MUST be bind-mounted at the SAME absolute path on host and
+      # in-container: the worker tells the Docker daemon to bind a server's working
+      # dir into its MC container, and the daemon resolves that bind against HOST
+      # paths. Identical paths make the worker's in-container path a valid host
+      # path. The worker-id under it also survives container recreation this way.
+      - ${MCSD_SCRATCH_DIR}:${MCSD_SCRATCH_DIR}
+    depends_on:
+      - api
+
+volumes:
+  db-data:
+  api-storage:

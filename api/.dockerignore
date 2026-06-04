@@ -1,0 +1,17 @@
+# Keep the build context small and reproducible: the image resolves deps from
+# uv.lock, so the local venv and tool caches must not leak in.
+.venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.import_linter_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+tests/
+Dockerfile
+.dockerignore
