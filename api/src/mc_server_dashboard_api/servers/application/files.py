@@ -127,6 +127,18 @@ class ReadFile:
 
 
 @dataclass(frozen=True)
+class DirListing:
+    """A directory listing returned by :class:`ListDir`.
+
+    ``truncated`` is set only on the running path when the Worker clipped the
+    listing to its per-listing cap; the at-rest Storage path is never truncated.
+    """
+
+    entries: list[FileEntry]
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
 class ListDir:
     """Browse a directory, branching at-rest -> Storage / running -> Worker (file:read).
 
@@ -144,14 +156,15 @@ class ListDir:
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
-    ) -> list[FileEntry]:
+    ) -> DirListing:
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
 
         if server.is_at_rest():
-            return await self.file_store.list_dir(
+            entries = await self.file_store.list_dir(
                 community_id=community_id, server_id=server_id, rel_path=rel_path
             )
+            return DirListing(entries=entries, truncated=False)
         if _is_running(server):
             self.file_store.validate_rel_path(rel_path)
             outcome = await self.control_plane.list_files(
@@ -162,10 +175,14 @@ class ListDir:
             if not outcome.success:
                 _map_file_status(server_id, outcome.status, outcome.message)
             listing = outcome.listing
-            entries = () if listing is None else listing.entries
-            return [
-                FileEntry(name=e.name, is_dir=e.is_dir, size=e.size) for e in entries
-            ]
+            cp_entries = () if listing is None else listing.entries
+            return DirListing(
+                entries=[
+                    FileEntry(name=e.name, is_dir=e.is_dir, size=e.size)
+                    for e in cp_entries
+                ],
+                truncated=False if listing is None else listing.truncated,
+            )
         raise ServerFilesUnsettledError(str(server_id.value))
 
 

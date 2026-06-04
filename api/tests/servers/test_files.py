@@ -547,12 +547,13 @@ async def test_list_dir_at_rest_reads_storage() -> None:
     store.dirs["."] = [FileEntry(name="world", is_dir=True, size=0)]
     cp = FakeControlPlane()
     use_case = ListDir(uow=uow, control_plane=cp, file_store=store)
-    entries = await use_case(
+    listing = await use_case(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
         rel_path=".",
     )
-    assert [e.name for e in entries] == ["world"]
+    assert [e.name for e in listing.entries] == ["world"]
+    assert listing.truncated is False  # the at-rest path is never truncated
     assert cp.dispatched == []  # never touched the worker
 
 
@@ -585,16 +586,50 @@ async def test_list_dir_running_reads_control_plane() -> None:
     )
     use_case = ListDir(uow=uow, control_plane=cp, file_store=store)
 
-    entries = await use_case(
+    listing = await use_case(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
         rel_path=".",
     )
-    assert [(e.name, e.is_dir, e.size) for e in entries] == [
+    assert [(e.name, e.is_dir, e.size) for e in listing.entries] == [
         ("server.properties", False, 42),
         ("world", True, 0),
     ]
+    assert listing.truncated is False
     assert [d[0] for d in cp.dispatched] == ["list_files"]
+
+
+async def test_list_dir_running_passes_truncated_flag_through() -> None:
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=CommandStatus.OK,
+            listing=OutcomeFileListing(
+                entries=(OutcomeFileEntry(name="world", is_dir=True, size=0),),
+                truncated=True,
+            ),
+        )
+    )
+    use_case = ListDir(uow=uow, control_plane=cp, file_store=FakeFileStore())
+
+    listing = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=".",
+    )
+    assert [e.name for e in listing.entries] == ["world"]
+    assert listing.truncated is True
 
 
 async def test_list_dir_running_disconnected_worker_raises_unavailable() -> None:

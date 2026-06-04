@@ -85,6 +85,7 @@ class DirEntryResponse(BaseModel):
 class DirListingResponse(BaseModel):
     path: str
     entries: list[DirEntryResponse]
+    truncated: bool = False
 
 
 class FileVersionsResponse(BaseModel):
@@ -117,13 +118,14 @@ async def read_or_list_files(
 ) -> FileContentResponse | DirListingResponse:
     """Read a file (default) or browse a directory (``?list=true``).
 
-    Reads branch on server state (Section 6.9); browsing always reads the
-    authoritative copy.
+    Both reads and browsing branch on server state (Section 6.9): a running
+    server is served from the Worker's live working set, a server at rest from
+    the authoritative copy.
     """
 
     if list_dir:
         try:
-            entries = await list_use_case(
+            listing = await list_use_case(
                 community_id=CommunityId(community_id),
                 server_id=ServerId(server_id),
                 rel_path=path,
@@ -141,7 +143,9 @@ async def read_or_list_files(
         except CommandDispatchError as exc:
             raise _conflict("command_failed") from exc
         return DirListingResponse(
-            path=path, entries=[DirEntryResponse.from_entry(e) for e in entries]
+            path=path,
+            entries=[DirEntryResponse.from_entry(e) for e in listing.entries],
+            truncated=listing.truncated,
         )
 
     try:

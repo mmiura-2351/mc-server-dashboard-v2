@@ -152,6 +152,42 @@ func TestListFilesSymlinkDirEscapeIsDenied(t *testing.T) {
 	}
 }
 
+func TestListFilesSymlinkChildIsNotFollowed(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	workingDir := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(workingDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A symlink child of the listed dir whose target is a directory. The listing
+	// must stat the link itself (AT_SYMLINK_NOFOLLOW), never follow it: the entry
+	// reports is_dir=false with the link's own size (the target path's length).
+	target := t.TempDir() // a real directory, to prove it is not followed
+	if err := os.Symlink(target, filepath.Join(workingDir, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: ".",
+	})
+	if !res.Success || res.FileListing == nil {
+		t.Fatalf("ListFiles result = %+v, want success with a listing", res)
+	}
+	var link *session.FileEntry
+	for i := range res.FileListing.Entries {
+		if res.FileListing.Entries[i].Name == "link" {
+			link = &res.FileListing.Entries[i]
+		}
+	}
+	if link == nil {
+		t.Fatalf("entries = %+v, want a 'link' entry", res.FileListing.Entries)
+	}
+	if link.IsDir {
+		t.Fatal("symlink child reported is_dir=true: the target was followed")
+	}
+	if link.Size != uint64(len(target)) {
+		t.Fatalf("symlink size = %d, want %d (the link's own target length)", link.Size, len(target))
+	}
+}
+
 func TestListFilesBoundedWithTruncationMarker(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	dir := filepath.Join(m.scratchDir, "s1", "many")
