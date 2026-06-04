@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,8 +97,9 @@ func TestSnapshotThenHydrateRoundTrip(t *testing.T) {
 }
 
 // TestHydrateRejectsWrongCredential proves the auth header is enforced end to
-// end: a wrong credential is a 401, which the client surfaces as an error rather
-// than silently treating it as an empty working set.
+// end: a wrong credential is a 401, which the client surfaces as an error
+// naming the unexpected status rather than silently treating it as an empty
+// working set.
 func TestHydrateRejectsWrongCredential(t *testing.T) {
 	base := env(t, "MCD_E2E_API_URL")
 	_ = env(t, "MCD_E2E_CREDENTIAL") // ensure the harness is enabled
@@ -110,8 +112,12 @@ func TestHydrateRejectsWrongCredential(t *testing.T) {
 	defer cancel()
 
 	hydrateURL := scopeURL(base, community, server, "working-set")
-	if err := client.Hydrate(ctx, hydrateURL, "wrong-credential", t.TempDir()); err == nil {
+	err := client.Hydrate(ctx, hydrateURL, "wrong-credential", t.TempDir())
+	if err == nil {
 		t.Fatal("expected an error hydrating with a wrong credential (401)")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected the error to name the 401 status, got: %v", err)
 	}
 }
 
