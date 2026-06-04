@@ -20,6 +20,15 @@ type fakeDocker struct {
 	createSpec CreateSpec
 	createErr  error
 	startErr   error
+	// conflictsLeft makes the next N Create calls return errNameConflict before a
+	// success, modelling the create racing the async removal of the exited
+	// container (issue #226). createCalls counts every Create call.
+	conflictsLeft int
+	createCalls   int
+
+	// inspectInfo / inspectErr are returned by Inspect when resolving a conflict.
+	inspectInfo ContainerInfo
+	inspectErr  error
 
 	stopCalled bool
 	stopNoExit bool
@@ -68,11 +77,22 @@ func (f *fakeDocker) Stats(_ context.Context, _ string) (ContainerStats, error) 
 func (f *fakeDocker) Create(_ context.Context, spec CreateSpec) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.createCalls++
 	if f.createErr != nil {
 		return "", f.createErr
 	}
+	if f.conflictsLeft > 0 {
+		f.conflictsLeft--
+		return "", errNameConflict
+	}
 	f.createSpec = spec
 	return "container-1", nil
+}
+
+func (f *fakeDocker) Inspect(_ context.Context, _ string) (ContainerInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inspectInfo, f.inspectErr
 }
 
 func (f *fakeDocker) Start(_ context.Context, _ string) error {
@@ -702,5 +722,99 @@ func TestSweepListError(t *testing.T) {
 
 	if err := d.Sweep(context.Background()); err == nil {
 		t.Fatal("expected Sweep to return the list error")
+	}
+}
+
+// A restart racing the async removal of the exited container hits a 409 once. The
+// conflicting container carries THIS Worker's label and is not running, so the
+// driver removes it and retries the create, and Start reaches running (issue
+// #226).
+func TestStartRemovesOwnStoppedConflictAndRetries(t *testing.T) {
+	docker := newFakeDocker()
+	docker.conflictsLeft = 1
+	docker.inspectInfo = ContainerInfo{ID: "stale-1", Labels: map[string]string{labelWorkerID: "w1"}, Running: false}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	docker.mu.Lock()
+	calls, removed := docker.createCalls, append([]string(nil), docker.removed...)
+	docker.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("createCalls = %d, want 2 (conflict then retry)", calls)
+	}
+	if len(removed) != 1 || removed[0] != "stale-1" {
+		t.Fatalf("removed = %v, want [stale-1]", removed)
+	}
+}
+
+// A 409 whose conflicting container carries a FOREIGN worker label is left
+// untouched and the create fails: the driver never removes a container it does
+// not own (issue #226).
+func TestStartLeavesForeignConflict(t *testing.T) {
+	docker := newFakeDocker()
+	docker.conflictsLeft = 1
+	docker.inspectInfo = ContainerInfo{ID: "foreign-1", Labels: map[string]string{labelWorkerID: "other"}, Running: false}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	if _, err := d.Start(context.Background(), spec()); err == nil {
+		t.Fatal("expected Start to fail on a foreign-labelled conflict")
+	}
+	docker.mu.Lock()
+	calls, removed := docker.createCalls, docker.removed
+	docker.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("createCalls = %d, want 1 (no retry)", calls)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v, want none for a foreign container", removed)
+	}
+}
+
+// A 409 whose conflicting container is THIS Worker's but still running is left
+// untouched and the create fails: a live server is never removed (issue #226).
+func TestStartLeavesRunningOwnConflict(t *testing.T) {
+	docker := newFakeDocker()
+	docker.conflictsLeft = 1
+	docker.inspectInfo = ContainerInfo{ID: "live-1", Labels: map[string]string{labelWorkerID: "w1"}, Running: true}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	if _, err := d.Start(context.Background(), spec()); err == nil {
+		t.Fatal("expected Start to fail on a running own conflict")
+	}
+	docker.mu.Lock()
+	calls, removed := docker.createCalls, docker.removed
+	docker.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("createCalls = %d, want 1 (no retry)", calls)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v, want none for a running container", removed)
+	}
+}
+
+// A persistent 409 (the retry after removal conflicts again) fails after exactly
+// one remove-and-retry; the driver does not loop (issue #226).
+func TestStartPersistentConflictFailsAfterOneRetry(t *testing.T) {
+	docker := newFakeDocker()
+	docker.conflictsLeft = 2
+	docker.inspectInfo = ContainerInfo{ID: "stale-1", Labels: map[string]string{labelWorkerID: "w1"}, Running: false}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	if _, err := d.Start(context.Background(), spec()); err == nil {
+		t.Fatal("expected Start to fail when the create conflicts again after the retry")
+	}
+	docker.mu.Lock()
+	calls, removed := docker.createCalls, docker.removed
+	docker.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("createCalls = %d, want 2 (conflict then one retry)", calls)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("removed = %v, want exactly one removal", removed)
 	}
 }
