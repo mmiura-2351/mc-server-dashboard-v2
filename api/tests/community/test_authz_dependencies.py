@@ -145,9 +145,7 @@ def test_resource_type_without_id_param_is_a_construction_error() -> None:
 
 def test_resource_id_param_without_type_is_a_construction_error() -> None:
     with pytest.raises(ValueError):
-        require_permission(
-            Permission("server:stop"), resource_id_param="server_id"
-        )
+        require_permission(Permission("server:stop"), resource_id_param="server_id")
 
 
 def test_missing_path_param_is_a_server_misconfiguration() -> None:
