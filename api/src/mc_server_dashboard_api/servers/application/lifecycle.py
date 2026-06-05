@@ -494,14 +494,19 @@ class StartServer:
 
 @dataclass(frozen=True)
 class StopServer:
-    """Stop a running server gracefully (server:stop, FR-SRV-2)."""
+    """Stop a running server (server:stop, FR-SRV-2).
+
+    Graceful by default; ``force`` skips the Worker's graceful (RCON) path and
+    takes the immediate-kill path (issue #270). The rest of the flow — desired
+    flip, placement-load decrement, final snapshot, unassign — is identical.
+    """
 
     uow: UnitOfWork
     control_plane: ControlPlane
     clock: Clock
 
     async def __call__(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
     ) -> Server:
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
@@ -534,7 +539,7 @@ class StopServer:
         # graceful-stop window and on a missed event.
         self.control_plane.decrement_assignment(worker_id=worker_id)
         outcome = await self.control_plane.stop(
-            worker_id=worker_id, server_id=server_id
+            worker_id=worker_id, server_id=server_id, force=force
         )
         if outcome.status is CommandStatus.SERVER_NOT_FOUND:
             # The Worker has no live instance to stop (e.g. the process crashed on

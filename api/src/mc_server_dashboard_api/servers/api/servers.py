@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -437,11 +437,15 @@ async def stop_server(
     ],
     use_case: Annotated[StopServer, Depends(get_stop_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    # Default false = today's graceful stop; ?force=true skips the Worker's
+    # graceful path and kills the process immediately (issue #270).
+    force: Annotated[bool, Query()] = False,
 ) -> ServerResponse:
     try:
         server = await use_case(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
+            force=force,
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc

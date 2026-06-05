@@ -424,6 +424,9 @@ class FakeControlPlane(ControlPlane):
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
         self.incremented: list[WorkerId] = []
         self.decremented: list[WorkerId] = []
+        # The ``force`` flag of the last stop dispatch, so a test can assert the
+        # use case forwarded the caller's choice (issue #270).
+        self.stop_force: bool | None = None
 
     async def place(self, *, backend: ExecutionBackend) -> WorkerId | None:
         return self._place_to
@@ -468,6 +471,7 @@ class FakeControlPlane(ControlPlane):
     async def stop(
         self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
     ) -> CommandOutcome:
+        self.stop_force = force
         return await self._record("stop", worker_id, server_id)
 
     async def restart(
