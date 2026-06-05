@@ -82,7 +82,7 @@ type dockerAPI interface {
 	// that no longer exists returns an error.
 	Inspect(ctx context.Context, name string) (ContainerInfo, error)
 	// List returns the containers carrying the given label key/value pair,
-	// including stopped ones.
+	// including stopped ones, each with its Engine container State (issue #336).
 	List(ctx context.Context, labelKey, labelValue string) ([]Container, error)
 	// Logs opens a following stdout+stderr log stream for a running container
 	// (FR-MON-2). The returned reader carries Docker's multiplexed stream frames
@@ -127,10 +127,14 @@ type PortMapping struct {
 	HostPort      string
 }
 
-// Container is a listed container: its id and name, used by the orphan sweep.
+// Container is a listed container: its id, name, and state, used by the orphan
+// sweep. State is the Engine's container state string ("running", "exited",
+// "created", ...); the sweep gracefully stops a "running" orphan before removing
+// it so the MC server's SIGTERM shutdown hook can save (issue #336).
 type Container struct {
-	ID   string
-	Name string
+	ID    string
+	Name  string
+	State string
 }
 
 // ContainerInfo is the subset of a container inspection the driver needs to

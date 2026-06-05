@@ -235,6 +235,7 @@ func (c *EngineClient) List(ctx context.Context, labelKey, labelValue string) ([
 	var raw []struct {
 		ID    string   `json:"Id"`
 		Names []string `json:"Names"`
+		State string   `json:"State"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/containers/json", q, nil, &raw); err != nil {
 		return nil, err
@@ -245,7 +246,7 @@ func (c *EngineClient) List(ctx context.Context, labelKey, labelValue string) ([
 		if len(r.Names) > 0 {
 			name = r.Names[0]
 		}
-		out = append(out, Container{ID: r.ID, Name: name})
+		out = append(out, Container{ID: r.ID, Name: name, State: r.State})
 	}
 	return out, nil
 }
