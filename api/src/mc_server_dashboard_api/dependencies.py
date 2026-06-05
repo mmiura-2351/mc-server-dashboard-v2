@@ -223,6 +223,7 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     CreateServer,
     DeleteServer,
     ListServers,
+    LookupServerCommunity,
     ReadServer,
     UpdateServer,
 )
@@ -400,6 +401,38 @@ def get_real_time_events(websocket: WebSocket) -> RealTimeEvents:
 
     bus: RealTimeEvents = websocket.app.state.real_time_events
     return bus
+
+
+ServerCommunityLookup = Callable[..., Awaitable[uuid.UUID | None]]
+
+
+def get_server_community_lookup(websocket: WebSocket) -> ServerCommunityLookup:
+    """Provide a lookup of which community a server belongs to, by id (#288).
+
+    The community-scoped events stream reads a firehose of every server's status
+    events and routes each by community; this resolves a worker-reported server
+    id (the UUID's text form) to its owning community UUID, or ``None`` when the
+    id is unknown or not a UUID. Injected from the ``WebSocket`` connection (the
+    only consumer); the endpoint caches results per connection to bound queries.
+    """
+
+    from mc_server_dashboard_api.servers.domain.value_objects import (
+        ServerId as ServersServerId,
+    )
+
+    engine: AsyncEngine = websocket.app.state.engine
+    session_factory = create_session_factory(engine)
+    use_case = LookupServerCommunity(uow=ServersUnitOfWork(session_factory))
+
+    async def _lookup(*, server_id: str) -> uuid.UUID | None:
+        try:
+            sid = ServersServerId(uuid.UUID(server_id))
+        except ValueError:
+            return None
+        community = await use_case(server_id=sid)
+        return community.value if community is not None else None
+
+    return _lookup
 
 
 def get_list_workers(

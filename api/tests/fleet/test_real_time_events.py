@@ -140,3 +140,51 @@ async def test_iterator_stops_after_close() -> None:
     await sub.aclose()
     with pytest.raises(StopAsyncIteration):
         await sub.__anext__()
+
+
+# --- firehose subscription (subscribe_all) ---------------------------------
+
+
+async def test_firehose_receives_events_from_any_server_tagged_with_id() -> None:
+    # A firehose subscriber sees events published for any server, each tagged
+    # with the server_id it is about so a many-server consumer can tell them
+    # apart (the per-server path leaves server_id None — it is the topic key).
+    bus = InProcessRealTimeEvents()
+    sub = bus.subscribe_all(streams=_ALL)
+
+    bus.publish(server_id="s1", event=_status("running"))
+    bus.publish(server_id="s2", event=_status("stopped"))
+
+    first = await asyncio.wait_for(sub.__anext__(), timeout=1)
+    second = await asyncio.wait_for(sub.__anext__(), timeout=1)
+    assert (first.server_id, first.payload) == ("s1", {"state": "running"})
+    assert (second.server_id, second.payload) == ("s2", {"state": "stopped"})
+    await sub.aclose()
+
+
+async def test_firehose_respects_stream_filter() -> None:
+    bus = InProcessRealTimeEvents()
+    sub = bus.subscribe_all(streams=frozenset({EventStream.STATUS}))
+
+    bus.publish(
+        server_id="s1",
+        event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "x"}),
+    )
+    bus.publish(server_id="s1", event=_status("running"))
+
+    event = await asyncio.wait_for(sub.__anext__(), timeout=1)
+    assert event.stream is EventStream.STATUS
+    await sub.aclose()
+
+
+async def test_firehose_unsubscribe_cleans_up_no_leak() -> None:
+    bus = InProcessRealTimeEvents()
+    sub = bus.subscribe_all(streams=_ALL)
+    assert bus.firehose_subscriber_count() == 1
+
+    await sub.aclose()
+
+    assert bus.firehose_subscriber_count() == 0
+    # A publish after the last firehose subscriber leaves is a no-op.
+    bus.publish(server_id="s1", event=_status("running"))
+    assert bus.firehose_subscriber_count() == 0

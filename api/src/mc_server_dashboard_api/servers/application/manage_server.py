@@ -285,6 +285,25 @@ class ReadServer:
 
 
 @dataclass(frozen=True)
+class LookupServerCommunity:
+    """Return the community a server belongs to, or ``None`` if it is unknown.
+
+    The community-scoped events stream (#288) reads a firehose of every server's
+    status events and must decide, per event, whether the server is in the
+    stream's community. This is that lookup: a single indexed read by server id,
+    returning the owning community id (no cross-community existence concern — the
+    caller compares it to the path community before forwarding anything).
+    """
+
+    uow: UnitOfWork
+
+    async def __call__(self, *, server_id: ServerId) -> CommunityId | None:
+        async with self.uow:
+            server = await self.uow.servers.get_by_id(server_id)
+        return server.community_id if server is not None else None
+
+
+@dataclass(frozen=True)
 class ListServers:
     """List the servers in a community (server:read)."""
 

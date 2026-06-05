@@ -51,11 +51,17 @@ class RealTimeEvent:
     (``WorkerMessage.emitted_at``), so a queued subscriber sees the true event
     time rather than the relay's send time. It is ``None`` when the Worker left
     the proto field unset/zero; the transport then falls back to receive time.
+
+    ``server_id`` is the id of the server the event is about. It is ``None`` on a
+    per-server subscription (where the id is the topic key the subscriber already
+    knows) and is set by the relay on the firehose (``subscribe_all``), where one
+    subscriber sees events from many servers and must tell them apart.
     """
 
     stream: EventStream
     payload: dict[str, object] = field(default_factory=dict)
     emitted_at: dt.datetime | None = None
+    server_id: str | None = None
 
 
 class EventSubscription(AsyncIterator[RealTimeEvent], abc.ABC):
@@ -93,4 +99,15 @@ class RealTimeEvents(abc.ABC):
         order. Events of a stream not in ``streams`` are not delivered (the GAP
         marker is always delivered). The subscription is cleaned up when it is
         closed (client disconnect / GC), leaving no leaked buffer.
+        """
+
+    @abc.abstractmethod
+    def subscribe_all(self, *, streams: frozenset[EventStream]) -> EventSubscription:
+        """Return a firehose :class:`EventSubscription` of *all* servers' events.
+
+        Like :meth:`subscribe` but not keyed to one server: every published event
+        whose stream is in ``streams`` is delivered, each tagged with its
+        :attr:`RealTimeEvent.server_id` so a many-server consumer (the
+        community-scoped stream) can route or filter by server. Same bounded
+        buffer, drop-oldest + GAP, and deterministic cleanup on close.
         """
