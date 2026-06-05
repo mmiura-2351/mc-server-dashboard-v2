@@ -11,6 +11,7 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import _to_api_command
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     HydrateCommand,
     SnapshotCommand,
+    StopServerCommand,
 )
 
 
@@ -34,3 +35,17 @@ def test_snapshot_command_maps_to_snapshot_trigger() -> None:
     assert api.WhichOneof("command") == "snapshot"
     assert api.snapshot.transfer_url == "https://api/x/snapshot"
     assert api.snapshot.transfer_token == "t"
+
+
+def test_stop_command_carries_force_in_proto() -> None:
+    # The force flag must reach the wire StopServer message so the Worker takes
+    # the immediate-kill path (issue #270).
+    api = _to_api_command("cmd-3", "server-3", StopServerCommand(force=True))
+    assert api.WhichOneof("command") == "stop"
+    assert api.stop.force is True
+
+
+def test_stop_command_defaults_force_false_in_proto() -> None:
+    api = _to_api_command("cmd-4", "server-4", StopServerCommand())
+    assert api.WhichOneof("command") == "stop"
+    assert api.stop.force is False

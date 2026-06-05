@@ -609,6 +609,34 @@ async def test_stop_sets_stopped_dispatches_and_decrements() -> None:
         ("snapshot", WorkerId(worker), ServerId(server_id)),
     ]
     assert cp.decremented == [WorkerId(worker)]
+    # Default is graceful: the stop dispatch carries force=False (issue #270).
+    assert cp.stop_force is False
+
+
+async def test_stop_force_forwards_force_to_control_plane() -> None:
+    # An explicit force stop threads force=True down to the control-plane dispatch
+    # (worker side then takes the immediate-kill path); issue #270.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane()
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        force=True,
+    )
+
+    assert cp.stop_force is True
 
 
 async def test_stop_graceful_success_unassigns_and_records_stopped() -> None:

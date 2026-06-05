@@ -83,8 +83,12 @@ class _FakeUseCase:
     def __init__(self, *, result: object = None, error: Exception | None = None):
         self._result = result
         self._error = error
+        # The keyword args of the last call, so a test can assert what the route
+        # forwarded (e.g. the ?force flag for stop; issue #270).
+        self.kwargs: dict[str, object] = {}
 
     async def __call__(self, **kwargs: object) -> object:
+        self.kwargs = kwargs
         if self._error is not None:
             raise self._error
         return self._result
@@ -258,6 +262,28 @@ def test_stop_missing_server_is_404() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "stop"))
     assert resp.status_code == 404
+
+
+def test_stop_defaults_to_graceful_force_false() -> None:
+    # No ?force query param: the route forwards force=False (today's behavior).
+    community = uuid.uuid4()
+    stop = _FakeUseCase(result=_server(community))
+    app = _app(member=True, allow=True, stop=stop)
+    client = next(_client(app))
+    resp = client.post(_url(community, uuid.uuid4(), "stop"))
+    assert resp.status_code == 200
+    assert stop.kwargs["force"] is False
+
+
+def test_stop_force_true_forwards_to_use_case() -> None:
+    # ?force=true threads force=True into the StopServer use case (issue #270).
+    community = uuid.uuid4()
+    stop = _FakeUseCase(result=_server(community))
+    app = _app(member=True, allow=True, stop=stop)
+    client = next(_client(app))
+    resp = client.post(_url(community, uuid.uuid4(), "stop"), params={"force": "true"})
+    assert resp.status_code == 200
+    assert stop.kwargs["force"] is True
 
 
 def test_command_not_running_is_409() -> None:
