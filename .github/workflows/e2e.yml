@@ -1,18 +1,21 @@
 name: e2e
 
-# Cross-language data-plane integration harness (issue #111): the REAL Go
-# data-plane client driven against the REAL Python API. Boots the API with
-# uvicorn (fs storage in a tmpdir, control plane disabled — the data-plane
-# endpoints need only Storage + the Worker credential, not the gRPC server),
-# migrates a Postgres service (the hydrate path's resolved-JAR lookup reads the
-# servers table), waits for /healthz, then runs the env-gated, e2e-tagged Go
-# test against it.
+# Cross-language e2e harness. Two independent jobs:
+#
+#   harness          — the data-plane integration harness (issue #111): the REAL
+#                      Go data-plane client driven against the REAL Python API.
+#   container-restart — the container-driver restart scenario (issue #234): the
+#                      REAL container ExecutionDriver driven against the REAL
+#                      Docker daemon (preinstalled on the runner), exercising the
+#                      create-vs-async-remover restart race the unit fakes cannot.
 
 on:
   pull_request:
     paths:
-      # The two surfaces the harness wires together, plus the workflow itself.
+      # The surfaces the harness wires together, plus the workflow itself.
       - "worker/internal/adapters/datatransfer/**"
+      - "worker/internal/adapters/containerdriver/**"
+      - "worker/internal/application/instancemanager/**"
       - "worker/test/e2e/**"
       - "api/src/mc_server_dashboard_api/dataplane/**"
       - "api/src/mc_server_dashboard_api/storage/**"
@@ -22,6 +25,8 @@ on:
     branches: [main]
     paths:
       - "worker/internal/adapters/datatransfer/**"
+      - "worker/internal/adapters/containerdriver/**"
+      - "worker/internal/application/instancemanager/**"
       - "worker/test/e2e/**"
       - "api/src/mc_server_dashboard_api/dataplane/**"
       - "api/src/mc_server_dashboard_api/storage/**"
@@ -127,3 +132,33 @@ jobs:
       - name: API log on failure
         if: failure()
         run: cat /tmp/uvicorn.log || true
+
+  # The container-driver restart scenario against the REAL Docker daemon
+  # preinstalled on the GitHub-hosted runner (issue #234). It needs neither the
+  # API nor Postgres — only the daemon — so it is a standalone job. The scenario
+  # is gated by MCD_E2E_DOCKER, which the harness job above leaves unset; here we
+  # set it and point MCD_E2E_STUB_IMAGE at the just-built stub image.
+  container-restart:
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per docs/dev/DEPENDENCIES.md.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go (caches the module + build cache)
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: worker/go.mod
+
+      # The stub image stands in for the Minecraft process: a `java` shim that
+      # ignores its args and blocks until SIGTERM, so the container stays running
+      # and stops cleanly (worker/test/e2e/stub).
+      - name: Build the stub server image
+        run: docker build -t mcsd-e2e-stub:latest worker/test/e2e/stub
+
+      - name: Run the container-driver restart scenario
+        working-directory: worker
+        env:
+          MCD_E2E_DOCKER: "1"
+          MCD_E2E_STUB_IMAGE: mcsd-e2e-stub:latest
+        run: go test -tags e2e -v -timeout 300s -run TestContainerRestart ./test/e2e/...

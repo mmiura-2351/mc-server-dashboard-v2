@@ -65,10 +65,13 @@ GOBIN="$(pwd)/.bin" go install github.com/golangci/golangci-lint/v2/cmd/golangci
 
 To auto-format instead of just checking: `gofmt -w .`.
 
-The default `go test ./...` deliberately excludes the cross-language data-plane
-harness under `test/e2e/`: it is behind the `e2e` build tag and skips unless
-`MCD_E2E_API_URL` and `MCD_E2E_CREDENTIAL` are set. See
-[Cross-language data-plane e2e](#cross-language-data-plane-e2e).
+The default `go test ./...` deliberately excludes the cross-language harnesses
+under `test/e2e/`: they are behind the `e2e` build tag and each skips unless its
+environment is set —
+[Cross-language data-plane e2e](#cross-language-data-plane-e2e) needs
+`MCD_E2E_API_URL` + `MCD_E2E_CREDENTIAL`, and
+[Container-driver restart e2e](#container-driver-restart-e2e) needs
+`MCD_E2E_DOCKER` + `MCD_E2E_STUB_IMAGE` (and a reachable Docker daemon).
 
 ## Cross-language data-plane e2e
 
@@ -97,8 +100,40 @@ uv run uvicorn mc_server_dashboard_api.app:create_app --factory \
 # 2. From worker/: run the e2e-tagged test against it.
 MCD_E2E_API_URL=http://127.0.0.1:8000 \
 MCD_E2E_CREDENTIAL=dev-secret \
-  go test -tags e2e -v ./test/e2e/...
+  go test -tags e2e -v -run TestSnapshotThenHydrateRoundTrip ./test/e2e/...
 ```
+
+## Container-driver restart e2e
+
+`test/e2e/restart_e2e_test.go` drives the **real** container `ExecutionDriver`
+against a **real** Docker daemon, restarting a server through the worker's
+command path (`StartServer` → `RestartServer`) and asserting it returns to
+running in a **new** container (issue #234). It is the structural guard for the
+create-vs-async-remover restart race (#226/#229/#233): three rounds of fixes each
+passed their unit fakes while the real daemon found a new interleaving, so this
+scenario needs a real daemon to reproduce the class.
+
+The scenario stands in for the Minecraft process with a tiny stub image
+(`test/e2e/stub/`): a `java` shim that ignores its args and blocks until SIGTERM,
+so the container stays running and `docker stop` ends it cleanly. It uses a unique
+per-run worker id and the deterministic `mcsd-<server-id>` container name, so its
+orphan sweep and cleanup touch only its own container — never another server on
+the host. CI runs it as the `container-restart` job in
+`.github/workflows/e2e.yml` (the GitHub-hosted runner has Docker preinstalled).
+
+```sh
+# 1. Build the stub image (once; rebuild if the Dockerfile changes).
+docker build -t mcsd-e2e-stub:latest worker/test/e2e/stub
+
+# 2. From worker/: run the restart scenario against the local daemon.
+MCD_E2E_DOCKER=1 \
+MCD_E2E_STUB_IMAGE=mcsd-e2e-stub:latest \
+  go test -tags e2e -v -timeout 300s -run TestContainerRestart ./test/e2e/...
+```
+
+On a host where Docker needs a group wrapper, prefix the commands with it
+(e.g. `sg docker -c "..."`). The test talks to the daemon over the default
+`unix:///var/run/docker.sock`.
 
 ## Configuration
 
