@@ -196,7 +196,7 @@ class RunReconcilerTick:
             action,
         )
         try:
-            await self._dispatch(server, action)
+            dispatched = await self._dispatch(server, action)
         except Exception as exc:  # noqa: BLE001 - never abort the tick
             self._record_failure(server.id, now)
             _LOG.warning(
@@ -206,10 +206,13 @@ class RunReconcilerTick:
                 exc,
             )
             return
-        # observed_state is re-read AFTER the dispatch: redispatch_start mutates the
-        # entity to running when it resolves an INVALID_STATE convergence, so a server
-        # that turned out to be running is NOT mistaken for a crash here.
-        if server.observed_state is ObservedState.CRASHED:
+        # Key the crash check off the entity the lifecycle use case RETURNS, not the
+        # stale list_reconcilable snapshot in `server`. redispatch_start loads its own
+        # entity and, on an INVALID_STATE convergence, records observed=running on THAT
+        # copy and returns it (lifecycle.py); the snapshot predates the dispatch and
+        # still reads CRASHED. Reading the returned entity is what keeps a server that
+        # genuinely converged to running from being miscounted as a crash here.
+        if dispatched.observed_state is ObservedState.CRASHED:
             # A start re-dispatched at a server still observed CRASHED is a RETRY of
             # a launch that evidently died: the dispatch succeeds (the Worker
             # launches the container) but the process crashes again, so the row stays
@@ -233,17 +236,20 @@ class RunReconcilerTick:
             "reconcile action %s succeeded for server %s", action, server.id.value
         )
 
-    async def _dispatch(self, server: Server, action: str) -> None:
+    async def _dispatch(self, server: Server, action: str) -> Server:
+        # Return the lifecycle's freshly-loaded entity so _run reads the post-dispatch
+        # observed_state (e.g. running after an INVALID_STATE convergence), not the
+        # stale list_reconcilable snapshot.
         if action == "place_and_start":
-            await self.start_server.place_and_start(
+            return await self.start_server.place_and_start(
                 community_id=server.community_id, server_id=server.id
             )
         elif action == "redispatch_start":
-            await self.start_server.redispatch_start(
+            return await self.start_server.redispatch_start(
                 community_id=server.community_id, server_id=server.id
             )
         else:  # redispatch_stop
-            await self.stop_server.redispatch_stop(
+            return await self.stop_server.redispatch_stop(
                 community_id=server.community_id, server_id=server.id
             )
 

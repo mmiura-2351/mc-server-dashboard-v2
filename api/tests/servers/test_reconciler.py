@@ -11,7 +11,10 @@ reconnect rebuild owns it).
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
+
+import pytest
 
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
@@ -518,3 +521,42 @@ async def test_invalid_state_convergence_stops_reselecting_the_row() -> None:
     cp.dispatched.clear()
     await reconciler.tick()
     assert cp.dispatched == []
+
+
+async def test_invalid_state_convergence_from_crashed_does_not_back_off(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Re-review regression (#343): desired=running, assigned, observed=CRASHED past
+    # grace. The redispatch succeeds via INVALID_STATE -- the Worker is already
+    # running the server and rejects the double-start, so redispatch_start records
+    # observed=running on its freshly-loaded entity. That server GENUINELY converged
+    # to running; it must NOT be miscounted as a crash. The post-dispatch crash check
+    # must read the entity the lifecycle returns (observed=running), not the stale
+    # list_reconcilable snapshot (still CRASHED) -- otherwise a spurious _record_failure
+    # fires and a false "crash-looping ... backing off" WARN is logged.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcomes={
+            "start": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="running"
+            )
+        }
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    # The convergence recorded observed=running; no backoff entry was created.
+    assert uow.servers.by_id[server.id].observed_state is ObservedState.RUNNING
+    assert server.id not in reconciler._attempts
+    # No spurious crash-looping warning.
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
