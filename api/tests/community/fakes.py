@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Sequence
 
 from mc_server_dashboard_api.community.domain.entities import (
     Community,
@@ -108,12 +109,22 @@ class FakeMembershipRepository(MembershipRepository):
 class FakeRoleRepository(RoleRepository):
     def __init__(self) -> None:
         self.by_id: dict[RoleId, Role] = {}
+        # Spies for the N+1 query-count assertion (issue #321).
+        self.get_by_id_calls = 0
+        self.get_by_ids_calls = 0
 
     async def add(self, role: Role) -> None:
         self.by_id[role.id] = role
 
     async def get_by_id(self, role_id: RoleId) -> Role | None:
+        self.get_by_id_calls += 1
         return self.by_id.get(role_id)
+
+    async def get_by_ids(self, role_ids: Sequence[RoleId]) -> list[Role]:
+        self.get_by_ids_calls += 1
+        if not role_ids:
+            return []
+        return [self.by_id[rid] for rid in role_ids if rid in self.by_id]
 
     async def list_for_community(self, community_id: CommunityId) -> list[Role]:
         return [r for r in self.by_id.values() if r.community_id == community_id]

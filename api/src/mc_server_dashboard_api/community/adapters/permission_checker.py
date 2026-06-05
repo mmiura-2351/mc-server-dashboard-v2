@@ -71,10 +71,9 @@ class RoleGrantPermissionChecker(PermissionChecker):
                 return set()
 
             effective: set[Permission] = set()
-            for role_id in await uow.memberships.list_role_ids(membership.id):
-                role = await uow.roles.get_by_id(role_id)
-                if role is not None:
-                    effective |= role.permissions
+            role_ids = await uow.memberships.list_role_ids(membership.id)
+            for role in await uow.roles.get_by_ids(role_ids):
+                effective |= role.permissions
 
             if resource.resource_type is not None and resource.resource_id is not None:
                 grant = await uow.resource_grants.get_for_user_resource(
