@@ -15,7 +15,11 @@ import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import replace
 
-from mc_server_dashboard_api.servers.domain.backup import Backup, BackupId
+from mc_server_dashboard_api.servers.domain.backup import (
+    Backup,
+    BackupId,
+    BackupStatistics,
+)
 from mc_server_dashboard_api.servers.domain.backup_repository import (
     BackupRepository,
 )
@@ -405,6 +409,18 @@ class FakeBackupRepository(BackupRepository):
     async def delete(self, backup_id: BackupId) -> None:
         self.by_id.pop(backup_id, None)
 
+    async def global_statistics(self) -> BackupStatistics:
+        rows = list(self.by_id.values())
+        known = [b.size_bytes for b in rows if b.size_bytes is not None]
+        times = [b.created_at for b in rows]
+        return BackupStatistics(
+            count=len(rows),
+            total_bytes=sum(known),
+            unknown_size_count=len(rows) - len(known),
+            newest=max(times) if times else None,
+            oldest=min(times) if times else None,
+        )
+
 
 class FakeGroupRepository(GroupRepository):
     """In-memory player-group store + attachment join (issue #276).
@@ -661,9 +677,12 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     def __init__(self, *, missing: bool = False) -> None:
         self._missing = missing
         self.archives: set[str] = set()
+        # Bytes per stored archive, so open/store/size round-trip in tests.
+        self.bytes_by_ref: dict[str, bytes] = {}
         self.created: list[ServerId] = []
         self.restored: list[tuple[ServerId, str]] = []
         self.deleted: list[tuple[ServerId, str]] = []
+        self.stored: list[ServerId] = []
         self._counter = 0
 
     async def create_from_current(
@@ -674,6 +693,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self._counter += 1
         ref = f"archive-{self._counter}"
         self.archives.add(ref)
+        self.bytes_by_ref[ref] = b"archive-bytes"
         self.created.append(server_id)
         return ref
 
@@ -688,4 +708,34 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> None:
         self.archives.discard(storage_ref)
+        self.bytes_by_ref.pop(storage_ref, None)
         self.deleted.append((server_id, storage_ref))
+
+    async def open(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> AsyncIterator[bytes]:
+        if storage_ref not in self.archives:
+            raise BackupNotFoundError(storage_ref)
+        yield self.bytes_by_ref[storage_ref]
+
+    async def store(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        stream: AsyncIterator[bytes],
+    ) -> str:
+        self._counter += 1
+        ref = f"archive-{self._counter}"
+        data = b"".join([chunk async for chunk in stream])
+        self.archives.add(ref)
+        self.bytes_by_ref[ref] = data
+        self.stored.append(server_id)
+        return ref
+
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        if storage_ref not in self.archives:
+            raise BackupNotFoundError(storage_ref)
+        return len(self.bytes_by_ref[storage_ref])

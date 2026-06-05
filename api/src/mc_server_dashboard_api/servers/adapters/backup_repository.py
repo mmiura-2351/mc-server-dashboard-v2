@@ -8,7 +8,7 @@ entity here.
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.backup_models import BackupModel
@@ -16,6 +16,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupId,
     BackupSource,
+    BackupStatistics,
 )
 from mc_server_dashboard_api.servers.domain.backup_repository import (
     BackupRepository,
@@ -70,3 +71,24 @@ class SqlAlchemyBackupRepository(BackupRepository):
     async def delete(self, backup_id: BackupId) -> None:
         stmt = delete(BackupModel).where(BackupModel.id == backup_id.value)
         await self._session.execute(stmt)
+
+    async def global_statistics(self) -> BackupStatistics:
+        # One aggregate query over the whole table: count, summed known sizes, the
+        # NULL-size count (legacy rows, excluded from the sum), and the time bounds.
+        stmt = select(
+            func.count(),
+            func.coalesce(func.sum(BackupModel.size_bytes), 0),
+            func.count().filter(BackupModel.size_bytes.is_(None)),
+            func.max(BackupModel.created_at),
+            func.min(BackupModel.created_at),
+        )
+        count, total_bytes, unknown, newest, oldest = (
+            await self._session.execute(stmt)
+        ).one()
+        return BackupStatistics(
+            count=count,
+            total_bytes=int(total_bytes),
+            unknown_size_count=unknown,
+            newest=newest,
+            oldest=oldest,
+        )

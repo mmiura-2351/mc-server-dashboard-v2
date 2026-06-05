@@ -36,11 +36,18 @@ retry.
 
 from __future__ import annotations
 
+import io
+import tarfile
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
+)
+from mc_server_dashboard_api.servers.application.files import (
+    MAX_ARCHIVE_ENTRIES,
+    MAX_UPLOAD_BYTES,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
@@ -49,6 +56,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupId,
     BackupSource,
+    BackupStatistics,
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
@@ -59,6 +67,8 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupUnsettledError,
+    FileTooLargeError,
+    InvalidBackupArchiveError,
     ServerNotFoundError,
     ServerNotStoppedError,
 )
@@ -73,6 +83,10 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 # The RCON line that flushes the live world to disk before a running-server
 # snapshot, so the archived working set is consistent (Section 6.9, FR-BAK-2).
 _SAVE_ALL_LINE = "save-all flush"
+
+# How much to stream per chunk when handing the uploaded archive to Storage; one
+# bounded block in flight, never the whole archive re-buffered.
+_UPLOAD_STREAM_CHUNK = 1024 * 1024
 
 
 async def _load(
@@ -128,11 +142,16 @@ class CreateBackup:
         storage_ref = await self.backup_store.create_from_current(
             community_id=community_id, server_id=server_id
         )
+        # Record the archive size now that it exists, so the row carries it (older
+        # rows predate this and stay NULL — reported as unknown in stats, #281).
+        size_bytes = await self.backup_store.size(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
         backup = Backup(
             id=BackupId.new(),
             server_id=server_id,
             storage_ref=storage_ref,
-            size_bytes=None,
+            size_bytes=size_bytes,
             source=source,
             created_by=created_by,
             created_at=self.clock.now(),
@@ -251,3 +270,199 @@ class DeleteBackup:
         async with self.uow:
             await self.uow.backups.delete(backup_id)
             await self.uow.commit()
+
+
+async def _load_backup(
+    uow: UnitOfWork,
+    community_id: CommunityId,
+    server_id: ServerId,
+    backup_id: BackupId,
+) -> Backup:
+    """Load a community-scoped backup, 404ing an unknown or cross-server id."""
+
+    async with uow:
+        await _load(uow, community_id, server_id)
+        backup = await uow.backups.get_by_id(backup_id)
+        if backup is None or backup.server_id != server_id:
+            raise BackupNotFoundError(str(backup_id.value))
+        return backup
+
+
+@dataclass(frozen=True)
+class DownloadBackup:
+    """Stream a backup archive in its native format (backup:read, issue #281).
+
+    Resolves the (community-scoped) backup, then opens a read stream over the
+    stored archive bytes through the :class:`BackupArchiveStore` seam — no
+    recompression, the exact stored ``tar.gz`` bytes. An unknown / cross-server
+    backup is :class:`BackupNotFoundError` (the edge 404s, no existence signal).
+    """
+
+    uow: UnitOfWork
+    backup_store: BackupArchiveStore
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        backup_id: BackupId,
+    ) -> AsyncIterator[bytes]:
+        backup = await _load_backup(self.uow, community_id, server_id, backup_id)
+        return self.backup_store.open(
+            community_id=community_id,
+            server_id=server_id,
+            storage_ref=backup.storage_ref,
+        )
+
+
+@dataclass(frozen=True)
+class UploadBackup:
+    """Store an off-host backup archive as a new restorable backup (issue #281).
+
+    The archive is VALIDATED before it is stored: bounded by ``max_bytes``
+    (:class:`FileTooLargeError` -> 413) and proven to open as a gzip tar whose
+    every member is a traversal-safe relative path
+    (:class:`InvalidBackupArchiveError` -> 422). Only then is it streamed into
+    Storage verbatim (no recompression), its size recorded, and a ``source=uploaded``
+    metadata row committed — so an uploaded backup is restorable through the exact
+    same restore flow as a created one.
+
+    The caps are fields so a test can inject a tiny cap and trip the guard with a
+    small archive; production wiring uses the defaults.
+    """
+
+    uow: UnitOfWork
+    backup_store: BackupArchiveStore
+    clock: Clock
+    max_bytes: int = MAX_UPLOAD_BYTES
+    max_entries: int = MAX_ARCHIVE_ENTRIES
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        content: bytes,
+        created_by: uuid.UUID | None = None,
+    ) -> Backup:
+        async with self.uow:
+            await _load(self.uow, community_id, server_id)
+
+        if len(content) > self.max_bytes:
+            raise FileTooLargeError(str(len(content)))
+        _validate_backup_archive(content, max_entries=self.max_entries)
+
+        storage_ref = await self.backup_store.store(
+            community_id=community_id,
+            server_id=server_id,
+            stream=_chunked(content),
+        )
+        backup = Backup(
+            id=BackupId.new(),
+            server_id=server_id,
+            storage_ref=storage_ref,
+            size_bytes=len(content),
+            source=BackupSource.UPLOADED,
+            created_by=created_by,
+            created_at=self.clock.now(),
+        )
+        async with self.uow:
+            await self.uow.backups.add(backup)
+            await self.uow.commit()
+        return backup
+
+
+@dataclass(frozen=True)
+class ServerBackupStatistics:
+    """Per-server backup usage: count, bytes, newest/oldest (backup:read, #281).
+
+    Community-scoped (loads the community-checked server first). ``total_bytes``
+    sums only the rows whose ``size_bytes`` is recorded; legacy NULL-size rows are
+    counted in ``unknown_size_count`` and excluded from the total — an honest
+    "unknown" rather than a wrong sum.
+    """
+
+    uow: UnitOfWork
+
+    async def __call__(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> BackupStatistics:
+        async with self.uow:
+            await _load(self.uow, community_id, server_id)
+            rows = await self.uow.backups.list_for_server(server_id)
+        return _aggregate(rows)
+
+
+@dataclass(frozen=True)
+class GlobalBackupStatistics:
+    """Platform-wide backup usage (platform-admin, issue #281).
+
+    The smallest honest global shape: total count, summed known bytes, the
+    NULL-size (legacy/unknown) count, and the newest/oldest timestamps across the
+    whole platform. Gated by the platform-admin axis at the edge, so no community
+    scope applies.
+    """
+
+    uow: UnitOfWork
+
+    async def __call__(self) -> BackupStatistics:
+        async with self.uow:
+            return await self.uow.backups.global_statistics()
+
+
+def _aggregate(rows: list[Backup]) -> BackupStatistics:
+    known = [b.size_bytes for b in rows if b.size_bytes is not None]
+    times = [b.created_at for b in rows]
+    return BackupStatistics(
+        count=len(rows),
+        total_bytes=sum(known),
+        unknown_size_count=len(rows) - len(known),
+        newest=max(times) if times else None,
+        oldest=min(times) if times else None,
+    )
+
+
+async def _chunked(content: bytes) -> AsyncIterator[bytes]:
+    for start in range(0, len(content), _UPLOAD_STREAM_CHUNK):
+        yield content[start : start + _UPLOAD_STREAM_CHUNK]
+
+
+def _validate_backup_archive(content: bytes, *, max_entries: int) -> None:
+    """Prove the upload is a traversal-safe gzip tar before it is stored (#281).
+
+    Backups are self-contained ``tar.gz`` archives (STORAGE.md Section 2). The
+    archive must open as a gzip tar, carry at most ``max_entries`` members, and
+    every member must be a regular file or directory with a relative, non-escaping
+    name (no absolute paths, no ``..``, no devices / symlink / hardlink members) —
+    the same traversal discipline Storage's extraction enforces, applied here so a
+    hostile archive is refused BEFORE it lands in the store. Raises
+    :class:`InvalidBackupArchiveError` (422) on any violation.
+    """
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tar:
+            count = 0
+            for member in tar:
+                count += 1
+                if count > max_entries:
+                    raise InvalidBackupArchiveError("too many entries")
+                if not (member.isfile() or member.isdir()):
+                    raise InvalidBackupArchiveError(
+                        f"unsafe member type: {member.name!r}"
+                    )
+                if _is_unsafe_member_name(member.name):
+                    raise InvalidBackupArchiveError(
+                        f"unsafe member path: {member.name!r}"
+                    )
+    except tarfile.TarError as exc:
+        raise InvalidBackupArchiveError("not a gzip tar archive") from exc
+
+
+def _is_unsafe_member_name(name: str) -> bool:
+    """True if a tar member name is absolute or escapes the extraction root."""
+
+    if name.startswith("/"):
+        return True
+    parts = name.replace("\\", "/").split("/")
+    return ".." in parts

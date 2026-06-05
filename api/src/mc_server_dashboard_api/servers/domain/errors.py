@@ -236,6 +236,17 @@ class InvalidBackupScheduleError(ServerError):
     """
 
 
+class InvalidBackupArchiveError(ServerError):
+    """An uploaded backup archive was not a valid, traversal-safe ``tar.gz`` (#281).
+
+    The upload validates the archive BEFORE storing it: it must open as a gzip tar
+    and every member must be a traversal-safe relative path (no absolute paths, no
+    ``..`` escapes, no devices/symlink/hardlink members). A body that does not open
+    as a tar.gz, or that carries an unsafe member, is rejected here so a hostile
+    archive never lands in the store. The edge maps this to 422.
+    """
+
+
 class InvalidExportMetadataError(ServerError):
     """A server-import archive carried a missing/malformed ``export_metadata.json``.
 

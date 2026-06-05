@@ -15,6 +15,7 @@ BackupNotFoundError).
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -117,3 +118,60 @@ async def test_delete_is_idempotent(tmp_path: Path) -> None:
     await adapter.delete(community_id=community, server_id=server, storage_ref=ref)
     # A second delete of the same (now-missing) ref is a no-op, not an error.
     await adapter.delete(community_id=community, server_id=server, storage_ref=ref)
+
+
+async def test_open_then_store_to_another_server_restores(tmp_path: Path) -> None:
+    """The seam's download (open) + upload (store) round-trip across servers: the
+    archive bytes stream out of one server and into another, restorable there."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"server.properties": b"motd=original"})
+    ref = await adapter.create_from_current(community_id=community, server_id=server)
+
+    archive = await drain(
+        adapter.open(community_id=community, server_id=server, storage_ref=ref)
+    )
+
+    other_community, other_server = _scope()
+    new_ref = await adapter.store(
+        community_id=other_community,
+        server_id=other_server,
+        stream=_stream_of(archive),
+    )
+    await adapter.restore(
+        community_id=other_community, server_id=other_server, storage_ref=new_ref
+    )
+    assert (await _hydrate(storage, other_community, other_server))[
+        "server.properties"
+    ] == b"motd=original"
+
+
+async def test_open_unknown_ref_translates_to_backup_not_found(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    with pytest.raises(BackupNotFoundError):
+        await drain(
+            adapter.open(community_id=community, server_id=server, storage_ref="nope")
+        )
+
+
+async def test_size_reports_archive_byte_count(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"a": b"1"})
+    ref = await adapter.create_from_current(community_id=community, server_id=server)
+    archive = await drain(
+        adapter.open(community_id=community, server_id=server, storage_ref=ref)
+    )
+    size = await adapter.size(community_id=community, server_id=server, storage_ref=ref)
+    assert size == len(archive)
+
+
+async def _stream_of(data: bytes) -> AsyncIterator[bytes]:
+    yield data

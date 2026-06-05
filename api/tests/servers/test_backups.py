@@ -26,8 +26,12 @@ import pytest
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
     DeleteBackup,
+    DownloadBackup,
+    GlobalBackupStatistics,
     ListBackups,
     RestoreBackup,
+    ServerBackupStatistics,
+    UploadBackup,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
@@ -46,6 +50,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupUnsettledError,
     CommandDispatchError,
+    FileTooLargeError,
+    InvalidBackupArchiveError,
     ServerNotFoundError,
     ServerNotStoppedError,
 )
@@ -441,3 +447,240 @@ async def test_delete_unknown_backup_is_not_found() -> None:
         await DeleteBackup(uow=uow, backup_store=FakeBackupArchiveStore())(
             community_id=_COMMUNITY, server_id=server.id, backup_id=BackupId.new()
         )
+
+
+# --- download / upload / statistics (issue #281) ---------------------------
+
+
+def _targz(files: dict[str, bytes]) -> bytes:
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _hostile_targz() -> bytes:
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        data = b"pwned"
+        info = tarfile.TarInfo(name="../../etc/escape")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _seed_backup(
+    backups: FakeBackupRepository,
+    archive: FakeBackupArchiveStore,
+    server_id: ServerId,
+    *,
+    storage_ref: str,
+    size_bytes: int | None,
+    created_at: dt.datetime = _NOW,
+) -> Backup:
+    backup = Backup(
+        id=BackupId.new(),
+        server_id=server_id,
+        storage_ref=storage_ref,
+        size_bytes=size_bytes,
+        source=BackupSource.MANUAL,
+        created_by=None,
+        created_at=created_at,
+    )
+    backups.seed(backup)
+    archive.archives.add(storage_ref)
+    archive.bytes_by_ref[storage_ref] = b"x" * (size_bytes or 0)
+    return backup
+
+
+async def test_download_streams_archive_for_known_backup() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    backup = _seed_backup(backups, archive, server.id, storage_ref="ref", size_bytes=5)
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    stream = await DownloadBackup(uow=uow, backup_store=archive)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+    blob = b"".join([chunk async for chunk in stream])
+    assert blob == b"x" * 5
+
+
+async def test_download_unknown_backup_is_not_found() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    uow = FakeUnitOfWork(servers=repo)
+    with pytest.raises(BackupNotFoundError):
+        await DownloadBackup(uow=uow, backup_store=FakeBackupArchiveStore())(
+            community_id=_COMMUNITY, server_id=server.id, backup_id=BackupId.new()
+        )
+
+
+async def test_download_cross_server_backup_is_not_found() -> None:
+    server = _at_rest()
+    other = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    repo.seed(other)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    foreign = _seed_backup(backups, archive, other.id, storage_ref="ref", size_bytes=3)
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+    with pytest.raises(BackupNotFoundError):
+        await DownloadBackup(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY, server_id=server.id, backup_id=foreign.id
+        )
+
+
+async def test_upload_validates_stores_and_records_uploaded_row() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+    content = _targz({"server.properties": b"k=v", "world/level.dat": b"w"})
+    actor = uuid.uuid4()
+
+    backup = await UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        content=content,
+        created_by=actor,
+    )
+
+    assert backup.source is BackupSource.UPLOADED
+    assert backup.created_by == actor
+    assert backup.size_bytes == len(content)
+    assert archive.stored == [server.id]
+    # The stored bytes are the uploaded archive verbatim (no recompression).
+    assert archive.bytes_by_ref[backup.storage_ref] == content
+    assert await uow.backups.get_by_id(backup.id) is not None
+
+
+async def test_upload_rejects_non_archive_before_storing() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    archive = FakeBackupArchiveStore()
+    uow = FakeUnitOfWork(servers=repo)
+    with pytest.raises(InvalidBackupArchiveError):
+        await UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            content=b"not a tar.gz",
+            created_by=uuid.uuid4(),
+        )
+    assert archive.stored == []
+
+
+async def test_upload_rejects_traversal_member_before_storing() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    archive = FakeBackupArchiveStore()
+    uow = FakeUnitOfWork(servers=repo)
+    with pytest.raises(InvalidBackupArchiveError):
+        await UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            content=_hostile_targz(),
+            created_by=uuid.uuid4(),
+        )
+    assert archive.stored == []
+
+
+async def test_upload_over_cap_is_rejected_before_storing() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    archive = FakeBackupArchiveStore()
+    uow = FakeUnitOfWork(servers=repo)
+    content = _targz({"big": b"x" * 4096})
+    with pytest.raises(FileTooLargeError):
+        await UploadBackup(
+            uow=uow, backup_store=archive, clock=FakeClock(_NOW), max_bytes=16
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            content=content,
+            created_by=uuid.uuid4(),
+        )
+    assert archive.stored == []
+
+
+async def test_server_statistics_aggregates_count_bytes_and_bounds() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    older = _NOW - dt.timedelta(days=1)
+    _seed_backup(
+        backups, archive, server.id, storage_ref="a", size_bytes=10, created_at=older
+    )
+    _seed_backup(
+        backups, archive, server.id, storage_ref="b", size_bytes=20, created_at=_NOW
+    )
+    # A legacy NULL-size row: excluded from total_bytes, counted as unknown.
+    _seed_backup(
+        backups, archive, server.id, storage_ref="c", size_bytes=None, created_at=_NOW
+    )
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    stats = await ServerBackupStatistics(uow=uow)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+    assert stats.count == 3
+    assert stats.total_bytes == 30
+    assert stats.unknown_size_count == 1
+    assert stats.newest == _NOW
+    assert stats.oldest == older
+
+
+async def test_server_statistics_empty_is_zero() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    uow = FakeUnitOfWork(servers=repo)
+    stats = await ServerBackupStatistics(uow=uow)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+    assert stats.count == 0
+    assert stats.total_bytes == 0
+    assert stats.unknown_size_count == 0
+    assert stats.newest is None and stats.oldest is None
+
+
+async def test_server_statistics_unknown_server_is_not_found() -> None:
+    uow = FakeUnitOfWork()
+    with pytest.raises(ServerNotFoundError):
+        await ServerBackupStatistics(uow=uow)(
+            community_id=_COMMUNITY, server_id=ServerId.new()
+        )
+
+
+async def test_global_statistics_aggregates_across_servers() -> None:
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    s1, s2 = ServerId.new(), ServerId.new()
+    _seed_backup(backups, archive, s1, storage_ref="a", size_bytes=10)
+    _seed_backup(backups, archive, s2, storage_ref="b", size_bytes=5)
+    uow = FakeUnitOfWork(backups=backups)
+    stats = await GlobalBackupStatistics(uow=uow)()
+    assert stats.count == 2
+    assert stats.total_bytes == 15
+    assert stats.unknown_size_count == 0

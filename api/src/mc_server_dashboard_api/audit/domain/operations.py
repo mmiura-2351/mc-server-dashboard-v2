@@ -73,10 +73,15 @@ SERVER_COMMAND: Final = "server:command"
 SERVER_EXPORT: Final = "server:export"
 SERVER_IMPORT: Final = "server:import"
 
-# Backup create/restore/delete (FR-BAK-*).
+# Backup create/restore/delete + transfer (FR-BAK-*). Upload/download (issue #281)
+# name the operation, not a permission: upload is gated by backup:create and
+# download by backup:read; there is no backup:upload / backup:download permission
+# in the catalog. The ``operation`` column is free text (see module docstring).
 BACKUP_CREATE: Final = "backup:create"
 BACKUP_RESTORE: Final = "backup:restore"
 BACKUP_DELETE: Final = "backup:delete"
+BACKUP_UPLOAD: Final = "backup:upload"
+BACKUP_DOWNLOAD: Final = "backup:download"
 
 # File upload / download / rename / delete / mkdir / search (FR-FILE-*, issue
 # #259). Recorded under the file:edit / file:read permissions they require.

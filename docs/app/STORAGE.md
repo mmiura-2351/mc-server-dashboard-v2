@@ -173,10 +173,11 @@ Communities.
 The API never deletes JARs implicitly in M1 (a JAR may be referenced by any
 server). JAR garbage collection is a deferred concern (Section 8.5).
 
-### 3.3 Backup archive create / list / restore / delete
+### 3.3 Backup archive create / list / restore / delete / transfer
 
-Serve backup management (FR-BAK-1, FR-BAK-2, FR-BAK-4). A backup is a
-self-contained archive of a working set; it does not depend on a Worker.
+Serve backup management (FR-BAK-1, FR-BAK-2, FR-BAK-4) and off-host transfer
+(issue #281). A backup is a self-contained archive of a working set; it does not
+depend on a Worker.
 
 | Operation | Purpose | Notes |
 |---|---|---|
@@ -184,6 +185,9 @@ self-contained archive of a working set; it does not depend on a Worker.
 | `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (#15); this returns the keys. |
 | `restore_backup(community_id, server_id, BackupKey)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. |
 | `delete_backup(community_id, server_id, BackupKey)` | Remove a backup archive | Idempotent. |
+| `open_backup(community_id, server_id, BackupKey) -> ReadStream` | Stream a stored archive in its native format | Download (issue #281): yields the archive bytes **verbatim** — the adapter-internal `tar.gz` (Section 2), no recompression. `NotFoundError` for an unknown key. |
+| `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload (issue #281): the **application** has already validated the archive (opens + traversal-safe entries) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. |
+| `backup_size(community_id, server_id, BackupKey) -> int` | Report a stored archive's byte count | The size recorded as `size_bytes` at create/upload (issue #281). `NotFoundError` for an unknown key. |
 
 ### 3.4 File read / edit on the authoritative copy
 

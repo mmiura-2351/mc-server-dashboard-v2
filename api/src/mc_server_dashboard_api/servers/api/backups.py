@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import uuid
 from typing import Annotated
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -30,17 +32,32 @@ from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
     get_create_backup,
     get_delete_backup,
+    get_download_backup,
+    get_global_backup_statistics,
     get_list_backups,
     get_restore_backup,
+    get_server_backup_statistics,
+    get_upload_backup,
     require_permission,
+    require_platform_admin,
 )
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
     DeleteBackup,
+    DownloadBackup,
+    GlobalBackupStatistics,
     ListBackups,
     RestoreBackup,
+    ServerBackupStatistics,
+    UploadBackup,
 )
-from mc_server_dashboard_api.servers.domain.backup import Backup, BackupId, BackupSource
+from mc_server_dashboard_api.servers.application.files import MAX_UPLOAD_BYTES
+from mc_server_dashboard_api.servers.domain.backup import (
+    Backup,
+    BackupId,
+    BackupSource,
+    BackupStatistics,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
@@ -48,6 +65,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupUnsettledError,
     CommandDispatchError,
+    FileTooLargeError,
+    InvalidBackupArchiveError,
     ServerNotFoundError,
     ServerNotStoppedError,
 )
@@ -56,6 +75,15 @@ from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, Se
 router = APIRouter()
 
 _SERVER_RESOURCE_TYPE = "server"
+
+# How much to pull per chunk when buffering the multipart upload, so an over-cap
+# body is refused as soon as the running count crosses MAX_UPLOAD_BYTES rather
+# than materializing the whole part first (mirroring the files upload edge).
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+# Backups are self-contained gzip tar archives (STORAGE.md Section 2); download
+# streams the native bytes with this content type and a ``.tar.gz`` attachment.
+_BACKUP_MEDIA_TYPE = "application/gzip"
 
 
 class BackupResponse(BaseModel):
@@ -82,6 +110,30 @@ class BackupResponse(BaseModel):
 
 class BackupListResponse(BaseModel):
     backups: list[BackupResponse]
+
+
+class BackupStatisticsResponse(BaseModel):
+    """Backup usage for a scope (one server, or the whole platform; issue #281).
+
+    ``total_bytes`` sums only the rows with a recorded ``size_bytes``;
+    ``unknown_size_count`` is the number of legacy NULL-size rows excluded from it.
+    """
+
+    count: int
+    total_bytes: int
+    unknown_size_count: int
+    newest: str | None
+    oldest: str | None
+
+    @classmethod
+    def from_stats(cls, stats: BackupStatistics) -> "BackupStatisticsResponse":
+        return cls(
+            count=stats.count,
+            total_bytes=stats.total_bytes,
+            unknown_size_count=stats.unknown_size_count,
+            newest=stats.newest.isoformat() if stats.newest is not None else None,
+            oldest=stats.oldest.isoformat() if stats.oldest is not None else None,
+        )
 
 
 @router.post(
@@ -265,6 +317,183 @@ async def delete_backup(
     await _record(recorder, ops.BACKUP_DELETE, authorized, community_id, backup_id)
 
 
+@router.get(
+    "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download",
+)
+async def download_backup(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    backup_id: uuid.UUID,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("backup:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[DownloadBackup, Depends(get_download_backup)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> StreamingResponse:
+    """Stream a backup archive in its native ``tar.gz`` format (backup:read, #281).
+
+    No recompression: the exact stored bytes stream out with a ``.tar.gz``
+    attachment. An unknown / cross-community backup is 404 (no existence signal).
+    """
+
+    try:
+        stream = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            backup_id=BackupId(backup_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except BackupNotFoundError as exc:
+        raise _not_found() from exc
+    await _record(recorder, ops.BACKUP_DOWNLOAD, authorized, community_id, backup_id)
+    return StreamingResponse(
+        stream,
+        media_type=_BACKUP_MEDIA_TYPE,
+        headers={"Content-Disposition": _content_disposition(f"{backup_id}.tar.gz")},
+    )
+
+
+@router.post(
+    "/communities/{community_id}/servers/{server_id}/backups/upload",
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_backup(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    file: UploadFile,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("backup:create"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[UploadBackup, Depends(get_upload_backup)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> BackupResponse:
+    """Upload an off-host backup archive as a new restorable backup (backup:create).
+
+    The multipart body is buffered with the chunked pre-buffer cap (over-cap -> 413
+    before the whole body is materialized); the use case then validates the archive
+    (opens + traversal-safe entries) before storing it. A non-archive / unsafe
+    member is 422; an over-cap archive is 413.
+    """
+
+    content = await _read_capped_upload(file)
+    try:
+        backup = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            content=content,
+            created_by=authorized.user_id.value,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except FileTooLargeError as exc:
+        raise _too_large() from exc
+    except InvalidBackupArchiveError as exc:
+        raise _unprocessable("invalid_archive") from exc
+    await _record(
+        recorder, ops.BACKUP_UPLOAD, authorized, community_id, backup.id.value
+    )
+    return BackupResponse.from_backup(backup)
+
+
+@router.get(
+    "/communities/{community_id}/servers/{server_id}/backups/statistics",
+)
+async def server_backup_statistics(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("backup:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ServerBackupStatistics, Depends(get_server_backup_statistics)],
+) -> BackupStatisticsResponse:
+    """A server's backup usage: count, bytes, newest/oldest (backup:read, #281)."""
+
+    try:
+        stats = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    return BackupStatisticsResponse.from_stats(stats)
+
+
+@router.get("/backups/statistics", dependencies=[Depends(require_platform_admin)])
+async def global_backup_statistics(
+    use_case: Annotated[GlobalBackupStatistics, Depends(get_global_backup_statistics)],
+) -> BackupStatisticsResponse:
+    """Platform-wide backup usage (platform-admin axis, issue #281).
+
+    The smallest honest global shape: total count, summed known bytes, the
+    NULL-size (unknown) count, and the newest/oldest timestamps across the whole
+    platform. Gated by the platform-admin flag (non-admin -> 403), like /workers.
+    """
+
+    stats = await use_case()
+    return BackupStatisticsResponse.from_stats(stats)
+
+
+async def _read_capped_upload(file: UploadFile) -> bytes:
+    """Pull the multipart body in chunks, aborting with 413 past the upload cap.
+
+    Reading in bounded chunks and checking the running count after each lets an
+    over-cap upload be refused as soon as the count crosses MAX_UPLOAD_BYTES,
+    rather than materializing a body far larger than the cap (mirroring the files
+    upload edge). The use case re-checks the cap, so this is the edge's early-out.
+    """
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise _too_large()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _content_disposition(filename: str) -> str:
+    """Build an attachment Content-Disposition header (RFC 6266 / RFC 5987).
+
+    Emits an ASCII-only ``filename`` fallback plus an RFC 5987 ``filename*`` with
+    the UTF-8 percent-encoded original, the #262 hardening (a crafted name cannot
+    inject extra header params or 500 on a non-latin-1 char). Backup names are
+    UUIDs, so this is straightforward here, but the helper keeps the same posture
+    as the files download edge.
+    """
+
+    ascii_fallback = "".join(
+        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_" for c in filename
+    )
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
+
+
 async def _record(
     recorder: AuditRecorder,
     operation: str,
@@ -334,3 +563,17 @@ def _not_found() -> HTTPException:
     # Keep the no-existence-signal posture (Section 6.4): a server/backup outside
     # this community 404s the same as a wholly unknown one.
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+
+
+def _too_large() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail={"reason": "too_large"},
+    )
+
+
+def _unprocessable(reason: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={"reason": reason},
+    )

@@ -223,6 +223,59 @@ async def test_delete_backup_is_idempotent(harness: StorageHarness) -> None:
     await harness.storage.delete_backup(community, server, key)  # no raise
 
 
+# --- backup transfer: open / put / size (Section 3.3, issue #281) -----------
+
+
+async def test_open_backup_streams_native_archive_round_trips_via_put(
+    harness: StorageHarness,
+) -> None:
+    """Download (open) then re-upload (put) yields a restorable backup: the bytes
+    stream out and back in verbatim, no recompression."""
+
+    community, server = new_scope()
+    original = {"server.properties": b"k=v", "world/level.dat": b"world"}
+    await harness.publish(community, server, original)
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    archive = await drain(harness.storage.open_backup(community, server, key))
+
+    # Upload the same archive bytes to a DIFFERENT server, then restore it.
+    other_community, other_server = new_scope()
+    new_key = await harness.storage.put_backup(
+        other_community, other_server, stream_of(archive)
+    )
+    assert new_key in await harness.storage.list_backups(other_community, other_server)
+    await harness.storage.restore_backup(other_community, other_server, new_key)
+
+    blob = await drain(
+        harness.storage.open_hydrate_source(other_community, other_server)
+    )
+    assert read_tar(blob) == original
+
+
+async def test_open_unknown_backup_is_not_found(harness: StorageHarness) -> None:
+    community, server = new_scope()
+    with pytest.raises(NotFoundError):
+        await drain(harness.storage.open_backup(community, server, BackupKey("nope")))
+
+
+async def test_backup_size_reports_archive_byte_count(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"x"})
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    archive = await drain(harness.storage.open_backup(community, server, key))
+    assert await harness.storage.backup_size(community, server, key) == len(archive)
+
+
+async def test_backup_size_unknown_is_not_found(harness: StorageHarness) -> None:
+    community, server = new_scope()
+    with pytest.raises(NotFoundError):
+        await harness.storage.backup_size(community, server, BackupKey("nope"))
+
+
 # --- file read / edit + version retention (Sections 3.4, 3.5, 5) -----------
 
 

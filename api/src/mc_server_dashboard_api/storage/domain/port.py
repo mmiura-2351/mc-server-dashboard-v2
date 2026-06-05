@@ -176,6 +176,40 @@ class BackupStore(abc.ABC):
     ) -> None:
         """Remove a backup archive. Idempotent."""
 
+    @abc.abstractmethod
+    def open_backup(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> ByteStream:
+        """Open a read stream over a stored backup archive in its native format.
+
+        Streams the archive bytes verbatim (the adapter-internal ``tar.gz`` codec,
+        Section 2) with **no** recompression so a download is the exact stored
+        bytes; the edge sets the content-type/disposition (issue #281). Raises
+        :class:`~.errors.NotFoundError` for an unknown key.
+        """
+
+    @abc.abstractmethod
+    async def put_backup(
+        self, community_id: CommunityId, server_id: ServerId, stream: ByteStream
+    ) -> BackupKey:
+        """Store an uploaded backup archive verbatim, returning its key (issue #281).
+
+        The caller (the upload use case) has already VALIDATED the archive opens and
+        its entries are traversal-safe; Storage only stores the bytes under a fresh
+        ``BackupKey`` in the server's ``backups/``, so the new backup is restorable
+        through :meth:`restore_backup` exactly like a created one.
+        """
+
+    @abc.abstractmethod
+    async def backup_size(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> int:
+        """Return a stored backup archive's size in bytes (issue #281).
+
+        The on-disk archive byte count, recorded as ``size_bytes`` at create/upload.
+        Raises :class:`~.errors.NotFoundError` for an unknown key.
+        """
+
 
 class FileStore(abc.ABC):
     """Port slice: authoritative-copy file read/edit for stopped servers.

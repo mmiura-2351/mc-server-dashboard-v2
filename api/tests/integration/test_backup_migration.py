@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from tests.integration.migrate import downgrade_base, upgrade_head
@@ -56,3 +56,28 @@ async def test_upgrade_creates_backup_then_downgrade_drops_it() -> None:
             assert "alembic_version" in tables
     finally:
         await engine.dispose()
+
+
+async def test_source_check_admits_uploaded_after_upgrade() -> None:
+    """The 0013 migration widens ``ck_backup_source`` to include ``uploaded``."""
+
+    assert _DB_URL is not None
+    await downgrade_base(_DB_URL)
+    await upgrade_head(_DB_URL)
+
+    engine = create_async_engine(_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            clause = (
+                await conn.execute(
+                    text(
+                        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                        "WHERE conname = 'ck_backup_source'"
+                    )
+                )
+            ).scalar_one()
+            assert "uploaded" in clause
+    finally:
+        await engine.dispose()
+
+    await downgrade_base(_DB_URL)

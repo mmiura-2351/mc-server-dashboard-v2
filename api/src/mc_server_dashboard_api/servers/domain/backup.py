@@ -41,13 +41,15 @@ class BackupSource(enum.Enum):
     ``MANUAL`` is an operator-requested backup (``backup:create``); ``SCHEDULED``
     is one produced by the per-server schedule (FR-BAK-3) — the listing of
     scheduled rows by ``created_at`` *is* the execution history. ``EVENT`` is
-    reserved for event-driven backups (the doc's third value); M1 produces only
-    manual and scheduled.
+    reserved for event-driven backups (the doc's third value). ``UPLOADED`` is a
+    backup brought in from an off-host archive via the upload endpoint (issue
+    #281); M1 produces manual, scheduled, and uploaded.
     """
 
     MANUAL = "manual"
     SCHEDULED = "scheduled"
     EVENT = "event"
+    UPLOADED = "uploaded"
 
 
 @dataclass
@@ -73,3 +75,23 @@ class Backup:
     source: BackupSource
     created_by: uuid.UUID | None
     created_at: dt.datetime
+
+
+@dataclass(frozen=True)
+class BackupStatistics:
+    """Aggregate backup usage for a scope (one server, or the whole platform).
+
+    ``count`` is the number of backups; ``total_bytes`` sums the *known* sizes
+    (rows whose ``size_bytes`` is recorded); ``unknown_size_count`` is how many
+    rows carry a NULL ``size_bytes`` (legacy rows created before the size was
+    recorded, issue #281) and are therefore excluded from ``total_bytes`` — an
+    honest "we don't know these" rather than a wrong total. ``newest`` / ``oldest``
+    are the extreme ``created_at`` timestamps, or ``None`` when there are no
+    backups.
+    """
+
+    count: int
+    total_bytes: int
+    unknown_size_count: int
+    newest: dt.datetime | None
+    oldest: dt.datetime | None
