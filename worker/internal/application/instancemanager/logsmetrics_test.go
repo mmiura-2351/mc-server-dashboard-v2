@@ -83,6 +83,18 @@ func (c *fakeClock) After(time.Duration) <-chan time.Time {
 	return ch
 }
 
+// NewTimer satisfies session.Clock. The metrics ticker uses only After, so this
+// returns a timer whose channel never fires.
+func (c *fakeClock) NewTimer(time.Duration) session.Timer { return noopTimer{} }
+
+// noopTimer is a session.Timer that never fires; the metrics ticker does not use
+// NewTimer.
+type noopTimer struct{}
+
+func (noopTimer) C() <-chan time.Time { return nil }
+func (noopTimer) Reset(time.Duration) {}
+func (noopTimer) Stop()               {}
+
 // tick fires every pending After channel, advancing the metrics ticker one step.
 func (c *fakeClock) tick() {
 	c.mu.Lock()

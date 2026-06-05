@@ -202,6 +202,15 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 		metrics = r.handler.Metrics()
 	}
 
+	// The heartbeat deadline is a persistent timer armed once and reset only after
+	// a beat is sent. Sending other message types does not touch it, so the
+	// cadence stays independent of event traffic — a never-idle select no longer
+	// starves the heartbeat (issue #341). The old code re-armed clock.After on
+	// every iteration, so a steady stream of inbound events kept resetting the
+	// deadline and the heartbeat case could never win.
+	heartbeat := r.clock.NewTimer(interval)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-serveCtx.Done():
@@ -224,10 +233,11 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 			if err := transport.SendMetrics(serveCtx, metricsEvent); err != nil {
 				return fmt.Errorf("send metrics: %w", err)
 			}
-		case <-r.clock.After(interval):
+		case <-heartbeat.C():
 			if err := transport.SendHeartbeat(serveCtx); err != nil {
 				return fmt.Errorf("send heartbeat: %w", err)
 			}
+			heartbeat.Reset(interval)
 		}
 	}
 }

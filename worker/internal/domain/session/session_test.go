@@ -54,12 +54,17 @@ func TestRegisterPrecedesHeartbeat(t *testing.T) {
 		defer transport.mu.Unlock()
 		return transport.registers == 1
 	})
+	var timer *fakeTimer
+	waitFor(t, func() bool {
+		timer = clock.firstTimer()
+		return timer != nil
+	})
 	if transport.heartbeatCount() != 0 {
 		t.Fatalf("heartbeat sent before timer fired: %d", transport.heartbeatCount())
 	}
 
 	// Fire the heartbeat timer once.
-	waitFor(t, func() bool { return clock.fireNext() })
+	timer.fire()
 	waitFor(t, func() bool { return transport.heartbeatCount() == 1 })
 
 	cancel()
@@ -77,9 +82,61 @@ func TestHeartbeatCadence(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = r.Run(ctx); close(done) }()
 
+	var timer *fakeTimer
+	waitFor(t, func() bool {
+		timer = clock.firstTimer()
+		return timer != nil
+	})
 	for beat := 1; beat <= 3; beat++ {
-		waitFor(t, func() bool { return clock.fireNext() })
+		timer.fire()
 		want := beat
+		waitFor(t, func() bool { return transport.heartbeatCount() == want })
+	}
+
+	cancel()
+	<-done
+}
+
+// TestHeartbeatNotStarvedByEventTraffic reproduces issue #341: with a steady
+// stream of inbound events arriving at sub-interval spacing across several
+// intervals, the runner must still send a heartbeat at every interval boundary.
+// The previous code re-armed the heartbeat via clock.After on every select
+// iteration, so a never-idle select never chose the heartbeat case — the worker
+// starved its own heartbeat and the API marked it offline. The heartbeat
+// deadline must be a persistent timer, reset only after a beat is sent, so its
+// cadence is independent of event traffic.
+func TestHeartbeatNotStarvedByEventTraffic(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// Wait for the runner to arm its heartbeat timer.
+	var timer *fakeTimer
+	waitFor(t, func() bool {
+		timer = clock.firstTimer()
+		return timer != nil
+	})
+
+	for beat := 1; beat <= 3; beat++ {
+		// Deliver a burst of events at sub-interval spacing and confirm each is
+		// processed, so the select keeps choosing event cases between beats.
+		handler.logs <- LogEvent{}
+		handler.metrics <- MetricsEvent{}
+		handler.events <- StatusEvent{}
+		want := beat
+		waitFor(t, func() bool { return len(transport.logLinesCopy()) == want })
+		waitFor(t, func() bool { return len(transport.metricsCopy()) == want })
+		waitFor(t, func() bool { return len(transport.statusesCopy()) == want })
+
+		// The interval boundary elapses: the persistent heartbeat timer fires.
+		timer.fire()
 		waitFor(t, func() bool { return transport.heartbeatCount() == want })
 	}
 
@@ -144,9 +201,8 @@ func TestReconnectReRegisters(t *testing.T) {
 	// stream-closed error, ending serve and triggering a reconnect.
 	close(first.commands)
 
-	// Keep firing pending timers (a stale heartbeat timer plus the backoff
-	// timer) until the second connection re-registers from scratch
-	// (CONTROL_PLANE.md Section 4.4).
+	// Keep firing the pending backoff timer until the second connection
+	// re-registers from scratch (CONTROL_PLANE.md Section 4.4).
 	waitFor(t, func() bool {
 		clock.fireNext()
 		second.mu.Lock()

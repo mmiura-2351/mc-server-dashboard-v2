@@ -58,6 +58,14 @@ type systemClock struct{}
 
 func (systemClock) Now() time.Time                         { return time.Now() }
 func (systemClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+func (systemClock) NewTimer(d time.Duration) session.Timer { return systemTimer{time.NewTimer(d)} }
+
+// systemTimer adapts *time.Timer to session.Timer for the default clock.
+type systemTimer struct{ t *time.Timer }
+
+func (t systemTimer) C() <-chan time.Time   { return t.t.C }
+func (t systemTimer) Reset(d time.Duration) { t.t.Reset(d) }
+func (t systemTimer) Stop()                 { t.t.Stop() }
 
 // defaultMetricsInterval is the metrics-sampling cadence when WithMetrics is not
 // wired (or given a non-positive interval). It mirrors a typical heartbeat

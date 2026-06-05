@@ -247,4 +247,23 @@ type Clock interface {
 	Now() time.Time
 	// After returns a channel that fires once after d elapses, like time.After.
 	After(d time.Duration) <-chan time.Time
+	// NewTimer returns a persistent, resettable timer (like time.NewTimer). The
+	// heartbeat deadline uses it so the cadence stays independent of event traffic:
+	// the timer is armed once and reset only after a heartbeat is sent, rather than
+	// re-armed via After on every select iteration (issue #341).
+	NewTimer(d time.Duration) Timer
+}
+
+// Timer is a single-shot deadline that can be re-armed, mirroring time.Timer.
+// It is the seam that keeps the heartbeat cadence deterministic under a fake
+// clock while staying independent of inbound event traffic (issue #341).
+type Timer interface {
+	// C is the channel on which the tick is delivered when the deadline elapses.
+	// Unlike After, the channel is stable across Reset.
+	C() <-chan time.Time
+	// Reset re-arms the timer to fire after d. It is called only after a heartbeat
+	// is sent, so other message types never re-arm the deadline.
+	Reset(d time.Duration)
+	// Stop halts the timer when the session tears down.
+	Stop()
 }
