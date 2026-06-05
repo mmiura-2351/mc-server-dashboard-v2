@@ -11,7 +11,7 @@
 
 .PHONY: all check lint format test docs-check \
 	api-lint api-format api-test \
-	worker-lint worker-format worker-test \
+	worker-lint worker-format worker-test worker-test-race \
 	proto-lint proto-gen proto-check proto-breaking \
 	bootstrap hooks-install
 
@@ -82,6 +82,14 @@ worker-format:
 
 worker-test:
 	cd worker && go test ./...
+
+# Worker test suite under the race detector. This is the gate CI runs (see
+# .github/workflows/worker.yml); the worker is concurrency-heavy and races have
+# been chased by hand before (#308). Kept separate from `worker-test` /
+# `make check` so the pre-push hook stays fast; run it locally before touching
+# the supervision/pump/session/driver code.
+worker-test-race:
+	cd worker && go test -race ./...
 
 # Install the pinned golangci-lint into worker/.bin if it is missing.
 $(GOLANGCI):
