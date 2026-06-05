@@ -87,6 +87,7 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
 )
 from mc_server_dashboard_api.servers.api import backups as server_backups
 from mc_server_dashboard_api.servers.api import files as server_files
+from mc_server_dashboard_api.servers.api import groups as server_groups
 from mc_server_dashboard_api.servers.api import ports as server_ports
 from mc_server_dashboard_api.servers.api import servers
 from mc_server_dashboard_api.servers.application.backup_scheduler import (
@@ -512,6 +513,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(server_ports.router)
     app.include_router(server_files.router)
     app.include_router(server_backups.router)
+    app.include_router(server_groups.router)
     app.include_router(workers.router)
     app.include_router(server_events.router)
     app.include_router(transfers.router)

@@ -28,6 +28,9 @@ from mc_server_dashboard_api.community.adapters.repositories import (
 from mc_server_dashboard_api.servers.adapters.backup_repository import (
     SqlAlchemyBackupRepository,
 )
+from mc_server_dashboard_api.servers.adapters.group_repository import (
+    SqlAlchemyGroupRepository,
+)
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
@@ -75,6 +78,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.servers = SqlAlchemyServerRepository(self._session)
         self.resource_grants = _ResourceGrantSweeperAdapter(self._session)
         self.backups = SqlAlchemyBackupRepository(self._session)
+        self.groups = SqlAlchemyGroupRepository(self._session)
         return self
 
     async def __aexit__(

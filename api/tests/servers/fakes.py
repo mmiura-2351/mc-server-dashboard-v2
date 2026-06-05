@@ -32,6 +32,13 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFileNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
+from mc_server_dashboard_api.servers.domain.group_repository import GroupRepository
+from mc_server_dashboard_api.servers.domain.groups import (
+    GroupId,
+    GroupKind,
+    GroupName,
+    PlayerGroup,
+)
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     JarProvisioningError,
@@ -399,22 +406,108 @@ class FakeBackupRepository(BackupRepository):
         self.by_id.pop(backup_id, None)
 
 
+class FakeGroupRepository(GroupRepository):
+    """In-memory player-group store + attachment join (issue #276).
+
+    Groups are stored by id (returning detached copies so a use case mutating the
+    loaded aggregate does not silently mutate the "persisted" one until ``save``);
+    attachments are a set of ``(group_id, server_id)`` pairs.
+    """
+
+    def __init__(self) -> None:
+        self.by_id: dict[GroupId, PlayerGroup] = {}
+        self.attachments: set[tuple[GroupId, ServerId]] = set()
+
+    def seed(self, group: PlayerGroup) -> None:
+        self.by_id[group.id] = group
+
+    @staticmethod
+    def _copy(group: PlayerGroup) -> PlayerGroup:
+        return replace(group, players=list(group.players))
+
+    async def add(self, group: PlayerGroup) -> None:
+        self.by_id[group.id] = self._copy(group)
+
+    async def get_by_id(self, group_id: GroupId) -> PlayerGroup | None:
+        group = self.by_id.get(group_id)
+        return None if group is None else self._copy(group)
+
+    async def get_by_community_kind_name(
+        self, community_id: CommunityId, kind: GroupKind, name: GroupName
+    ) -> PlayerGroup | None:
+        for group in self.by_id.values():
+            if (
+                group.community_id == community_id
+                and group.kind is kind
+                and group.name == name
+            ):
+                return self._copy(group)
+        return None
+
+    async def list_for_community(self, community_id: CommunityId) -> list[PlayerGroup]:
+        return [
+            self._copy(g) for g in self.by_id.values() if g.community_id == community_id
+        ]
+
+    async def save(self, group: PlayerGroup) -> None:
+        self.by_id[group.id] = self._copy(group)
+
+    async def delete(self, group_id: GroupId) -> None:
+        self.by_id.pop(group_id, None)
+        self.attachments = {pair for pair in self.attachments if pair[0] != group_id}
+
+    async def attach(self, group_id: GroupId, server_id: ServerId) -> None:
+        self.attachments.add((group_id, server_id))
+
+    async def detach(self, group_id: GroupId, server_id: ServerId) -> bool:
+        if (group_id, server_id) not in self.attachments:
+            return False
+        self.attachments.discard((group_id, server_id))
+        return True
+
+    async def is_attached(self, group_id: GroupId, server_id: ServerId) -> bool:
+        return (group_id, server_id) in self.attachments
+
+    async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
+        return sorted(
+            (s for g, s in self.attachments if g == group_id),
+            key=lambda s: str(s.value),
+        )
+
+    async def list_groups_for_server(self, server_id: ServerId) -> list[PlayerGroup]:
+        return [
+            self._copy(self.by_id[g])
+            for g, s in sorted(self.attachments, key=lambda p: str(p[0].value))
+            if s == server_id and g in self.by_id
+        ]
+
+    async def list_groups_for_server_kind(
+        self, server_id: ServerId, kind: GroupKind
+    ) -> list[PlayerGroup]:
+        return [
+            g for g in await self.list_groups_for_server(server_id) if g.kind is kind
+        ]
+
+
 class FakeUnitOfWork(UnitOfWork):
     # Narrow the Port-declared attribute types to the concrete fakes so tests can
     # reach their inspection helpers without casts.
     servers: FakeServerRepository
     resource_grants: FakeResourceGrantSweeper
     backups: FakeBackupRepository
+    groups: FakeGroupRepository
 
     def __init__(
         self,
         servers: FakeServerRepository | None = None,
         resource_grants: FakeResourceGrantSweeper | None = None,
         backups: FakeBackupRepository | None = None,
+        groups: FakeGroupRepository | None = None,
     ) -> None:
         self.servers = servers or FakeServerRepository()
         self.resource_grants = resource_grants or FakeResourceGrantSweeper()
         self.backups = backups or FakeBackupRepository()
+        self.groups = groups or FakeGroupRepository()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":

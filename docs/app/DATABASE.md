@@ -406,6 +406,67 @@ deferred shape would be, roughly:
 > This sketch is **not** part of the M1 schema; it documents the intended future
 > table only.
 
+### Player groups (issue #276)
+
+Reusable, Community-scoped player lists (OP / whitelist) attached to many servers
+and synced to a server's `ops.json` / `whitelist.json`. Three normalized tables
+(matching the relational model of the rest of this document, Section 2). The
+group tooling lives in a `groups` slice **inside the servers bounded context** —
+player groups are server-content tooling, not membership/authz, so the Community
+context stays pure authorization. The Community-level permission codes guarding
+the endpoints are `group:read` / `group:manage` (Appendix A).
+
+#### `player_group`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `community_id` | uuid FK → `community.id` | `ON DELETE CASCADE` |
+| `name` | text | unique within `(community_id, kind)` |
+| `kind` | text | `op` / `whitelist` (CHECK enum); immutable for the group's lifetime (it selects the target file) |
+
+Constraints: `UNIQUE(community_id, kind, name)` — a group name is unique per
+Community per kind, so `op`/`admins` and `whitelist`/`admins` coexist.
+
+#### `group_player`
+
+A player row under a group (the player set). Membership is keyed by
+`player_uuid` (the upsert key): adding an existing uuid updates its username.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `group_id` | uuid FK → `player_group.id` | `ON DELETE CASCADE` |
+| `player_uuid` | uuid | the Minecraft account uuid (the file's stable key) |
+| `username` | text | display name written into the file |
+
+Constraints: `UNIQUE(group_id, player_uuid)` — one row per player per group.
+
+#### `server_group`
+
+The many-to-many attachment join between groups and servers.
+
+| Column | Type | Notes |
+|---|---|---|
+| `group_id` | uuid FK → `player_group.id` | `ON DELETE CASCADE` |
+| `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
+
+Primary key: composite `(group_id, server_id)`. Both FKs cascade, so deleting a
+group or a server tidies its attachments automatically.
+
+**File-sync posture (issue #276, the smallest honest M2 choice).** On any change
+that affects an attached server's authoritative player file — attach, detach, or a
+player add/remove on an attached group — the API regenerates that server's
+`ops.json` (kind `op`; entries `{uuid, name, level, bypassesPlayerLimit}`, level
+defaulting to 4) or `whitelist.json` (kind `whitelist`; entries `{uuid, name}`)
+through the existing at-rest file write seam (versioned). The file is the
+**union-merge** of every attached group of that kind, ordered by uuid so it is
+byte-stable diff-to-diff. **Only at-rest servers are written**; a running or
+otherwise unsettled server is left pending and ships the updated authoritative
+copy on its next natural hydrate (hydrate always carries the authoritative working
+set). Pushing live changes to a running server via the Worker (EditFile + RCON
+reload) is deferred.
+
 ---
 
 ## 8. Backups & file history
