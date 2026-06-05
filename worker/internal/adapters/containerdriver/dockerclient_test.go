@@ -179,7 +179,7 @@ func TestEngineClientWaitDecodesStatusCode(t *testing.T) {
 func TestEngineClientListFiltersByLabel(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"Id": "a", "Names": []string{"/mcsd-s1"}},
+			{"Id": "a", "Names": []string{"/mcsd-s1"}, "State": "running"},
 		})
 	})
 	c := d.client(t)
@@ -188,7 +188,7 @@ func TestEngineClientListFiltersByLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(got) != 1 || got[0].ID != "a" || got[0].Name != "/mcsd-s1" {
+	if len(got) != 1 || got[0].ID != "a" || got[0].Name != "/mcsd-s1" || got[0].State != "running" {
 		t.Fatalf("List = %v", got)
 	}
 	req := d.requests[0]

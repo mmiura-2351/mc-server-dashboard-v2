@@ -408,12 +408,26 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 // host-process driver's posture (drop-oldest + dropped-count marker, issue #96).
 const logBufferLines = 256
 
+// containerStateRunning is the Engine's container-state string for a running
+// container (the State field /containers/json reports). The sweep gracefully
+// stops a running orphan before removing it (issue #336).
+const containerStateRunning = "running"
+
 // Sweep removes leftover containers labelled for this Worker, recovering from a
 // crash that left a server's container running or stopped. It is called once at
 // startup before any server is launched; the deterministic name plus the
 // worker-id label scope it to this Worker's own containers so it never touches
-// unrelated ones. Removal errors for individual containers are returned joined so
-// the caller can log them, but a partial sweep does not block startup.
+// unrelated ones.
+//
+// A RUNNING orphan is stopped gracefully first — `docker stop` with the driver's
+// StopTimeout grace, SIGTERM then SIGKILL inside the daemon — so the MC server's
+// shutdown hook saves the world before the container goes away; a plain
+// force-remove would SIGKILL it and lose unsaved data (issue #336). A stop
+// failure does not leak the container: the remove runs regardless, and the stop
+// error is surfaced in the joined result. Exited/created orphans are
+// force-removed directly (no graceful stop). Removal/stop errors for individual
+// containers are returned joined so the caller can log them, but a partial sweep
+// does not block startup.
 func (d *Driver) Sweep(ctx context.Context) error {
 	containers, err := d.docker.List(ctx, labelWorkerID, d.workerID)
 	if err != nil {
@@ -421,6 +435,11 @@ func (d *Driver) Sweep(ctx context.Context) error {
 	}
 	var errs []error
 	for _, c := range containers {
+		if c.State == containerStateRunning {
+			if err := d.docker.Stop(ctx, c.ID, d.stopTimeout); err != nil {
+				errs = append(errs, fmt.Errorf("stop %s (%s): %w", c.Name, c.ID, err))
+			}
+		}
 		if err := d.docker.Remove(ctx, c.ID); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s (%s): %w", c.Name, c.ID, err))
 		}

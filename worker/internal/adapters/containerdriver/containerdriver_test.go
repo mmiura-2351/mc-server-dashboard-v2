@@ -37,6 +37,11 @@ type fakeDocker struct {
 
 	stopCalled bool
 	stopNoExit bool
+	// stopped records the ids passed to Stop (in order), and stopErr forces a Stop
+	// failure. Used by the Sweep tests to assert the graceful-stop-before-remove
+	// ordering for running orphans (issue #336).
+	stopped    []string
+	stopErr    error
 	killCalled bool
 	killCalls  int
 	// killNoExit models a container that survives docker kill: Kill records the
@@ -129,11 +134,16 @@ func (f *fakeDocker) Start(_ context.Context, _ string) error {
 	return f.startErr
 }
 
-func (f *fakeDocker) Stop(_ context.Context, _ string, _ time.Duration) error {
+func (f *fakeDocker) Stop(_ context.Context, id string, _ time.Duration) error {
 	f.mu.Lock()
 	f.stopCalled = true
+	f.stopped = append(f.stopped, id)
 	noExit := f.stopNoExit
+	stopErr := f.stopErr
 	f.mu.Unlock()
+	if stopErr != nil {
+		return stopErr
+	}
 	if !noExit {
 		f.exit(0, nil)
 	}
@@ -916,6 +926,64 @@ func TestSweepRemovesWorkerContainers(t *testing.T) {
 	}
 	if len(docker.removed) != 2 {
 		t.Fatalf("removed = %v, want 2 containers", docker.removed)
+	}
+}
+
+// A RUNNING orphan is stopped gracefully (docker stop with the grace) before it
+// is removed, so the MC server's SIGTERM shutdown hook saves the world instead of
+// being SIGKILLed by the force-remove (issue #336).
+func TestSweepGracefullyStopsRunningContainerBeforeRemove(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
+	d := newTestDriver(docker, nil, nil)
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(docker.stopped) != 1 || docker.stopped[0] != "a" {
+		t.Fatalf("stopped = %v, want [a]", docker.stopped)
+	}
+	if len(docker.removed) != 1 || docker.removed[0] != "a" {
+		t.Fatalf("removed = %v, want [a]", docker.removed)
+	}
+}
+
+// A non-running orphan (exited/created) keeps the force-remove-only behavior: no
+// graceful stop is issued (issue #336).
+func TestSweepRemovesExitedContainerWithoutStop(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "exited"}}
+	d := newTestDriver(docker, nil, nil)
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(docker.stopped) != 0 {
+		t.Fatalf("stopped = %v, want none (exited container is force-removed)", docker.stopped)
+	}
+	if len(docker.removed) != 1 || docker.removed[0] != "a" {
+		t.Fatalf("removed = %v, want [a]", docker.removed)
+	}
+}
+
+// A graceful-stop failure on a running orphan must not leak the container: Sweep
+// still removes it (force) and surfaces the stop error in the joined result
+// (issue #336).
+func TestSweepStopFailureStillRemovesAndSurfaces(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
+	docker.stopErr = errors.New("stop boom")
+	d := newTestDriver(docker, nil, nil)
+
+	err := d.Sweep(context.Background())
+	if err == nil {
+		t.Fatal("expected Sweep to surface the stop failure")
+	}
+	if !strings.Contains(err.Error(), "stop boom") {
+		t.Fatalf("error = %v, want it to contain the stop failure", err)
+	}
+	if len(docker.removed) != 1 || docker.removed[0] != "a" {
+		t.Fatalf("removed = %v, want [a] (the container must not leak)", docker.removed)
 	}
 }
 
