@@ -38,6 +38,9 @@ type fakeDocker struct {
 	stopCalled bool
 	stopNoExit bool
 	killCalled bool
+	// killNoExit models a container that survives docker kill: Kill records the
+	// call but does not release Wait, so the post-Kill waitExit times out.
+	killNoExit bool
 	removed    []string
 
 	listResult []Container
@@ -134,8 +137,11 @@ func (f *fakeDocker) Stop(_ context.Context, _ string, _ time.Duration) error {
 func (f *fakeDocker) Kill(_ context.Context, _ string) error {
 	f.mu.Lock()
 	f.killCalled = true
+	noExit := f.killNoExit
 	f.mu.Unlock()
-	f.exit(137, nil)
+	if !noExit {
+		f.exit(137, nil)
+	}
 	return nil
 }
 
@@ -615,6 +621,31 @@ func TestGracefulStopEscalatesToKill(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 	drainTo(t, inst.Events(), execution.StateStopped)
+	if !docker.killWasCalled() {
+		t.Fatal("expected docker kill escalation")
+	}
+}
+
+// When docker kill fails to terminate the container, the post-Kill waitExit times
+// out. Stop must report this as a failure so the manager reports the command
+// failed, the API keeps the assignment, and the reconciler retries (issue #211);
+// reporting success here would let the API unassign while the container lingers.
+func TestGracefulStopFailsWhenContainerSurvivesKill(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
+	// Neither docker stop nor docker kill exits the container.
+	docker.stopNoExit = true
+	docker.killNoExit = true
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected Stop to fail when the container survives docker kill")
+	}
 	if !docker.killWasCalled() {
 		t.Fatal("expected docker kill escalation")
 	}

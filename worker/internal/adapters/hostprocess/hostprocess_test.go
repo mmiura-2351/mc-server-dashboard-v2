@@ -17,15 +17,18 @@ import (
 // fakeProcess is an in-memory stand-in for an OS process. Wait blocks until the
 // test (or a signal) releases it, so no real java runs in CI.
 type fakeProcess struct {
-	mu        sync.Mutex
-	done      chan struct{}
-	waitErr   error
-	signals   []os.Signal
-	killed    bool
-	startErr  error
-	startedAt bool
-	stdout    io.Reader
-	stderr    io.Reader
+	mu      sync.Mutex
+	done    chan struct{}
+	waitErr error
+	signals []os.Signal
+	killed  bool
+	// killNoExit models a process that survives SIGKILL: Kill records the call but
+	// does not release Wait, so the post-Kill waitExit times out.
+	killNoExit bool
+	startErr   error
+	startedAt  bool
+	stdout     io.Reader
+	stderr     io.Reader
 }
 
 func newFakeProcess() *fakeProcess {
@@ -69,8 +72,11 @@ func (p *fakeProcess) Signal(sig os.Signal) error {
 func (p *fakeProcess) Kill() error {
 	p.mu.Lock()
 	p.killed = true
+	noExit := p.killNoExit
 	p.mu.Unlock()
-	p.exit(errors.New("killed"))
+	if !noExit {
+		p.exit(errors.New("killed"))
+	}
 	return nil
 }
 
@@ -238,6 +244,29 @@ func TestGracefulStopEscalatesToSIGKILL(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 	drainTo(t, inst.Events(), execution.StateStopped)
+	if !proc.killed {
+		t.Fatal("expected SIGKILL escalation")
+	}
+}
+
+// A process that survives SIGKILL leaves the post-Kill waitExit timing out. Stop
+// must report this as a failure so the manager reports the command failed, the
+// API keeps the assignment, and the reconciler retries (issue #211); reporting
+// success here would let the API unassign while the process lingers.
+func TestStopFailsWhenProcessSurvivesKill(t *testing.T) {
+	proc := newFakeProcess()
+	proc.killNoExit = true
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected Stop to fail when the process survives SIGKILL")
+	}
 	if !proc.killed {
 		t.Fatal("expected SIGKILL escalation")
 	}

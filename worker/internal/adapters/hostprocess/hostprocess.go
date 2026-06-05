@@ -247,8 +247,35 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	if err := i.proc.Kill(); err != nil {
 		return fmt.Errorf("hostprocess: kill: %w", err)
 	}
-	i.waitExit(ctx, i.stopTimeout)
+	// Confirm the kill actually terminated the process. A process that survives
+	// SIGKILL leaves this final wait timing out; report it as a stop failure so the
+	// manager reports the command failed, the API keeps the assignment, and the
+	// reconciler retries (issue #211). Reporting success here would let the API
+	// unassign while the process lingers. The instance was already evicted from the
+	// manager's map (handleStop's take()), so the linger is owned by the startup
+	// sweep and the reconciler, not re-tracked here.
+	//
+	// This wait does not honor ctx cancellation: the kill is already issued, so a
+	// cancelled caller context must not be read as a lingering process when the
+	// process did in fact exit. Only the timeout means it survived.
+	if !i.waitExitDone(i.stopTimeout) {
+		return fmt.Errorf("hostprocess: process survived SIGKILL after %s", i.stopTimeout)
+	}
 	return nil
+}
+
+// waitExitDone reports whether the process reached a terminal state within d,
+// observing only the exit and the timeout (not caller-context cancellation). It
+// confirms a kill terminated the process (issue #211).
+func (i *instance) waitExitDone(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-i.exited:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // isTerminal reports whether s is a state the process can no longer leave.
