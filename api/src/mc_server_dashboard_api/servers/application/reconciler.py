@@ -44,7 +44,19 @@ thrash the fleet every tick. The backoff state is in-memory (a per-server map),
 mirroring the snapshot scheduler's in-memory due-tracking: a restart forgets it,
 which only means the first post-restart tick may retry sooner — acceptable, and
 the divergence itself is still durable in the DB. A successful action clears the
-entry.
+entry — except a start re-dispatched at a server still observed ``crashed``, which
+is a retry of a launch that evidently died: the dispatch succeeds (the Worker
+launches the container) but the process crashes again, so it is counted as a
+failure and backs off, damping the boot-crash loop (#343). Because each crash
+cycle transits through ``starting`` (when the row briefly drops out of
+``list_reconcilable``), the entry must NOT be cleared just because the server is
+momentarily absent, or the failure count would reset every cycle and never grow.
+Entries are therefore time-expired, not membership-cleaned: an entry is dropped
+only once ``now`` is past ``next_eligible_at`` by ``backoff_max_seconds`` of slack
+— so a genuinely healed server (which stops refreshing its entry) expires quietly,
+while a still-flapping server re-arrives and refreshes ``next_eligible_at`` long
+before then, so its backoff keeps growing up to ``backoff_max_seconds``. The map
+still does not grow without bound.
 
 Loud structured logs accompany every action and every failure so an operator can
 see the reconciler working (NFR-OBS-1). One bad action is logged and left for a
@@ -113,13 +125,30 @@ class RunReconcilerTick:
         now = self.clock.now()
         async with self.uow:
             candidates = await self.uow.servers.list_reconcilable()
-        live_ids = {server.id for server in candidates}
-        # Drop backoff state for servers no longer diverged so the map does not
-        # grow without bound.
-        for stale in self._attempts.keys() - live_ids:
-            del self._attempts[stale]
+        self._expire_stale(now)
         for server in candidates:
             await self._consider(server, now)
+
+    def _expire_stale(self, now: dt.datetime) -> None:
+        # Time-based expiry so the map does not grow without bound, WITHOUT
+        # membership-based cleanup. A crash-looping server flaps observed
+        # crashed -> starting -> crashed; while starting it drops out of
+        # list_reconcilable, so a membership check ("absent now") would erase its
+        # backoff every cycle and reset the failure count — defeating the
+        # exponential growth (#343). Instead an entry survives until well past its
+        # own next-eligible instant: a flapping server re-arrives long before then
+        # and refreshes next_eligible_at (keeping its count), while a genuinely
+        # healed server stops refreshing and its entry quietly expires. The slack
+        # (backoff_max_seconds) comfortably exceeds the longest plausible absence
+        # of a still-diverged server (a slow modded boot sitting in starting).
+        expired = [
+            server_id
+            for server_id, attempt in self._attempts.items()
+            if now
+            >= attempt.next_eligible_at + dt.timedelta(seconds=self.backoff_max_seconds)
+        ]
+        for server_id in expired:
+            del self._attempts[server_id]
 
     async def _consider(self, server: Server, now: dt.datetime) -> None:
         if self._within_grace(server, now):
@@ -167,7 +196,7 @@ class RunReconcilerTick:
             action,
         )
         try:
-            await self._dispatch(server, action)
+            dispatched = await self._dispatch(server, action)
         except Exception as exc:  # noqa: BLE001 - never abort the tick
             self._record_failure(server.id, now)
             _LOG.warning(
@@ -177,22 +206,50 @@ class RunReconcilerTick:
                 exc,
             )
             return
+        # Key the crash check off the entity the lifecycle use case RETURNS, not the
+        # stale list_reconcilable snapshot in `server`. redispatch_start loads its own
+        # entity and, on an INVALID_STATE convergence, records observed=running on THAT
+        # copy and returns it (lifecycle.py); the snapshot predates the dispatch and
+        # still reads CRASHED. Reading the returned entity is what keeps a server that
+        # genuinely converged to running from being miscounted as a crash here.
+        if dispatched.observed_state is ObservedState.CRASHED:
+            # A start re-dispatched at a server still observed CRASHED is a RETRY of
+            # a launch that evidently died: the dispatch succeeds (the Worker
+            # launches the container) but the process crashes again, so the row stays
+            # reconcilable and the next tick would re-issue at full cadence forever
+            # (boot-crash loop, #343). Count it as a failure so consecutive crash
+            # restarts back off exponentially like dispatch failures do. The backoff
+            # keeps GROWING across crash cycles even though each cycle transits
+            # through starting (when the row drops out of list_reconcilable): the
+            # entry is not membership-cleaned, only time-expired (_expire_stale), and
+            # a flapping server re-arrives long before its expiry instant.
+            self._record_failure(server.id, now)
+            _LOG.warning(
+                "reconcile action %s dispatched for crash-looping server %s; "
+                "backing off",
+                action,
+                server.id.value,
+            )
+            return
         self._attempts.pop(server.id, None)
         _LOG.info(
             "reconcile action %s succeeded for server %s", action, server.id.value
         )
 
-    async def _dispatch(self, server: Server, action: str) -> None:
+    async def _dispatch(self, server: Server, action: str) -> Server:
+        # Return the lifecycle's freshly-loaded entity so _run reads the post-dispatch
+        # observed_state (e.g. running after an INVALID_STATE convergence), not the
+        # stale list_reconcilable snapshot.
         if action == "place_and_start":
-            await self.start_server.place_and_start(
+            return await self.start_server.place_and_start(
                 community_id=server.community_id, server_id=server.id
             )
         elif action == "redispatch_start":
-            await self.start_server.redispatch_start(
+            return await self.start_server.redispatch_start(
                 community_id=server.community_id, server_id=server.id
             )
         else:  # redispatch_stop
-            await self.stop_server.redispatch_stop(
+            return await self.stop_server.redispatch_stop(
                 community_id=server.community_id, server_id=server.id
             )
 
