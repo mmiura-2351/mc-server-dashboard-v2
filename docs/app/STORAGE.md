@@ -522,14 +522,17 @@ set's members; when there is a resolved JAR but no published snapshot, the body 
 a tar carrying just `server.jar` (a `200`, not the `204` of the nothing-to-send
 case) so the Worker can still launch.
 
-forge and spigot are **not** resolved: the version catalog lists/resolves only
-vanilla (Mojang manifest), Paper (PaperMC API), and fabric (meta.fabricmc.net).
-The `server_type` CHECK enum still permits `forge` and `spigot`, but server
-create-validation rejects both — the catalog has no usable source (forge needs a
-worker-side installer step; spigot has no official distribution API and create
-recommends Paper instead). The fabric server launcher JAR has no upstream
-checksum, so it is pooled content-addressed by its own SHA-256 without
-source-digest verification.
+spigot is **not** resolved: the version catalog lists/resolves vanilla (Mojang
+manifest), Paper (PaperMC API), fabric (meta.fabricmc.net), and forge (the Forge
+Maven + promotions feed). The `server_type` CHECK enum still permits `spigot`,
+but server create-validation rejects it — the catalog has no usable source (no
+official distribution API; create recommends Paper instead). Forge resolves to
+the *installer* JAR, injected into the working set at `server.jar` like the other
+types; the worker runs `--installServer` on first start, so the same hydrate
+mechanism serves it. The fabric server launcher JAR has no upstream checksum, so
+it is pooled content-addressed by its own SHA-256 without source-digest
+verification; vanilla (SHA-1), Paper (SHA-256), and forge (SHA-1, the installer's
+sibling `.sha1`) are verified against their published digest before pooling.
 
 **Proven-complete gate (FR-DATA-6).** `commit_snapshot` only publishes a staged
 transfer the data plane signalled complete (Section 4.1). The signal is the HTTP

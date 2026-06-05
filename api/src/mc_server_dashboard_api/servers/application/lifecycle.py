@@ -363,6 +363,7 @@ class StartServer:
             worker_id=worker_id,
             server_id=server_id,
             backend=server.execution_backend,
+            server_type=server.server_type,
             jar_relpath=_DEFAULT_JAR_RELPATH,
             minecraft_version=server.mc_version,
         )

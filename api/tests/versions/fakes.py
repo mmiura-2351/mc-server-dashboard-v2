@@ -32,6 +32,9 @@ class FakeJsonFetcher(JsonFetcher):
             raise FetchError(f"no fixture for {url}")
         return self._payloads[url]
 
+    async def get_text(self, url: str) -> str:
+        raise FetchError(f"no text fixture for {url}")
+
 
 class FlakyJsonFetcher(JsonFetcher):
     """Fail the first ``fail_times`` calls, then serve the payload (retry tests)."""
@@ -47,6 +50,41 @@ class FlakyJsonFetcher(JsonFetcher):
             self._remaining_failures -= 1
             raise FetchError(f"transient failure for {url}")
         return self._payloads[url]
+
+    async def get_text(self, url: str) -> str:
+        raise FetchError(f"no text fixture for {url}")
+
+
+class FakeDocumentFetcher(JsonFetcher):
+    """Serve recorded text and JSON documents by URL (the Forge catalog needs both)."""
+
+    def __init__(
+        self,
+        *,
+        texts: dict[str, str],
+        payloads: dict[str, object],
+        fail: bool = False,
+    ) -> None:
+        self.texts = texts
+        self._payloads = payloads
+        self.fail = fail
+        self.calls: list[str] = []
+
+    async def get_json(self, url: str) -> object:
+        self.calls.append(url)
+        if self.fail:
+            raise FetchError(f"forced failure for {url}")
+        if url not in self._payloads:
+            raise FetchError(f"no fixture for {url}")
+        return self._payloads[url]
+
+    async def get_text(self, url: str) -> str:
+        self.calls.append(url)
+        if self.fail:
+            raise FetchError(f"forced failure for {url}")
+        if url not in self.texts:
+            raise FetchError(f"no text fixture for {url}")
+        return self.texts[url]
 
 
 class FakeJarFetcher(JarFetcher):

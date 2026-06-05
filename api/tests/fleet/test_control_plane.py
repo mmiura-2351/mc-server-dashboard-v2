@@ -35,6 +35,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResultCode,
     CommandTimedOutError,
     EditFileCommand,
+    LaunchMode,
     ListFilesCommand,
     ReadFileCommand,
     ServerCommandCommand,
@@ -298,6 +299,70 @@ async def test_dispatch_failure_maps_typed_code(harness: _Harness) -> None:
     assert not result.success
     assert result.code is CommandResultCode.INVALID_STATE
     assert result.message == "running"
+    await call.done_writing()
+
+
+async def test_start_carries_forge_launch_mode_on_the_wire(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+    received: list[pb.StartServer] = []
+
+    async def worker_echo() -> None:
+        msg = await call.read()
+        received.append(msg.api_command.start)
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=StartServerCommand(
+            driver=DriverKind.HOST_PROCESS,
+            jar_relpath="server.jar",
+            minecraft_version="1.21.8",
+            launch_mode=LaunchMode.FORGE_ARGSFILE,
+        ),
+    )
+    await echo
+
+    assert received[0].launch_mode == pb.LAUNCH_MODE_FORGE_ARGSFILE
+    await call.done_writing()
+
+
+async def test_start_carries_jar_launch_mode_on_the_wire(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+    received: list[pb.StartServer] = []
+
+    async def worker_echo() -> None:
+        msg = await call.read()
+        received.append(msg.api_command.start)
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=StartServerCommand(
+            driver=DriverKind.HOST_PROCESS,
+            jar_relpath="server.jar",
+            minecraft_version="1.21.1",
+            launch_mode=LaunchMode.JAR,
+        ),
+    )
+    await echo
+
+    assert received[0].launch_mode == pb.LAUNCH_MODE_JAR
     await call.done_writing()
 
 

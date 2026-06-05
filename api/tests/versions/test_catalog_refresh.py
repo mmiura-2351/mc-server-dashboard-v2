@@ -29,6 +29,7 @@ class _RecordingInvalidator(CacheInvalidator):
             ServerType.VANILLA: "https://launchermeta.mojang.com/x",
             ServerType.PAPER: "https://api.papermc.io/v2/x",
             ServerType.FABRIC: "https://meta.fabricmc.net/v2/x",
+            ServerType.FORGE: "https://maven.minecraftforge.net/x",
         }
         matched = [url for url in sample.values() if predicate(url)]
         self.cleared_for.extend(matched)
@@ -39,6 +40,7 @@ _PREFIXES = {
     ServerType.VANILLA: "https://launchermeta.mojang.com",
     ServerType.PAPER: "https://api.papermc.io",
     ServerType.FABRIC: "https://meta.fabricmc.net",
+    ServerType.FORGE: "https://maven.minecraftforge.net",
 }
 
 
@@ -48,7 +50,7 @@ async def test_refresh_all_invalidates_every_type() -> None:
     refresh = CatalogRefresh(invalidator=inv, prefixes=_PREFIXES)
     invalidated = await refresh(server_type=None)
     assert set(invalidated) == set(ServerType)
-    assert len(inv.cleared_for) == 3
+    assert len(inv.cleared_for) == 4
 
 
 @pytest.mark.asyncio

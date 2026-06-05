@@ -111,7 +111,7 @@ def test_refresh_all_returns_invalidated_catalogs() -> None:
     with client:
         resp = client.post("/versions/refresh")
     assert resp.status_code == 200
-    assert set(resp.json()["invalidated"]) == {"vanilla", "paper", "fabric"}
+    assert set(resp.json()["invalidated"]) == {"vanilla", "paper", "fabric", "forge"}
     assert refresh.calls == [None]
 
 

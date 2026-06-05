@@ -16,9 +16,11 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResultCode,
     EditFileCommand,
     HydrateCommand,
+    LaunchMode,
     ListFilesCommand,
     ReadFileCommand,
     SnapshotCommand,
+    StartServerCommand,
 )
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     ControlPlane as FleetControlPlane,
@@ -41,6 +43,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ExecutionBackend,
     ServerId,
+    ServerType,
     WorkerId,
 )
 
@@ -188,10 +191,41 @@ async def test_sanitized_start_failure_maps_to_status(
         worker_id=WorkerId(uuid.uuid4()),
         server_id=ServerId(uuid.uuid4()),
         backend=ExecutionBackend.HOST_PROCESS,
+        server_type=ServerType.VANILLA,
         jar_relpath="server.jar",
         minecraft_version="1.21",
     )
     assert outcome.status is status
+
+
+@pytest.mark.parametrize(
+    ("server_type", "launch_mode"),
+    [
+        (ServerType.FORGE, LaunchMode.FORGE_ARGSFILE),
+        (ServerType.VANILLA, LaunchMode.JAR),
+        (ServerType.PAPER, LaunchMode.JAR),
+        (ServerType.FABRIC, LaunchMode.JAR),
+    ],
+)
+async def test_start_maps_server_type_to_launch_mode(
+    server_type: ServerType, launch_mode: LaunchMode
+) -> None:
+    # Forge launches via the supervised installer + args file; every other type
+    # via the historical JAR launch (issue #307).
+    fleet = _CapturingFleetControlPlane()
+    adapter = _adapter(fleet)
+
+    await adapter.start(
+        worker_id=WorkerId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+        backend=ExecutionBackend.HOST_PROCESS,
+        server_type=server_type,
+        jar_relpath="server.jar",
+        minecraft_version="1.21",
+    )
+
+    assert isinstance(fleet.last, StartServerCommand)
+    assert fleet.last.launch_mode is launch_mode
 
 
 async def test_file_access_denied_maps_to_status() -> None:

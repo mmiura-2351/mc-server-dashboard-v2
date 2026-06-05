@@ -110,7 +110,7 @@ M2 is organized as four pillars, each tracked by an epic:
 - **Pillar B — server-operation use cases complete end-to-end** (epic #240):
   EULA acceptance flow, port management (free-port discovery and
   auto-assignment), force stop on the HTTP API, additional server types (fabric
-  is added; spigot and forge are documented exclusions — see FR-VER-1), and
+  and forge are added; spigot is a documented exclusion — see FR-VER-1), and
   sanitized start-failure categories.
 - **Pillar C — data and content management** (epic #241): extended file
   operations, server ZIP import/export, backup upload/download (off-host), and
@@ -446,22 +446,27 @@ branch on server state. This policy is shared by 6.10 (File Management) and
 
 - FR-VER-1: The system lists supported Minecraft versions and server types and
   resolves the appropriate downloadable JAR. The catalogued (resolvable) server
-  types are **vanilla** (Mojang version manifest), **paper** (PaperMC API), and
-  **fabric** (meta.fabricmc.net — the generated server launcher JAR). Two types in
-  the persisted CHECK enum are deliberately *not* catalogued and are rejected at
-  create-time:
+  types are **vanilla** (Mojang version manifest), **paper** (PaperMC API),
+  **fabric** (meta.fabricmc.net — the generated server launcher JAR), and
+  **forge** (the Forge Maven + promotions feed). One type in the persisted CHECK
+  enum is deliberately *not* catalogued and is rejected at create-time:
   - **spigot** — has no official distribution API (built locally by BuildTools and
     not redistributable). Create returns a `422 spigot_unsupported` recommending
     **paper**, a Spigot-compatible fork with an official download API.
-  - **forge** — a Forge server requires running an installer on the worker that
-    produces a libraries tree plus run scripts, which does not fit the single-JAR
-    working-set model; supporting it is a worker-protocol change tracked as a
-    separate follow-up. Create returns a `422 unsupported_server_type`.
+
+  **forge** resolves to the *installer* JAR
+  (`maven.minecraftforge.net/.../forge-<v>-installer.jar`), shipped to the worker
+  at the conventional `server.jar` relpath; the worker runs the supervised
+  `--installServer` step on first start (the `forge-argsfile` launch mode, FR-EXE),
+  then launches via the generated args file. The catalog lists the MC versions
+  Forge has published, picking the recommended (fallback latest) Forge build per
+  MC version from the promotions feed.
 - FR-VER-2: JAR retrieval uses external APIs (official manifests, etc.) behind an
-  adapter with retry and cache fallback. Vanilla (SHA-1) and Paper (SHA-256)
-  publish a checksum that is verified on download; the Fabric meta API publishes no
-  digest for its generated launcher JAR, so that download is stored unverified but
-  still content-addressed by its own SHA-256.
+  adapter with retry and cache fallback. Vanilla (SHA-1), Paper (SHA-256), and
+  Forge (SHA-1, from the installer's sibling `.sha1`) publish a checksum that is
+  verified on download; the Fabric meta API publishes no digest for its generated
+  launcher JAR, so that download is stored unverified but still content-addressed
+  by its own SHA-256.
 - FR-VER-3: Retrieved JARs are persisted through the Storage Port and reused
   across servers.
 

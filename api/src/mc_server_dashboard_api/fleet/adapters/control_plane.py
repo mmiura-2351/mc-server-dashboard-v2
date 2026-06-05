@@ -33,6 +33,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     FileEntry,
     FileListing,
     HydrateCommand,
+    LaunchMode,
     ListFilesCommand,
     ReadFileCommand,
     RestartServerCommand,
@@ -52,6 +53,13 @@ from mcsd.controlplane.v1 import control_plane_pb2 as pb
 _DRIVER_TO_PROTO: dict[DriverKind, "pb.ExecutionDriverKind.ValueType"] = {
     DriverKind.HOST_PROCESS: pb.EXECUTION_DRIVER_KIND_HOST_PROCESS,
     DriverKind.CONTAINER: pb.EXECUTION_DRIVER_KIND_CONTAINER,
+}
+
+# Map the domain launch mode to the wire enum (issue #307). FORGE_ARGSFILE drives
+# the Worker's supervised-installer-then-args-file launch (issue #305/#306).
+_LAUNCH_MODE_TO_PROTO: dict[LaunchMode, "pb.LaunchMode.ValueType"] = {
+    LaunchMode.JAR: pb.LAUNCH_MODE_JAR,
+    LaunchMode.FORGE_ARGSFILE: pb.LAUNCH_MODE_FORGE_ARGSFILE,
 }
 
 # Map the wire failure code onto the domain result code (CONTROL_PLANE.md 7).
@@ -187,6 +195,7 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
                 driver=_DRIVER_TO_PROTO[command.driver],
                 jar_relpath=command.jar_relpath,
                 minecraft_version=command.minecraft_version,
+                launch_mode=_LAUNCH_MODE_TO_PROTO[command.launch_mode],
             )
         )
     elif isinstance(command, StopServerCommand):

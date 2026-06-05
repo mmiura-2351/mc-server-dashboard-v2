@@ -1,10 +1,10 @@
 """Catalog-backed create-path version validation (FR-VER-1).
 
 The servers ``VersionValidator`` maps the persisted ``server_type`` onto the
-version catalog. Types the catalog cannot resolve are rejected at create-time:
-``forge`` as unsupported (worker installer step needed), ``spigot`` with a
-distinct error recommending Paper (no official distribution API). A catalogued
-type whose version is not offered is the unknown-version case.
+version catalog. ``vanilla`` / ``paper`` / ``fabric`` / ``forge`` are catalogued
+and validated against the catalog; ``spigot`` is rejected with a distinct error
+recommending Paper (no official distribution API). A catalogued type whose
+version is not offered is the unknown-version case.
 """
 
 from __future__ import annotations
@@ -17,26 +17,42 @@ from mc_server_dashboard_api.servers.adapters.version_validator import (
 from mc_server_dashboard_api.servers.domain.version_validator import (
     SpigotUnsupportedError,
     UnknownVersionError,
-    UnsupportedServerTypeError,
 )
 from mc_server_dashboard_api.versions.adapters.composite import CompositeCatalog
+from mc_server_dashboard_api.versions.adapters.forge import (
+    _METADATA_URL,
+    ForgeCatalog,
+)
 from mc_server_dashboard_api.versions.adapters.vanilla import (
     _MANIFEST_URL,
     VanillaCatalog,
 )
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
-from tests.versions.fakes import FakeJsonFetcher
+from tests.versions.fakes import FakeDocumentFetcher, FakeJsonFetcher
 
 _VERSION_URL = "https://example.test/1.21.1.json"
 _MANIFEST = {
     "versions": [{"id": "1.21.1", "type": "release", "url": _VERSION_URL}],
 }
+_FORGE_METADATA = """<?xml version="1.0" encoding="UTF-8"?>
+<metadata><versioning><versions>
+  <version>1.21.8-58.1.0</version>
+</versions></versioning></metadata>
+"""
 
 
 def _validator() -> CatalogVersionValidator:
-    fetcher = FakeJsonFetcher({_MANIFEST_URL: _MANIFEST})
     catalog = CompositeCatalog(
-        by_type={ServerType.VANILLA: VanillaCatalog(fetcher=fetcher)}
+        by_type={
+            ServerType.VANILLA: VanillaCatalog(
+                fetcher=FakeJsonFetcher({_MANIFEST_URL: _MANIFEST})
+            ),
+            ServerType.FORGE: ForgeCatalog(
+                fetcher=FakeDocumentFetcher(
+                    texts={_METADATA_URL: _FORGE_METADATA}, payloads={}
+                )
+            ),
+        }
     )
     return CatalogVersionValidator(catalog=catalog)
 
@@ -53,9 +69,14 @@ async def test_unknown_version_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forge_rejected_as_unsupported() -> None:
-    with pytest.raises(UnsupportedServerTypeError):
-        await _validator().validate(server_type="forge", version="1.21.1")
+async def test_accepts_offered_forge_version() -> None:
+    await _validator().validate(server_type="forge", version="1.21.8")
+
+
+@pytest.mark.asyncio
+async def test_unknown_forge_version_rejected() -> None:
+    with pytest.raises(UnknownVersionError):
+        await _validator().validate(server_type="forge", version="9.9.9")
 
 
 @pytest.mark.asyncio

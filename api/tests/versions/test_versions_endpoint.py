@@ -2,7 +2,7 @@
 
 Exercised in-process via TestClient with the catalog overridden by a fake (no
 network). Covers: auth requirement, the types index, a version listing, the
-unknown-type 404 (forge), and the source-down 503.
+unknown-type 404 (spigot), and the source-down 503.
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ def test_lists_server_types() -> None:
     with client:
         resp = client.get("/versions")
     assert resp.status_code == 200
-    assert resp.json() == {"server_types": ["vanilla", "paper", "fabric"]}
+    assert resp.json() == {"server_types": ["vanilla", "paper", "fabric", "forge"]}
 
 
 def test_lists_versions_for_type() -> None:
@@ -88,10 +88,18 @@ def test_lists_versions_for_type() -> None:
     assert resp.json() == {"versions": ["1.21.1"]}
 
 
-def test_unknown_type_forge_is_404() -> None:
+def test_lists_versions_for_forge() -> None:
     client = _client(_FakeCatalog())
     with client:
         resp = client.get("/versions/forge")
+    assert resp.status_code == 200
+    assert resp.json() == {"versions": ["1.21.1"]}
+
+
+def test_unknown_type_spigot_is_404() -> None:
+    client = _client(_FakeCatalog())
+    with client:
+        resp = client.get("/versions/spigot")
     assert resp.status_code == 404
     assert resp.json()["detail"]["reason"] == "unknown_server_type"
 

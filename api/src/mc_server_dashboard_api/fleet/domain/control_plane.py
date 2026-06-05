@@ -111,6 +111,20 @@ class CommandResult:
         return self.code is CommandResultCode.OK
 
 
+class LaunchMode(enum.Enum):
+    """How the Worker launches a server's process (CONTROL_PLANE.md Section 5).
+
+    ``JAR`` is the historical ``java -jar <jar> nogui`` launch (vanilla / Paper /
+    Fabric). ``FORGE_ARGSFILE`` runs the supervised Forge installer on first start
+    then launches via the generated args file (issue #305/#306/#307). The mode is
+    carried explicitly on the command, never inferred from the working-set
+    contents.
+    """
+
+    JAR = "jar"
+    FORGE_ARGSFILE = "forge_argsfile"
+
+
 @dataclass(frozen=True)
 class StartServerCommand:
     """Launch a server on the Worker (CONTROL_PLANE.md Section 5)."""
@@ -118,6 +132,7 @@ class StartServerCommand:
     driver: DriverKind
     jar_relpath: str
     minecraft_version: str
+    launch_mode: LaunchMode = LaunchMode.JAR
 
 
 @dataclass(frozen=True)

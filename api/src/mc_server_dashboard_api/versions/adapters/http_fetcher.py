@@ -17,7 +17,7 @@ _TIMEOUT = httpx.Timeout(10.0)
 
 
 class HttpxJsonFetcher(JsonFetcher):
-    """Fetch JSON over HTTP with httpx, mapping failures to :class:`FetchError`."""
+    """Fetch a document over HTTP with httpx, mapping failures to FetchError."""
 
     async def get_json(self, url: str) -> object:
         try:
@@ -26,4 +26,13 @@ class HttpxJsonFetcher(JsonFetcher):
                 response.raise_for_status()
                 return response.json()
         except (httpx.HTTPError, ValueError) as exc:
+            raise FetchError(str(exc)) from exc
+
+    async def get_text(self, url: str) -> str:
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.text
+        except httpx.HTTPError as exc:
             raise FetchError(str(exc)) from exc

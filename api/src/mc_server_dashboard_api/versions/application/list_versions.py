@@ -1,8 +1,9 @@
 """Read use cases for the version catalog endpoints (FR-VER-1).
 
 Thin wrappers over the :class:`VersionCatalog` Port. The types index is the set of
-server types the catalog can resolve at M1 (``vanilla`` / ``paper``) — it is the
-catalog's own ``ServerType`` enum, so ``forge`` is absent by construction.
+server types the catalog can resolve (``vanilla`` / ``paper`` / ``fabric`` /
+``forge``) — it is the catalog's own ``ServerType`` enum, so ``spigot`` is absent
+by construction.
 """
 
 from __future__ import annotations

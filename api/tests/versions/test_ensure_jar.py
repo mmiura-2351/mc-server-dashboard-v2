@@ -99,6 +99,52 @@ async def test_fabric_downloads_and_stores_without_checksum() -> None:
     assert pool.stored[key] == _FABRIC_JAR
 
 
+_FORGE_INSTALLER = b"PK\x03\x04 forge installer jar"
+
+
+def _forge_ensure() -> tuple[EnsureJar, FakeJarPool]:
+    from mc_server_dashboard_api.versions.adapters.forge import (
+        _METADATA_URL,
+        _PROMOTIONS_URL,
+        ForgeCatalog,
+        _installer_sha1_url,
+        _installer_url,
+    )
+    from tests.versions.fakes import FakeDocumentFetcher
+
+    metadata = (
+        "<metadata><versioning><versions>"
+        "<version>1.21.8-58.1.0</version>"
+        "</versions></versioning></metadata>"
+    )
+    promotions = {"promos": {"1.21.8-recommended": "58.1.0"}}
+    installer_url = _installer_url("1.21.8-58.1.0")
+    good_sha1 = hashlib.sha1(_FORGE_INSTALLER).hexdigest()
+    doc_fetcher = FakeDocumentFetcher(
+        texts={
+            _METADATA_URL: metadata,
+            _installer_sha1_url("1.21.8-58.1.0"): good_sha1,
+        },
+        payloads={_PROMOTIONS_URL: promotions},
+    )
+    catalog = CompositeCatalog(
+        by_type={ServerType.FORGE: ForgeCatalog(fetcher=doc_fetcher)}
+    )
+    jar_fetcher = FakeJarFetcher({installer_url: _FORGE_INSTALLER})
+    pool = FakeJarPool()
+    return EnsureJar(catalog=catalog, fetcher=jar_fetcher, pool=pool), pool
+
+
+@pytest.mark.asyncio
+async def test_forge_pools_installer_verified_by_upstream_sha1() -> None:
+    # Forge pools the INSTALLER jar; the upstream .sha1 is verified through the
+    # existing SHA-1 seam (like vanilla) before the bytes are stored (issue #307).
+    ensure, pool = _forge_ensure()
+    key = await ensure(server_type=ServerType.FORGE, version="1.21.8")
+    assert key == hashlib.sha256(_FORGE_INSTALLER).hexdigest()
+    assert pool.stored[key] == _FORGE_INSTALLER
+
+
 @pytest.mark.asyncio
 async def test_known_key_present_skips_download() -> None:
     good_sha1 = hashlib.sha1(_JAR).hexdigest()
