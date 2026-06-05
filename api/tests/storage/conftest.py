@@ -21,7 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.fs import (
+    _DEFAULT_MAX_RESTORE_BYTES,
+    FsStorage,
+)
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -60,12 +63,26 @@ class StorageHarness:
 
 
 def build_harness(
-    backend: str, tmp_path: Path, *, version_retention: int = 10
+    backend: str,
+    tmp_path: Path,
+    *,
+    version_retention: int = 10,
+    max_restore_bytes: int | None = None,
 ) -> StorageHarness:
-    """Construct a :class:`StorageHarness` for one backend (fs / object)."""
+    """Construct a :class:`StorageHarness` for one backend (fs / object).
 
+    ``max_restore_bytes`` injects a tiny decompressed-size cap so a restore
+    gzip-bomb test trips the bound with a small fixture (#287); ``None`` keeps the
+    adapter default.
+    """
+
+    cap = _DEFAULT_MAX_RESTORE_BYTES if max_restore_bytes is None else max_restore_bytes
     if backend == "fs":
-        storage: Storage = FsStorage(tmp_path, version_retention=version_retention)
+        storage: Storage = FsStorage(
+            tmp_path,
+            version_retention=version_retention,
+            max_restore_bytes=cap,
+        )
 
         async def _sweep() -> None:
             assert isinstance(storage, FsStorage)
@@ -74,7 +91,9 @@ def build_harness(
         return StorageHarness(storage=storage, _sweep=_sweep)
 
     obj = ObjectStorage(
-        fake_s3_factory(FakeS3Store()), version_retention=version_retention
+        fake_s3_factory(FakeS3Store()),
+        version_retention=version_retention,
+        max_restore_bytes=cap,
     )
     return StorageHarness(storage=obj, _sweep=obj.sweep)
 

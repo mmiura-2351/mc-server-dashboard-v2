@@ -94,23 +94,33 @@ func TestCoalesceMultiServerIsolation(t *testing.T) {
 		<-m.events
 	}
 
+	// Coalescing converges each server to its latest, but it does not promise
+	// that latest is the *first* event delivered for that server: if the
+	// dispatcher had already pulled an intermediate status into a blocked send
+	// before the later transitions arrived, that intermediate is delivered first
+	// and the latest follows it. So track latest-wins per server and assert on the
+	// converged value after the stream goes quiet, rather than on the first event
+	// seen — which races the dispatcher (issue #308).
 	latest := map[string]string{}
-	deadline := time.After(2 * time.Second)
-	for len(latest) < 2 {
+	overall := time.After(2 * time.Second)
+	for {
 		select {
 		case ev := <-m.events:
 			if ev.ServerID == "a" || ev.ServerID == "b" {
 				latest[ev.ServerID] = ev.State
 			}
-		case <-deadline:
-			t.Fatalf("only saw %v before timeout", latest)
+		case <-time.After(200 * time.Millisecond):
+			// Quiescent: the dispatcher has delivered everything it will.
+			if latest["a"] != "stopped" {
+				t.Fatalf("server a converged to %q, want stopped", latest["a"])
+			}
+			if latest["b"] != "running" {
+				t.Fatalf("server b converged to %q, want running (B's latest lost)", latest["b"])
+			}
+			return
+		case <-overall:
+			t.Fatalf("stream did not go quiet; saw %v", latest)
 		}
-	}
-	if latest["a"] != "stopped" {
-		t.Fatalf("server a = %q, want stopped", latest["a"])
-	}
-	if latest["b"] != "running" {
-		t.Fatalf("server b = %q, want running (B's latest lost)", latest["b"])
 	}
 }
 

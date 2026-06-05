@@ -307,14 +307,19 @@ class StartServer:
         if outcome.status is CommandStatus.INVALID_STATE:
             observed_at = self.clock.now()
             async with self.uow:
-                await self.uow.servers.record_observed_state(
+                applied = await self.uow.servers.record_observed_state(
                     server_id,
                     observed_state=ObservedState.RUNNING,
                     observed_at=observed_at,
                 )
                 await self.uow.commit()
-            server.observed_state = ObservedState.RUNNING
-            server.observed_at = observed_at
+            # Keep the return honest (issue #292): mutate the entity only when the
+            # write landed. If the #216 guard dropped it, a same-instant/fresher
+            # observed write already won, so leave the entity's observed fields
+            # as-read rather than claim a write that did not happen.
+            if applied:
+                server.observed_state = ObservedState.RUNNING
+                server.observed_at = observed_at
             return server
         raise _dispatch_failure(
             server_id=server_id, kind="StartServer", outcome=outcome
@@ -555,16 +560,22 @@ class StopServer:
             # later start's require_unassigned compare-and-set 409s forever.
             observed_at = self.clock.now()
             async with self.uow:
-                await self.uow.servers.record_observed_state(
+                applied = await self.uow.servers.record_observed_state(
                     server_id,
                     observed_state=ObservedState.STOPPED,
                     observed_at=observed_at,
                     unassign=True,
                 )
                 await self.uow.commit()
-            server.observed_state = ObservedState.STOPPED
-            server.observed_at = observed_at
-            server.assigned_worker_id = None
+            # Keep the return honest (issue #292): mutate the entity only when the
+            # write landed. The guard and the unassign share one UPDATE, so a
+            # dropped write also dropped the unassign — leave both observed fields
+            # and the assignment as-read rather than claim a write that did not
+            # happen.
+            if applied:
+                server.observed_state = ObservedState.STOPPED
+                server.observed_at = observed_at
+                server.assigned_worker_id = None
             return server
         if not outcome.success:
             raise _dispatch_failure(
@@ -582,16 +593,21 @@ class StopServer:
         # converged the cache.
         observed_at = self.clock.now()
         async with self.uow:
-            await self.uow.servers.record_observed_state(
+            applied = await self.uow.servers.record_observed_state(
                 server_id,
                 observed_state=ObservedState.STOPPED,
                 observed_at=observed_at,
                 unassign=True,
             )
             await self.uow.commit()
-        server.observed_state = ObservedState.STOPPED
-        server.observed_at = observed_at
-        server.assigned_worker_id = None
+        # Keep the return honest (issue #292): mutate the entity only when the
+        # write landed; if the #216 guard dropped it, a same-instant/fresher write
+        # already won and dropped the unassign atomically, so leave the observed
+        # fields and assignment as-read.
+        if applied:
+            server.observed_state = ObservedState.STOPPED
+            server.observed_at = observed_at
+            server.assigned_worker_id = None
         # Final snapshot AFTER the process has exited (the graceful stop above
         # only returns once the Worker reports the process gone), so the captured
         # working set is quiescent (FR-DATA-4, FR-DATA-7). A snapshot failure is
@@ -658,16 +674,20 @@ class StopServer:
             )
         observed_at = self.clock.now()
         async with self.uow:
-            await self.uow.servers.record_observed_state(
+            applied = await self.uow.servers.record_observed_state(
                 server_id,
                 observed_state=ObservedState.STOPPED,
                 observed_at=observed_at,
                 unassign=True,
             )
             await self.uow.commit()
-        server.observed_state = ObservedState.STOPPED
-        server.observed_at = observed_at
-        server.assigned_worker_id = None
+        # Keep the return honest (issue #292): mutate the entity only when the
+        # write landed; if the #216 guard dropped it, leave the observed fields and
+        # assignment as-read rather than claim a write that did not happen.
+        if applied:
+            server.observed_state = ObservedState.STOPPED
+            server.observed_at = observed_at
+            server.assigned_worker_id = None
         return server
 
 

@@ -170,7 +170,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         observed_at: dt.datetime,
         *,
         unassign: bool = False,
-    ) -> None:
+    ) -> bool:
         values: dict[str, Any] = {
             "observed_state": observed_state.value,
             "observed_at": observed_at,
@@ -200,7 +200,12 @@ class SqlAlchemyServerRepository(ServerRepository):
             )
             .values(**values)
         )
-        await self._session.execute(stmt)
+        result = await self._session.execute(stmt)
+        # Report whether the guard accepted the write (rowcount == 1) so a
+        # convergence caller can keep its returned entity honest (issue #292):
+        # when the guard drops the write (0 rows; a same-instant or fresher write
+        # already landed) the caller must not optimistically mutate the entity.
+        return cast("CursorResult[Any]", result).rowcount == 1
 
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime

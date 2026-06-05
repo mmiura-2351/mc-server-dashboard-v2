@@ -111,7 +111,7 @@ class ServerRepository(abc.ABC):
         observed_at: dt.datetime,
         *,
         unassign: bool = False,
-    ) -> None:
+    ) -> bool:
         """Cache the worker-reported observed state for ``server_id`` (FR-SRV-4).
 
         A no-op if the server is absent (it may have been deleted while the
@@ -123,6 +123,13 @@ class ServerRepository(abc.ABC):
         remain: clearing the assignment then lets a later start re-place under
         ``require_unassigned`` (issue #206). Crash/disconnect paths leave the
         assignment intact (the stickiness invariant), so they do not set it.
+
+        Returns ``True`` when the write landed, ``False`` when the #216 monotonic
+        guard dropped it (a same-instant or fresher write already stamped the row)
+        or the server is absent. A convergence caller uses this to keep its
+        returned entity honest (issue #292): it mutates the entity's observed
+        fields only when ``True``, otherwise leaves them as-read so the return
+        never claims a write that did not land.
         """
 
     @abc.abstractmethod

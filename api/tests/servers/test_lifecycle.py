@@ -853,6 +853,43 @@ async def test_stop_server_not_found_converges_to_stopped() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
+async def test_stop_server_not_found_returned_entity_honest_when_write_dropped() -> (
+    None
+):
+    # Honesty fix (issue #292): under a same-instant clock the #216 monotonic guard
+    # drops the convergence write (a fresher StatusChange already stamped the row at
+    # the same instant). The returned entity must reflect the DROPPED write -- it
+    # must not optimistically claim observed=stopped / unassigned that did not land.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    seeded = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker_id=worker,
+    )
+    # A fresher StatusChange already landed at the clock's instant, so the guard
+    # (observed_at <= current) drops the convergence write stamped at the same _NOW.
+    seeded.observed_at = _NOW
+    uow.servers.seed(seeded)
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    # The guard dropped the write, so the row keeps its observed cache and assignment.
+    assert stored.observed_state is ObservedState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    # The returned entity must agree with the row, not the optimistic mutation.
+    assert result.observed_state is ObservedState.RUNNING
+    assert result.assigned_worker_id == WorkerId(worker)
+
+
 async def test_stop_server_not_found_then_start_succeeds() -> None:
     # The SERVER_NOT_FOUND convergence path must also unassign, so the stop ->
     # start chain succeeds after a crashed/already-gone instance (issue #206).
@@ -1239,6 +1276,40 @@ async def test_redispatch_start_invalid_state_is_treated_as_running() -> None:
     assert result.observed_at == _NOW
 
 
+async def test_redispatch_start_invalid_state_returned_entity_honest_when_dropped() -> (
+    None
+):
+    # Honesty fix (issue #292): under a same-instant clock the #216 guard drops the
+    # observed=running convergence write. The returned entity must reflect the
+    # DROPPED write, not optimistically claim observed=running that did not land.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    seeded = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker_id=worker,
+    )
+    # A fresher write already stamped the row at the clock's instant; the guard drops
+    # the equal-stamped convergence write.
+    seeded.observed_at = _NOW
+    uow.servers.seed(seeded)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INVALID_STATE, message="running")
+    )
+
+    result = await _start_server(uow, cp).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    # The guard dropped the write, so the row keeps its observed cache.
+    assert stored.observed_state is ObservedState.UNKNOWN
+    # The returned entity must agree with the row, not the optimistic mutation.
+    assert result.observed_state is ObservedState.UNKNOWN
+
+
 async def test_redispatch_start_failure_keeps_running_intent() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
@@ -1310,6 +1381,40 @@ async def test_redispatch_stop_server_not_found_unassigns() -> None:
     )
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.assigned_worker_id is None
+
+
+async def test_redispatch_stop_returned_entity_honest_when_write_dropped() -> None:
+    # Honesty fix (issue #292): under a same-instant clock the #216 guard drops the
+    # observed=stopped/unassign convergence write. The returned entity must reflect
+    # the DROPPED write, not optimistically claim observed=stopped / unassigned.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    seeded = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker_id=worker,
+    )
+    # A fresher write already stamped the row at the clock's instant; the guard drops
+    # the equal-stamped convergence write (and its unassign, atomically).
+    seeded.observed_at = _NOW
+    uow.servers.seed(seeded)
+    cp = FakeControlPlane()
+
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).redispatch_stop(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    # The guard dropped the write, so the row keeps its observed cache and assignment.
+    assert stored.observed_state is ObservedState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    # The returned entity must agree with the row, not the optimistic mutation.
+    assert result.observed_state is ObservedState.RUNNING
+    assert result.assigned_worker_id == WorkerId(worker)
 
 
 async def test_redispatch_stop_failure_keeps_assignment() -> None:

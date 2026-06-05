@@ -65,6 +65,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     PublishPhase,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveTooLargeError,
     IncompleteTransferError,
     NotFoundError,
     PathTraversalError,
@@ -94,6 +95,12 @@ _CHUNK = 1024 * 1024
 # parts; the stub does not care, but production must respect it).
 _PART = 8 * 1024 * 1024
 _DEFAULT_VERSION_RETENTION = 10
+# Decompressed-size cap for restore extraction. The compressed archive object is
+# bounded on the way in, but a gzip member can expand ~1000x; the cumulative
+# DECOMPRESSED bytes are counted as members are streamed to staging so a bomb
+# cannot fill the store (#287). 8 GiB bounds the amplification while covering a real
+# Minecraft world; a constant is intentional (no config knob requested).
+_DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 # The single pointer object naming the live snapshot prefix (Section 4.2).
 _POINTER = "current.json"
 
@@ -186,10 +193,12 @@ class ObjectStorage(Storage):
         client_factory: S3ClientFactory,
         *,
         version_retention: int = _DEFAULT_VERSION_RETENTION,
+        max_restore_bytes: int = _DEFAULT_MAX_RESTORE_BYTES,
         failure_seam: FailureSeam | None = None,
     ) -> None:
         self._client_factory = client_factory
         self._version_retention = version_retention
+        self._max_restore_bytes = max_restore_bytes
         self._seam = failure_seam or FailureSeam()
         self._leases: dict[str, int] = {}
         # Active-staging handles: the ``incoming/<transfer>/`` prefix of each
@@ -635,11 +644,16 @@ class ObjectStorage(Storage):
                 # it through the same pointer-flip path as a snapshot (Section 4.1).
                 spool = await _spool_object(client, backup_key, ".restore.", ".tar.gz")
                 try:
+                    # Count cumulative DECOMPRESSED bytes across members: a gzip
+                    # member can expand ~1000x past the compressed object, so the cap
+                    # aborts a bomb before it fills the store (#287).
+                    budget = _RestoreBudget(self._max_restore_bytes)
                     for name in await asyncio.to_thread(
                         _safe_archive_members, spool, "r:gz"
                     ):
                         await client.upload_multipart(
-                            incoming + name, _archive_member_parts(spool, name, "r:gz")
+                            incoming + name,
+                            budget.count(_archive_member_parts(spool, name, "r:gz")),
                         )
                     staged = await client.list_objects(incoming)
                     await self._publish(
@@ -1093,6 +1107,29 @@ def _safe_archive_members(spool: Path, mode: Literal["r:*", "r:gz"]) -> list[str
                     )
                 names.append(member.name)
     return names
+
+
+class _RestoreBudget:
+    """Tally decompressed bytes across a restore's members, bounding the total.
+
+    The running sum is checked after every chunk, so a single high-ratio member
+    aborts mid-stream (:class:`ArchiveTooLargeError`) rather than being uploaded to
+    staging in full first — the gzip-bomb defence (#287). The count is over actual
+    bytes read, not the forgeable member header.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self._max_bytes = max_bytes
+        self._total = 0
+
+    async def count(self, parts: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+        async for chunk in parts:
+            self._total += len(chunk)
+            if self._total > self._max_bytes:
+                raise ArchiveTooLargeError(
+                    f"restore archive exceeds {self._max_bytes} decompressed bytes"
+                )
+            yield chunk
 
 
 async def _archive_member_parts(
