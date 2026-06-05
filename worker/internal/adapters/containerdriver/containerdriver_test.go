@@ -373,6 +373,47 @@ func drainTo(t *testing.T, ch <-chan execution.StatusEvent, want execution.Serve
 	}
 }
 
+// awaitLogLine reads the Logs() stream until a line containing want surfaces. It
+// is the deterministic synchronization point the hold-on-starting test relies on:
+// once a benign boot line appears on Logs(), the capture goroutine has demuxed the
+// boot window, and since markReadyIfDone runs synchronously before a line is
+// queued (logpump.go), any readiness marker present would already have fired
+// Ready. So the marker has provably NOT been seen yet — no sleep needed.
+func awaitLogLine(t *testing.T, ch <-chan execution.LogEvent, want string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("log channel closed before reaching %q", want)
+			}
+			if strings.Contains(ev.Line, want) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for log line %q", want)
+		}
+	}
+}
+
+// observedRunning reports whether any StateRunning event is currently buffered on
+// ch. It drains non-blocking: every emit up to the caller's synchronization point
+// has already completed, so a running event — if one was wrongly emitted before
+// readiness — is sitting in the buffer to be observed here.
+func observedRunning(ch <-chan execution.StatusEvent) bool {
+	for {
+		select {
+		case ev := <-ch:
+			if ev.State == execution.StateRunning {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
+
 func TestStartReachesRunning(t *testing.T) {
 	docker := newFakeDocker()
 	d := newTestDriver(docker, nil, errors.New("no rcon"))
@@ -390,18 +431,57 @@ func TestStartReachesRunning(t *testing.T) {
 // Running is reported only after the server logs its startup-complete "Done"
 // line; until then the instance holds StateStarting so a client gating console
 // input on running does not hit the RCON boot window (issue #345).
+//
+// This pins the PR's core invariant: running is never observed BEFORE the
+// readiness marker. The container log stream is held open (an io.Pipe) without the
+// Done line and the readiness timeout is long, so neither the marker path nor the
+// fallback can fire. A benign boot line driven through to Logs() is the
+// deterministic synchronization point (see awaitLogLine): once it surfaces, the
+// instance must still be starting with no running event emitted; only after the
+// Done frame is written does running arrive. Re-introducing the pre-fix immediate
+// StateRunning emit in beginLaunchTail makes the negative assertions below fail.
 func TestStartHoldsStartingUntilReadyMarker(t *testing.T) {
+	pr, pw := io.Pipe()
 	docker := newFakeDocker()
-	// A long readiness timeout means only the Done marker can drive running here.
+	docker.logBody = pr
+	// A long readiness timeout means only the Done marker can drive running here;
+	// the fallback path is covered by TestStartReachesRunningViaFallbackTimeout.
 	d := newReadinessTestDriver(docker, 10*time.Second)
-	docker.logBody = strings.NewReader(string(frame(dockerStreamStdout,
-		`[12:00:00] [Server thread/INFO]: Done (3.210s)! For help, type "help"`+"\n")))
 
 	inst, err := d.Start(context.Background(), spec())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	src, ok := inst.(execution.LogSource)
+	if !ok {
+		t.Fatal("container instance should be a LogSource")
+	}
+
+	// Drive a benign boot frame (NOT the marker) and wait for it on Logs(). Its
+	// arrival proves the capture goroutine demuxed the boot window without seeing the
+	// marker, so awaitReady cannot have transitioned to running.
+	if _, err := pw.Write(frame(dockerStreamStdout,
+		"[12:00:00] [Server thread/INFO]: Starting minecraft server\n")); err != nil {
+		t.Fatalf("write boot frame: %v", err)
+	}
+	awaitLogLine(t, src.Logs(), "Starting minecraft server")
+
+	// The negative assertions: the instance is still starting and no running event
+	// was emitted before the readiness marker.
+	if got := inst.Status(); got != execution.StateStarting {
+		t.Fatalf("Status = %v before the readiness marker, want starting", got)
+	}
+	if observedRunning(inst.Events()) {
+		t.Fatal("running was emitted before the readiness marker")
+	}
+
+	// Now feed the marker frame; running must arrive.
+	if _, err := pw.Write(frame(dockerStreamStdout,
+		`[12:00:03] [Server thread/INFO]: Done (3.210s)! For help, type "help"`+"\n")); err != nil {
+		t.Fatalf("write done frame: %v", err)
+	}
 	drainTo(t, inst.Events(), execution.StateRunning)
+	_ = pw.Close()
 }
 
 // With no readiness marker in the logs, the instance still reaches running once
