@@ -1052,13 +1052,24 @@ def get_list_servers(request: Request) -> ListServers:
     return ListServers(uow=ServersUnitOfWork(session_factory))
 
 
-def get_update_server(request: Request) -> UpdateServer:
-    """Assemble the :class:`UpdateServer` use case (server:update)."""
+def get_update_server(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> UpdateServer:
+    """Assemble the :class:`UpdateServer` use case (server:update).
+
+    Binds the file seam to Storage and the configured port range so an at-rest
+    game-port change can validate the new port and rewrite ``server-port`` in
+    ``server.properties`` (issue #311), keeping the DB and bind port in sync.
+    """
 
     session_factory = create_session_factory(get_engine(request))
+    ports = get_settings(request).ports
     return UpdateServer(
         uow=ServersUnitOfWork(session_factory),
         clock=ServersSystemClock(),
+        file_store=file_store,
+        port_range=PortRange(start=ports.range_start, end=ports.range_end),
         # The per-server snapshot-interval override carried on config is validated
         # against the configured floor here (CONFIGURATION.md Section 5.4).
         min_interval_seconds=get_settings(request).snapshot.min_interval_seconds,
