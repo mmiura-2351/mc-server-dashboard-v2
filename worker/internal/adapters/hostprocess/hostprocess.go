@@ -259,6 +259,19 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	// cancelled caller context must not be read as a lingering process when the
 	// process did in fact exit. Only the timeout means it survived.
 	if !i.waitExitDone(i.stopTimeout) {
+		// The process survived the kill, so this Stop failed but the process is
+		// still alive. Reset the stopping latch (and the recorded state back to
+		// running, since the process is still alive) so a subsequent Stop re-runs
+		// the full graceful→SIGTERM→SIGKILL→confirm sequence instead of short-
+		// circuiting on the entry guard and returning a false success (issue #253).
+		// The reset is confined to this failure path: a successful stop or a
+		// terminal state keeps stopping latched so supervise reports the eventual
+		// exit as stopped and concurrent stops still dedupe. supervise has not run
+		// here (the process has not exited), so clearing stopping is safe.
+		i.mu.Lock()
+		i.stopping = false
+		i.state = execution.StateRunning
+		i.mu.Unlock()
 		return fmt.Errorf("hostprocess: process survived SIGKILL after %s", i.stopTimeout)
 	}
 	return nil

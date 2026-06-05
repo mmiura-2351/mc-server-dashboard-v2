@@ -13,20 +13,40 @@ import (
 // orphanInstance is a fakeInstance whose Stop fails until stopAfter calls have
 // been made, modelling the #211 case where a driver Stop cannot confirm
 // termination (process/container survives Kill) until a later retry succeeds.
+//
+// It faithfully models the real drivers' stopping-latch contract (issue #253):
+// Stop latches `stopping` on entry and, if already latched (terminal or a
+// concurrent/repeat stop), short-circuits to a no-op nil — exactly the behavior
+// that turned the orphan retry into a false success. The latch is reset only on
+// the failure return so a subsequent Stop re-runs the termination attempt; a
+// successful stop keeps it latched (the instance is gone). Without this faithful
+// model the manager suite could not have caught the bug.
 type orphanInstance struct {
 	*fakeInstance
 	stopAfter int // number of leading Stop calls that fail
 	stopCalls int
+	stopping  bool
 }
 
 func (i *orphanInstance) Stop(ctx context.Context, graceful bool) error {
 	i.mu.Lock()
+	// Mirror the driver entry guard: a Stop while already stopping is a no-op nil.
+	if i.stopping {
+		i.mu.Unlock()
+		return nil
+	}
+	i.stopping = true
 	i.stopCalls++
 	fail := i.stopCalls <= i.stopAfter
 	i.mu.Unlock()
 	if fail {
+		// Survived-kill failure path: reset the latch so a retry re-attempts.
+		i.mu.Lock()
+		i.stopping = false
+		i.mu.Unlock()
 		return errors.New("driver: process survived kill")
 	}
+	// Confirmed termination: keep stopping latched and finalize via the base fake.
 	return i.fakeInstance.Stop(ctx, graceful)
 }
 

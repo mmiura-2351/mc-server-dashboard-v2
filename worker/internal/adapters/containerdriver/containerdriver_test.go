@@ -38,10 +38,16 @@ type fakeDocker struct {
 	stopCalled bool
 	stopNoExit bool
 	killCalled bool
+	killCalls  int
 	// killNoExit models a container that survives docker kill: Kill records the
 	// call but does not release Wait, so the post-Kill waitExit times out.
 	killNoExit bool
-	removed    []string
+	// killSurvive counts how many leading Kill calls survive (do not release Wait);
+	// each Kill decrements it, and a Kill at zero exits the container. It models a
+	// container that lingers through the first kill(s) and dies on a later retry,
+	// driving the re-attemptable-Stop path (issue #253).
+	killSurvive int
+	removed     []string
 
 	listResult []Container
 	listErr    error
@@ -137,12 +143,22 @@ func (f *fakeDocker) Stop(_ context.Context, _ string, _ time.Duration) error {
 func (f *fakeDocker) Kill(_ context.Context, _ string) error {
 	f.mu.Lock()
 	f.killCalled = true
-	noExit := f.killNoExit
+	f.killCalls++
+	survive := f.killNoExit || f.killSurvive > 0
+	if f.killSurvive > 0 {
+		f.killSurvive--
+	}
 	f.mu.Unlock()
-	if !noExit {
+	if !survive {
 		f.exit(137, nil)
 	}
 	return nil
+}
+
+func (f *fakeDocker) killCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.killCalls
 }
 
 func (f *fakeDocker) Wait(_ context.Context, _ string) (int64, error) {
@@ -648,6 +664,64 @@ func TestGracefulStopFailsWhenContainerSurvivesKill(t *testing.T) {
 	}
 	if !docker.killWasCalled() {
 		t.Fatal("expected docker kill escalation")
+	}
+}
+
+// After a Stop that fails because the container survives docker kill, a retry
+// Stop must re-run the kill-and-confirm sequence rather than short-circuit on the
+// stopping latch. When the container then dies on the retry kill, the retry
+// returns success (issue #253). Without the latch reset the retry would return a
+// false nil.
+func TestStopReattemptableAfterSurvivedKill(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
+	// docker stop never exits the container, so each Stop falls through to docker
+	// kill; the first kill survives and the next kill exits it.
+	docker.stopNoExit = true
+	docker.killSurvive = 1
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected first Stop to fail when the container survives docker kill")
+	}
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("retry Stop = %v, want success once the container dies on the retry kill", err)
+	}
+	if docker.killCount() != 2 {
+		t.Fatalf("docker kill called %d times, want 2 (initial + retry re-issues the kill)", docker.killCount())
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+}
+
+// A retry Stop while the container is STILL surviving the kill must fail again,
+// never return a false nil: the orphan is still alive and the API must keep the
+// assignment (issue #253).
+func TestRetryStopStillSurvivingFailsAgain(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
+	docker.stopNoExit = true
+	docker.killNoExit = true // every kill survives
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected first Stop to fail")
+	}
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("retry Stop returned nil while the container still survives; want a failure")
+	}
+	if docker.killCount() != 2 {
+		t.Fatalf("docker kill called %d times, want 2 (the retry must re-issue the kill, not short-circuit)", docker.killCount())
 	}
 }
 
