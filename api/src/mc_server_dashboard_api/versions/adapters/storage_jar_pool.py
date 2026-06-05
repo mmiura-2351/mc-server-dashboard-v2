@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.storage.domain.port import JarStore
 from mc_server_dashboard_api.storage.domain.value_objects import JarKey
-from mc_server_dashboard_api.versions.domain.jar_pool import JarPool
+from mc_server_dashboard_api.versions.domain.jar_pool import JarPool, PoolStats
 
 
 @dataclass(frozen=True)
@@ -33,3 +33,7 @@ class StorageJarPool(JarPool):
 
         key = await self.jars.put_jar(_stream())
         return key.sha256
+
+    async def stats(self) -> PoolStats:
+        s = await self.jars.jar_pool_stats()
+        return PoolStats(count=s.count, total_bytes=s.total_bytes)

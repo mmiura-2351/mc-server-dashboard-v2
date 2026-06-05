@@ -72,6 +72,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
 from mc_server_dashboard_api.storage.domain.port import (
     ByteStream,
     DirEntry,
+    JarPoolStats,
     SnapshotHandle,
     Storage,
 )
@@ -540,6 +541,13 @@ class ObjectStorage(Storage):
                 raise NotFoundError(f"jar not found: {key.sha256}")
             async for chunk in await client.get_object(self._jar_key(key)):
                 yield chunk
+
+    async def jar_pool_stats(self) -> JarPoolStats:
+        # One prefix scan over the content-addressed ``jars/`` namespace (Section
+        # 2 as a key scheme); each object's size comes back with the listing.
+        async with self._client_factory() as client:
+            objs = await client.list_objects("jars/")
+        return JarPoolStats(count=len(objs), total_bytes=sum(obj.size for obj in objs))
 
     # --- backup archive create / list / restore / delete (Section 3.3) -----
 
