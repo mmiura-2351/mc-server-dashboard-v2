@@ -150,6 +150,12 @@ class UpdateServerRequest(BaseModel):
     name: str | None = None
     config: Any = None
     execution_backend: str | None = None
+    # Optional new game port (issue #311). Omitted (None) leaves the port
+    # unchanged; supplied, it is validated against the range (422 out of range)
+    # and the taken set (409 taken), at rest only, and rewritten into
+    # server.properties. Schema-bounded to a valid TCP port so a wildly invalid
+    # value is a 422 at parse time.
+    game_port: int | None = Field(default=None, gt=0, le=65535)
 
 
 class ServerCommandRequest(BaseModel):
@@ -450,21 +456,29 @@ async def update_server(
     use_case: Annotated[UpdateServer, Depends(get_update_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
-    """Edit a server's name/config (server:update).
+    """Edit a server's name/config/game port (server:update).
 
     **Error precedence (issue #115).** Validation runs first: config-bounds
-    (``config_too_large`` / ``config_invalid_shape``) and the cadence-override
-    floor/shape (``invalid_snapshot_interval`` / ``invalid_backup_schedule``) are
-    422 and are evaluated before any state gating. Only then does the state gate
-    apply: an edit that requires the server to be at rest but finds it running is
-    409 (``server_not_stopped``). So a below-floor override on a running server is
-    a 422, not a 409.
+    (``config_too_large`` / ``config_invalid_shape``), the cadence-override
+    floor/shape (``invalid_snapshot_interval`` / ``invalid_backup_schedule``), and
+    the game-port range (``port_out_of_range``) are 422 and are evaluated before
+    any state gating. Only then does the state gate apply: an edit that requires
+    the server to be at rest but finds it running is 409 (``server_not_stopped``).
+    So a below-floor override (or an out-of-range port) on a running server is a
+    422, not a 409.
 
     **Cadence-knob split (issue #115).** A config update that touches only the
     operationally-safe keys (``snapshot_interval_seconds``,
     ``backup_interval_hours``) bypasses the at-rest gate and is accepted while the
     server runs; the schedulers pick up the new value on their next tick. Any
-    other config change — or a name change — keeps the at-rest requirement.
+    other config change — a name change, or a game-port change — keeps the at-rest
+    requirement.
+
+    **Game port (issue #311).** A new ``game_port`` is at rest only, validated
+    like create (422 ``port_out_of_range`` / 409 ``port_taken``), and rewrites
+    ``server-port`` in the at-rest ``server.properties`` so the DB and bind port
+    stay in sync. A storage failure during that rewrite is 503 ``seed_failed`` and
+    leaves the row unchanged.
     """
 
     config = None if body.config is None else _validated_config(body.config)
@@ -475,6 +489,7 @@ async def update_server(
             name=body.name,
             config=config,
             execution_backend=body.execution_backend,
+            game_port=body.game_port,
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
@@ -488,8 +503,18 @@ async def update_server(
         raise _unprocessable("invalid_snapshot_interval") from exc
     except InvalidBackupScheduleError as exc:
         raise _unprocessable("invalid_backup_schedule") from exc
+    except PortOutOfRangeError as exc:
+        # A new game_port outside the configured range (issue #311).
+        raise _unprocessable("port_out_of_range") from exc
+    except PortAlreadyTakenError as exc:
+        # A new game_port already held by another server (issue #311).
+        raise _conflict("port_taken") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except WorkingSetSeedFailedError as exc:
+        # Rewriting server.properties for the port change failed; the row was not
+        # committed (no DB/file drift), surfaced as a mapped 503 (issue #311).
+        raise _service_unavailable("seed_failed") from exc
     await _record(
         recorder, ops.SERVER_UPDATE, authorized, community_id, server.id.value
     )
