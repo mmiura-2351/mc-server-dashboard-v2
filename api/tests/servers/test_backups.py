@@ -18,6 +18,7 @@ Storage), per TESTING.md Section 4. Verifies:
 from __future__ import annotations
 
 import datetime as dt
+import io
 import logging
 import tarfile
 import uuid
@@ -628,9 +629,6 @@ async def test_upload_over_cap_is_rejected_before_storing() -> None:
 
 
 def _targz_with_member(info: "tarfile.TarInfo", data: bytes = b"") -> bytes:
-    import io
-    import tarfile
-
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         tar.addfile(info, io.BytesIO(data) if data else None)

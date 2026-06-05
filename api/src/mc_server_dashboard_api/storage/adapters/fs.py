@@ -1141,9 +1141,11 @@ def _extract_member_capped(
 
     A file member's body is drained in bounded chunks and written out; the running
     decompressed total is checked after every chunk so a single high-ratio member
-    aborts mid-write rather than being fully materialized first. Directory and other
-    safe non-file members carry no body, so they extract through the data filter with
-    no contribution to the count. Returns the updated running total.
+    aborts mid-write rather than being fully materialized first. Writing the body by
+    hand bypasses ``extractall``, so the member's sanitized mode/mtime are reapplied
+    afterwards. Directory and other safe non-file members carry no body, so they
+    extract through the data filter with no contribution to the count. Returns the
+    updated running total.
     """
 
     safe = tarfile.data_filter(member, str(dest))
@@ -1166,4 +1168,8 @@ def _extract_member_capped(
                     f"restore archive exceeds {max_bytes} decompressed bytes"
                 )
             out.write(chunk)
+    # Streaming the body by hand drops the member metadata that ``extractall``
+    # would have applied, so restore the sanitized mode/mtime ourselves.
+    os.chmod(target, safe.mode)
+    os.utime(target, (safe.mtime, safe.mtime))
     return total

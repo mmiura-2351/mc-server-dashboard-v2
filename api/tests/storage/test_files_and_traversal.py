@@ -9,14 +9,21 @@ oldest-pruning, which depend on the fs module internals.
 
 from __future__ import annotations
 
+import io
 import os
+import tarfile
 import time
 from pathlib import Path
 
 import pytest
 
 from mc_server_dashboard_api.storage.adapters import fs as fs_module
-from mc_server_dashboard_api.storage.adapters.fs import FsStorage, _new_version_id
+from mc_server_dashboard_api.storage.adapters.fs import (
+    _DEFAULT_MAX_RESTORE_BYTES,
+    FsStorage,
+    _extract_tar_gz_into,
+    _new_version_id,
+)
 from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.storage.helpers import new_scope, publish, snapshot_dir
@@ -137,3 +144,33 @@ async def test_retention_prunes_the_oldest_version(
     ]
     # Only the two newest prior contents survive; the oldest (v0, v1) were pruned.
     assert contents == [b"v3", b"v2"]
+
+
+def test_restore_extract_preserves_file_mode_and_mtime(tmp_path: Path) -> None:
+    """Streaming a member body out by hand still restores its mode and mtime.
+
+    The size-bounded restore extraction writes file bodies via a plain ``open`` /
+    ``write`` loop instead of ``extractall``, which would otherwise drop the member
+    metadata; the mode/mtime are reapplied from the data-filter-sanitized member so
+    a restored file keeps the parity ``extractall(filter="data")`` gave before (#287).
+    """
+
+    archive = tmp_path / "backup.tar.gz"
+    mtime = 1_600_000_000
+    info = tarfile.TarInfo(name="run.sh")
+    payload = b"#!/bin/sh\necho hi\n"
+    info.size = len(payload)
+    info.mode = 0o750
+    info.mtime = mtime
+    with tarfile.open(archive, mode="w:gz") as tar:
+        tar.addfile(info, io.BytesIO(payload))
+
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _extract_tar_gz_into(archive, dest, _DEFAULT_MAX_RESTORE_BYTES)
+
+    extracted = dest / "run.sh"
+    assert extracted.read_bytes() == payload
+    stat = extracted.stat()
+    assert stat.st_mode & 0o777 == 0o750
+    assert int(stat.st_mtime) == mtime
