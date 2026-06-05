@@ -44,7 +44,12 @@ thrash the fleet every tick. The backoff state is in-memory (a per-server map),
 mirroring the snapshot scheduler's in-memory due-tracking: a restart forgets it,
 which only means the first post-restart tick may retry sooner — acceptable, and
 the divergence itself is still durable in the DB. A successful action clears the
-entry.
+entry — except a start re-dispatched at a server still observed ``crashed``, which
+is a retry of a launch that evidently died: the dispatch succeeds (the Worker
+launches the container) but the process crashes again, so it is counted as a
+failure and backs off, damping the boot-crash loop (#343). A genuinely healed
+server reports ``starting``/``running`` and drops out of ``list_reconcilable``, so
+the stale-cleanup clears its entry.
 
 Loud structured logs accompany every action and every failure so an operator can
 see the reconciler working (NFR-OBS-1). One bad action is logged and left for a
@@ -175,6 +180,23 @@ class RunReconcilerTick:
                 action,
                 server.id.value,
                 exc,
+            )
+            return
+        if server.observed_state is ObservedState.CRASHED:
+            # A start re-dispatched at a server still observed CRASHED is a RETRY of
+            # a launch that evidently died: the dispatch succeeds (the Worker
+            # launches the container) but the process crashes again, so the row stays
+            # reconcilable and the next tick would re-issue at full cadence forever
+            # (boot-crash loop, #343). Count it as a failure so consecutive crash
+            # restarts back off exponentially like dispatch failures do. A genuinely
+            # healed server reports starting/running and drops out of
+            # list_reconcilable, so the existing stale-cleanup clears its entry.
+            self._record_failure(server.id, now)
+            _LOG.warning(
+                "reconcile action %s dispatched for crash-looping server %s; "
+                "backing off",
+                action,
+                server.id.value,
             )
             return
         self._attempts.pop(server.id, None)

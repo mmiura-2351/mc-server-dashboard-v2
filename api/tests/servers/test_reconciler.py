@@ -339,6 +339,43 @@ async def test_success_clears_backoff() -> None:
     assert server.id not in reconciler._attempts
 
 
+async def test_crash_loop_start_backs_off_despite_successful_dispatch() -> None:
+    # A boot-crash server (#343): desired=running, observed=crashed, every start
+    # dispatch SUCCEEDS (the Worker launches the container) but the MC process dies
+    # again, so the row stays reconcilable across ticks. The successful dispatch
+    # must NOT clear the backoff; consecutive crash restarts must space out
+    # exponentially instead of re-hydrating + re-starting at full cadence forever.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()  # start dispatched (hydrate+start), crash counted -> 30s
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert reconciler._attempts[server.id].failures == 1
+
+    clock.set(_NOW + dt.timedelta(seconds=10))
+    await reconciler.tick()  # within backoff -> not re-dispatched
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+    clock.set(_NOW + dt.timedelta(seconds=40))
+    await reconciler.tick()  # past 30s backoff -> retried, crash counted -> 60s
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "hydrate", "start"]
+    assert reconciler._attempts[server.id].failures == 2
+
+    # The grown window now spaces the next retry out: 31s after the second attempt
+    # is still inside the 60s window.
+    clock.set(_NOW + dt.timedelta(seconds=40 + 31))
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "hydrate", "start"]
+
+
 async def test_unknown_observed_with_connected_worker_redispatches_start() -> None:
     # desired=running, assigned, observed=unknown but the worker is in fact
     # connected (a stale unknown): treat as a stale start and re-dispatch.
