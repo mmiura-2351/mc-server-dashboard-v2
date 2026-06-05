@@ -342,6 +342,7 @@ func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
 	switch c := cmd.GetCommand().(type) {
 	case *controlplanev1.ApiCommand_Start:
 		out.Driver = driverName(c.Start.GetDriver())
+		out.LaunchMode = launchModeName(c.Start.GetLaunchMode())
 		out.JarRelpath = c.Start.GetJarRelpath()
 		out.MinecraftVersion = c.Start.GetMinecraftVersion()
 	case *controlplanev1.ApiCommand_Stop:
@@ -386,6 +387,21 @@ func driverName(kind controlplanev1.ExecutionDriverKind) string {
 		return "host-process"
 	case controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER:
 		return "container"
+	default:
+		return ""
+	}
+}
+
+// launchModeName maps the wire LaunchMode enum to the launch-mode name the
+// instancemanager consumes (issue #305). UNSPECIFIED maps to the empty name,
+// which the manager treats as the historical JAR launch — so a command from an
+// API that does not set the field behaves exactly as before.
+func launchModeName(mode controlplanev1.LaunchMode) string {
+	switch mode {
+	case controlplanev1.LaunchMode_LAUNCH_MODE_JAR:
+		return "jar"
+	case controlplanev1.LaunchMode_LAUNCH_MODE_FORGE_ARGSFILE:
+		return "forge-argsfile"
 	default:
 		return ""
 	}

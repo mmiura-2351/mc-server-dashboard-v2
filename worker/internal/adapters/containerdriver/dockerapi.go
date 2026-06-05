@@ -49,6 +49,15 @@ func containerName(serverID string) string {
 	return containerNamePrefix + serverID
 }
 
+// installContainerName is the deterministic name for a server's supervised Forge
+// install container (issue #305). The "-install" suffix keeps it distinct from the
+// launch name (containerName), so the short-lived install container never collides
+// with the launch container's deterministic name; both carry the worker-id label,
+// so a crash-leaked install container is reaped by the startup sweep.
+func installContainerName(serverID string) string {
+	return containerNamePrefix + serverID + "-install"
+}
+
 // dockerAPI is the narrow Docker Engine seam the driver needs. The real adapter
 // (dockerclient.go) speaks the Engine API over the unix socket; tests substitute
 // a fake. Keeping the surface to the handful of endpoints the lifecycle uses

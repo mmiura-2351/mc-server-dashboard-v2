@@ -7,6 +7,56 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
+// An unset launch_mode (UNSPECIFIED) maps to the empty launch mode, which the
+// instancemanager treats as the historical JAR launch (issue #305).
+func TestToCommandStartDefaultLaunchModeIsEmpty(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c1",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_Start{
+			Start: &controlplanev1.StartServer{
+				Driver:           controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_HOST_PROCESS,
+				JarRelpath:       "server.jar",
+				MinecraftVersion: "1.21",
+			},
+		},
+	})
+	if cmd.Kind != "StartServer" {
+		t.Fatalf("Kind = %q, want StartServer", cmd.Kind)
+	}
+	if cmd.LaunchMode != "" {
+		t.Fatalf("LaunchMode = %q, want empty (default JAR)", cmd.LaunchMode)
+	}
+}
+
+// An explicit LAUNCH_MODE_JAR maps to the "jar" name.
+func TestToCommandStartJarLaunchMode(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c1",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_Start{
+			Start: &controlplanev1.StartServer{LaunchMode: controlplanev1.LaunchMode_LAUNCH_MODE_JAR},
+		},
+	})
+	if cmd.LaunchMode != "jar" {
+		t.Fatalf("LaunchMode = %q, want jar", cmd.LaunchMode)
+	}
+}
+
+// LAUNCH_MODE_FORGE_ARGSFILE maps to the "forge-argsfile" name.
+func TestToCommandStartForgeLaunchMode(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c1",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_Start{
+			Start: &controlplanev1.StartServer{LaunchMode: controlplanev1.LaunchMode_LAUNCH_MODE_FORGE_ARGSFILE},
+		},
+	})
+	if cmd.LaunchMode != "forge-argsfile" {
+		t.Fatalf("LaunchMode = %q, want forge-argsfile", cmd.LaunchMode)
+	}
+}
+
 func TestToCommandMapsHydrateTrigger(t *testing.T) {
 	cmd := toCommand(&controlplanev1.ApiCommand{
 		CommandId: "c1",
