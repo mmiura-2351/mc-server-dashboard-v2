@@ -32,7 +32,8 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     create_session_factory,
 )
-from mc_server_dashboard_api.core.api import health
+from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
+from mc_server_dashboard_api.core.api import health, metrics, readiness
 from mc_server_dashboard_api.dataplane.api import transfers
 from mc_server_dashboard_api.dependencies import build_brute_force_config
 from mc_server_dashboard_api.fleet.adapters.clock import SystemClock as FleetSystemClock
@@ -273,6 +274,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.storage = storage
         app.state.version_catalog = version_catalog
+        # Readiness flag for /readyz (issue #282): the control-plane gRPC server
+        # has not started yet; flipped True once start() returns below.
+        app.state.grpc_started = False
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
         # note): reclaim any staging dir/prefix or superseded snapshot left by a
         # crash before this process serves. Idempotent and keyed off the live
@@ -351,6 +355,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             await grpc_server.start()
             app.state.grpc_server = grpc_server
+            app.state.grpc_started = True
             logging.getLogger(__name__).info(
                 "control-plane gRPC server started",
                 extra={"port": settings.server.grpc_port},
@@ -498,8 +503,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await engine.dispose()
 
     app = FastAPI(title="mc-server-dashboard API", lifespan=lifespan)
+    # Middleware is applied outermost-last: adding the metrics middleware after the
+    # correlation-id one makes it the outer wrapper, so it times the full request
+    # handling and labels by route template (issue #282).
     app.middleware("http")(correlation_id_middleware)
+    app.middleware("http")(metrics_middleware)
     app.include_router(health.router)
+    app.include_router(readiness.router)
+    app.include_router(metrics.router)
     app.include_router(users.router)
     # Registered after users.router so the exact ``/users/me`` self-service paths
     # still match before this router's templated ``/users/{user_id}`` paths.

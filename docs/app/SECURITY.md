@@ -26,7 +26,8 @@
 2. [Brute-force protection](#2-brute-force-protection)
 3. [Lockout-state home (decision)](#3-lockout-state-home-decision)
 4. [Trusted-proxy IP resolution](#4-trusted-proxy-ip-resolution)
-5. [Related documents](#5-related-documents)
+5. [Observability endpoints](#5-observability-endpoints)
+6. [Related documents](#6-related-documents)
 
 ---
 
@@ -190,7 +191,30 @@ thereby evade or poison the per-IP brute-force counter.
 
 ---
 
-## 5. Related documents
+## 5. Observability endpoints
+
+The API exposes three unauthenticated operational endpoints for orchestrators
+and monitoring (issue #282):
+
+- `GET /healthz` — liveness; reports the database-connectivity readiness inline.
+- `GET /readyz` — readiness; 200 with per-component booleans when every critical
+  component is ready, 503 with the same shape otherwise.
+- `GET /metrics` — Prometheus exposition of aggregate metrics.
+
+These endpoints are **deliberately unauthenticated** so a probe or scraper need
+no credential, and they are **safe-by-content**: `/healthz` and `/readyz` return
+only component booleans, and `/metrics` returns only aggregates (counts,
+latencies, gauges) — never per-user or per-server identifying data. `/metrics`
+should nonetheless be **firewalled on an internet-facing deployment**: the
+aggregate counts (server/worker totals, request rates) are operational signal an
+external party has no need to see. The bundled Compose deployment publishes only
+the API port and does not expose `/metrics` to any separate listener, so no
+additional change is needed there; an operator fronting the API with a reverse
+proxy should block `/metrics` (and may also restrict `/readyz`) at the proxy.
+
+---
+
+## 6. Related documents
 
 | Doc | Covers |
 |---|---|

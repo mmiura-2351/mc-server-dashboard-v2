@@ -24,7 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
+from mc_server_dashboard_api.core.adapters.metrics import (
+    reconciler_last_success_timestamp_seconds,
+    reconciler_ticks_total,
+)
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
 from mc_server_dashboard_api.servers.application.startup_reset import (
     ResetUnverifiableObservedStates,
@@ -53,7 +58,11 @@ async def run_reconciler_loop(
             if not reset_done:
                 await reset()
                 reset_done = True
+            # Count the tick attempt and stamp the last clean tick, so an operator
+            # can alert on a stalled reconciler via /metrics (issue #282).
+            reconciler_ticks_total.inc()
             await reconciler.tick()
+            reconciler_last_success_timestamp_seconds.set(time.time())
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - one bad tick must not kill the loop

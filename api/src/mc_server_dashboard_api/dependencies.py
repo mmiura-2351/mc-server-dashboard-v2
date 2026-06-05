@@ -16,7 +16,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from mc_server_dashboard_api.audit.adapters.clock import (
     SystemClock as AuditSystemClock,
@@ -92,7 +92,11 @@ from mc_server_dashboard_api.core.adapters.database import (
     SqlAlchemyDatabasePing,
     create_session_factory,
 )
+from mc_server_dashboard_api.core.adapters.readiness import (
+    FlagControlPlaneReadiness,
+)
 from mc_server_dashboard_api.core.domain.health import DatabasePing
+from mc_server_dashboard_api.core.domain.readiness import ControlPlaneReadiness
 from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.control_plane import (
@@ -390,6 +394,27 @@ def get_database_ping(request: Request) -> DatabasePing:
     """Bind the :class:`DatabasePing` Port to its SQLAlchemy adapter."""
 
     return SqlAlchemyDatabasePing(get_engine(request))
+
+
+def get_control_plane_readiness(request: Request) -> ControlPlaneReadiness:
+    """Bind the :class:`ControlPlaneReadiness` Port from the enabled+started flags.
+
+    Enabled is config; started is the ``grpc_started`` flag the app factory sets
+    on app state once the control-plane gRPC server has started (issue #282). When
+    the control plane is disabled the component is trivially ready.
+    """
+
+    enabled = get_settings(request).control.enabled
+    started = bool(getattr(request.app.state, "grpc_started", False))
+    return FlagControlPlaneReadiness(enabled=enabled, started=started)
+
+
+def get_metrics_session_factory(
+    request: Request,
+) -> async_sessionmaker[AsyncSession]:
+    """Provide a short-lived session factory for the /metrics scrape query (#282)."""
+
+    return create_session_factory(get_engine(request))
 
 
 def get_audit_recorder(request: Request) -> AuditRecorder:

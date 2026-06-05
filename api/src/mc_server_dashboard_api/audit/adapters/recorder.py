@@ -15,6 +15,7 @@ import logging
 from mc_server_dashboard_api.audit.domain.events import AuditEvent
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.audit.domain.writer import AuditWriter
+from mc_server_dashboard_api.core.adapters.metrics import audit_write_failures_total
 
 _logger = logging.getLogger(__name__)
 
@@ -30,7 +31,9 @@ class LoggingAuditRecorder(AuditRecorder):
             await self._writer.write(event)
         except Exception:
             # FR-AUD-2: a failed audit write must never raise into or roll back
-            # the (already committed) operation. Log and swallow.
+            # the (already committed) operation. Log and swallow — and count it,
+            # so a silently failing audit trail is observable via /metrics (#282).
+            audit_write_failures_total.inc()
             _logger.error(
                 "audit write failed",
                 extra={
