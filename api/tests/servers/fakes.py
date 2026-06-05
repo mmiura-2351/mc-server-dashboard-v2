@@ -311,19 +311,22 @@ class FakeServerRepository(ServerRepository):
         observed_at: dt.datetime,
         *,
         unassign: bool = False,
-    ) -> None:
+    ) -> bool:
         server = self.by_id.get(server_id)
         if server is None:
-            return
+            return False
         # Mirror the real adapter's monotonic guard (issue #216): drop a write
         # stamped no later than the row's current observed_at; a never-observed row
         # (observed_at is None) still accepts its first write.
         if server.observed_at is not None and observed_at <= server.observed_at:
-            return
+            # Mirror the real adapter's applied flag (issue #292, #249 equivalence):
+            # a dropped write reports False so the caller keeps its return honest.
+            return False
         server.observed_state = observed_state
         server.observed_at = observed_at
         if unassign:
             server.assigned_worker_id = None
+        return True
 
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
