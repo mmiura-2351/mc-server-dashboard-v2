@@ -87,6 +87,11 @@ class FakeFileStore(FileStore):
         self.files: dict[str, bytes] = {}
         self.dirs: dict[str, list[FileEntry]] = {}
         self.versions: dict[str, list[str]] = {}
+        # Retained version bytes keyed by (rel_path, version_id), so a test can
+        # round-trip write -> history -> rollback against the real Storage
+        # retain-before-overwrite semantics the adapter provides (FR-FILE-3).
+        self.version_bytes: dict[tuple[str, str], bytes] = {}
+        self._version_seq = 0
         self.writes: list[tuple[str, bytes]] = []
         self.rollbacks: list[tuple[str, str]] = []
         self.deleted_files: list[str] = []
@@ -155,6 +160,14 @@ class FakeFileStore(FileStore):
     ) -> None:
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
+        # Mirror Storage.write_file: retain the prior content as a version
+        # (newest-first) before overwriting, so the running-edit snapshot and the
+        # at-rest edit both produce a recoverable version (FR-FILE-3).
+        if rel_path in self.files:
+            self._version_seq += 1
+            version_id = f"v{self._version_seq}"
+            self.version_bytes[(rel_path, version_id)] = self.files[rel_path]
+            self.versions.setdefault(rel_path, []).insert(0, version_id)
         self.files[rel_path] = content
         self.writes.append((rel_path, content))
 
@@ -231,6 +244,15 @@ class FakeFileStore(FileStore):
         version_id: str,
     ) -> None:
         self.rollbacks.append((rel_path, version_id))
+        # Restore the retained bytes through write_file so rollback is itself
+        # reversible (Storage.rollback_file semantics), matching the adapter.
+        if (rel_path, version_id) in self.version_bytes:
+            await self.write_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=rel_path,
+                content=self.version_bytes[(rel_path, version_id)],
+            )
 
 
 def _server(
@@ -630,6 +652,7 @@ async def test_write_running_edits_control_plane() -> None:
         ),
     )
     store = FakeFileStore()
+    store.files["ops.json"] = b"[]-seed"  # the at-rest authoritative copy
     cp = FakeControlPlane()
     use_case = WriteFile(uow=uow, control_plane=cp, file_store=store)
 
@@ -640,7 +663,91 @@ async def test_write_running_edits_control_plane() -> None:
         content=b"[]",
     )
     assert [d[0] for d in cp.dispatched] == ["edit_file"]
-    assert store.writes == []
+    # The pre-edit authoritative bytes are snapshotted (re-written unchanged) so
+    # a version is retained before the worker overwrites the live working set; the
+    # authoritative current/ content is otherwise unchanged (FR-FILE-3, #344).
+    assert store.writes == [("ops.json", b"[]-seed")]
+    assert store.files["ops.json"] == b"[]-seed"
+
+
+async def test_write_running_versions_prior_authoritative_content() -> None:
+    # Regression for #344: a running edit must retain the pre-edit authoritative
+    # content as a version, so history is non-empty and rollback (once at rest)
+    # restores it — just like an at-rest edit does.
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    store = FakeFileStore()
+    store.files["server.properties"] = b"rcon=old"  # the at-rest seed
+    cp = FakeControlPlane()
+
+    await WriteFile(uow=uow, control_plane=cp, file_store=store)(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+        content=b"rcon=new",
+    )
+
+    # The edit was dispatched to the worker (the live working set), not written to
+    # current/ — the authoritative copy stays the pre-edit content for now.
+    assert [d[0] for d in cp.dispatched] == ["edit_file"]
+    assert store.files["server.properties"] == b"rcon=old"
+
+    # A version of the pre-edit content is now retained (history is non-empty),
+    # and rolling back to it once at rest restores the prior bytes.
+    versions = await ListFileVersions(uow=uow, file_store=store)(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+    )
+    assert versions
+    uow.servers.by_id[ServerId(server_id)].desired_state = DesiredState.STOPPED
+    uow.servers.by_id[ServerId(server_id)].observed_state = ObservedState.STOPPED
+    await RollbackFile(uow=uow, file_store=store)(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+        version_id=versions[0],
+    )
+    assert store.files["server.properties"] == b"rcon=old"
+
+
+async def test_write_running_absent_authoritative_file_skips_snapshot() -> None:
+    # A file created while running has no authoritative copy to snapshot, so the
+    # edit must not fail trying to version nothing (#344).
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    store = FakeFileStore()  # no seeded server.properties
+    cp = FakeControlPlane()
+
+    await WriteFile(uow=uow, control_plane=cp, file_store=store)(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+        content=b"rcon=new",
+    )
+
+    assert [d[0] for d in cp.dispatched] == ["edit_file"]
+    assert store.writes == []  # nothing to snapshot, no version churned
 
 
 async def test_write_over_cap_is_rejected_before_dispatch() -> None:
