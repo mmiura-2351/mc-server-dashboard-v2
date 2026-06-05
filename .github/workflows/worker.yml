@@ -77,5 +77,10 @@ jobs:
       - name: Lint (golangci-lint)
         run: ./.bin/golangci-lint run
 
-      - name: Test (race detector)
-        run: go test -race ./...
+      # The -race flag is the gate from #323 (worker is concurrency-heavy);
+      # -coverprofile + the go tool cover summary make coverage visible in the
+      # CI log (#325). No coverage floor enforced.
+      - name: Test (race detector + coverage)
+        run: |
+          go test -race -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1
