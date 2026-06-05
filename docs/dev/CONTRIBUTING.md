@@ -72,6 +72,13 @@ runs the full `make check` (lint + typecheck + test for both ecosystems).
   the release-notes group and skips the buf-breaking CI gate (see
   [`../../proto/README.md`](../../proto/README.md)); the version bump follows
   [`RELEASING.md`](RELEASING.md) Section 1.
+- A PR that adds an Alembic migration renumbers it to `main`'s current head at
+  the final rebase before merge: parallel PRs each chain off the same head, so
+  whichever merges second collides until renumbered. Expect this whenever more
+  than one open PR touches `api/migrations/`. CI's migration guard (the api
+  workflow) fails on duplicate heads or numbers against the merge ref, but only
+  re-runs on the next push, so the rebase-time renumber is the discipline that
+  prevents the collision.
 - PR descriptions and issues are written in English.
 
 ## 6. Review
