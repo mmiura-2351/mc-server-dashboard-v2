@@ -28,3 +28,56 @@ func TestRunFailsFastOnMissingConfig(t *testing.T) {
 		t.Errorf("run() error = %v, want a config error", err)
 	}
 }
+
+// TestResolveRconHost pins the mixed-driver RCON host-resolution gate (issue
+// #218): only a container-driven server consults the container driver's
+// resolver; every other server (and a worker with no container driver built)
+// dials the host loopback (empty host).
+func TestResolveRconHost(t *testing.T) {
+	containerResolver := func(serverID string) string {
+		if serverID == "srv-1" {
+			return "mc-srv-1"
+		}
+		return ""
+	}
+	noContainerDriver := func(string) string { return "" }
+
+	tests := []struct {
+		name              string
+		driver            string
+		containerRconHost func(string) string
+		serverID          string
+		want              string
+	}{
+		{
+			name:              "container driver with network resolves to the container name",
+			driver:            "container",
+			containerRconHost: containerResolver,
+			serverID:          "srv-1",
+			want:              "mc-srv-1",
+		},
+		{
+			name:              "host-process driver keeps the loopback",
+			driver:            "host-process",
+			containerRconHost: containerResolver,
+			serverID:          "srv-1",
+			want:              "",
+		},
+		{
+			name:              "container driver with no container driver built keeps the loopback",
+			driver:            "container",
+			containerRconHost: noContainerDriver,
+			serverID:          "srv-1",
+			want:              "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveRconHost(tc.driver, tc.containerRconHost, tc.serverID)
+			if got != tc.want {
+				t.Errorf("resolveRconHost(%q, _, %q) = %q, want %q", tc.driver, tc.serverID, got, tc.want)
+			}
+		})
+	}
+}

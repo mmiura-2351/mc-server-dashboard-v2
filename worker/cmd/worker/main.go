@@ -163,13 +163,24 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	// server on a worker that also advertises the container driver — keeps the host
 	// loopback, so a mixed-driver worker resolves each server correctly (issue #218).
 	openControl := func(ctx context.Context, serverID, driver string) (execution.ServerControl, error) {
-		host := ""
-		if driver == "container" {
-			host = containerRconHost(serverID)
-		}
+		host := resolveRconHost(driver, containerRconHost, serverID)
 		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host)
 	}
 	return instancemanager.New(drivers, wc.ScratchDir, openControl).WithLogger(logger), nil
+}
+
+// resolveRconHost picks the RCON dial host for a server. It is empty (the host
+// loopback) for every server except a container-driven one, which is dialed at
+// the host the container driver derives from its topology (its container name
+// when a network is configured). containerRconHost is the container driver's
+// resolver, or the no-container-driver stub that always returns empty. This is
+// the mixed-driver gate: a host-process server on a worker that also advertises
+// the container driver keeps the loopback (issue #218).
+func resolveRconHost(driver string, containerRconHost func(string) string, serverID string) string {
+	if driver == "container" {
+		return containerRconHost(serverID)
+	}
+	return ""
 }
 
 // newLogger builds the structured logger from the log configuration. Secrets are
