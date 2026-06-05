@@ -75,6 +75,9 @@ class _FakeUserRepository(UserRepository):
     async def count_active_platform_admins(self) -> int:
         raise NotImplementedError
 
+    async def lock_active_platform_admins(self) -> int:
+        raise NotImplementedError
+
 
 class _FakeRefreshTokenRepository(RefreshTokenRepository):
     async def add(self, token: RefreshToken) -> None:

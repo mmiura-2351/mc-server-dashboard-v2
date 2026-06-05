@@ -39,10 +39,9 @@ class DeleteAccount:
     clock: Clock
 
     async def __call__(self, *, user_id: UserId) -> None:
-        # NOTE: both guards below are check-then-act under READ COMMITTED with no
-        # row lock, so concurrent self-deletes can race past them (last-admin and
-        # community-owner TOCTOU). Closing it (FOR UPDATE / SERIALIZABLE / a DB
-        # constraint) is deferred to #260.
+        # The community-owner check still runs in its own committed transaction
+        # (a separate context's seam), so its TOCTOU window is unchanged; #260
+        # closes only the last-active-admin race, which lives in this context.
         if await self.ownership.owns_any_community(user_id):
             raise CommunityOwnedError(str(user_id.value))
 
@@ -53,10 +52,12 @@ class DeleteAccount:
             # The invariant counts ACTIVE admins only (issue #278): a deactivated
             # admin cannot act, so it does not keep the platform administrable.
             # The self-deleting user is itself active (it passed get_current_user),
-            # so a count of 1 means it is the last active admin.
+            # so a count of 1 means it is the last active admin. lock_active_*
+            # takes a FOR UPDATE lock so concurrent last-two-admin self-deletes
+            # serialize and exactly one wins (#260); only this admin path locks.
             if (
                 user.is_platform_admin
-                and await self.uow.users.count_active_platform_admins() <= 1
+                and await self.uow.users.lock_active_platform_admins() <= 1
             ):
                 raise LastPlatformAdminError(str(user_id.value))
 

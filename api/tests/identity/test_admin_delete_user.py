@@ -129,6 +129,38 @@ async def test_delete_admin_allowed_when_other_active_admin_remains() -> None:
     assert target.id not in uow.users.by_id
 
 
+async def test_delete_admin_locks_active_admins() -> None:
+    # Deleting an active admin reduces the set, so the FOR UPDATE lock is taken
+    # to serialize concurrent last-two-admin deletes (#260).
+    actor = make_user(username="actor", is_platform_admin=True)
+    target = make_user(username="t", email="t@example.com", is_platform_admin=True)
+    uow = FakeUnitOfWork()
+    uow.users.seed(actor)
+    uow.users.seed(target)
+
+    await _use_case(uow, FakeCommunityOwnership())(
+        actor_id=actor.id, target_id=target.id
+    )
+
+    assert uow.users.lock_calls == 1
+
+
+async def test_delete_non_admin_does_not_lock_active_admins() -> None:
+    # Deleting a non-admin never reduces the active-admin set, so it stays
+    # lock-free (#260).
+    admin = make_user(username="admin", is_platform_admin=True)
+    target = make_user(username="bob", email="bob@example.com")
+    uow = FakeUnitOfWork()
+    uow.users.seed(admin)
+    uow.users.seed(target)
+
+    await _use_case(uow, FakeCommunityOwnership())(
+        actor_id=admin.id, target_id=target.id
+    )
+
+    assert uow.users.lock_calls == 0
+
+
 async def test_unknown_target_raises() -> None:
     admin = make_user(username="admin", is_platform_admin=True)
     uow = FakeUnitOfWork()

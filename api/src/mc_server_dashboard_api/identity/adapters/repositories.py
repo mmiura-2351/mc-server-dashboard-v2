@@ -149,6 +149,19 @@ class SqlAlchemyUserRepository(UserRepository):
         )
         return (await self._session.execute(stmt)).scalar_one()
 
+    async def lock_active_platform_admins(self) -> int:
+        # Lock the matched user rows FOR UPDATE so concurrent last-admin guards
+        # serialize on them (#260): the second transaction blocks until the first
+        # commits, then this re-read under READ COMMITTED sees the decremented
+        # set. A bare count(*) cannot be row-locked, so select the rows under the
+        # lock and count them here.
+        stmt = (
+            select(UserModel.id)
+            .where(UserModel.is_platform_admin.is_(True), UserModel.active.is_(True))
+            .with_for_update()
+        )
+        return len((await self._session.execute(stmt)).all())
+
 
 class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
     """:class:`RefreshTokenRepository` adapter over an ``AsyncSession``."""

@@ -478,6 +478,33 @@ async def test_count_active_platform_admins_excludes_deactivated(
         assert await uow.users.count_active_platform_admins() == 1
 
 
+async def test_lock_active_platform_admins_counts_like_the_plain_count(
+    engine: AsyncEngine,
+) -> None:
+    # The locking variant (#260) must match count_active_platform_admins: only
+    # active admins, deactivated admins excluded. (The lock itself is exercised
+    # in test_identity_last_admin_concurrency.py.)
+    factory = create_session_factory(engine)
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.users.lock_active_platform_admins() == 0
+
+    active = _user(username="active", email="active@example.com")
+    active.is_platform_admin = True
+    inactive = _user(username="inactive", email="inactive@example.com")
+    inactive.is_platform_admin = True
+    inactive.active = False
+    plain = _user(username="plain", email="plain@example.com")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(active)
+        await uow.users.add(inactive)
+        await uow.users.add(plain)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.users.lock_active_platform_admins() == 1
+
+
 async def test_list_page_orders_by_created_at_and_paginates(
     engine: AsyncEngine,
 ) -> None:
