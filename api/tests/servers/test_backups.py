@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import tarfile
 import uuid
 
 import pytest
@@ -32,6 +33,7 @@ from mc_server_dashboard_api.servers.application.backups import (
     RestoreBackup,
     ServerBackupStatistics,
     UploadBackup,
+    _validate_backup_archive,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
@@ -613,6 +615,105 @@ async def test_upload_over_cap_is_rejected_before_storing() -> None:
     with pytest.raises(FileTooLargeError):
         await UploadBackup(
             uow=uow, backup_store=archive, clock=FakeClock(_NOW), max_bytes=16
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            content=content,
+            created_by=uuid.uuid4(),
+        )
+    assert archive.stored == []
+
+
+# --- hostile-member validation branches (_validate_backup_archive, #287) ----
+
+
+def _targz_with_member(info: "tarfile.TarInfo", data: bytes = b"") -> bytes:
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        tar.addfile(info, io.BytesIO(data) if data else None)
+    return buf.getvalue()
+
+
+def test_validate_rejects_absolute_member_name() -> None:
+    import tarfile
+
+    info = tarfile.TarInfo(name="/etc/passwd")
+    info.size = 1
+    content = _targz_with_member(info, b"x")
+    with pytest.raises(InvalidBackupArchiveError):
+        _validate_backup_archive(content, max_entries=10)
+
+
+def test_validate_rejects_symlink_member() -> None:
+    import tarfile
+
+    info = tarfile.TarInfo(name="link")
+    info.type = tarfile.SYMTYPE
+    info.linkname = "/etc/passwd"
+    content = _targz_with_member(info)
+    with pytest.raises(InvalidBackupArchiveError):
+        _validate_backup_archive(content, max_entries=10)
+
+
+def test_validate_rejects_hardlink_member() -> None:
+    import tarfile
+
+    info = tarfile.TarInfo(name="hard")
+    info.type = tarfile.LNKTYPE
+    info.linkname = "world/level.dat"
+    content = _targz_with_member(info)
+    with pytest.raises(InvalidBackupArchiveError):
+        _validate_backup_archive(content, max_entries=10)
+
+
+def test_validate_rejects_device_member() -> None:
+    import tarfile
+
+    info = tarfile.TarInfo(name="dev/sda")
+    info.type = tarfile.CHRTYPE
+    info.devmajor = 1
+    info.devminor = 3
+    content = _targz_with_member(info)
+    with pytest.raises(InvalidBackupArchiveError):
+        _validate_backup_archive(content, max_entries=10)
+
+
+def test_validate_rejects_too_many_entries() -> None:
+    content = _targz({f"f{i}": b"x" for i in range(5)})
+    with pytest.raises(InvalidBackupArchiveError):
+        _validate_backup_archive(content, max_entries=3)
+
+
+def test_validate_rejects_decompression_bomb_member() -> None:
+    # A single member whose decompressed body exceeds the cap is refused before any
+    # store, even though the compressed archive is tiny (gzip-bomb amplification).
+    content = _targz({"bomb": b"\x00" * 4096})
+    with pytest.raises(InvalidBackupArchiveError):
+        _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=1024)
+
+
+def test_validate_accepts_safe_archive_within_caps() -> None:
+    content = _targz({"server.properties": b"k=v", "world/level.dat": b"w"})
+    # No raise: a benign archive within both the entry and decompressed caps.
+    _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=1024)
+
+
+async def test_upload_rejects_decompression_bomb_before_storing() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    archive = FakeBackupArchiveStore()
+    uow = FakeUnitOfWork(servers=repo)
+    content = _targz({"bomb": b"\x00" * 4096})
+    with pytest.raises(InvalidBackupArchiveError):
+        await UploadBackup(
+            uow=uow,
+            backup_store=archive,
+            clock=FakeClock(_NOW),
+            max_decompressed_bytes=1024,
         )(
             community_id=_COMMUNITY,
             server_id=server.id,

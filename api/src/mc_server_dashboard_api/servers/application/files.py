@@ -83,6 +83,17 @@ MAX_EDIT_BYTES = 4 * 1024 * 1024
 # requested); document if it ever needs tuning.
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
+# The decompressed-size cap for an uploaded/restored backup archive. The
+# compressed body is bounded by MAX_UPLOAD_BYTES (512 MiB), but a gzip member can
+# expand ~1000x, so the compressed cap alone does not bound how much a hostile
+# archive inflates on extraction (a gzip bomb). 8 GiB bounds that amplification
+# while comfortably covering a real Minecraft world (restores of large worlds are
+# expected; the point is bounding the blow-up ratio, not blocking big worlds). The
+# bound counts ACTUAL decompressed bytes as members are drained, so a member that
+# under-reports its header size cannot slip past. A constant is intentional (no
+# config knob requested); document if it ever needs tuning.
+MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
+
 # The archive-entry-count cap. The cumulative-size cap alone does not bound a
 # member-count bomb: a tiny archive of hundreds of thousands of 1-byte members
 # stays under MAX_UPLOAD_BYTES yet each member is a separate versioned write

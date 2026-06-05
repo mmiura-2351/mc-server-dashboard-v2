@@ -41,12 +41,14 @@ import tarfile
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import IO
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
 )
 from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
+    MAX_DECOMPRESSED_BYTES,
     MAX_UPLOAD_BYTES,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
@@ -337,6 +339,7 @@ class UploadBackup:
     clock: Clock
     max_bytes: int = MAX_UPLOAD_BYTES
     max_entries: int = MAX_ARCHIVE_ENTRIES
+    max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES
 
     async def __call__(
         self,
@@ -351,7 +354,11 @@ class UploadBackup:
 
         if len(content) > self.max_bytes:
             raise FileTooLargeError(str(len(content)))
-        _validate_backup_archive(content, max_entries=self.max_entries)
+        _validate_backup_archive(
+            content,
+            max_entries=self.max_entries,
+            max_decompressed_bytes=self.max_decompressed_bytes,
+        )
 
         storage_ref = await self.backup_store.store(
             community_id=community_id,
@@ -428,21 +435,33 @@ async def _chunked(content: bytes) -> AsyncIterator[bytes]:
         yield content[start : start + _UPLOAD_STREAM_CHUNK]
 
 
-def _validate_backup_archive(content: bytes, *, max_entries: int) -> None:
-    """Prove the upload is a traversal-safe gzip tar before it is stored (#281).
+def _validate_backup_archive(
+    content: bytes,
+    *,
+    max_entries: int,
+    max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES,
+) -> None:
+    """Prove the upload is a traversal-safe, bounded gzip tar before storing (#281).
 
     Backups are self-contained ``tar.gz`` archives (STORAGE.md Section 2). The
     archive must open as a gzip tar, carry at most ``max_entries`` members, and
     every member must be a regular file or directory with a relative, non-escaping
     name (no absolute paths, no ``..``, no devices / symlink / hardlink members) —
     the same traversal discipline Storage's extraction enforces, applied here so a
-    hostile archive is refused BEFORE it lands in the store. Raises
-    :class:`InvalidBackupArchiveError` (422) on any violation.
+    hostile archive is refused BEFORE it lands in the store.
+
+    The compressed body is already capped, but a gzip member can expand ~1000x, so
+    each file member's body is drained and the cumulative DECOMPRESSED byte count
+    is bounded by ``max_decompressed_bytes`` (#287). The count is over actual bytes
+    read, not the (forgeable) member header, so a member that under-reports its size
+    cannot slip past. Raises :class:`InvalidBackupArchiveError` (422) on any
+    violation.
     """
 
     try:
         with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tar:
             count = 0
+            total = 0
             for member in tar:
                 count += 1
                 if count > max_entries:
@@ -455,8 +474,31 @@ def _validate_backup_archive(content: bytes, *, max_entries: int) -> None:
                     raise InvalidBackupArchiveError(
                         f"unsafe member path: {member.name!r}"
                     )
+                if member.isfile():
+                    handle = tar.extractfile(member)
+                    if handle is not None:
+                        total = _drain_capped(handle, total, max_decompressed_bytes)
     except tarfile.TarError as exc:
         raise InvalidBackupArchiveError("not a gzip tar archive") from exc
+
+
+def _drain_capped(handle: IO[bytes], total: int, max_bytes: int) -> int:
+    """Drain a member's decompressed body in chunks, bounding the cumulative total.
+
+    Mirrors ``files._read_capped`` (#262) but counts only — the validator never
+    needs the bytes, just proof the archive stays under the cap. ``total`` is the
+    running sum across prior members; the sum is checked after every chunk so a
+    single high-ratio member aborts mid-decompression rather than materializing
+    first (the gzip-bomb defence). Returns the updated running total.
+    """
+
+    while True:
+        chunk = handle.read(_UPLOAD_STREAM_CHUNK)
+        if not chunk:
+            return total
+        total += len(chunk)
+        if total > max_bytes:
+            raise InvalidBackupArchiveError("decompressed size exceeds cap")
 
 
 def _is_unsafe_member_name(name: str) -> bool:

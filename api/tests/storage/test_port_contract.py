@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveTooLargeError,
     IncompleteTransferError,
     NotFoundError,
     SnapshotHandleError,
@@ -27,6 +28,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
+    bomb_targz,
     drain,
     malicious_tar_with_escape,
     new_scope,
@@ -265,6 +267,23 @@ async def test_restore_unknown_backup_is_not_found(
     await harness.publish(community, server, {"f": b"x"})
     with pytest.raises(NotFoundError):
         await harness.storage.restore_backup(community, server, BackupKey("nope"))
+
+
+async def test_restore_rejects_decompression_bomb(backend: str, tmp_path: Path) -> None:
+    """A backup whose members inflate past the restore cap is refused, not extracted.
+
+    The compressed archive is bounded on the way in, but a gzip member can expand
+    ~1000x; the restore extraction bounds the cumulative DECOMPRESSED bytes so a
+    bomb cannot fill the disk (#287). Built with a tiny cap so the fixture stays
+    small.
+    """
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=1024)
+    community, server = new_scope()
+    bomb = bomb_targz()
+    key = await harness.storage.put_backup(community, server, stream_of(bomb))
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.restore_backup(community, server, key)
 
 
 async def test_delete_backup_is_idempotent(harness: StorageHarness) -> None:

@@ -45,6 +45,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     PublishPhase,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveTooLargeError,
     IncompleteTransferError,
     NotFoundError,
     PathTraversalError,
@@ -71,6 +72,13 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 # Read/stream chunk size for hydrate / JAR egress.
 _CHUNK = 1024 * 1024
 _DEFAULT_VERSION_RETENTION = 10
+
+# Decompressed-size cap for restore extraction. The compressed archive body is
+# bounded on the way in, but a gzip member can expand ~1000x; the cumulative
+# DECOMPRESSED bytes are counted as members are extracted so a bomb cannot fill the
+# disk (#287). 8 GiB bounds the amplification while covering a real Minecraft
+# world; a constant is intentional (no config knob requested).
+_DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 
 
 class _FsSnapshotHandle(SnapshotHandle):
@@ -103,11 +111,13 @@ class FsStorage(Storage):
         root: Path,
         *,
         version_retention: int = _DEFAULT_VERSION_RETENTION,
+        max_restore_bytes: int = _DEFAULT_MAX_RESTORE_BYTES,
         failure_seam: FailureSeam | None = None,
         tar_member_hook: Callable[[Path], None] | None = None,
     ) -> None:
         self._root = root
         self._version_retention = version_retention
+        self._max_restore_bytes = max_restore_bytes
         self._seam = failure_seam or FailureSeam()
         self._tar_member_hook = tar_member_hook
         # Active-reader leases: a snapshot directory an open hydrate stream is
@@ -545,7 +555,9 @@ class FsStorage(Storage):
         # the same active-staging lease for the life of the operation (issue #183).
         self._register_staging(staging)
         try:
-            await asyncio.to_thread(_extract_tar_gz_into, archive, staging)
+            await asyncio.to_thread(
+                _extract_tar_gz_into, archive, staging, self._max_restore_bytes
+            )
             await asyncio.to_thread(self._publish, community_id, server_id, staging)
         except BaseException:
             await asyncio.to_thread(_rmtree, staging)
@@ -1100,6 +1112,58 @@ def _write_tar_gz(directory: Path, archive: Path) -> None:
             tar.add(child, arcname=child.name)
 
 
-def _extract_tar_gz_into(archive: Path, dest: Path) -> None:
+def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> None:
+    """Extract a restore ``tar.gz`` into ``dest``, traversal-safe and size-bounded.
+
+    ``filter="data"`` (Python 3.12+) refuses absolute paths, ``..`` escapes, devices
+    and other unsafe members — the tar-side traversal defence. On top of it, the
+    cumulative DECOMPRESSED bytes are counted as each file member is drained and
+    bounded by ``max_bytes``: a gzip member can expand ~1000x past the compressed
+    body, so the size cap aborts a bomb (:class:`ArchiveTooLargeError`) before it
+    fills the disk (#287). The count is over actual bytes read, not the forgeable
+    member header.
+    """
+
+    total = 0
     with tarfile.open(archive, mode="r:gz") as tar:
-        tar.extractall(dest, filter="data")
+        for member in tar:
+            total = _extract_member_capped(tar, member, dest, total, max_bytes)
+
+
+def _extract_member_capped(
+    tar: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    dest: Path,
+    total: int,
+    max_bytes: int,
+) -> int:
+    """Extract one member under the data filter, counting drained file bytes.
+
+    A file member's body is drained in bounded chunks and written out; the running
+    decompressed total is checked after every chunk so a single high-ratio member
+    aborts mid-write rather than being fully materialized first. Directory and other
+    safe non-file members carry no body, so they extract through the data filter with
+    no contribution to the count. Returns the updated running total.
+    """
+
+    safe = tarfile.data_filter(member, str(dest))
+    if not safe.isfile():
+        tar.extract(safe, dest, filter="data")
+        return total
+    handle = tar.extractfile(safe)
+    if handle is None:  # pragma: no cover - a file member always yields a handle
+        return total
+    target = dest / safe.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with handle, open(target, "wb") as out:
+        while True:
+            chunk = handle.read(_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ArchiveTooLargeError(
+                    f"restore archive exceeds {max_bytes} decompressed bytes"
+                )
+            out.write(chunk)
+    return total
