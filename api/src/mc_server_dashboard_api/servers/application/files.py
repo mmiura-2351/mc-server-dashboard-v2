@@ -394,6 +394,12 @@ def _archive_entries(
     size cap is enforced *during* decompression on both paths (a member is read in
     chunks, counted as it inflates), so a single high-ratio member cannot be
     materialized in memory before the guard trips.
+
+    This is the SAME generator both the validate pass and the write pass run over,
+    so the per-entry checks are defined once (no duplication). The validate pass
+    (:func:`_validate_archive`) drains it without writing; the write pass consumes
+    it again and persists each member. The archive bytes are already in memory
+    (bounded by ``MAX_UPLOAD_BYTES``), so a second pass is cheap.
     """
 
     if filename.endswith(".zip"):
@@ -404,6 +410,27 @@ def _archive_entries(
         )
     else:
         raise InvalidFilePathError(filename)
+
+
+def _validate_archive(
+    filename: str, content: bytes, *, max_bytes: int, max_entries: int
+) -> None:
+    """Dry-run the hardened extraction so a rejection happens before any write.
+
+    Iterates the entire archive through the SAME :func:`_archive_entries` checks
+    (traversal / symlink / special-member, cumulative size, entry count) and
+    discards the yielded bytes — nothing is persisted. If the whole archive
+    validates this returns; otherwise it raises the same
+    :class:`InvalidFilePathError` / :class:`FileTooLargeError` the write pass
+    would. Running this first makes extraction atomic: a mid-archive rejection
+    (zip-slip / size cap / entry-count) leaves NOTHING written (issue #269), and
+    on import it fires before the server row is committed (issue #277).
+    """
+
+    for _entry_path, _data in _archive_entries(
+        filename, content, max_bytes=max_bytes, max_entries=max_entries
+    ):
+        pass
 
 
 def _check_entry_path(name: str) -> None:
@@ -537,6 +564,16 @@ class UploadFile:
             raise ServerFilesUnsettledError(str(server_id.value))
 
         if extract:
+            # Validate the whole archive (traversal / symlink / size / entry-count)
+            # in a dry-run pass BEFORE writing anything: a mid-archive rejection
+            # then leaves no partially-written versioned files (issue #269). The
+            # archive bytes are already in memory, so the second pass is cheap.
+            _validate_archive(
+                filename,
+                content,
+                max_bytes=self.max_bytes,
+                max_entries=self.max_entries,
+            )
             # Duplicate entry names (two members with the same path) are written
             # in archive order, so the last occurrence wins — the same last-write
             # semantics a sequence of plain writes would have. Left as-is (no

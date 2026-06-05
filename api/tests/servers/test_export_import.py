@@ -37,6 +37,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
+    InvalidFilePathError,
     ServerFilesUnsettledError,
     WorkingSetSeedFailedError,
 )
@@ -326,6 +327,29 @@ async def test_import_oversized_is_too_large() -> None:
             execution_backend="host_process",
             content=archive,
         )
+    # The validate-first pass (#277) rejects the hostile archive BEFORE the row is
+    # created: a 413 leaves no server row behind, unlike the seed-failure posture.
+    assert len(dst_uow.servers.by_id) == 0
+
+
+async def test_import_zip_slip_entry_creates_no_row() -> None:
+    # A zip-slip member (422) is a property of the archive and is rejected by the
+    # pre-commit validate pass, so no server row is created (#277).
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), "../escape.txt": b"pwned"})
+    with pytest.raises(InvalidFilePathError):
+        await imp(
+            community_id=CommunityId(community),
+            name="fresh",
+            execution_backend="host_process",
+            content=archive,
+        )
+    assert len(dst_uow.servers.by_id) == 0
+    assert dst_store.files == {}
 
 
 async def test_import_publish_failure_is_seed_failed() -> None:

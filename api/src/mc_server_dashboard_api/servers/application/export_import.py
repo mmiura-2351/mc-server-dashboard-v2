@@ -21,11 +21,14 @@ Both reuse the C1 machinery rather than re-implementing it:
   ``accept_eula`` is never implied (the imported working set may carry its own
   eula.txt).
 
-Failure posture (import): the row commits first, then the working set is
-published. A publish failure mid-way reuses the #243/#252 seed-failure posture --
-:class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- leaving a committed
-but degraded row that is repairable via the files API, rather than an unmapped
-500.
+Failure posture (import): the archive is fully validated (metadata shape AND the
+hardened entry checks — zip-slip, size, entry-count) BEFORE the row commits, so a
+hostile archive is rejected (413/422) with NO server row created (issue #277).
+Only a genuine storage failure during the post-commit write pass can leave a
+committed row behind; that mid-write class reuses the #243/#252 seed-failure
+posture -- :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- leaving a
+committed but degraded row that is repairable via the files API, rather than an
+unmapped 500. It is now the ONLY post-commit failure class.
 
 Legacy incompatibility: legacy exports carry a different metadata shape. This
 slice does NOT implement compatibility; the format is documented (DEPLOYMENT.md)
@@ -45,6 +48,7 @@ from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
     MAX_UPLOAD_BYTES,
     _archive_entries,
+    _validate_archive,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.domain.clock import Clock
@@ -143,11 +147,15 @@ class ImportServer:
     :class:`CreateServer` use case so the SAME validation (server_type/version via
     the #267 validator, edition, name uniqueness) and the #243 port auto-assign
     apply -- ``accept_eula`` is left false (the imported working set carries its
-    own eula.txt if any). After the row commits, the archive contents are
-    published as the initial working set through the hardened extraction
-    (``_archive_entries``: zip-slip, size, and entry-count caps), with the
-    metadata member itself excluded. The name comes from the caller, not the
-    metadata.
+    own eula.txt if any).
+
+    The whole archive is then validated in a dry-run pass (the hardened
+    ``_archive_entries`` checks: zip-slip, size, and entry-count caps) BEFORE the
+    row is created, so a hostile archive 413/422s with no server row left behind
+    (issue #277). Only after both the metadata and the entries validate does the
+    row commit; the write pass then publishes the entries as the initial working
+    set, with the metadata member itself excluded. The name comes from the caller,
+    not the metadata.
 
     The caps are fields (not bare constants) so a test can inject tiny caps and
     trip the size / entry-count guards with a small archive; production wiring uses
@@ -171,6 +179,17 @@ class ImportServer:
             raise FileTooLargeError(str(len(content)))
 
         metadata = _parse_metadata(content)
+        # Validate the whole archive (zip-slip / size / entry-count) BEFORE the row
+        # is created, so a hostile archive 413/422s with no server row left behind
+        # (issue #277). The metadata member is included in this pass (it is a normal
+        # archive entry); only its write is skipped later. The body bytes are
+        # already in memory, so the dry-run pass is cheap.
+        _validate_archive(
+            EXPORT_METADATA_FILENAME + ".zip",  # route to the zip branch
+            content,
+            max_bytes=self.max_bytes,
+            max_entries=self.max_entries,
+        )
         # Create the row through the shared use case: it runs the version validator
         # (spigot/forge/unknown-version -> 422), assigns the game port (#243), and
         # enforces name uniqueness (409). accept_eula stays false on purpose.
@@ -194,13 +213,16 @@ class ImportServer:
     ) -> None:
         """Write the archive members into the new server's first published version.
 
-        Reuses the hardened extraction (``_archive_entries``) for the zip-slip /
-        size / entry-count caps, skipping the metadata member so it never lands in
-        the working set. A cap breach (413) or an unsafe member path (422) is a
-        property of the archive and is surfaced as-is. Any other storage failure
-        mid-publish reuses the #243/#252 seed-failure posture: the committed row
-        stays (degraded but repairable via the files API) and the failure surfaces
-        as a mapped 503, never an unmapped 500.
+        Runs only after :meth:`__call__`'s pre-commit validate pass has cleared the
+        whole archive, so the entries here are already known-safe; re-running the
+        SAME hardened extraction (``_archive_entries``) keeps the streamed decode in
+        one place and skips the metadata member so it never lands in the working
+        set. The archive-property cap/path rejections (413/422) cannot fire here
+        (the validate pass already raised them, before the row existed) but the
+        re-raise is kept defensively. The ONLY genuine post-commit failure is a
+        storage write error mid-publish: it reuses the #243/#252 seed-failure
+        posture -- the committed row stays (degraded but repairable via the files
+        API) and the failure surfaces as a mapped 503, never an unmapped 500.
         """
 
         try:
@@ -219,8 +241,9 @@ class ImportServer:
                     content=data,
                 )
         except (FileTooLargeError, InvalidFilePathError):
-            # A cap breach (413) or an unsafe member path (422) is a property of
-            # the archive, surfaced to the caller as-is -- not a seed failure.
+            # Defensive: the pre-commit validate pass already rejected these as an
+            # archive property (413/422) with no row created, so they should not
+            # reach here; re-raise as-is rather than mask them as a seed failure.
             raise
         except Exception as exc:
             _logger.warning(
