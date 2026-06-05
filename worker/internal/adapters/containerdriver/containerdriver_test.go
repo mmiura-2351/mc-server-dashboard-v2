@@ -822,6 +822,35 @@ func TestStartConflictLoopRemoveInProgressThen404Succeeds(t *testing.T) {
 	}
 }
 
+// A transient (non-404) inspect error mid-loop is not fatal: the driver treats
+// it as "name still in use", keeps polling, and recovers when the next inspect
+// 404s and the retried create succeeds.
+func TestStartConflictLoopInspectErrorThenRecovers(t *testing.T) {
+	docker := newFakeDocker()
+	docker.conflictsLeft = 1
+	docker.inspectSteps = []inspectStep{
+		{err: errors.New("inspect boom")},
+		{err: errNotFound},
+	}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	docker.mu.Lock()
+	calls, removed := docker.createCalls, docker.removed
+	docker.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("createCalls = %d, want 2 (conflict then retry after recovery)", calls)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v, want none (the transient error never triggers a remove)", removed)
+	}
+}
+
 // The inspect finds THIS Worker's exited container; the driver removes it, the
 // name frees, and the retried create succeeds.
 func TestStartConflictLoopRemovesOwnStoppedThenSucceeds(t *testing.T) {

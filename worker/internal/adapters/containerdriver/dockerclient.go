@@ -206,6 +206,12 @@ func (c *EngineClient) Remove(ctx context.Context, id string) error {
 	if err := c.do(ctx, http.MethodDelete, "/containers/"+id, q, nil, nil); err != nil {
 		var status statusError
 		if errors.As(err, &status) && status.code == http.StatusConflict {
+			// Mapping a DELETE 409 to "removal in progress" is sound only because
+			// this request always sends force=true (set above): with force, the
+			// daemon returns 409 solely for a removal already in flight. Without
+			// force, a 409 also means "container is running", which this branch
+			// would silently misclassify — so keep force=true if this ever changes.
+			//
 			// Surface a typed conflict so the wait-for-name-free loop treats an
 			// in-flight removal as progress and keeps polling (issue #233); keep the
 			// daemon message for diagnostics.
