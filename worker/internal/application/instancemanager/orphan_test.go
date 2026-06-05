@@ -3,6 +3,7 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -189,16 +190,42 @@ func TestOrphanClearedWhenInstanceExitsOnItsOwn(t *testing.T) {
 	d.inst.events <- execution.StatusEvent{ServerID: "s1", State: execution.StateStopped}
 	close(d.inst.events)
 
-	deadline := time.Now().Add(2 * time.Second)
+	// Anchor on the pump's own progress rather than a fixed sleep: the pump
+	// forwards the terminal stopped status onto the merged stream as the last
+	// action of its event loop, then the loop exits and the deferred
+	// forgetOrphanIf clears the orphan (issue #253). Draining that terminal event
+	// off m.Events() deterministically advances the pump past its final send, so
+	// the remaining window before the orphan is cleared is only the deferred call
+	// scheduling — collapsing the old dependency on a fixed deadline that an
+	// overloaded -race runner could exceed (issue #330).
+	overall := time.After(2 * time.Second)
+drain:
+	for {
+		select {
+		case ev := <-m.Events():
+			if ev.ServerID == "s1" && ev.State == execution.StateStopped.String() {
+				break drain
+			}
+		case <-overall:
+			t.Fatal("pump did not forward the terminal stopped status")
+		}
+	}
+
+	// Event-driven fast path with a generous overall deadline: poll the observable
+	// (the orphan is cleared once a stop for the id is SERVER_NOT_FOUND), which
+	// converges within microseconds of the drain above once the deferred
+	// forgetOrphanIf runs.
 	for {
 		res := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
 		if res.ErrorCode == session.CommandErrorServerNotFound {
 			break
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-overall:
 			t.Fatalf("orphan not cleared after instance exit; last = %+v", res)
+		default:
 		}
-		time.Sleep(5 * time.Millisecond)
+		runtime.Gosched()
 	}
 }
 

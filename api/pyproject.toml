@@ -92,6 +92,10 @@ dev = [
     # would otherwise hang the whole run. 2.4.0 (2025-05-05) is well outside the
     # 7-day cooldown (Section 3); cap the next major (dev tooling, Section 1).
     "pytest-timeout>=2.4.0,<3",
+    # Coverage measurement for CI visibility (#325): `pytest --cov=src`. 7.1.0
+    # (2026-03-21) is well outside the 7-day cooldown (Section 3); cap the next
+    # major (dev tooling, Section 1).
+    "pytest-cov>=7.1.0,<8",
 ]
 
 [build-system]

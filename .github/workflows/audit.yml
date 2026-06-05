@@ -1,0 +1,86 @@
+name: audit
+
+# Dependency vulnerability audit (govulncheck for worker/, pip-audit for api/).
+#
+# WHY scheduled matters most: the majority of CVEs land against versions that
+# are ALREADY pinned in the lockfiles, not against a new diff. The weekly cron
+# is the real safety net; the on-PR run (path-filtered to the dependency
+# manifests only) just catches a CVE that a manifest change introduces.
+#
+# FAILURE POLICY: a red audit run means a known vulnerability now affects a
+# pinned dependency. That is the signal -- it is meant to fail loudly. Do NOT
+# silence it; triage per docs/dev/DEPENDENCIES.md Section 4 (open a patch PR
+# within a week, out-of-band for high-severity).
+#
+# These jobs are intentionally NOT named `check`: the required status context
+# is `check` (see sanity.yml). An audit must never become a required context --
+# a CVE landing against a pinned dep must not block unrelated merges.
+
+on:
+  schedule:
+    # Mondays 03:00 UTC -- a quiet slot, off the working week.
+    - cron: "0 3 * * 1"
+  pull_request:
+    # Only when a dependency manifest changes; a CVE in an unchanged pin is the
+    # scheduled run's job, not every PR's.
+    paths:
+      - "api/uv.lock"
+      - "api/pyproject.toml"
+      - "worker/go.mod"
+      - "worker/go.sum"
+      - ".github/workflows/audit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go (caches the module + build cache)
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: worker/go.mod
+
+      # govulncheck is pinned like the other Go tools (cf. GOLANGCI_VERSION in
+      # the Makefile): an exact tag, never @latest, kept outside the cooldown.
+      - name: Install govulncheck (pinned)
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+
+      # Call-graph aware, so it only fails on vulnerabilities the worker's code
+      # actually reaches.
+      - name: govulncheck
+        run: govulncheck ./...
+
+  pip-audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: api/uv.lock
+
+      # Audit the exact locked set, not a fresh resolve, so what ships is what is
+      # scanned. uvx runs pip-audit in an isolated, version-pinned env (kept
+      # outside the cooldown), so it never pollutes the project environment.
+      # --no-emit-project drops the local editable package (`-e .`), which has no
+      # PyPI release to audit.
+      - name: pip-audit
+        run: uv export --format requirements-txt --no-emit-project | uvx --from 'pip-audit==2.10.0' pip-audit -r /dev/stdin
