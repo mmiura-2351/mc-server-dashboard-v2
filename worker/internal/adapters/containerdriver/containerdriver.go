@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -189,12 +190,12 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 
 	id, err := d.createContainer(ctx, create)
 	if err != nil {
-		return nil, fmt.Errorf("containerdriver: create container: %w", err)
+		return nil, fmt.Errorf("containerdriver: create container: %w", classifyStartError(err))
 	}
 	if err := d.docker.Start(ctx, id); err != nil {
 		// Best-effort cleanup of the created-but-unstarted container.
 		_ = d.docker.Remove(ctx, id)
-		return nil, fmt.Errorf("containerdriver: start container: %w", err)
+		return nil, fmt.Errorf("containerdriver: start container: %w", classifyStartError(err))
 	}
 
 	logCtx, logCancel := context.WithCancel(context.Background())
@@ -223,6 +224,36 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 
 	go inst.supervise()
 	return inst, nil
+}
+
+// classifyStartError wraps a create/start failure with a sanitized execution
+// sentinel (execution.ErrPortConflict / execution.ErrImageMissing) when the
+// Docker daemon's message matches a known operational class, so the instance
+// manager can surface a friendlier failure code than the generic internal one
+// (issue #225). Any other error is returned unchanged (the default stays
+// internal).
+//
+// FRAGILITY: the Docker Engine API has no machine-readable error class for these
+// — it returns a 500/404 with a free-text daemon message — so detection is
+// substring matching on that prose. A daemon-message wording change across Docker
+// versions would silently drop a server back to the unclassified "internal" code
+// (never a misclassification: an unmatched message simply falls through). The raw
+// daemon text continues to ride the wrapped error into the Worker logs regardless,
+// so a field diagnosis never depends on the classification succeeding.
+func classifyStartError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "port is already allocated"):
+		return fmt.Errorf("%w: %v", execution.ErrPortConflict, err)
+	case strings.Contains(msg, "No such image"),
+		strings.Contains(msg, "pull access denied"):
+		return fmt.Errorf("%w: %v", execution.ErrImageMissing, err)
+	default:
+		return err
+	}
 }
 
 // createContainer creates the container, healing the create name conflict a

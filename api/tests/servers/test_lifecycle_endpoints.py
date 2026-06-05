@@ -255,6 +255,32 @@ def test_start_command_failure_is_409() -> None:
     assert resp.json()["detail"]["reason"] == "command_failed"
 
 
+def test_start_port_conflict_is_409_with_reason() -> None:
+    # A sanitized port_conflict category (issue #225) renders as a 409 whose
+    # reason names the category instead of the generic command_failed.
+    app = _app(
+        member=True,
+        allow=True,
+        start=_FakeUseCase(error=CommandDispatchError("x", reason="port_conflict")),
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "port_conflict"
+
+
+def test_start_image_missing_is_409_with_reason() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        start=_FakeUseCase(error=CommandDispatchError("x", reason="image_missing")),
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "image_missing"
+
+
 def test_stop_missing_server_is_404() -> None:
     app = _app(
         member=True, allow=True, stop=_FakeUseCase(error=ServerNotFoundError("x"))

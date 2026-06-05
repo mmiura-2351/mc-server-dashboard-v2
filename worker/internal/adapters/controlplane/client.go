@@ -291,6 +291,10 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_TRANSFER_FAILED
 	case session.CommandErrorFileAccessDenied:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_FILE_ACCESS_DENIED
+	case session.CommandErrorPortConflict:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_PORT_CONFLICT
+	case session.CommandErrorImageMissing:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING
 	default:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
 	}

@@ -759,6 +759,12 @@ _SERVICE_UNAVAILABLE_REASONS = {
 
 def _lifecycle_http_error(exc: Exception) -> HTTPException:
     _, reason = _LIFECYCLE_CLASSIFICATION[type(exc)]
+    # A start failure the Worker classified into a sanitized category (issue #225)
+    # carries its own reason (e.g. port_conflict / image_missing), surfacing it in
+    # the 409 body in place of the generic command_failed. The raw daemon text is
+    # never the reason (log-only), so no Worker internals leak.
+    if isinstance(exc, CommandDispatchError) and exc.reason is not None:
+        return _conflict(exc.reason)
     if reason in _SERVICE_UNAVAILABLE_REASONS:
         return _service_unavailable(reason)
     return _conflict(reason)

@@ -321,6 +321,14 @@ enum CommandErrorCode {
   COMMAND_ERROR_CODE_TRANSFER_FAILED = 5;
   // The Worker failed to apply the command for an unclassified reason.
   COMMAND_ERROR_CODE_INTERNAL = 6;
+  // A StartServer could not publish a host port because it is already in use
+  // (e.g. two servers sharing server-port on one Worker). Sanitized from the
+  // container driver's start error; the raw daemon text stays in Worker logs.
+  COMMAND_ERROR_CODE_PORT_CONFLICT = 7;
+  // A StartServer could not find or pull the container image for the server's
+  // Minecraft/Java version. Sanitized from the container driver's create error;
+  // the raw daemon text stays in Worker logs.
+  COMMAND_ERROR_CODE_IMAGE_MISSING = 8;
 }
 
 // ---------------------------------------------------------------------------

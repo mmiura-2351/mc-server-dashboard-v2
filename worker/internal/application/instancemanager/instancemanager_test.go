@@ -2,6 +2,7 @@ package instancemanager
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -265,6 +266,41 @@ func TestRestartResultCarriesOriginalCorrelationID(t *testing.T) {
 	}
 	if res.CommandID != "restart-id" {
 		t.Fatalf("restart result CommandID = %q, want %q", res.CommandID, "restart-id")
+	}
+}
+
+// A driver Start error wrapping execution.ErrPortConflict surfaces as the
+// sanitized port_conflict code, not the generic internal one (issue #225).
+func TestStartPortConflictSurfacesCode(t *testing.T) {
+	d := &fakeDriver{startErr: fmt.Errorf("containerdriver: start: %w", execution.ErrPortConflict)}
+	m := newManager(t, d, nil)
+
+	res := m.Handle(context.Background(), startCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorPortConflict {
+		t.Fatalf("start = %+v, want PORT_CONFLICT failure", res)
+	}
+}
+
+// A driver Start error wrapping execution.ErrImageMissing surfaces as the
+// sanitized image_missing code (issue #225).
+func TestStartImageMissingSurfacesCode(t *testing.T) {
+	d := &fakeDriver{startErr: fmt.Errorf("containerdriver: create: %w", execution.ErrImageMissing)}
+	m := newManager(t, d, nil)
+
+	res := m.Handle(context.Background(), startCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorImageMissing {
+		t.Fatalf("start = %+v, want IMAGE_MISSING failure", res)
+	}
+}
+
+// An unclassified driver Start error keeps the generic internal code (issue #225).
+func TestStartUnclassifiedFailureIsInternal(t *testing.T) {
+	d := &fakeDriver{startErr: fmt.Errorf("daemon unreachable")}
+	m := newManager(t, d, nil)
+
+	res := m.Handle(context.Background(), startCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorInternal {
+		t.Fatalf("start = %+v, want INTERNAL failure", res)
 	}
 }
 

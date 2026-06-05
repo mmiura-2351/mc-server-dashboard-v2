@@ -78,6 +78,8 @@ _STATUS_BY_CODE: dict[CommandResultCode, CommandStatus] = {
     CommandResultCode.FILE_ACCESS_DENIED: CommandStatus.FILE_ACCESS_DENIED,
     CommandResultCode.TRANSFER_FAILED: CommandStatus.TRANSFER_FAILED,
     CommandResultCode.INTERNAL: CommandStatus.INTERNAL,
+    CommandResultCode.PORT_CONFLICT: CommandStatus.PORT_CONFLICT,
+    CommandResultCode.IMAGE_MISSING: CommandStatus.IMAGE_MISSING,
 }
 
 

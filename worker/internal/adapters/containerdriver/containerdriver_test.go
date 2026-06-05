@@ -804,6 +804,71 @@ func TestStartCreateFailure(t *testing.T) {
 	}
 }
 
+// A docker start error whose daemon message reports a host-port collision is
+// classified as a port conflict so the instance manager can emit the sanitized
+// port_conflict code (issue #225).
+func TestStartPortConflictClassified(t *testing.T) {
+	docker := newFakeDocker()
+	docker.startErr = errors.New(
+		"containerdriver: POST /containers/c/start: status 500: " +
+			"driver failed programming external connectivity on endpoint mcsd-s1: " +
+			"Bind for 0.0.0.0:25565 failed: port is already allocated")
+	d := newTestDriver(docker, nil, nil)
+
+	_, err := d.Start(context.Background(), spec())
+	if !errors.Is(err, execution.ErrPortConflict) {
+		t.Fatalf("Start error = %v, want wrapped ErrPortConflict", err)
+	}
+}
+
+// A docker create error whose daemon message reports a missing image is
+// classified as image-missing so the instance manager can emit the sanitized
+// image_missing code (issue #225).
+func TestStartImageMissingClassified(t *testing.T) {
+	docker := newFakeDocker()
+	docker.createErr = errors.New(
+		"containerdriver: POST /containers/create: status 404: " +
+			"No such image: eclipse-temurin:21-jre")
+	d := newTestDriver(docker, nil, nil)
+
+	_, err := d.Start(context.Background(), spec())
+	if !errors.Is(err, execution.ErrImageMissing) {
+		t.Fatalf("Start error = %v, want wrapped ErrImageMissing", err)
+	}
+}
+
+// A pull-access-denied create error (a private/typo image the daemon cannot
+// pull) is also classified as image-missing (issue #225).
+func TestStartPullAccessDeniedClassifiedImageMissing(t *testing.T) {
+	docker := newFakeDocker()
+	docker.createErr = errors.New(
+		"containerdriver: POST /containers/create: status 404: " +
+			"pull access denied for eclipse-temurin, repository does not exist " +
+			"or may require 'docker login'")
+	d := newTestDriver(docker, nil, nil)
+
+	_, err := d.Start(context.Background(), spec())
+	if !errors.Is(err, execution.ErrImageMissing) {
+		t.Fatalf("Start error = %v, want wrapped ErrImageMissing", err)
+	}
+}
+
+// An unclassified start failure carries neither sanitized category, so the
+// instance manager keeps the generic internal code (issue #225).
+func TestStartUnclassifiedFailureNoCategory(t *testing.T) {
+	docker := newFakeDocker()
+	docker.startErr = errors.New("containerdriver: POST /containers/c/start: status 500: out of memory")
+	d := newTestDriver(docker, nil, nil)
+
+	_, err := d.Start(context.Background(), spec())
+	if err == nil {
+		t.Fatal("expected Start to fail")
+	}
+	if errors.Is(err, execution.ErrPortConflict) || errors.Is(err, execution.ErrImageMissing) {
+		t.Fatalf("unclassified failure should carry no sanitized category, got %v", err)
+	}
+}
+
 // A failed start removes the created-but-unstarted container.
 func TestStartFailureCleansUpContainer(t *testing.T) {
 	docker := newFakeDocker()

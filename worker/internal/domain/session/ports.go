@@ -110,6 +110,15 @@ const (
 	// CommandErrorFileAccessDenied marks a rejected file access: a traversal-unsafe
 	// path or an oversized read/edit (FR-FILE-4, CONTROL_PLANE.md Section 7).
 	CommandErrorFileAccessDenied
+	// CommandErrorPortConflict marks a StartServer whose driver could not publish a
+	// host port already in use (issue #225). The container driver classifies it
+	// from the docker start error; the raw daemon text stays in Worker logs.
+	CommandErrorPortConflict
+	// CommandErrorImageMissing marks a StartServer whose driver could not find or
+	// pull the server's container image (issue #225). The container driver
+	// classifies it from the docker create error; the raw daemon text stays in
+	// Worker logs.
+	CommandErrorImageMissing
 )
 
 // String renders the error code as a stable name for logs (issue #194).
@@ -127,6 +136,10 @@ func (c CommandErrorCode) String() string {
 		return "transfer_failed"
 	case CommandErrorFileAccessDenied:
 		return "file_access_denied"
+	case CommandErrorPortConflict:
+		return "port_conflict"
+	case CommandErrorImageMissing:
+		return "image_missing"
 	default:
 		return fmt.Sprintf("CommandErrorCode(%d)", int(c))
 	}

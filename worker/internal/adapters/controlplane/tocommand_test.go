@@ -120,6 +120,20 @@ func TestMapErrorCodeFileAccessDenied(t *testing.T) {
 	}
 }
 
+func TestMapErrorCodePortConflict(t *testing.T) {
+	got := mapErrorCode(session.CommandErrorPortConflict)
+	if got != controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_PORT_CONFLICT {
+		t.Fatalf("mapErrorCode = %v, want PORT_CONFLICT", got)
+	}
+}
+
+func TestMapErrorCodeImageMissing(t *testing.T) {
+	got := mapErrorCode(session.CommandErrorImageMissing)
+	if got != controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING {
+		t.Fatalf("mapErrorCode = %v, want IMAGE_MISSING", got)
+	}
+}
+
 func TestMapLogStream(t *testing.T) {
 	if got := mapLogStream(session.LogStreamStdout); got != controlplanev1.LogStream_LOG_STREAM_STDOUT {
 		t.Fatalf("stdout mapped to %v", got)

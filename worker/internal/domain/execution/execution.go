@@ -197,3 +197,15 @@ var ErrUnknownServer = errors.New("execution: unknown server")
 // ErrInvalidState is returned when a command is invalid for the instance's
 // current state (e.g. start an already-running server).
 var ErrInvalidState = errors.New("execution: invalid state for command")
+
+// ErrPortConflict is wrapped into a driver's Start error when a server could not
+// be launched because a host port it must publish is already in use (issue
+// #225). The instance manager matches it with errors.Is to emit a sanitized
+// port_conflict failure code instead of the generic internal one.
+var ErrPortConflict = errors.New("execution: host port already in use")
+
+// ErrImageMissing is wrapped into a driver's Start error when a server could not
+// be launched because its container image is absent and could not be pulled
+// (issue #225). The instance manager matches it with errors.Is to emit a
+// sanitized image_missing failure code instead of the generic internal one.
+var ErrImageMissing = errors.New("execution: container image missing")

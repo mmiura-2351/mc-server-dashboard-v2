@@ -39,6 +39,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    ExecutionBackend,
     ServerId,
     WorkerId,
 )
@@ -166,6 +167,31 @@ async def test_list_files_dispatches_and_carries_listing() -> None:
         ("config.yml", False, 12),
         ("data", True, 0),
     ]
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [
+        (CommandResultCode.PORT_CONFLICT, CommandStatus.PORT_CONFLICT),
+        (CommandResultCode.IMAGE_MISSING, CommandStatus.IMAGE_MISSING),
+    ],
+)
+async def test_sanitized_start_failure_maps_to_status(
+    code: CommandResultCode, status: CommandStatus
+) -> None:
+    # The Worker's sanitized start-failure codes (issue #225) carry through the
+    # fleet result code to the servers-side outcome status.
+    fleet = _CapturingFleetControlPlane(result=CommandResult(code=code, message="x"))
+    adapter = _adapter(fleet)
+
+    outcome = await adapter.start(
+        worker_id=WorkerId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+        backend=ExecutionBackend.HOST_PROCESS,
+        jar_relpath="server.jar",
+        minecraft_version="1.21",
+    )
+    assert outcome.status is status
 
 
 async def test_file_access_denied_maps_to_status() -> None:
