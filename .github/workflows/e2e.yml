@@ -133,11 +133,12 @@ jobs:
         if: failure()
         run: cat /tmp/uvicorn.log || true
 
-  # The container-driver restart scenario against the REAL Docker daemon
-  # preinstalled on the GitHub-hosted runner (issue #234). It needs neither the
-  # API nor Postgres — only the daemon — so it is a standalone job. The scenario
-  # is gated by MCD_E2E_DOCKER, which the harness job above leaves unset; here we
-  # set it and point MCD_E2E_STUB_IMAGE at the just-built stub image.
+  # The container-driver scenarios against the REAL Docker daemon preinstalled on
+  # the GitHub-hosted runner: the restart race (issue #234) and the Forge
+  # supervised-install path (issue #326). They need neither the API nor Postgres —
+  # only the daemon — so this is a standalone job; both share the one stub image
+  # build. The scenarios are gated by MCD_E2E_DOCKER, which the harness job above
+  # leaves unset; here we set it and point MCD_E2E_STUB_IMAGE at the built image.
   container-restart:
     runs-on: ubuntu-latest
     steps:
@@ -151,8 +152,9 @@ jobs:
           go-version-file: worker/go.mod
 
       # The stub image stands in for the Minecraft process: a `java` shim that
-      # ignores its args and blocks until SIGTERM, so the container stays running
-      # and stops cleanly (worker/test/e2e/stub).
+      # branches on its argv — a Forge `--installServer` invocation writes the
+      # launch args file and exits, every other invocation blocks until SIGTERM so
+      # the container stays running and stops cleanly (worker/test/e2e/stub).
       - name: Build the stub server image
         run: docker build -t mcsd-e2e-stub:latest worker/test/e2e/stub
 
@@ -162,3 +164,10 @@ jobs:
           MCD_E2E_DOCKER: "1"
           MCD_E2E_STUB_IMAGE: mcsd-e2e-stub:latest
         run: go test -tags e2e -v -timeout 300s -run TestContainerRestart ./test/e2e/...
+
+      - name: Run the container-driver Forge install scenario
+        working-directory: worker
+        env:
+          MCD_E2E_DOCKER: "1"
+          MCD_E2E_STUB_IMAGE: mcsd-e2e-stub:latest
+        run: go test -tags e2e -v -timeout 300s -run TestContainerForge ./test/e2e/...
