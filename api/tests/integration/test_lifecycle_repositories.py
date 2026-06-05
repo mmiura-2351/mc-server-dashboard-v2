@@ -60,6 +60,7 @@ pytestmark = pytest.mark.skipif(
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _OLD = dt.datetime(2026, 6, 4, 11, 0, tzinfo=dt.timezone.utc)
+_NEWER = dt.datetime(2026, 6, 4, 13, 0, tzinfo=dt.timezone.utc)
 
 
 @pytest.fixture
@@ -226,6 +227,40 @@ async def test_record_observed_state_applies_fresh_write(engine: AsyncEngine) ->
     assert loaded is not None
     assert loaded.observed_state is ObservedState.STOPPED
     assert loaded.observed_at == _NOW
+
+
+async def test_record_observed_state_returns_applied_flag(engine: AsyncEngine) -> None:
+    # Honesty fix (issue #292): the method reports whether the write actually landed
+    # (rowcount == 1) so a convergence caller can mutate its returned entity only
+    # when the #216 guard accepted the write. A same-instant (equal-stamped) write is
+    # dropped and must report applied=False.
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        first = await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
+        )
+        await uow.commit()
+    # First write on a NULL observed_at lands.
+    assert first is True
+
+    async with ServersUnitOfWork(factory) as uow:
+        same_instant = await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.STOPPED, observed_at=_NOW
+        )
+        await uow.commit()
+    # Equal stamp -> the guard drops it (same-instant duplicate).
+    assert same_instant is False
+
+    async with ServersUnitOfWork(factory) as uow:
+        fresher = await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.STOPPED, observed_at=_NEWER
+        )
+        await uow.commit()
+    # A strictly fresher stamp lands.
+    assert fresher is True
 
 
 async def test_record_observed_state_accepts_first_write_on_null_observed_at(
