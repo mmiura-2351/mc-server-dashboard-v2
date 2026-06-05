@@ -147,7 +147,7 @@ firewall must allow inbound traffic to whichever game ports your servers use.
 **Distinct ports are now automatic at create.** The API tracks each server's game
 port (`server.game_port`, DATABASE.md Section 7) and, at create, assigns the
 lowest free in-range port (configurable via `ports.range_start`/`ports.range_end`,
-default `25565..25664`; CONFIGURATION.md Section 5.7), unique deployment-wide, and
+default `25565..25664`; CONFIGURATION.md Section 5.8), unique deployment-wide, and
 seeds `server-port=<port>` into the new server's `server.properties`. So
 operator-created servers no longer need manual `server-port` editing to avoid
 host-port collisions. An operator may still pass an explicit `game_port` at create

@@ -15,6 +15,7 @@ makes the failure-injection seams (used by the crash-safety tests) trivial.
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -38,6 +39,10 @@ class FakeS3Store:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.multipart_parts: dict[str, int] = {}
+        # Per-key store time, mirroring S3 ``LastModified`` for the JAR-pool GC
+        # safety window (#293). Set on every write; defaulted to "now" on read for
+        # any key a test seeded directly into ``objects``.
+        self.mtimes: dict[str, dt.datetime] = {}
 
 
 class FakeS3Client:
@@ -65,6 +70,7 @@ class FakeS3Client:
 
     async def put_object(self, key: str, body: bytes) -> None:
         self._store.objects[key] = bytes(body)
+        self._store.mtimes[key] = dt.datetime.now(dt.UTC)
 
     async def upload_multipart(self, key: str, parts: AsyncIterator[bytes]) -> None:
         # Consume part-by-part (never a single whole-body read) and tally the parts,
@@ -77,6 +83,7 @@ class FakeS3Client:
             count += 1
         self._store.objects[key] = bytes(buf)
         self._store.multipart_parts[key] = count
+        self._store.mtimes[key] = dt.datetime.now(dt.UTC)
 
     async def head_object(self, key: str) -> int | None:
         obj = self._store.objects.get(key)
@@ -86,13 +93,19 @@ class FakeS3Client:
         if src_key not in self._store.objects:
             raise NotFoundError(f"object not found: {src_key}")
         self._store.objects[dst_key] = self._store.objects[src_key]
+        self._store.mtimes[dst_key] = dt.datetime.now(dt.UTC)
 
     async def delete_object(self, key: str) -> None:
         self._store.objects.pop(key, None)
+        self._store.mtimes.pop(key, None)
 
     async def list_objects(self, prefix: str) -> list[S3Object]:
         return [
-            S3Object(key=key, size=len(data))
+            S3Object(
+                key=key,
+                size=len(data),
+                last_modified=self._store.mtimes.get(key, dt.datetime.now(dt.UTC)),
+            )
             for key, data in sorted(self._store.objects.items())
             if key.startswith(prefix)
         ]

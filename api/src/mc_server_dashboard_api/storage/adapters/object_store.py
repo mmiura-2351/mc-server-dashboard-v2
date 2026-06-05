@@ -45,6 +45,7 @@ the very edge and tests run against an in-memory stub.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import io
 import json
@@ -72,6 +73,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
 from mc_server_dashboard_api.storage.domain.port import (
     ByteStream,
     DirEntry,
+    JarPoolEntry,
     JarPoolStats,
     SnapshotHandle,
     Storage,
@@ -98,10 +100,15 @@ _POINTER = "current.json"
 
 @dataclass(frozen=True)
 class S3Object:
-    """One object from a prefix listing: its full key and byte size."""
+    """One object from a prefix listing: its full key, byte size, and mtime.
+
+    ``last_modified`` is the object's store time (S3 ``LastModified``), the input
+    the JAR-pool GC safety window reads (#293); it is timezone-aware UTC.
+    """
 
     key: str
     size: int
+    last_modified: dt.datetime
 
 
 class S3Client(Protocol):
@@ -548,6 +555,26 @@ class ObjectStorage(Storage):
         async with self._client_factory() as client:
             objs = await client.list_objects("jars/")
         return JarPoolStats(count=len(objs), total_bytes=sum(obj.size for obj in objs))
+
+    async def list_jars(self) -> list[JarPoolEntry]:
+        # Same ``jars/`` prefix scan as jar_pool_stats; each object's size + mtime
+        # come back with the listing, the GC's reference-diff + safety-window input
+        # (#293). The content key is the basename with the ``.jar`` suffix stripped.
+        async with self._client_factory() as client:
+            objs = await client.list_objects("jars/")
+        return [
+            JarPoolEntry(
+                key=JarKey(obj.key.removeprefix("jars/").removesuffix(".jar")),
+                size_bytes=obj.size,
+                modified_at=obj.last_modified,
+            )
+            for obj in objs
+        ]
+
+    async def delete_jar(self, key: JarKey) -> None:
+        # delete_object is idempotent (no error if absent), matching the Port.
+        async with self._client_factory() as client:
+            await client.delete_object(self._jar_key(key))
 
     # --- backup archive create / list / restore / delete (Section 3.3) -----
 

@@ -12,6 +12,7 @@ here so no storage type crosses the seam.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 from dataclasses import dataclass
 
 
@@ -21,6 +22,21 @@ class PoolStats:
 
     count: int
     total_bytes: int
+
+
+@dataclass(frozen=True)
+class PoolEntry:
+    """One pooled JAR's content key, size, and store time (the GC's unit, #293).
+
+    The versions-side mirror of the storage ``JarPoolEntry`` slice the GC scans:
+    ``sha256`` is the content key (same string the server config records),
+    ``size_bytes`` feeds the freed-bytes accounting, and ``modified_at`` (UTC,
+    timezone-aware) is what the GC's safety window compares against ``now``.
+    """
+
+    sha256: str
+    size_bytes: int
+    modified_at: dt.datetime
 
 
 class JarPool(abc.ABC):
@@ -40,3 +56,11 @@ class JarPool(abc.ABC):
     @abc.abstractmethod
     async def stats(self) -> PoolStats:
         """Count + total bytes of the pooled JARs (operational visibility, #286)."""
+
+    @abc.abstractmethod
+    async def list_entries(self) -> list[PoolEntry]:
+        """Enumerate the pooled JARs with key, size, and store time (the GC, #293)."""
+
+    @abc.abstractmethod
+    async def delete(self, sha256: str) -> None:
+        """Remove a pooled JAR by content key. Idempotent (no error if absent)."""

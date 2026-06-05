@@ -28,6 +28,7 @@ error rather than a silent EOF.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import os
 import shutil
@@ -52,6 +53,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
 from mc_server_dashboard_api.storage.domain.port import (
     ByteStream,
     DirEntry,
+    JarPoolEntry,
     JarPoolStats,
     SnapshotHandle,
     Storage,
@@ -465,6 +467,33 @@ class FsStorage(Storage):
                 count += 1
                 total += entry.stat().st_size
         return JarPoolStats(count=count, total_bytes=total)
+
+    async def list_jars(self) -> list[JarPoolEntry]:
+        return await asyncio.to_thread(self._list_jars)
+
+    def _list_jars(self) -> list[JarPoolEntry]:
+        jars = self._jars_dir()
+        if not jars.is_dir():
+            return []
+        # Same content-addressed ``<sha256>.jar`` namespace jar_pool_stats scans;
+        # here each entry also carries its size and mtime (the GC safety window,
+        # #293). The ``.jar.*.tmp`` stage files are excluded by the ``.jar`` suffix.
+        entries: list[JarPoolEntry] = []
+        for entry in jars.iterdir():
+            if entry.suffix != ".jar" or not entry.is_file():
+                continue
+            stat = entry.stat()
+            entries.append(
+                JarPoolEntry(
+                    key=JarKey(entry.stem),
+                    size_bytes=stat.st_size,
+                    modified_at=dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.UTC),
+                )
+            )
+        return entries
+
+    async def delete_jar(self, key: JarKey) -> None:
+        await asyncio.to_thread(self._jar_path(key).unlink, missing_ok=True)
 
     # --- backup archive create / list / restore / delete (Section 3.3) -----
 

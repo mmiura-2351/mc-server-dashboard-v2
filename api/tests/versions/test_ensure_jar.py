@@ -110,3 +110,46 @@ async def test_known_key_present_skips_download() -> None:
     )
     assert result == key
     assert jar_fetcher.calls == []  # no re-download
+
+
+@pytest.mark.asyncio
+async def test_ensure_after_gc_re_downloads_cleanly() -> None:
+    # After the GC reclaims an orphaned JAR, a later start that needs the same
+    # version finds it gone (known_key present but not pooled) and re-downloads,
+    # leaving the pool restored (#293).
+    import datetime as dt
+
+    from mc_server_dashboard_api.versions.application.jar_gc import (
+        GC_SAFETY_WINDOW,
+        RunJarPoolGc,
+    )
+    from mc_server_dashboard_api.versions.domain.clock import Clock
+    from mc_server_dashboard_api.versions.domain.jar_references import LiveJarReferences
+
+    good_sha1 = hashlib.sha1(_JAR).hexdigest()
+    ensure, pool, jar_fetcher = _ensure(good_sha1)
+    key = await ensure(server_type=ServerType.VANILLA, version="1.21.1")
+    assert key in pool.stored
+
+    class _NoReferences(LiveJarReferences):
+        async def live(self) -> set[str]:
+            return set()
+
+    class _PastClock(Clock):
+        # Far enough ahead that the freshly-stored JAR is past the safety window.
+        def now(self) -> dt.datetime:
+            return dt.datetime.now(dt.UTC) + GC_SAFETY_WINDOW + dt.timedelta(hours=1)
+
+    gc = RunJarPoolGc(pool=pool, references=_NoReferences(), clock=_PastClock())
+    result = await gc()
+    assert result.deleted == 1
+    assert key not in pool.stored
+
+    # The recorded content key is no longer pooled, so ensure re-downloads it.
+    jar_fetcher.calls.clear()
+    re_key = await ensure(
+        server_type=ServerType.VANILLA, version="1.21.1", known_key=key
+    )
+    assert re_key == key
+    assert pool.stored[key] == _JAR
+    assert jar_fetcher.calls == [_JAR_URL]

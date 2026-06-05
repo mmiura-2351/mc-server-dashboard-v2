@@ -27,6 +27,8 @@ def test_defaults_apply_when_only_required_supplied(
     assert settings.server.http_port == 8000
     assert settings.log.level == "info"
     assert settings.log.format == "json"
+    # JAR-pool GC defaults to daily (issue #293).
+    assert settings.jar_gc.interval_seconds == 86400
 
 
 def test_missing_required_database_url_fails_fast(
@@ -236,6 +238,7 @@ def test_token_ttl_must_be_positive(
         ("reconciler", "grace_seconds", 0),
         ("reconciler", "backoff_base_seconds", 0),
         ("reconciler", "backoff_max_seconds", 0),
+        ("jar_gc", "interval_seconds", 0),
     ],
 )
 def test_numeric_setting_rejects_out_of_range(

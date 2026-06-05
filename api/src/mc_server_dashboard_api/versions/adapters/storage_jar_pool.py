@@ -15,7 +15,11 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.storage.domain.port import JarStore
 from mc_server_dashboard_api.storage.domain.value_objects import JarKey
-from mc_server_dashboard_api.versions.domain.jar_pool import JarPool, PoolStats
+from mc_server_dashboard_api.versions.domain.jar_pool import (
+    JarPool,
+    PoolEntry,
+    PoolStats,
+)
 
 
 @dataclass(frozen=True)
@@ -37,3 +41,16 @@ class StorageJarPool(JarPool):
     async def stats(self) -> PoolStats:
         s = await self.jars.jar_pool_stats()
         return PoolStats(count=s.count, total_bytes=s.total_bytes)
+
+    async def list_entries(self) -> list[PoolEntry]:
+        return [
+            PoolEntry(
+                sha256=e.key.sha256,
+                size_bytes=e.size_bytes,
+                modified_at=e.modified_at,
+            )
+            for e in await self.jars.list_jars()
+        ]
+
+    async def delete(self, sha256: str) -> None:
+        await self.jars.delete_jar(JarKey(sha256))
