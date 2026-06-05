@@ -71,6 +71,20 @@ class UserRepository(abc.ABC):
         deactivate / revoke guards enforce.
         """
 
+    @abc.abstractmethod
+    async def lock_active_platform_admins(self) -> int:
+        """Lock the active-admin rows ``FOR UPDATE`` and return their count (#260).
+
+        Like :meth:`count_active_platform_admins`, but takes a row lock on the
+        matched ``user`` rows inside the caller's transaction. Concurrent guards
+        that reduce the active-admin set (last-admin self-delete / deactivate /
+        revoke) therefore serialize on the same rows: the second transaction
+        blocks until the first commits, then re-counts the now-decremented set
+        and refuses. Callers invoke it only on paths that reduce the set, so
+        non-reducing hot paths (grant, reactivate, non-admin delete) stay
+        lock-free.
+        """
+
 
 class RefreshTokenRepository(abc.ABC):
     """Port: persistence for :class:`RefreshToken` session records."""

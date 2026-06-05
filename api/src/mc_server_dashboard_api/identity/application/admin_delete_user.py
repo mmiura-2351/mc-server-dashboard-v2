@@ -38,10 +38,9 @@ class AdminDeleteUser:
     clock: Clock
 
     async def __call__(self, *, actor_id: UserId, target_id: UserId) -> None:
-        # NOTE: the guards below are check-then-act under READ COMMITTED with no
-        # row lock, so concurrent deletes can race past them (last-admin and
-        # community-owner TOCTOU). The non-transactional posture is kept on
-        # purpose, the same as the self-delete guard, and tracked in #260.
+        # The community-owner check still runs in its own committed transaction
+        # (a separate context's seam), so its TOCTOU window is unchanged; #260
+        # closes only the last-active-admin race below.
         if target_id == actor_id:
             raise SelfTargetError(str(target_id.value))
 
@@ -52,10 +51,13 @@ class AdminDeleteUser:
             user = await self.uow.users.get_by_id(target_id)
             if user is None:
                 raise UserNotFoundError(str(target_id.value))
+            # Deleting an active admin reduces the set, so take a FOR UPDATE lock
+            # so concurrent last-two-admin deletes serialize and exactly one wins
+            # (#260); deleting a non-admin or inactive user stays lock-free.
             if (
                 user.is_platform_admin
                 and user.active
-                and await self.uow.users.count_active_platform_admins() <= 1
+                and await self.uow.users.lock_active_platform_admins() <= 1
             ):
                 raise LastPlatformAdminError(str(target_id.value))
 

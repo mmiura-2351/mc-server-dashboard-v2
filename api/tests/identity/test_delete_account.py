@@ -115,6 +115,34 @@ async def test_delete_account_refused_when_only_other_admin_is_deactivated() -> 
     assert admin.id in uow.users.by_id
 
 
+async def test_delete_account_admin_locks_active_admins() -> None:
+    # An admin self-delete reduces the active-admin set, so the FOR UPDATE lock
+    # is taken to serialize concurrent last-two-admin self-deletes (#260).
+    admin = make_user(username="a", email="a@example.com", now=_NOW)
+    admin.is_platform_admin = True
+    other = make_user(username="b", email="b@example.com", now=_NOW)
+    other.is_platform_admin = True
+    uow = FakeUnitOfWork()
+    uow.users.seed(admin)
+    uow.users.seed(other)
+
+    await _use_case(uow, FakeCommunityOwnership())(user_id=admin.id)
+
+    assert uow.users.lock_calls == 1
+
+
+async def test_delete_account_non_admin_does_not_lock_active_admins() -> None:
+    # A non-admin self-delete never reduces the active-admin set, so it stays
+    # lock-free (#260).
+    user = make_user(now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    await _use_case(uow, FakeCommunityOwnership())(user_id=user.id)
+
+    assert uow.users.lock_calls == 0
+
+
 async def test_delete_account_unknown_user_raises() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(UserNotFoundError):

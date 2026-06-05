@@ -102,6 +102,35 @@ async def test_deactivate_admin_allowed_when_other_active_admin_remains() -> Non
     assert uow.users.by_id[target.id].active is False
 
 
+async def test_deactivate_admin_locks_active_admins() -> None:
+    # Deactivating an active admin reduces the set, so the FOR UPDATE lock is
+    # taken to serialize concurrent last-two-admin deactivations (#260).
+    actor = make_user(username="actor", is_platform_admin=True)
+    target = make_user(username="t", email="t@example.com", is_platform_admin=True)
+    keep = make_user(username="keep", email="keep@example.com", is_platform_admin=True)
+    uow = FakeUnitOfWork()
+    uow.users.seed(actor)
+    uow.users.seed(target)
+    uow.users.seed(keep)
+
+    await _use_case(uow)(actor_id=actor.id, target_id=target.id, active=False)
+
+    assert uow.users.lock_calls == 1
+
+
+async def test_reactivate_does_not_lock_active_admins() -> None:
+    # Reactivation never reduces the active-admin set, so it stays lock-free (#260).
+    admin = make_user(username="admin", is_platform_admin=True)
+    target = make_user(username="bob", email="bob@example.com", active=False)
+    uow = FakeUnitOfWork()
+    uow.users.seed(admin)
+    uow.users.seed(target)
+
+    await _use_case(uow)(actor_id=admin.id, target_id=target.id, active=True)
+
+    assert uow.users.lock_calls == 0
+
+
 async def test_reactivate_sets_flag_without_revoking() -> None:
     admin = make_user(username="admin", is_platform_admin=True)
     target = make_user(username="bob", email="bob@example.com", active=False)

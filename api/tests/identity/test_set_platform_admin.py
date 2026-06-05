@@ -34,6 +34,31 @@ async def test_grant_sets_flag() -> None:
     assert uow.commits == 1
 
 
+async def test_grant_does_not_lock_active_admins() -> None:
+    # A grant never reduces the active-admin set, so it must stay lock-free (#260).
+    target = make_user(username="bob", email="bob@example.com")
+    uow = FakeUnitOfWork()
+    uow.users.seed(target)
+
+    await _use_case(uow)(target_id=target.id, grant=True)
+
+    assert uow.users.lock_calls == 0
+
+
+async def test_revoke_locks_active_admins() -> None:
+    # Revoking an active admin reduces the set, so the FOR UPDATE lock is taken
+    # to serialize concurrent last-two-admin revokes (#260).
+    target = make_user(username="t", email="t@example.com", is_platform_admin=True)
+    keep = make_user(username="keep", email="keep@example.com", is_platform_admin=True)
+    uow = FakeUnitOfWork()
+    uow.users.seed(target)
+    uow.users.seed(keep)
+
+    await _use_case(uow)(target_id=target.id, grant=False)
+
+    assert uow.users.lock_calls == 1
+
+
 async def test_revoke_sets_flag_when_other_admin_remains() -> None:
     target = make_user(username="t", email="t@example.com", is_platform_admin=True)
     keep = make_user(username="keep", email="keep@example.com", is_platform_admin=True)

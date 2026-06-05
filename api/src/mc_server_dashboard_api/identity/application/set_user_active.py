@@ -38,10 +38,6 @@ class SetUserActive:
     async def __call__(
         self, *, actor_id: UserId, target_id: UserId, active: bool
     ) -> None:
-        # NOTE: the last-active-admin guard below is check-then-act under READ
-        # COMMITTED with no row lock, so concurrent deactivations could race past
-        # it (last-admin TOCTOU). The non-transactional posture is kept on purpose
-        # and tracked with the self-delete guard in #260.
         if not active and target_id == actor_id:
             raise SelfTargetError(str(target_id.value))
 
@@ -51,10 +47,14 @@ class SetUserActive:
                 raise UserNotFoundError(str(target_id.value))
 
             if not active:
+                # Deactivating an active admin reduces the set, so take a FOR
+                # UPDATE lock so concurrent last-two-admin deactivations serialize
+                # and exactly one wins (#260). Reactivation never reaches here, so
+                # that hot path stays lock-free.
                 if (
                     user.is_platform_admin
                     and user.active
-                    and await self.uow.users.count_active_platform_admins() <= 1
+                    and await self.uow.users.lock_active_platform_admins() <= 1
                 ):
                     raise LastPlatformAdminError(str(target_id.value))
 

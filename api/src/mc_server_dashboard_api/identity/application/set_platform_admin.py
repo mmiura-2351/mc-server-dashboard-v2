@@ -33,19 +33,20 @@ class SetPlatformAdmin:
     clock: Clock
 
     async def __call__(self, *, target_id: UserId, grant: bool) -> None:
-        # NOTE: the last-active-admin guard is check-then-act under READ COMMITTED
-        # with no row lock (last-admin TOCTOU). The non-transactional posture is
-        # kept on purpose, the same as the self-delete guard, and tracked in #260.
         async with self.uow:
             user = await self.uow.users.get_by_id(target_id)
             if user is None:
                 raise UserNotFoundError(str(target_id.value))
 
+            # Revoking an active admin reduces the set, so take a FOR UPDATE lock
+            # so concurrent last-two-admin revokes serialize and exactly one wins
+            # (#260). A grant never reduces the set, so it stays lock-free (the
+            # short-circuit on ``not grant`` keeps the lock off the grant path).
             if (
                 not grant
                 and user.is_platform_admin
                 and user.active
-                and await self.uow.users.count_active_platform_admins() <= 1
+                and await self.uow.users.lock_active_platform_admins() <= 1
             ):
                 raise LastPlatformAdminError(str(target_id.value))
 
