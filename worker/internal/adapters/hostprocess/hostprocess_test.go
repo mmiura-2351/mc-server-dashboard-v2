@@ -126,6 +126,16 @@ func (fixedSelector) Select(string) (string, error) { return "/jvm/21/bin/java",
 
 func newTestDriver(t *testing.T, proc *fakeProcess, ctrl execution.ServerControl, ctrlErr error) *Driver {
 	t.Helper()
+	// A short readiness fallback lets tests that do not feed a Done marker reach
+	// running promptly via the timeout path (issue #345).
+	return newReadinessTestDriver(t, proc, 20*time.Millisecond, ctrl, ctrlErr)
+}
+
+// newReadinessTestDriver builds a driver with an explicit readiness fallback
+// timeout so the readiness tests (issue #345) can isolate the marker path (long
+// timeout) from the fallback path (short timeout).
+func newReadinessTestDriver(t *testing.T, proc *fakeProcess, readinessTimeout time.Duration, ctrl execution.ServerControl, ctrlErr error) *Driver {
+	t.Helper()
 	spawn := func(_ context.Context, _ string, _ []string, _ string) (process, error) {
 		if proc.startErr != nil {
 			return nil, proc.startErr
@@ -135,7 +145,7 @@ func newTestDriver(t *testing.T, proc *fakeProcess, ctrl execution.ServerControl
 	}
 	return New(fixedSelector{}, spawn, func(context.Context, execution.InstanceSpec) (execution.ServerControl, error) {
 		return ctrl, ctrlErr
-	}, Options{StopTimeout: 50 * time.Millisecond})
+	}, Options{StopTimeout: 50 * time.Millisecond, ReadinessTimeout: readinessTimeout})
 }
 
 func spec() execution.InstanceSpec {
@@ -172,6 +182,57 @@ func TestStartReachesRunning(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateRunning)
 	if inst.Status() != execution.StateRunning {
 		t.Fatalf("Status = %v, want running", inst.Status())
+	}
+}
+
+// Running is reported only after the server logs its startup-complete "Done"
+// line; until then the instance holds StateStarting so a client gating console
+// input on running does not hit the RCON boot window (issue #345).
+func TestStartHoldsStartingUntilReadyMarker(t *testing.T) {
+	proc := newFakeProcess()
+	proc.stdout = strings.NewReader(
+		`[12:00:00] [Server thread/INFO]: Done (3.210s)! For help, type "help"` + "\n")
+	// A long readiness timeout means only the Done marker can drive running here.
+	d := newReadinessTestDriver(t, proc, 10*time.Second, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+}
+
+// With no readiness marker in the logs, the instance still reaches running once
+// the fallback timeout elapses, so a server whose log format differs never
+// sticks in starting forever (issue #345).
+func TestStartReachesRunningViaFallbackTimeout(t *testing.T) {
+	proc := newFakeProcess() // empty stdout/stderr: the Done marker never appears
+	d := newReadinessTestDriver(t, proc, 30*time.Millisecond, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+}
+
+// A process that exits while still starting (before any readiness marker)
+// surfaces as crashed, not running: a boot crash (e.g. eula=false) must not be
+// masked by the readiness wait (issue #345).
+func TestStartExitDuringStartingReportsCrashed(t *testing.T) {
+	proc := newFakeProcess()
+	// A long readiness timeout: the exit, not the fallback, must drive the state.
+	d := newReadinessTestDriver(t, proc, 10*time.Second, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The process exits before any Done line; the instance must go crashed.
+	proc.exit(errors.New("exit status 1"))
+	drainTo(t, inst.Events(), execution.StateCrashed)
+	if inst.Status() == execution.StateRunning {
+		t.Fatal("instance reported running after a boot crash")
 	}
 }
 

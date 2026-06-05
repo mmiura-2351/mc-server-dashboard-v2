@@ -319,7 +319,26 @@ func newTestDriver(docker *fakeDocker, ctrl execution.ServerControl, ctrlErr err
 		WorkerID:    "w1",
 		StopTimeout: 50 * time.Millisecond,
 		GameBindIP:  "0.0.0.0",
+		// A short readiness fallback lets tests that do not feed a Done marker reach
+		// running promptly via the timeout path (issue #345).
+		ReadinessTimeout: 20 * time.Millisecond,
 		// Short conflict-loop timing keeps the wait-for-name-free tests fast.
+		ConflictPollInterval: time.Millisecond,
+		ConflictDeadline:     100 * time.Millisecond,
+	})
+}
+
+// newReadinessTestDriver builds a driver with an explicit readiness fallback
+// timeout so the readiness tests (issue #345) can isolate the marker path (long
+// timeout) from the fallback path (short timeout).
+func newReadinessTestDriver(docker *fakeDocker, readinessTimeout time.Duration) *Driver {
+	return New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{
+		WorkerID:             "w1",
+		StopTimeout:          50 * time.Millisecond,
+		GameBindIP:           "0.0.0.0",
+		ReadinessTimeout:     readinessTimeout,
 		ConflictPollInterval: time.Millisecond,
 		ConflictDeadline:     100 * time.Millisecond,
 	})
@@ -365,6 +384,58 @@ func TestStartReachesRunning(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateRunning)
 	if inst.Status() != execution.StateRunning {
 		t.Fatalf("Status = %v, want running", inst.Status())
+	}
+}
+
+// Running is reported only after the server logs its startup-complete "Done"
+// line; until then the instance holds StateStarting so a client gating console
+// input on running does not hit the RCON boot window (issue #345).
+func TestStartHoldsStartingUntilReadyMarker(t *testing.T) {
+	docker := newFakeDocker()
+	// A long readiness timeout means only the Done marker can drive running here.
+	d := newReadinessTestDriver(docker, 10*time.Second)
+	docker.logBody = strings.NewReader(string(frame(dockerStreamStdout,
+		`[12:00:00] [Server thread/INFO]: Done (3.210s)! For help, type "help"`+"\n")))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+}
+
+// With no readiness marker in the logs, the instance still reaches running once
+// the fallback timeout elapses, so a server whose log format differs never
+// sticks in starting forever (issue #345).
+func TestStartReachesRunningViaFallbackTimeout(t *testing.T) {
+	docker := newFakeDocker()
+	// No log body, so the Done marker never appears; only the fallback can run it.
+	d := newReadinessTestDriver(docker, 30*time.Millisecond)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+}
+
+// A container that exits while still starting (before any readiness marker)
+// surfaces as crashed, not running: a boot crash (e.g. eula=false) must not be
+// masked by the readiness wait (issue #345).
+func TestStartExitDuringStartingReportsCrashed(t *testing.T) {
+	docker := newFakeDocker()
+	// A long readiness timeout: the exit, not the fallback, must drive the state.
+	d := newReadinessTestDriver(docker, 10*time.Second)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The container exits before any Done line; the instance must go crashed.
+	docker.exit(1, nil)
+	drainTo(t, inst.Events(), execution.StateCrashed)
+	if inst.Status() == execution.StateRunning {
+		t.Fatal("instance reported running after a boot crash")
 	}
 }
 
@@ -481,7 +552,7 @@ func TestGracefulStopUsesContainerRconHost(t *testing.T) {
 	d := New(docker, images(), func(_ context.Context, _ execution.InstanceSpec, rconHost string) (execution.ServerControl, error) {
 		gotHost = rconHost
 		return &fakeControl{}, nil
-	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, Network: "mcsd"})
+	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, ReadinessTimeout: 20 * time.Millisecond, Network: "mcsd"})
 
 	inst, err := d.Start(context.Background(), spec())
 	if err != nil {

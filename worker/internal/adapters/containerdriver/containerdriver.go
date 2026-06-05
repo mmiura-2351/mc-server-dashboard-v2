@@ -6,10 +6,12 @@
 // dependency tree empty as the RCON client did (docs/dev/DEPENDENCIES.md).
 //
 // Lifecycle parity with the host-process driver: a successful create+start
-// transitions starting→running immediately (M1 readiness posture; log-based
-// "Done" detection is FR-MON-2). The container exiting while no Stop is in
-// flight is a crash (StateCrashed, FR-SRV-4); an exit during a Stop is a clean
-// StateStopped.
+// enters StateStarting and is held there until the server logs its startup-
+// complete "Done (X.XXXs)! For help" line (by which point RCON is listening),
+// then transitions to running; a bounded fallback timeout reports running anyway
+// if the marker never appears (issue #345). The container exiting while no Stop
+// is in flight is a crash (StateCrashed, FR-SRV-4); an exit during a Stop is a
+// clean StateStopped.
 //
 // Stop semantics (ARCHITECTURE.md Section 5.2): a graceful stop prefers the
 // in-band RCON "stop" command (reusing the ServerControl seam), then falls back
@@ -43,6 +45,13 @@ const (
 // defaultStopTimeout bounds the `docker stop` SIGTERM grace period before the
 // daemon escalates to SIGKILL.
 const defaultStopTimeout = 30 * time.Second
+
+// defaultReadinessTimeout bounds how long the driver holds StateStarting waiting
+// for the server's startup-complete log marker before falling back to running
+// (issue #345). It is generous enough for a modded server's boot (tens of
+// seconds) while never leaving a server stuck in starting when its log format
+// omits the marker.
+const defaultReadinessTimeout = 5 * time.Minute
 
 // defaultConflictPollInterval and defaultConflictDeadline bound the
 // wait-for-name-free loop createContainer runs on a create name conflict: it
@@ -90,6 +99,10 @@ type Options struct {
 	// production defaults; tests set short values to keep the suite fast.
 	ConflictPollInterval time.Duration
 	ConflictDeadline     time.Duration
+	// ReadinessTimeout bounds how long the driver holds StateStarting waiting for
+	// the server's startup-complete log marker before falling back to running
+	// (issue #345). Zero uses defaultReadinessTimeout.
+	ReadinessTimeout time.Duration
 }
 
 // Driver is the container ExecutionDriver.
@@ -104,6 +117,8 @@ type Driver struct {
 	// conflictPoll and conflictDeadline bound the wait-for-name-free loop (#233).
 	conflictPoll     time.Duration
 	conflictDeadline time.Duration
+	// readinessTimeout bounds the hold-on-starting wait (issue #345).
+	readinessTimeout time.Duration
 }
 
 // New builds a container Driver. docker is the Engine seam; images resolves a
@@ -126,6 +141,10 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	if conflictDeadline <= 0 {
 		conflictDeadline = defaultConflictDeadline
 	}
+	readinessTimeout := opts.ReadinessTimeout
+	if readinessTimeout <= 0 {
+		readinessTimeout = defaultReadinessTimeout
+	}
 	return &Driver{
 		docker:           docker,
 		images:           images,
@@ -136,6 +155,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		network:          opts.Network,
 		conflictPoll:     conflictPoll,
 		conflictDeadline: conflictDeadline,
+		readinessTimeout: readinessTimeout,
 	}
 }
 
@@ -174,20 +194,21 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	}
 
 	inst := &instance{
-		spec:        spec,
-		docker:      d.docker,
-		image:       image,
-		network:     d.network,
-		gameBindIP:  d.gameBindIP,
-		labels:      d.labels(spec.ServerID),
-		createFn:    d.createContainer,
-		openControl: d.openControl,
-		rconHost:    d.RconHost(spec.ServerID),
-		stopTimeout: d.stopTimeout,
-		events:      make(chan execution.StatusEvent, 8),
-		exited:      make(chan struct{}),
-		state:       execution.StateStarting,
-		logPump:     execution.NewLogPump(spec.ServerID, logBufferLines),
+		spec:             spec,
+		docker:           d.docker,
+		image:            image,
+		network:          d.network,
+		gameBindIP:       d.gameBindIP,
+		labels:           d.labels(spec.ServerID),
+		createFn:         d.createContainer,
+		openControl:      d.openControl,
+		rconHost:         d.RconHost(spec.ServerID),
+		stopTimeout:      d.stopTimeout,
+		readinessTimeout: d.readinessTimeout,
+		events:           make(chan execution.StatusEvent, 8),
+		exited:           make(chan struct{}),
+		state:            execution.StateStarting,
+		logPump:          execution.NewLogPump(spec.ServerID, logBufferLines),
 	}
 	inst.emit(execution.StateStarting, "")
 
@@ -487,6 +508,9 @@ type instance struct {
 	// host loopback, the container name when a user-defined network is configured.
 	rconHost    string
 	stopTimeout time.Duration
+	// readinessTimeout bounds the hold-on-starting wait before falling back to
+	// running (issue #345).
+	readinessTimeout time.Duration
 
 	events chan execution.StatusEvent
 	// exited is closed by supervise once the container has reached a terminal
@@ -536,9 +560,10 @@ func (i *instance) beginLaunch(id string) {
 	i.beginLaunchTail(id)
 }
 
-// beginLaunchTail wires log capture, marks the instance running, and starts the
-// exit supervisor for an already-published launch container. superviseInstall
-// calls it after publishing and starting the launch under the latch lock, so the
+// beginLaunchTail wires log capture, starts the exit supervisor, and holds
+// StateStarting until the server reports readiness (the startup-complete log
+// marker) before transitioning to running (issue #345). superviseInstall calls
+// it after publishing and starting the launch under the latch lock, so the
 // publish and the stopping re-check stay one critical section (issue #306).
 func (i *instance) beginLaunchTail(id string) {
 	// Follow the container's multiplexed log stream into the per-instance pump.
@@ -551,10 +576,28 @@ func (i *instance) beginLaunchTail(id string) {
 	i.logWG.Add(1)
 	go i.captureLogs(logCtx, id)
 
-	i.set(execution.StateRunning)
-	i.emit(execution.StateRunning, "")
-
 	go i.supervise()
+	go i.awaitReady()
+}
+
+// awaitReady holds StateStarting until the server's startup-complete log marker
+// appears (RCON is listening by then), the readiness fallback elapses, or the
+// container exits first; only the first two transition to running (issue #345).
+// The transition is gated under the lock on the instance still being in
+// StateStarting, so a container that crashed while booting (supervise set
+// crashed) or a Stop that latched stopping is never overwritten with running.
+func (i *instance) awaitReady() {
+	if !execution.WaitReady(i.logPump.Ready(), i.exited, i.readinessTimeout) {
+		return // the container exited first; supervise owns the terminal state.
+	}
+	i.mu.Lock()
+	if i.state != execution.StateStarting {
+		i.mu.Unlock()
+		return
+	}
+	i.state = execution.StateRunning
+	i.mu.Unlock()
+	i.emit(execution.StateRunning, "")
 }
 
 // superviseInstall waits for the supervised install container to exit, captures

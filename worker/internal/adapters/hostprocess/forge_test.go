@@ -47,7 +47,7 @@ func queueSpawn(t *testing.T, procs ...*fakeProcess) (spawnFunc, *[]spawnRec) {
 func forgeDriver(spawn spawnFunc) *Driver {
 	return New(fixedSelector{}, spawn, func(context.Context, execution.InstanceSpec) (execution.ServerControl, error) {
 		return nil, errors.New("no rcon")
-	}, Options{StopTimeout: 50 * time.Millisecond})
+	}, Options{StopTimeout: 50 * time.Millisecond, ReadinessTimeout: 20 * time.Millisecond})
 }
 
 func forgeSpec(dir string) execution.InstanceSpec {
