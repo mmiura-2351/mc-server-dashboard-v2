@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.errors import UnknownVersionError
@@ -41,11 +42,16 @@ _INSTALLER_URL = f"{_BASE}/versions/installer"
 
 
 def _loader_for_game_url(game: str) -> str:
-    return f"{_LOADER_URL}/{game}"
+    return f"{_LOADER_URL}/{quote(game, safe='')}"
 
 
 def _server_jar_url(game: str, loader: str, installer: str) -> str:
-    return f"{_LOADER_URL}/{game}/{loader}/{installer}/server/jar"
+    # URL-encode each segment (defense-in-depth): game is caller-supplied and
+    # loader/installer come from the upstream API.
+    game_q = quote(game, safe="")
+    loader_q = quote(loader, safe="")
+    installer_q = quote(installer, safe="")
+    return f"{_LOADER_URL}/{game_q}/{loader_q}/{installer_q}/server/jar"
 
 
 @dataclass(frozen=True)
