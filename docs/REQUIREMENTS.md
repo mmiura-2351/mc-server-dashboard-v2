@@ -93,16 +93,56 @@ both sides land in one change set.
 - Audit logging.
 - A platform-administrator role above all Communities.
 
-### 2.2 Out of scope (M1, deferred)
+### 2.2 In scope (M2)
 
-- Kubernetes execution backend (abstraction must allow it; not implemented).
-- Per-Community quotas / resource limits.
+M2's theme is **the use-case-enabling foundation**: every intended user use case
+can be executed end-to-end through the API. The Web UI is a separate track that
+consumes this API surface — it is not built here (the UI lives in a separate
+repository; this document covers the API + Worker).
+
+M2 is organized as four pillars, each tracked by an epic:
+
+- **Pillar A — account self-service and admin lifecycle** (epic #239): users
+  manage their own account (password change, profile update, account deletion);
+  platform administrators manage users via the API (list,
+  deactivate/reactivate, delete, grant/revoke administrator) instead of direct
+  SQL. Identity stays global (FR-AUTH-5); every mutation is audited.
+- **Pillar B — server-operation use cases complete end-to-end** (epic #240):
+  EULA acceptance flow, port management (free-port discovery and
+  auto-assignment), force stop on the HTTP API, the spigot / forge / fabric
+  server types, and sanitized start-failure categories.
+- **Pillar C — data and content management** (epic #241): extended file
+  operations, server ZIP import/export, backup upload/download (off-host), and
+  OP / whitelist player groups synced to the server.
+- **Pillar D — operations and long-run robustness** (epic #242): Prometheus
+  metrics and a readiness endpoint, a system notification stream, JAR pool
+  garbage collection, and version-catalog admin.
+
+### 2.3 Explicitly dropped (not planned)
+
+These are **dropped**, not deferred: they are not required to cover the user use
+cases and are not on the roadmap. (Distinct from the M3+ deferred list in
+Section 2.4, which is still planned.)
+
+- Kubernetes execution backend. The `ExecutionDriver` abstraction stays
+  k8s-compatible (FR-EXE-4), but there is no commitment to build a Kubernetes
+  driver.
 - Billing / metering.
+- Email invitations / invite links (membership is manual add; FR-MEM-1).
+- Self-service Community creation (Communities are admin-created; FR-COMM-2).
 - Server live-migration without downtime (relocation is stop → snapshot →
   hydrate → start).
-- Continuous delta replication of world data (M1 uses snapshot-based sync).
 - Horizontal scaling of the API tier, message-broker transport.
-- The web UI (a separate repository; this document covers the API + Worker).
+
+### 2.4 Deferred to M3+ (still planned)
+
+Out of scope for M2 but kept on the roadmap for a later milestone:
+
+- Per-Community quotas / resource limits.
+- Continuous delta replication of world data (snapshot-based sync until then).
+- Worker-restart container adoption (#102).
+- Fleet-level start idempotency (#182).
+- Lane capacity (#169).
 
 ---
 
@@ -156,7 +196,7 @@ holding different roles in each, and may also be a platform administrator.
               commands ↓│↑ events (status / log / metrics)             │ transfer (world/jar/backup)
         ┌───────────────┴────────────────────────────────────────────▼────────────────────┐
         │  Worker (stateless / replaceable)                                                 │
-        │  ExecutionDriver ──▶ [ host-process | container | (k8s later) ]                   │
+        │  ExecutionDriver ──▶ [ host-process | container | (k8s-ready) ]                   │
         │  Runs MC in a local scratch working dir; manages it (RCON, signals)               │
         │  Holds no authoritative data: hydrate on start, snapshot on stop / interval       │
         └───────────────────────────────────────────────────────────────────────────────────┘
@@ -223,7 +263,7 @@ holding different roles in each, and may also be a platform administrator.
 
 - FR-COMM-1: A Community is a named container that owns servers and their data.
 - FR-COMM-2: Communities are created **only by a platform administrator**, who
-  assigns the initial owner. Self-service creation is out of scope for M1.
+  assigns the initial owner. Self-service creation is dropped (see Section 2.3).
 - FR-COMM-3: Each Community is isolated: its resources are invisible to
   non-members (Layer-1 visibility; see 6.4).
 - FR-COMM-4: On creation, a Community is seeded with preset roles (at minimum an
@@ -233,7 +273,7 @@ holding different roles in each, and may also be a platform administrator.
 
 - FR-MEM-1: Members are added by a Community owner/admin **manually adding an
   existing user account** to the Community. Invite links and email invitations
-  are deferred (the membership model must leave room to add them later).
+  are dropped (see Section 2.3).
 - FR-MEM-2: Membership is many-to-many: a user may belong to multiple
   Communities and hold different roles in each.
 - FR-MEM-3: A member can be removed; removal revokes that Community's roles and
@@ -301,8 +341,10 @@ Requirements:
 - FR-EXE-3: The execution backend is selectable per server, chosen at creation.
   Whether and how it may be changed afterward is a design-phase question (see
   9.1); the M1 baseline assumption is that it is fixed for a server's lifetime.
-- FR-EXE-4: The interface must accommodate a future Kubernetes driver without
-  interface changes.
+- FR-EXE-4: The interface must remain shaped so a Kubernetes driver could be
+  added without interface changes. Building such a driver is not committed (see
+  Section 2.3); this is a compatibility constraint on the abstraction, not a
+  planned deliverable.
 - FR-EXE-5: The Worker selects the correct Java runtime for a server based on its
   Minecraft version (multiple Java versions may be installed; the right one is
   chosen per server). This selection is the driver's/Worker's concern, not the
@@ -478,8 +520,8 @@ The open questions from the first draft are resolved as follows:
 
 | # | Question | Decision | Refs |
 |---|---|---|---|
-| 1 | Community provisioning flow | **Admin-only creation.** Only a platform administrator creates a Community and assigns its owner. Self-service deferred. | FR-COMM-2 |
-| 2 | Invitation mechanism | **Manual add.** A Community owner/admin adds an existing user account directly. Invite links / email deferred. | FR-MEM-1 |
+| 1 | Community provisioning flow | **Admin-only creation.** Only a platform administrator creates a Community and assigns its owner. Self-service dropped (Section 2.3). | FR-COMM-2 |
+| 2 | Invitation mechanism | **Manual add.** A Community owner/admin adds an existing user account directly. Invite links / email dropped (Section 2.3). | FR-MEM-1 |
 | 3 | File/backup semantics for running servers | **State-branching policy** (read/edit read-through to the Worker when running; backup via save-all→snapshot→archive; restore requires stop). | 6.9, FR-FILE-2, FR-BAK-4 |
 | 4 | Snapshot interval policy | **Periodic default + per-server override + event-driven** (graceful stop, on-demand backup). | FR-DATA-7 |
 | 5 | Transport | **gRPC bidirectional stream** for the control plane; **API-terminated HTTP** for the bulk data plane. | 5.1, 5.2 |
