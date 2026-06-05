@@ -13,8 +13,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    ServerType as ServersServerType,
+)
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError,
+    SpigotUnsupportedError,
     UnknownVersionError,
     UnsupportedServerTypeError,
     VersionValidator,
@@ -33,10 +37,17 @@ class CatalogVersionValidator(VersionValidator):
     catalog: VersionCatalog
 
     async def validate(self, *, server_type: str, version: str) -> None:
+        if server_type == ServersServerType.SPIGOT.value:
+            # Spigot has no official distribution API (BuildTools-only), so it is
+            # not catalogued; recommend Paper (a Spigot-compatible fork) explicitly.
+            raise SpigotUnsupportedError(
+                f"spigot is not distributable (BuildTools-only); "
+                f"use paper for a Spigot-compatible server (requested {version})"
+            )
         try:
             catalog_type = ServerType(server_type)
         except ValueError as exc:
-            # Valid in the schema CHECK enum (e.g. forge) but not catalogued at M1.
+            # Valid in the schema CHECK enum (e.g. forge) but not catalogued.
             raise UnsupportedServerTypeError(server_type) from exc
         try:
             offered = await self.catalog.list_versions(catalog_type)

@@ -480,10 +480,14 @@ set's members; when there is a resolved JAR but no published snapshot, the body 
 a tar carrying just `server.jar` (a `200`, not the `204` of the nothing-to-send
 case) so the Worker can still launch.
 
-forge is **not** resolved at M1: the version catalog lists/resolves only vanilla
-(Mojang manifest) and Paper (PaperMC API). The `server_type` CHECK enum still
-permits `forge`, but server create-validation rejects it as unsupported — the
-catalog has no source for it.
+forge and spigot are **not** resolved: the version catalog lists/resolves only
+vanilla (Mojang manifest), Paper (PaperMC API), and fabric (meta.fabricmc.net).
+The `server_type` CHECK enum still permits `forge` and `spigot`, but server
+create-validation rejects both — the catalog has no usable source (forge needs a
+worker-side installer step; spigot has no official distribution API and create
+recommends Paper instead). The fabric server launcher JAR has no upstream
+checksum, so it is pooled content-addressed by its own SHA-256 without
+source-digest verification.
 
 **Proven-complete gate (FR-DATA-6).** `commit_snapshot` only publishes a staged
 transfer the data plane signalled complete (Section 4.1). The signal is the HTTP

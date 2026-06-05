@@ -7,6 +7,14 @@ import hashlib
 import pytest
 
 from mc_server_dashboard_api.versions.adapters.composite import CompositeCatalog
+from mc_server_dashboard_api.versions.adapters.fabric import (
+    _GAME_URL,
+    _INSTALLER_URL,
+    _LOADER_URL,
+    FabricCatalog,
+    _loader_for_game_url,
+    _server_jar_url,
+)
 from mc_server_dashboard_api.versions.adapters.vanilla import (
     _MANIFEST_URL,
     VanillaCatalog,
@@ -58,6 +66,37 @@ async def test_hash_mismatch_rejects_and_stores_nothing() -> None:
     with pytest.raises(JarHashMismatchError):
         await ensure(server_type=ServerType.VANILLA, version="1.21.1")
     assert pool.stored == {}
+
+
+_FABRIC_JAR = b"PK\x03\x04 fabric launcher jar"
+_FABRIC_JAR_URL = _server_jar_url("1.21.1", "0.16.5", "1.0.1")
+
+
+def _fabric_ensure() -> tuple[EnsureJar, FakeJarPool]:
+    json_fetcher = FakeJsonFetcher(
+        {
+            _GAME_URL: [{"version": "1.21.1", "stable": True}],
+            _LOADER_URL: [{"version": "0.16.5", "stable": True}],
+            _INSTALLER_URL: [{"version": "1.0.1", "stable": True}],
+            _loader_for_game_url("1.21.1"): [{"loader": {"version": "0.16.5"}}],
+        }
+    )
+    catalog = CompositeCatalog(
+        by_type={ServerType.FABRIC: FabricCatalog(fetcher=json_fetcher)}
+    )
+    jar_fetcher = FakeJarFetcher({_FABRIC_JAR_URL: _FABRIC_JAR})
+    pool = FakeJarPool()
+    return EnsureJar(catalog=catalog, fetcher=jar_fetcher, pool=pool), pool
+
+
+@pytest.mark.asyncio
+async def test_fabric_downloads_and_stores_without_checksum() -> None:
+    # Fabric publishes no digest for the generated launcher JAR: ensure-on-start
+    # stores the bytes unverified, content-addressed by their own SHA-256.
+    ensure, pool = _fabric_ensure()
+    key = await ensure(server_type=ServerType.FABRIC, version="1.21.1")
+    assert key == hashlib.sha256(_FABRIC_JAR).hexdigest()
+    assert pool.stored[key] == _FABRIC_JAR
 
 
 @pytest.mark.asyncio

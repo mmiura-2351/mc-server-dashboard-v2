@@ -89,6 +89,7 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioni
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError,
+    SpigotUnsupportedError,
     UnsupportedServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
@@ -212,9 +213,14 @@ async def create_server(
         raise _unprocessable("invalid_server_type") from exc
     except UnknownExecutionBackendError as exc:
         raise _unprocessable("invalid_execution_backend") from exc
+    except SpigotUnsupportedError as exc:
+        # Spigot is schema-valid but has no official distribution API
+        # (BuildTools-only): a distinct reason so the client can surface the
+        # recommendation to use Paper (FR-VER-1).
+        raise _unprocessable("spigot_unsupported") from exc
     except UnsupportedServerTypeError as exc:
-        # A schema-valid type the catalog cannot resolve at M1 (forge): rejected
-        # as unsupported, distinct from a wholly invalid type (FR-VER-1).
+        # A schema-valid type the catalog cannot resolve (forge): rejected as
+        # unsupported, distinct from a wholly invalid type (FR-VER-1).
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnknownVersionError as exc:
         raise _unprocessable("unknown_version") from exc

@@ -29,7 +29,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from mc_server_dashboard_api.core.adapters.database import Base
 
-_SERVER_TYPES = ("vanilla", "paper", "forge")
+_SERVER_TYPES = ("vanilla", "paper", "fabric", "forge", "spigot")
 _EXECUTION_BACKENDS = ("host_process", "container")
 _DESIRED_STATES = ("running", "stopped")
 _OBSERVED_STATES = (

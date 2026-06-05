@@ -79,6 +79,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError,
+    SpigotUnsupportedError,
     UnsupportedServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
@@ -299,6 +300,18 @@ def test_create_unsupported_type_forge_is_422() -> None:
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["detail"]["reason"] == "unsupported_server_type"
+
+
+def test_create_spigot_is_422_spigot_unsupported() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=SpigotUnsupportedError("use paper")),
+    )
+    client = next(_client(app))
+    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "spigot_unsupported"
 
 
 def test_create_unknown_version_is_422() -> None:

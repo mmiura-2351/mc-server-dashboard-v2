@@ -61,6 +61,11 @@ class EnsureJar:
 
 
 def _verify(source: JarSource, data: bytes) -> None:
+    if source.hash_algorithm is None or source.expected_hash is None:
+        # Fabric's meta API publishes no digest for the generated launcher JAR, so
+        # there is nothing to verify against; the bytes are still pooled
+        # content-addressed by their own SHA-256.
+        return
     digest = hashlib.new(_HASHLIB_NAME[source.hash_algorithm], data).hexdigest()
     if digest.lower() != source.expected_hash.lower():
         raise JarHashMismatchError(
