@@ -6,10 +6,11 @@ ruling: create validates, start fetches). The servers domain/application may not
 import the versions context (import-linter contract), so they depend on this
 narrow Port; the wiring binds it to a versions-catalog-backed adapter.
 
-``forge`` is the documented M1 non-goal: the DB CHECK enum still permits it, but
-the catalog does not list/resolve it, so this seam rejects it as *unsupported* —
-distinct from an unknown version. The two failure modes are separate exceptions so
-the edge can map them to distinct, honest 422 reasons.
+``spigot`` is the documented non-goal (no official distribution API), rejected
+with a distinct error recommending Paper. A schema type the catalog does not
+list/resolve is the *unsupported* case — distinct from an unknown version. The
+failure modes are separate exceptions so the edge can map them to distinct,
+honest 422 reasons. ``forge`` is catalogued (issue #307) and validates normally.
 """
 
 from __future__ import annotations
@@ -20,11 +21,11 @@ from mc_server_dashboard_api.servers.domain.errors import ServerError
 
 
 class UnsupportedServerTypeError(ServerError):
-    """The server type is valid in the schema but not resolvable here (forge).
+    """The server type is valid in the schema but not resolvable by the catalog.
 
-    Forge needs a worker-side installer step (it produces libraries + run scripts
-    rather than a single launchable JAR), which does not fit the single-jar
-    working-set model, so it is not catalogued; create rejects it as unsupported.
+    Defensive: every current schema type except spigot (which has its own error)
+    is catalogued — vanilla/paper/fabric/forge. This guards against a schema CHECK
+    enum value the catalog has no source for; create rejects it as unsupported.
     """
 
 

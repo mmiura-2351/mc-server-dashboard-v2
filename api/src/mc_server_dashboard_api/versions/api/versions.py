@@ -182,8 +182,8 @@ def _parse_server_type(value: str) -> ServerType:
     try:
         return ServerType(value)
     except ValueError as exc:
-        # forge (and any other non-catalogued type) is unsupported at M1: a clean
-        # 404 on the catalog surface, distinct from a transient source outage.
+        # spigot (and any other non-catalogued type) is unsupported: a clean 404 on
+        # the catalog surface, distinct from a transient source outage.
         raise _unknown_type() from exc
 
 

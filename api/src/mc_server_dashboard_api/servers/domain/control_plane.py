@@ -24,6 +24,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ExecutionBackend,
     ServerId,
+    ServerType,
     WorkerId,
 )
 
@@ -137,10 +138,16 @@ class ControlPlane(abc.ABC):
         worker_id: WorkerId,
         server_id: ServerId,
         backend: ExecutionBackend,
+        server_type: ServerType,
         jar_relpath: str,
         minecraft_version: str,
     ) -> CommandOutcome:
-        """Dispatch StartServer to ``worker_id`` and await the result (FR-SRV-2)."""
+        """Dispatch StartServer to ``worker_id`` and await the result (FR-SRV-2).
+
+        ``server_type`` selects the Worker launch mode: ``forge`` launches via the
+        supervised installer + args file, every other type via the historical JAR
+        launch (issue #307).
+        """
 
     @abc.abstractmethod
     async def stop(

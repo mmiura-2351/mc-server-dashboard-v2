@@ -136,6 +136,20 @@ If you create a server without `accept_eula`, the first start still crashes on t
 default `eula=false`; recover by editing `eula.txt` to `eula=true` (the file API)
 and starting again.
 
+### Forge servers install on first start
+
+A Forge server type resolves to the Forge **installer** JAR (not a directly
+launchable server JAR): the API ships it into the working set at `server.jar`, and
+the worker runs the supervised `--installServer` step the first time the server
+starts (the `forge-argsfile` launch mode). The installer produces the Forge
+libraries tree and the generated args file; the worker then launches via that args
+file. Subsequent starts skip the install (the args file is already present).
+
+The first start therefore takes noticeably longer than a vanilla/Paper start while
+the installer downloads Forge's libraries. The installer's combined output is
+written to `logs/forge-install.log` in the server's working set, readable through
+the file API — check it if a Forge first start fails or stalls.
+
 ## 6. How Minecraft server ports reach clients
 
 The worker's container driver reads each server's `server.properties` and

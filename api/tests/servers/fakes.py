@@ -59,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
     ServerId,
     ServerName,
+    ServerType,
     WorkerId,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
@@ -624,9 +625,11 @@ class FakeControlPlane(ControlPlane):
         worker_id: WorkerId,
         server_id: ServerId,
         backend: ExecutionBackend,
+        server_type: ServerType,
         jar_relpath: str,
         minecraft_version: str,
     ) -> CommandOutcome:
+        self.start_launch_server_type = server_type
         return await self._record("start", worker_id, server_id)
 
     async def stop(

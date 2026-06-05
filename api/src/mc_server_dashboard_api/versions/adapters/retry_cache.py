@@ -61,10 +61,22 @@ class RetryCachingFetcher(JsonFetcher, CacheInvalidator):
     _cache: dict[str, _CacheEntry] = field(default_factory=dict)
 
     async def get_json(self, url: str) -> object:
+        return await self._fetch_cached(url, self.inner.get_json)
+
+    async def get_text(self, url: str) -> str:
+        # Raw-text documents (the Forge maven-metadata.xml) flow through the same
+        # retry + TTL-cache fallback as JSON; the cached value is the text body.
+        payload = await self._fetch_cached(url, self.inner.get_text)
+        assert isinstance(payload, str)
+        return payload
+
+    async def _fetch_cached(
+        self, url: str, fetch: Callable[[str], Awaitable[object]]
+    ) -> object:
         last_error: FetchError | None = None
         for attempt in range(self.attempts):
             try:
-                payload = await self.inner.get_json(url)
+                payload = await fetch(url)
             except FetchError as exc:
                 last_error = exc
                 if attempt + 1 < self.attempts:

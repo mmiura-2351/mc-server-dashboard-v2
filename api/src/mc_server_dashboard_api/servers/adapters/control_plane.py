@@ -25,6 +25,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandTimedOutError,
     EditFileCommand,
     HydrateCommand,
+    LaunchMode,
     ListFilesCommand,
     ReadFileCommand,
     RestartServerCommand,
@@ -58,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ExecutionBackend,
     ServerId,
+    ServerType,
     WorkerId,
 )
 
@@ -81,6 +83,18 @@ _STATUS_BY_CODE: dict[CommandResultCode, CommandStatus] = {
     CommandResultCode.PORT_CONFLICT: CommandStatus.PORT_CONFLICT,
     CommandResultCode.IMAGE_MISSING: CommandStatus.IMAGE_MISSING,
 }
+
+
+def _launch_mode_for(server_type: ServerType) -> LaunchMode:
+    """Forge launches via the supervised installer + args file; all else via JAR.
+
+    The launch mode is carried explicitly on StartServer (issue #307); the Worker
+    never infers it from the working-set contents (CONTROL_PLANE.md Section 5).
+    """
+
+    if server_type is ServerType.FORGE:
+        return LaunchMode.FORGE_ARGSFILE
+    return LaunchMode.JAR
 
 
 def _to_outcome(result: CommandResult) -> CommandOutcome:
@@ -166,6 +180,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         worker_id: WorkerId,
         server_id: ServerId,
         backend: ExecutionBackend,
+        server_type: ServerType,
         jar_relpath: str,
         minecraft_version: str,
     ) -> CommandOutcome:
@@ -176,6 +191,7 @@ class FleetControlPlaneAdapter(ControlPlane):
                 driver=_DRIVER_BY_BACKEND[backend],
                 jar_relpath=jar_relpath,
                 minecraft_version=minecraft_version,
+                launch_mode=_launch_mode_for(server_type),
             ),
         )
 

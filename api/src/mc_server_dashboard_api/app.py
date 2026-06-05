@@ -117,6 +117,7 @@ from mc_server_dashboard_api.versions.adapters.clock import (
 )
 from mc_server_dashboard_api.versions.adapters.composite import CompositeCatalog
 from mc_server_dashboard_api.versions.adapters.fabric import FabricCatalog
+from mc_server_dashboard_api.versions.adapters.forge import ForgeCatalog
 from mc_server_dashboard_api.versions.adapters.http_fetcher import HttpxJsonFetcher
 from mc_server_dashboard_api.versions.adapters.http_jar_fetcher import HttpxJarFetcher
 from mc_server_dashboard_api.versions.adapters.jar_gc_loop import run_jar_gc_loop
@@ -190,11 +191,15 @@ def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
 # the cached last-good entries whose URL starts with that type's source host.
 # Vanilla also fetches per-version detail JSON from a different host, which a
 # host-prefix match does not cover — the per-type refresh targets the type's source
-# manifest (the listing), and an all-types refresh clears the whole cache.
+# manifest (the listing), and an all-types refresh clears the whole cache. Forge is
+# the same shape: the prefix targets the maven-metadata listing host; the
+# promotions feed (files.minecraftforge.net) and the per-build .sha1 are cleared by
+# an all-types refresh (issue #307).
 _CATALOG_SOURCE_PREFIXES: dict[CatalogServerType, str] = {
     CatalogServerType.VANILLA: "https://launchermeta.mojang.com",
     CatalogServerType.PAPER: "https://api.papermc.io",
     CatalogServerType.FABRIC: "https://meta.fabricmc.net",
+    CatalogServerType.FORGE: "https://maven.minecraftforge.net",
 }
 
 
@@ -202,8 +207,9 @@ def _build_version_catalog() -> tuple[VersionCatalog, RetryCachingFetcher]:
     """Build the process-wide :class:`VersionCatalog` (ARCHITECTURE.md Section 7.3).
 
     One httpx fetcher wrapped in the retry + in-process TTL-cache fallback
-    (FR-VER-2), shared by the vanilla (Mojang), Paper (PaperMC), and Fabric
-    (meta.fabricmc.net) catalogs so the last-good manifest cache is process-wide. A
+    (FR-VER-2), shared by the vanilla (Mojang), Paper (PaperMC), Fabric
+    (meta.fabricmc.net), and Forge (Forge Maven) catalogs so the last-good
+    manifest cache is process-wide. A
     jittered, asyncio-backed backoff spaces retries; the cache TTL keeps the catalog
     serving through a transient source outage. The cache lives for the process
     lifetime, so this is built once and stored on app state. The fetcher is returned
@@ -220,6 +226,7 @@ def _build_version_catalog() -> tuple[VersionCatalog, RetryCachingFetcher]:
             CatalogServerType.VANILLA: VanillaCatalog(fetcher=fetcher),
             CatalogServerType.PAPER: PaperCatalog(fetcher=fetcher),
             CatalogServerType.FABRIC: FabricCatalog(fetcher=fetcher),
+            CatalogServerType.FORGE: ForgeCatalog(fetcher=fetcher),
         }
     )
     return catalog, fetcher
