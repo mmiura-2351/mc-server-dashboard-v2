@@ -56,6 +56,12 @@ dependencies = [
     # promoted here as a runtime dependency. 0.28.1 (2024-12-06) is well outside
     # the 7-day cooldown (Section 3); cap the next minor (0.x, Section 1).
     "httpx>=0.28.1,<0.29",              # 2024-12-06
+    # Prometheus exposition + metric primitives behind the /metrics endpoint
+    # (issue #282, NFR-OBS): the standard client library renders the text format
+    # and provides the Counter/Histogram/Gauge primitives and the custom-collector
+    # protocol the servers-by-state gauge uses. 0.25.0 (2026-04-09) is well outside
+    # the 7-day cooldown (Section 3); cap the next minor (0.x, Section 1).
+    "prometheus-client>=0.25.0,<0.26",  # 2026-04-09
 ]
 
 [dependency-groups]
