@@ -308,7 +308,7 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 		JarRelpath:       cmd.JarRelpath,
 	})
 	if err != nil {
-		return fail(cmd.CommandID, session.CommandErrorInternal,
+		return fail(cmd.CommandID, startErrorCode(err),
 			fmt.Sprintf("instancemanager: start: %v", err))
 	}
 
@@ -988,6 +988,21 @@ func (m *Manager) forgetIf(serverID string, inst execution.Instance) {
 	if m.instances[serverID] == inst {
 		delete(m.instances, serverID)
 		delete(m.startCmds, serverID)
+	}
+}
+
+// startErrorCode classifies a driver Start failure into a CommandResult error
+// code. A driver (the container driver) wraps a known operational failure with a
+// sanitized execution sentinel so the API can surface a friendlier 409 reason
+// than the generic one; any other failure stays internal (issue #225).
+func startErrorCode(err error) session.CommandErrorCode {
+	switch {
+	case errors.Is(err, execution.ErrPortConflict):
+		return session.CommandErrorPortConflict
+	case errors.Is(err, execution.ErrImageMissing):
+		return session.CommandErrorImageMissing
+	default:
+		return session.CommandErrorInternal
 	}
 }
 

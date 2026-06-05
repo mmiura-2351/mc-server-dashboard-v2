@@ -47,6 +47,9 @@ class CommandStatus(enum.Enum):
     FILE_ACCESS_DENIED = "file_access_denied"
     TRANSFER_FAILED = "transfer_failed"
     INTERNAL = "internal"
+    # Sanitized start-failure categories the Worker classifies (issue #225).
+    PORT_CONFLICT = "port_conflict"
+    IMAGE_MISSING = "image_missing"
 
 
 @dataclass(frozen=True)

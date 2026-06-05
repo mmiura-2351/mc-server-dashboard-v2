@@ -157,7 +157,17 @@ class CommandDispatchError(ServerError):
     The Worker returned a ``CommandResult`` failure (CONTROL_PLANE.md Section 7).
     For a start, the use case compensates the desired/assignment write before
     raising. The edge maps this to a typed 409.
+
+    ``reason`` optionally names a sanitized failure category (e.g.
+    ``"port_conflict"``, ``"image_missing"``, issue #225) the edge renders as the
+    409 body reason instead of the generic ``command_failed``. It stays ``None``
+    for ordinary dispatch failures. The raw Worker message is never the reason:
+    it can leak Worker host paths, so it is logged, not returned.
     """
+
+    def __init__(self, message: str = "", *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class ServerFileNotFoundError(ServerError):

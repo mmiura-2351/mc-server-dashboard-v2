@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -61,6 +62,8 @@ func wantCode(t *testing.T, code string) (success bool, errCode session.CommandE
 		"driver_unavailable": session.CommandErrorDriverUnavailable,
 		"transfer_failed":    session.CommandErrorTransferFailed,
 		"file_access_denied": session.CommandErrorFileAccessDenied,
+		"port_conflict":      session.CommandErrorPortConflict,
+		"image_missing":      session.CommandErrorImageMissing,
 	}
 	c, ok := codes[code]
 	if !ok {
@@ -112,6 +115,20 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		cmd := contractCmd(t, row.Kind, serverID)
 		cmd.Driver = "container" // not offered by the test worker (only host-process)
 		return m.Handle(ctx, cmd)
+
+	case "port_conflict":
+		// A driver whose Start fails with the sanitized port-conflict sentinel: the
+		// container driver derives it from the Docker daemon message; here the fake
+		// returns the wrapped sentinel so the assertion reflects the real
+		// classification path (issue #225).
+		d := &fakeDriver{startErr: fmt.Errorf("start: %w", execution.ErrPortConflict)}
+		m := newManager(t, d, nil)
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
+	case "image_missing":
+		d := &fakeDriver{startErr: fmt.Errorf("create: %w", execution.ErrImageMissing)}
+		m := newManager(t, d, nil)
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	case "missing_path":
 		m := newManager(t, &fakeDriver{}, nil)

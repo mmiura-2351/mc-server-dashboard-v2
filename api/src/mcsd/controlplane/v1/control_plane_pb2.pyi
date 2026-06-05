@@ -70,6 +70,16 @@ class _CommandErrorCodeEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_Comm
     """A hydrate/snapshot data-plane transfer failed."""
     COMMAND_ERROR_CODE_INTERNAL: _CommandErrorCode.ValueType  # 6
     """The Worker failed to apply the command for an unclassified reason."""
+    COMMAND_ERROR_CODE_PORT_CONFLICT: _CommandErrorCode.ValueType  # 7
+    """A StartServer could not publish a host port because it is already in use
+    (e.g. two servers sharing server-port on one Worker). Sanitized from the
+    container driver's start error; the raw daemon text stays in Worker logs.
+    """
+    COMMAND_ERROR_CODE_IMAGE_MISSING: _CommandErrorCode.ValueType  # 8
+    """A StartServer could not find or pull the container image for the server's
+    Minecraft/Java version. Sanitized from the container driver's create error;
+    the raw daemon text stays in Worker logs.
+    """
 
 class CommandErrorCode(_CommandErrorCode, metaclass=_CommandErrorCodeEnumTypeWrapper):
     """CommandErrorCode classifies a command failure."""
@@ -89,6 +99,16 @@ COMMAND_ERROR_CODE_TRANSFER_FAILED: CommandErrorCode.ValueType  # 5
 """A hydrate/snapshot data-plane transfer failed."""
 COMMAND_ERROR_CODE_INTERNAL: CommandErrorCode.ValueType  # 6
 """The Worker failed to apply the command for an unclassified reason."""
+COMMAND_ERROR_CODE_PORT_CONFLICT: CommandErrorCode.ValueType  # 7
+"""A StartServer could not publish a host port because it is already in use
+(e.g. two servers sharing server-port on one Worker). Sanitized from the
+container driver's start error; the raw daemon text stays in Worker logs.
+"""
+COMMAND_ERROR_CODE_IMAGE_MISSING: CommandErrorCode.ValueType  # 8
+"""A StartServer could not find or pull the container image for the server's
+Minecraft/Java version. Sanitized from the container driver's create error;
+the raw daemon text stays in Worker logs.
+"""
 Global___CommandErrorCode: _TypeAlias = CommandErrorCode  # noqa: Y015
 
 class _ServerState:

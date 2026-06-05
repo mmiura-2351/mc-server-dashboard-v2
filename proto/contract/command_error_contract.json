@@ -21,6 +21,13 @@
     "  driver_unavailable - the requested driver is not offered by this Worker",
     "  missing_path       - the file/dir target does not exist in the working set",
     "  unsafe_path        - a traversal-rejected path (FR-FILE-4)",
+    "  port_conflict      - the driver Start failed on a host-port collision (#225)",
+    "  image_missing      - the driver Start failed on a missing container image (#225)",
+    "The port_conflict / image_missing rows are sanitized categories the container",
+    "driver derives from the Docker daemon's free-text error message (substring",
+    "detection -- see classifyStartError); the Worker test drives a fake driver",
+    "returning the wrapped sentinel rather than a live daemon. They are pinned so",
+    "the API may match them for a friendlier 409 reason (issue #225).",
     "This table pins the deterministic per-kind precondition codes only; the",
     "environment-dependent 'internal' and 'transfer_failed' codes are",
     "intentionally left unpinned."
@@ -30,6 +37,8 @@
     {"kind": "StartServer", "precondition": "instance_running", "code": "invalid_state"},
     {"kind": "StartServer", "precondition": "orphan_pending", "code": "invalid_state"},
     {"kind": "StartServer", "precondition": "driver_unavailable", "code": "driver_unavailable"},
+    {"kind": "StartServer", "precondition": "port_conflict", "code": "port_conflict"},
+    {"kind": "StartServer", "precondition": "image_missing", "code": "image_missing"},
 
     {"kind": "StopServer", "precondition": "instance_running", "code": "ok"},
     {"kind": "StopServer", "precondition": "instance_absent", "code": "server_not_found"},

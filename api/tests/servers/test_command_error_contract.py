@@ -38,6 +38,9 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "mc_server_dashboard_api"
 _APP = _SRC / "servers" / "application"
 _LIFECYCLE = _APP / "lifecycle.py"
 _FILES = _APP / "files.py"
+# command_dispatch.py maps a start failure's sanitized status onto the 409 reason
+# (issue #225): another (kind, code) match site, scanned by the regression guard.
+_COMMAND_DISPATCH = _APP / "command_dispatch.py"
 
 # Worker command kinds the file use cases dispatch (the table's keys). The API's
 # ``_map_file_status`` is shared across all three running-server file commands.
@@ -65,6 +68,10 @@ API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     # files.py: _map_file_status (shared by all file commands).
     *((kind, CommandStatus.SERVER_NOT_FOUND) for kind in _FILE_READ_KINDS),
     *((kind, CommandStatus.FILE_ACCESS_DENIED) for kind in _FILE_KINDS),
+    # command_dispatch.py: a sanitized start failure maps its status onto the 409
+    # body reason (port_conflict / image_missing) instead of command_failed (#225).
+    ("StartServer", CommandStatus.PORT_CONFLICT),
+    ("StartServer", CommandStatus.IMAGE_MISSING),
 )
 
 
@@ -96,15 +103,19 @@ def test_no_undeclared_match_sites() -> None:
     """
 
     pattern = re.compile(r"CommandStatus\.[A-Z_]+")
-    found = sum(len(pattern.findall(path.read_text())) for path in (_LIFECYCLE, _FILES))
+    found = sum(
+        len(pattern.findall(path.read_text()))
+        for path in (_LIFECYCLE, _FILES, _COMMAND_DISPATCH)
+    )
     # lifecycle.py has 4 CommandStatus.<NAME> references (redispatch_start,
     # stop convergence, graceful-stop "not SERVER_NOT_FOUND", SendServerCommand);
-    # files.py has 2 (_map_file_status). Bump this with intent when a genuinely
-    # new convergence match is added -- and add it to API_MATCH_SITES so it is
-    # checked against the contract table.
-    assert found == 6, (
-        f"found {found} CommandStatus references in lifecycle.py/files.py, "
-        "expected 6. A convergence/special-case match was added or removed: "
-        "update API_MATCH_SITES (so it is checked against the contract table) "
-        "and this count."
+    # files.py has 2 (_map_file_status); command_dispatch.py has 2 (the sanitized
+    # start-failure reason map, issue #225). Bump this with intent when a genuinely
+    # new convergence/special-case match is added -- and add it to API_MATCH_SITES
+    # so it is checked against the contract table.
+    assert found == 8, (
+        f"found {found} CommandStatus references in lifecycle.py/files.py/"
+        "command_dispatch.py, expected 8. A convergence/special-case match was "
+        "added or removed: update API_MATCH_SITES (so it is checked against the "
+        "contract table) and this count."
     )

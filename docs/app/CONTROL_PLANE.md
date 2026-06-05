@@ -303,6 +303,8 @@ classes a Worker can hit:
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
 | `FILE_ACCESS_DENIED` | A file path was rejected (traversal / not found / not permitted). |
 | `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |
+| `PORT_CONFLICT` | A `StartServer` could not publish a host port already in use (the container driver classifies it from the Docker daemon's error message). |
+| `IMAGE_MISSING` | A `StartServer` could not find or pull the server's container image (the container driver classifies it from the Docker daemon's error message). |
 | `INTERNAL` | An unclassified failure applying the command. |
 
 A registration refusal is reported differently: `RegisterAck.accepted=false`

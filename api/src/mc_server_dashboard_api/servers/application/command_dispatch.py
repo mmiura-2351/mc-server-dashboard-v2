@@ -13,11 +13,23 @@ from __future__ import annotations
 
 import logging
 
-from mc_server_dashboard_api.servers.domain.control_plane import CommandOutcome
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
+    CommandStatus,
+)
 from mc_server_dashboard_api.servers.domain.errors import CommandDispatchError
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 _LOG = logging.getLogger(__name__)
+
+# Sanitized start-failure categories the Worker classifies (issue #225). Their
+# status maps directly to the 409 body reason so an operator sees e.g.
+# ``port_conflict`` instead of the generic ``command_failed`` -- without the raw
+# daemon text (still log-only) leaking into the response.
+_SANITIZED_REASONS: dict[CommandStatus, str] = {
+    CommandStatus.PORT_CONFLICT: "port_conflict",
+    CommandStatus.IMAGE_MISSING: "image_missing",
+}
 
 
 def dispatch_failure(
@@ -32,4 +44,4 @@ def dispatch_failure(
         server_id.value,
         detail,
     )
-    return CommandDispatchError(detail)
+    return CommandDispatchError(detail, reason=_SANITIZED_REASONS.get(outcome.status))

@@ -102,6 +102,14 @@ const (
 	CommandErrorCode_COMMAND_ERROR_CODE_TRANSFER_FAILED CommandErrorCode = 5
 	// The Worker failed to apply the command for an unclassified reason.
 	CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL CommandErrorCode = 6
+	// A StartServer could not publish a host port because it is already in use
+	// (e.g. two servers sharing server-port on one Worker). Sanitized from the
+	// container driver's start error; the raw daemon text stays in Worker logs.
+	CommandErrorCode_COMMAND_ERROR_CODE_PORT_CONFLICT CommandErrorCode = 7
+	// A StartServer could not find or pull the container image for the server's
+	// Minecraft/Java version. Sanitized from the container driver's create error;
+	// the raw daemon text stays in Worker logs.
+	CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING CommandErrorCode = 8
 )
 
 // Enum value maps for CommandErrorCode.
@@ -114,6 +122,8 @@ var (
 		4: "COMMAND_ERROR_CODE_FILE_ACCESS_DENIED",
 		5: "COMMAND_ERROR_CODE_TRANSFER_FAILED",
 		6: "COMMAND_ERROR_CODE_INTERNAL",
+		7: "COMMAND_ERROR_CODE_PORT_CONFLICT",
+		8: "COMMAND_ERROR_CODE_IMAGE_MISSING",
 	}
 	CommandErrorCode_value = map[string]int32{
 		"COMMAND_ERROR_CODE_UNSPECIFIED":        0,
@@ -123,6 +133,8 @@ var (
 		"COMMAND_ERROR_CODE_FILE_ACCESS_DENIED": 4,
 		"COMMAND_ERROR_CODE_TRANSFER_FAILED":    5,
 		"COMMAND_ERROR_CODE_INTERNAL":           6,
+		"COMMAND_ERROR_CODE_PORT_CONFLICT":      7,
+		"COMMAND_ERROR_CODE_IMAGE_MISSING":      8,
 	}
 )
 
@@ -2207,7 +2219,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\x13ExecutionDriverKind\x12%\n" +
 	"!EXECUTION_DRIVER_KIND_UNSPECIFIED\x10\x00\x12&\n" +
 	"\"EXECUTION_DRIVER_KIND_HOST_PROCESS\x10\x01\x12#\n" +
-	"\x1fEXECUTION_DRIVER_KIND_CONTAINER\x10\x02*\xa4\x02\n" +
+	"\x1fEXECUTION_DRIVER_KIND_CONTAINER\x10\x02*\xf0\x02\n" +
 	"\x10CommandErrorCode\x12\"\n" +
 	"\x1eCOMMAND_ERROR_CODE_UNSPECIFIED\x10\x00\x12'\n" +
 	"#COMMAND_ERROR_CODE_SERVER_NOT_FOUND\x10\x01\x12$\n" +
@@ -2215,7 +2227,9 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"%COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE\x10\x03\x12)\n" +
 	"%COMMAND_ERROR_CODE_FILE_ACCESS_DENIED\x10\x04\x12&\n" +
 	"\"COMMAND_ERROR_CODE_TRANSFER_FAILED\x10\x05\x12\x1f\n" +
-	"\x1bCOMMAND_ERROR_CODE_INTERNAL\x10\x06*\xcc\x01\n" +
+	"\x1bCOMMAND_ERROR_CODE_INTERNAL\x10\x06\x12$\n" +
+	" COMMAND_ERROR_CODE_PORT_CONFLICT\x10\a\x12$\n" +
+	" COMMAND_ERROR_CODE_IMAGE_MISSING\x10\b*\xcc\x01\n" +
 	"\vServerState\x12\x1c\n" +
 	"\x18SERVER_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15SERVER_STATE_STARTING\x10\x01\x12\x18\n" +
