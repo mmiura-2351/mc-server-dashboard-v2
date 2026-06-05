@@ -39,7 +39,11 @@ from mc_server_dashboard_api.servers.domain.backup import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId
 from tests.integration.migrate import downgrade_base, upgrade_head
-from tests.servers.fakes import FakeClock, FakeVersionValidator
+from tests.servers.fakes import (
+    FakeClock,
+    FakeFileStore,
+    FakeVersionValidator,
+)
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
@@ -78,6 +82,7 @@ async def _seed_server(engine: AsyncEngine) -> uuid.UUID:
         uow=ServersUnitOfWork(factory),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
     )(
         community_id=CommunityId(community.id.value),
         name="survival",

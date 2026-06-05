@@ -218,6 +218,32 @@ def test_authorized_member_creates_server() -> None:
     assert resp.json()["execution_backend"] == "host_process"
 
 
+def test_create_defaults_accept_eula_to_false() -> None:
+    # Omitting accept_eula forwards False to the use case (no eula.txt seeded),
+    # keeping today's repairable first-start crash flow (issue #198).
+    community = uuid.uuid4()
+    use_case = _FakeUseCase(result=_server_entity(community_id=community))
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(f"/communities/{community}/servers", json=_create_body())
+    assert resp.status_code == 201
+    assert use_case.calls[0]["accept_eula"] is False
+
+
+def test_create_forwards_accept_eula_true() -> None:
+    # accept_eula=true reaches the use case, which seeds eula.txt (issue #198).
+    community = uuid.uuid4()
+    use_case = _FakeUseCase(result=_server_entity(community_id=community))
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/communities/{community}/servers",
+        json={**_create_body(), "accept_eula": True},
+    )
+    assert resp.status_code == 201
+    assert use_case.calls[0]["accept_eula"] is True
+
+
 def test_non_member_gets_404_on_read() -> None:
     app = _app(member=False, allow=True, read=_FakeUseCase())
     client = next(_client(app))

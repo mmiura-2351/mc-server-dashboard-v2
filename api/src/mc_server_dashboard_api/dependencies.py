@@ -785,11 +785,14 @@ def get_revoke_grant(request: Request) -> RevokeGrant:
 def get_create_server(
     request: Request,
     catalog: Annotated[VersionCatalog, Depends(get_version_catalog)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
 ) -> CreateServer:
     """Assemble the :class:`CreateServer` use case (server:create).
 
     Binds the version-validation seam to the global catalog so create rejects an
-    unsupported type / unoffered version before staging the row (FR-VER-1).
+    unsupported type / unoffered version before staging the row (FR-VER-1), and the
+    file seam to Storage so create can seed the initial working set (eula.txt on
+    accept_eula, issue #198).
     """
 
     session_factory = create_session_factory(get_engine(request))
@@ -797,6 +800,7 @@ def get_create_server(
         uow=ServersUnitOfWork(session_factory),
         clock=ServersSystemClock(),
         version_validator=CatalogVersionValidator(catalog=catalog),
+        file_store=file_store,
     )
 
 
