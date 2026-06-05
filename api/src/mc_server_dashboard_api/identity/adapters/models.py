@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     false,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -43,6 +44,10 @@ class UserModel(Base):
     is_platform_admin: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=false()
     )
+    # Account lifecycle flag (issue #278): ``true()`` renders the SQL literal
+    # ``true`` so existing rows backfill active, matching the issue #62 posture
+    # for ``is_platform_admin`` (``func.true()`` would render an invalid call).
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=true())
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

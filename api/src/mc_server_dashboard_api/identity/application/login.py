@@ -7,8 +7,9 @@ persisting the refresh row atomically.
 
 Around that it enforces the SECURITY.md Section 2 brute-force algorithm through
 the :class:`LoginAttemptStore`: every attempt is recorded; an account already
-locked, an IP over its sliding-window threshold, an unknown user, and a wrong
-password are *all* rejected as a single :class:`InvalidCredentialsError` after
+locked, an IP over its sliding-window threshold, an unknown user, a wrong
+password, and a deactivated account are *all* rejected as a single
+:class:`InvalidCredentialsError` after
 awaiting the artificial :class:`LoginFailureDelay`, so none can be told apart by
 status or timing (enumeration defence). Crossing the per-username threshold locks
 the account for an exponentially backed-off duration; a successful login clears
@@ -58,6 +59,7 @@ REASON_LOCKED = "locked"
 REASON_IP_THROTTLED = "ip_throttled"
 REASON_UNKNOWN_USER = "unknown_user"
 REASON_WRONG_PASSWORD = "wrong_password"
+REASON_DEACTIVATED = "deactivated"
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,12 @@ class Login:
                 await self._fail(key, ip, REASON_UNKNOWN_USER, now=now)
             if not self.hasher.verify(password, user.password_hash):
                 await self._fail(key, ip, REASON_WRONG_PASSWORD, now=now)
+            # A deactivated account fails *after* the password verify so it costs
+            # the same as a wrong password and shares the uniform error: the
+            # response and timing must not distinguish "deactivated" from "wrong
+            # password" (enumeration posture, issue #278).
+            if not user.active:
+                await self._fail(key, ip, REASON_DEACTIVATED, now=now)
             pair = await issue_token_pair(
                 uow=self.uow,
                 tokens=self.tokens,

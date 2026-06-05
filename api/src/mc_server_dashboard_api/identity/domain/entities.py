@@ -26,6 +26,11 @@ class User:
     ``is_platform_admin`` is the admin axis (FR-AUTH-6), not a separate table.
     The password is held only as its hash (FR-AUTH-3); hashing itself is an
     adapter concern and out of scope for the domain.
+
+    ``active`` is the account lifecycle flag (issue #278): a deactivated account
+    keeps its row (so audit history and uniqueness survive) but cannot
+    authenticate — login refuses it with the uniform 401 and every request
+    carrying its access token is rejected by ``AuthenticateRequest``.
     """
 
     id: UserId
@@ -35,6 +40,7 @@ class User:
     created_at: dt.datetime
     updated_at: dt.datetime
     is_platform_admin: bool = False
+    active: bool = True
 
 
 @dataclass

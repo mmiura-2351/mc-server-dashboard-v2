@@ -88,7 +88,12 @@ The API HTTP surface is then on `http://<host>:${API_HTTP_PORT}` (default 8000);
 ## 5. First-run bootstrap (create the platform admin)
 
 There is no seeded admin. Register the first user over HTTP, then promote it to
-platform admin directly in the database (the only out-of-band step).
+platform admin directly in the database. This `psql` step is the only out-of-band
+bootstrap and is needed **only for the very first admin** — once one platform
+admin exists, all further admin management (granting/revoking the admin flag,
+deactivating/reactivating, deleting, and listing users) is done through the
+authenticated, audited admin API (`PUT /users/{id}/platform-admin`,
+`POST /users/{id}/deactivate` and friends; issue #278), never `psql`.
 
 1. Register the user:
 
@@ -98,7 +103,7 @@ platform admin directly in the database (the only out-of-band step).
      -d '{"username": "admin", "password": "<a-strong-password>"}'
    ```
 
-2. Promote it to platform admin:
+2. Promote it to platform admin (first admin only):
 
    ```sh
    docker compose exec db \
@@ -108,6 +113,16 @@ platform admin directly in the database (the only out-of-band step).
 
    (`user` is a reserved word in SQL, hence the quotes. Use the `POSTGRES_USER` /
    `POSTGRES_DB` values from your `.env` if you changed them.)
+
+From here on, that admin promotes additional admins through the API rather than
+the database:
+
+```sh
+curl -X PUT http://localhost:8000/users/<user-id>/platform-admin \
+  -H 'Authorization: Bearer <admin-access-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"grant": true}'
+```
 
 ### Accepting the Minecraft EULA on first run
 

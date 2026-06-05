@@ -166,6 +166,7 @@ many. The platform-administrator capability is a flag on this same record
 | `email` | text | unique |
 | `password_hash` | text | bcrypt/argon2 output incl. per-user salt (FR-AUTH-3) |
 | `is_platform_admin` | bool | the admin axis (FR-AUTH-6, FR-AUTHZ-5); default false |
+| `active` | bool | account lifecycle flag (issue #278); default true. A deactivated account keeps its row but cannot authenticate: login refuses it with the uniform 401, and an outstanding access token is rejected on its next request |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(username)`, `UNIQUE(email)`.

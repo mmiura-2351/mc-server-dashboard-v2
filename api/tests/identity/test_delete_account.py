@@ -98,6 +98,23 @@ async def test_delete_account_allowed_when_other_admin_remains() -> None:
     assert admin.id not in uow.users.by_id
 
 
+async def test_delete_account_refused_when_only_other_admin_is_deactivated() -> None:
+    # A deactivated admin does not count toward the last-active-admin invariant
+    # (#278), so the active admin is still the last one and cannot self-delete.
+    admin = make_user(username="a", email="a@example.com", now=_NOW)
+    admin.is_platform_admin = True
+    deactivated = make_user(username="b", email="b@example.com", now=_NOW)
+    deactivated.is_platform_admin = True
+    deactivated.active = False
+    uow = FakeUnitOfWork()
+    uow.users.seed(admin)
+    uow.users.seed(deactivated)
+
+    with pytest.raises(LastPlatformAdminError):
+        await _use_case(uow, FakeCommunityOwnership())(user_id=admin.id)
+    assert admin.id in uow.users.by_id
+
+
 async def test_delete_account_unknown_user_raises() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(UserNotFoundError):

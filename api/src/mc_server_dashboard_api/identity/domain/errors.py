@@ -71,6 +71,17 @@ class LastPlatformAdminError(IdentityError):
     """
 
 
+class SelfTargetError(IdentityError):
+    """An admin lifecycle action refused because the actor targeted themselves.
+
+    The platform-admin user-administration routes (issue #278) refuse to let an
+    admin deactivate or delete *their own* account, steering them to the
+    self-service ``/users/me`` routes instead; the edge maps this to 409. (Self
+    platform-admin revoke is allowed unless it is the last active admin, so it is
+    not covered by this error.)
+    """
+
+
 class InvalidAccessTokenError(IdentityError):
     """An access token failed verification (bad signature, malformed, expired)."""
 

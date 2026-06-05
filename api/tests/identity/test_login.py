@@ -95,6 +95,39 @@ async def test_login_unknown_user_is_same_error_as_wrong_password() -> None:
     assert delay.calls == 1
 
 
+async def test_login_deactivated_user_is_uniform_failure() -> None:
+    # A deactivated account, even with the right password, fails with the same
+    # uniform error and the same artificial delay as a wrong password -- no
+    # response/timing oracle distinguishing the two (#278). The check runs after
+    # the password verify (asserted by the delay being applied), so a deactivated
+    # account is indistinguishable from a wrong password to a probing caller.
+    user = make_user(password=_PASSWORD, active=False)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    delay = RecordingFailureDelay()
+
+    with pytest.raises(InvalidCredentialsError):
+        await _login(uow, delay)(username="alice", password=_PASSWORD)
+
+    assert uow.refresh_tokens.by_hash == {}
+    assert uow.commits == 0
+    assert delay.calls == 1
+
+
+async def test_login_deactivated_failure_records_deactivated_reason() -> None:
+    # The forensic reason on the attempt row is "deactivated" (never surfaced).
+    user = make_user(password=_PASSWORD, active=False)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    attempts = FakeLoginAttemptStore()
+    delay = RecordingFailureDelay()
+
+    with pytest.raises(InvalidCredentialsError):
+        await _login(uow, delay, attempts)(username="alice", password=_PASSWORD)
+
+    assert [a[3] for a in attempts.attempts] == ["deactivated"]
+
+
 async def test_failure_records_attempt_with_username_and_ip() -> None:
     uow = FakeUnitOfWork()
     uow.users.seed(make_user(password=_PASSWORD))

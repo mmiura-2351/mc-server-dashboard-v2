@@ -55,8 +55,21 @@ class UserRepository(abc.ABC):
         """Delete the user with ``user_id``; cascades remove their dependent rows."""
 
     @abc.abstractmethod
-    async def count_platform_admins(self) -> int:
-        """Count users with the platform-admin flag (last-admin self-delete guard)."""
+    async def list_page(self, *, limit: int, offset: int) -> list[User]:
+        """Return a page of users ordered by ``created_at`` (admin listing, #278)."""
+
+    @abc.abstractmethod
+    async def count_all(self) -> int:
+        """Count every user row (the total for the admin listing's pagination, #278)."""
+
+    @abc.abstractmethod
+    async def count_active_platform_admins(self) -> int:
+        """Count *active* platform admins (the last-active-admin invariant, #278).
+
+        A deactivated admin cannot act, so it does not count toward the "platform
+        must keep at least one administrator" invariant that the delete /
+        deactivate / revoke guards enforce.
+        """
 
 
 class RefreshTokenRepository(abc.ABC):

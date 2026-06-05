@@ -36,3 +36,13 @@ async def test_valid_token_for_missing_user_is_rejected() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(InvalidAccessTokenError):
         await _auth(uow)(access_token=f"access::{user.id.value}")
+
+
+async def test_valid_token_for_deactivated_user_is_rejected() -> None:
+    # A deactivated account makes an outstanding access token unusable: the same
+    # uniform error as a token-gone race, no oracle distinguishing the two (#278).
+    user = make_user(active=False)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    with pytest.raises(InvalidAccessTokenError):
+        await _auth(uow)(access_token=f"access::{user.id.value}")

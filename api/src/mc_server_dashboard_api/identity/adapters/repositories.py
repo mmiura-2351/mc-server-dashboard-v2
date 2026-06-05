@@ -41,6 +41,7 @@ def _to_user(row: UserModel) -> User:
         email=EmailAddress(row.email),
         password_hash=row.password_hash,
         is_platform_admin=row.is_platform_admin,
+        active=row.active,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -71,6 +72,7 @@ class SqlAlchemyUserRepository(UserRepository):
                 email=user.email.value,
                 password_hash=user.password_hash,
                 is_platform_admin=user.is_platform_admin,
+                active=user.active,
                 created_at=user.created_at,
                 updated_at=user.updated_at,
             )
@@ -108,6 +110,8 @@ class SqlAlchemyUserRepository(UserRepository):
                 username=user.username.value,
                 email=user.email.value,
                 password_hash=user.password_hash,
+                is_platform_admin=user.is_platform_admin,
+                active=user.active,
                 updated_at=user.updated_at,
             )
         )
@@ -125,8 +129,24 @@ class SqlAlchemyUserRepository(UserRepository):
         stmt = delete(UserModel).where(UserModel.id == user_id.value)
         await self._session.execute(stmt)
 
-    async def count_platform_admins(self) -> int:
-        stmt = select(func.count()).where(UserModel.is_platform_admin.is_(True))
+    async def list_page(self, *, limit: int, offset: int) -> list[User]:
+        stmt = (
+            select(UserModel)
+            .order_by(UserModel.created_at, UserModel.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_user(row) for row in rows]
+
+    async def count_all(self) -> int:
+        stmt = select(func.count()).select_from(UserModel)
+        return (await self._session.execute(stmt)).scalar_one()
+
+    async def count_active_platform_admins(self) -> int:
+        stmt = select(func.count()).where(
+            UserModel.is_platform_admin.is_(True), UserModel.active.is_(True)
+        )
         return (await self._session.execute(stmt)).scalar_one()
 
 
