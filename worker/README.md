@@ -113,22 +113,37 @@ create-vs-async-remover restart race (#226/#229/#233): three rounds of fixes eac
 passed their unit fakes while the real daemon found a new interleaving, so this
 scenario needs a real daemon to reproduce the class.
 
-The scenario stands in for the Minecraft process with a tiny stub image
-(`test/e2e/stub/`): a `java` shim that ignores its args and blocks until SIGTERM,
-so the container stays running and `docker stop` ends it cleanly. It uses a unique
-per-run worker id and the deterministic `mcsd-<server-id>` container name, so its
-orphan sweep and cleanup touch only its own container — never another server on
-the host. CI runs it as the `container-restart` job in
+`test/e2e/forge_e2e_test.go` drives the same real driver+daemon through the
+Forge supervised-install path (issue #326): a Forge args-file `StartServer` whose
+working set lacks the args file runs a supervised install container
+(`mcsd-<id>-install`), which the stub installer satisfies by writing the launch
+args file, then proceeds to a running launch container — asserting the args file,
+the gone install container, and `logs/forge-install.log`. A companion case proves
+an already-installed working set skips the install step.
+
+Both scenarios stand in for the Minecraft process with a tiny stub image
+(`test/e2e/stub/`): a `java` shim that branches on its argv — a Forge
+`--installServer` invocation writes the launch args file and exits, every other
+invocation blocks until SIGTERM, so the container stays running and `docker stop`
+ends it cleanly. Each uses a unique per-run worker id (prefixed `e2e-restart-` /
+`e2e-forge-`) and the deterministic `mcsd-<server-id>` container name, so its
+orphan sweep and cleanup touch only its own containers — never another server on
+the host. CI runs both as the `container-restart` job in
 `.github/workflows/e2e.yml` (the GitHub-hosted runner has Docker preinstalled).
 
 ```sh
 # 1. Build the stub image (once; rebuild if the Dockerfile changes).
 docker build -t mcsd-e2e-stub:latest worker/test/e2e/stub
 
-# 2. From worker/: run the restart scenario against the local daemon.
+# 2. From worker/: run a scenario against the local daemon.
 MCD_E2E_DOCKER=1 \
 MCD_E2E_STUB_IMAGE=mcsd-e2e-stub:latest \
   go test -tags e2e -v -timeout 300s -run TestContainerRestart ./test/e2e/...
+
+# Or the Forge install scenario:
+MCD_E2E_DOCKER=1 \
+MCD_E2E_STUB_IMAGE=mcsd-e2e-stub:latest \
+  go test -tags e2e -v -timeout 300s -run TestContainerForge ./test/e2e/...
 ```
 
 On a host where Docker needs a group wrapper, prefix the commands with it

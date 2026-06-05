@@ -1,12 +1,13 @@
 //go:build e2e
 
-// Cross-run reaper for the container-driver restart harness (issue #256).
+// Cross-run reaper for the container-driver e2e scenarios (issues #256, #326).
 //
-// restart_e2e_test.go cleans up its stub container via t.Cleanup, which does
-// NOT run when the process dies on a hard panic or a `go test -timeout` kill.
-// Each run also uses a fresh random worker id ("e2e-restart-<uuid>"), so the
-// driver's own startup sweep — scoped to a single worker id — never reclaims a
-// previous run's orphan. The orphan therefore lingers until a human prunes it.
+// restart_e2e_test.go and forge_e2e_test.go clean up their stub containers via
+// t.Cleanup, which does NOT run when the process dies on a hard panic or a
+// `go test -timeout` kill. Each run also uses a fresh random worker id
+// ("e2e-restart-<uuid>" / "e2e-forge-<uuid>"), so the driver's own startup sweep
+// — scoped to a single worker id — never reclaims a previous run's orphan. The
+// orphan therefore lingers until a human prunes it.
 //
 // reapStaleE2EContainers closes that gap: before a run starts it removes the
 // stub containers that PREVIOUS harness runs leaked, identifying them by the
@@ -15,9 +16,10 @@
 // Two safety properties matter:
 //
 //   - It must never touch the live stack. The live container-driver worker id
-//     is a plain UUID; harness runs prefix theirs with "e2e-restart-". The
-//     reaper filters on that VALUE prefix (not merely the label key, which the
-//     live stack also carries), so a live worker's containers are never matched.
+//     is a plain UUID; harness runs prefix theirs with "e2e-" (e2e-restart-,
+//     e2e-forge-). The reaper filters on that VALUE prefix (not merely the label
+//     key, which the live stack also carries), so a live worker's containers are
+//     never matched.
 //
 //   - It must not race a CONCURRENT harness run. Two runs never share a worker
 //     id, but a sibling run's container is a valid e2e-prefixed container the
@@ -37,11 +39,12 @@ import (
 	"time"
 )
 
-// e2eWorkerIDPrefix is the worker-id value prefix every restart-harness run
-// uses (restart_e2e_test.go: "e2e-restart-"+uuid). The reaper matches on this
-// prefix so it only ever removes harness containers, never the live stack's
-// (whose worker id is a bare UUID).
-const e2eWorkerIDPrefix = "e2e-restart-"
+// e2eWorkerIDPrefix is the shared worker-id value prefix every e2e harness run
+// uses: restart_e2e_test.go ("e2e-restart-"+uuid) and forge_e2e_test.go
+// ("e2e-forge-"+uuid) both extend it. The reaper matches on this shared prefix so
+// it reclaims either scenario's leaked containers, yet still never touches the
+// live stack's (whose worker id is a bare UUID, no "e2e-" prefix).
+const e2eWorkerIDPrefix = "e2e-"
 
 // reapWorkerIDLabel is the Docker label key the container driver stamps the
 // worker id under (mirrors containerdriver.labelWorkerID, which is unexported).

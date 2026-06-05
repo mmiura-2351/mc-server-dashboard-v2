@@ -1,0 +1,40 @@
+#!/bin/sh
+# Stub `java` for the container-driver e2e scenarios (issues #234, #326). It runs
+# as the container's PID 1 and branches on its argv:
+#
+#   - A Forge SUPERVISED INSTALL invocation carries `--installServer`
+#     (`java -jar server.jar --installServer`, execution.forgeInstallArgs). It
+#     CREATES the launch artifact the driver's post-install re-plan globs for —
+#     libraries/net/minecraftforge/forge/<v>/unix_args.txt
+#     (execution.forgeArgsfileGlob) — relative to the working dir (/data, the
+#     bind-mounted working set) and exits 0. No JRE and no download: it only
+#     produces the file the next launch needs.
+#   - Any OTHER invocation (a plain JAR launch, or a Forge args-file launch)
+#     BLOCKS until SIGTERM so the container stays running like a real server.
+#     PID 1 receives only signals it traps, so install an explicit handler for
+#     `docker stop` to end it promptly; `wait` lets the trap fire between sleeps.
+
+for arg in "$@"; do
+	if [ "$arg" = "--installServer" ]; then
+		# The version segment is arbitrary for the stub — the driver globs the
+		# version with a wildcard and expects exactly one match.
+		dir="libraries/net/minecraftforge/forge/0.0.0-stub"
+		mkdir -p "$dir"
+		printf 'stub forge args file\n' >"$dir/unix_args.txt"
+		# The container runs as root, so the artifact and its parent dirs land
+		# root-owned in the bind-mounted working set. The harness runs as a non-root
+		# user and its t.TempDir cleanup must be able to unlink them, which needs
+		# write on the parent dirs; make the created tree world-writable so the
+		# cleanup never fails on a permission-denied (it would otherwise fail the
+		# Go test).
+		chmod -R 0777 libraries
+		echo "stub forge installer: wrote $dir/unix_args.txt"
+		exit 0
+	fi
+done
+
+trap "exit 0" TERM INT
+while true; do
+	sleep 1 &
+	wait $!
+done
