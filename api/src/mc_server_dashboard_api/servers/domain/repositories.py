@@ -76,7 +76,11 @@ class ServerRepository(abc.ABC):
 
     @abc.abstractmethod
     async def update(self, server: Server) -> None:
-        """Persist the mutable fields of ``server`` (name, config, timestamps)."""
+        """Persist the mutable fields of ``server`` (name, config, game port, ts).
+
+        The game port is included so an at-rest re-port (issue #311) lands in the
+        same write; a name/config-only edit leaves it unchanged.
+        """
 
     @abc.abstractmethod
     async def update_lifecycle(

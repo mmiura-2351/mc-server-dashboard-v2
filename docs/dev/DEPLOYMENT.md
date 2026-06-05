@@ -167,10 +167,26 @@ operator-created servers no longer need manual `server-port` editing to avoid
 host-port collisions. An operator may still pass an explicit `game_port` at create
 (rejected 422 out of range, 409 taken); a delete frees the port for reuse.
 
+**Changing a server's port after create.** A stopped server can be re-ported via
+`PATCH /communities/{id}/servers/{id}` with a `game_port` field (issue #311). It
+validates the new port like create (422 out of range, 409 taken), rewrites
+`server-port` in the at-rest `server.properties`, and updates `server.game_port`
+together, so under normal operation the DB and the real bind port stay in sync.
+The server must be at rest (a running server is 409 `server_not_stopped`). This is
+the preferred way to re-port — it keeps the tracked port and the file aligned,
+unlike editing `server.properties` by hand.
+
+The file write and the DB commit are not atomic: if a concurrent
+`UNIQUE(game_port)` race loses at commit (response 409 `port_taken`),
+`server.properties` may already hold the new port while the row keeps the old —
+the only residual drift mode. It is recoverable: retry the PATCH, which rewrites
+both to a consistent state.
+
 For an **imported or legacy server** whose row predates port tracking
-(`game_port` is `NULL`), nothing is auto-assigned — set its `server-port` manually
-in `server.properties` (via the files API) and keep distinct values per server, as
-before.
+(`game_port` is `NULL`), nothing is auto-assigned. Prefer the update-port API
+above to set its port (it backfills `game_port` and rewrites `server.properties`
+together); the manual SQL backfill below is the fallback when you have already set
+`server-port` directly in the file.
 
 ### Backfilling legacy `game_port` rows
 
@@ -182,7 +198,11 @@ the gap discoverable, the API logs a **startup WARN** listing the count and ids
 of every `game_port = NULL` server. When you see it, backfill those rows so the
 taken-set math becomes correct again.
 
-For each listed server, read its current bind port from `server.properties` (the
+The **preferred fix** is the update-port API (`PATCH .../servers/{id}` with
+`game_port`), which sets `game_port` and rewrites `server-port` in one validated,
+in-sync step. Use the manual SQL below only when you have already set the port
+directly in `server.properties` and just need the DB row to match: read each
+listed server's current bind port from `server.properties` (the
 `server-port=<port>` line, via the files API) and write it into `game_port`:
 
 ```sql

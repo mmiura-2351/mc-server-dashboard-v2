@@ -47,8 +47,10 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     CreateServer,
     DeleteServer,
     ReadServer,
+    UpdateServer,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    PortAlreadyTakenError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
 )
@@ -314,3 +316,99 @@ async def test_list_ids_missing_game_port_finds_only_legacy_rows(
     # taken set, and the legacy NULL port is excluded from it.
     assert [s.value for s in missing] == [legacy_id]
     assert tracked.game_port in taken
+
+
+def _updater(factory: object) -> UpdateServer:
+    return UpdateServer(
+        uow=ServersUnitOfWork(factory),  # type: ignore[arg-type]
+        clock=FakeClock(_NOW),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+    )
+
+
+async def test_update_game_port_persists_to_row(engine: AsyncEngine) -> None:
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+    )
+    server = await create(
+        community_id=CommunityId(community_id),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+
+    await _updater(factory)(
+        community_id=CommunityId(community_id),
+        server_id=server.id,
+        game_port=25570,
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server.id)
+        taken = await uow.servers.list_game_ports()
+    assert loaded is not None
+    assert loaded.game_port == 25570
+    # The new port is in the taken set; the old port was released.
+    assert taken == {25570}
+
+
+async def test_update_game_port_rejects_taken_against_real_db(
+    engine: AsyncEngine,
+) -> None:
+    # An at-rest re-port to a port another server already holds in the DB is a
+    # PortAlreadyTakenError: the taken-set pre-read (against the real DB) catches
+    # the conflict. The deployment-wide UNIQUE(game_port) is the ultimate backstop
+    # for a genuine race that slips past the pre-read (#261).
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+    )
+    server = await create(
+        community_id=CommunityId(community_id),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+    # Another server already holds 25570 in the DB; the pre-read catches it.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "execution_backend, config, game_port, desired_state, "
+                "observed_state, created_at, updated_at) VALUES "
+                "(:id, :community_id, 'taker', 'java', '1.21.1', 'vanilla', "
+                "'host_process', '{}', 25570, 'stopped', 'stopped', now(), now())"
+            ),
+            {"id": uuid.uuid4(), "community_id": community_id},
+        )
+
+    with pytest.raises(PortAlreadyTakenError):
+        await _updater(factory)(
+            community_id=CommunityId(community_id),
+            server_id=server.id,
+            game_port=25570,
+        )
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server.id)
+    assert loaded is not None
+    assert loaded.game_port == server.game_port
