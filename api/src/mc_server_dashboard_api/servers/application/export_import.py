@@ -62,6 +62,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.server_properties import (
+    set_rcon_properties,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
@@ -77,6 +80,11 @@ EXPORT_FORMAT_VERSION = 1
 # set that already holds a file by this name would collide, so import treats the
 # member as metadata only and never materializes it.
 EXPORT_METADATA_FILENAME = "export_metadata.json"
+
+# The server.properties member, if present in the archive: import enforces the
+# RCON keys on it during publish (issue #335) so an imported server's console /
+# graceful-stop path works out of the box, just like a created one.
+_PROPERTIES_FILENAME = "server.properties"
 
 # The cap on the (decompressed) metadata descriptor. The descriptor is a handful
 # of short string fields, so 64 KiB is generous; the bound exists only to refuse a
@@ -157,6 +165,15 @@ class ImportServer:
     set, with the metadata member itself excluded. The name comes from the caller,
     not the metadata.
 
+    On publish, the imported ``server.properties`` has the RCON keys enforced
+    (issue #335): ``enable-rcon=true`` and ``rcon.port`` are always overwritten, but
+    ``rcon.password`` is set only when the archive's value is missing/empty. The
+    choice to preserve a non-empty existing password (rather than rotate) keeps an
+    importer's known credential working; the always-overwrite of enable/port
+    guarantees the console / graceful-stop path works regardless of how RCON was
+    configured in the source. If the archive has no ``server.properties`` at all,
+    the composed :class:`CreateServer` already seeded one with the RCON keys.
+
     The caps are fields (not bare constants) so a test can inject tiny caps and
     trip the size / entry-count guards with a small archive; production wiring uses
     the defaults.
@@ -234,6 +251,16 @@ class ImportServer:
             ):
                 if entry_path == EXPORT_METADATA_FILENAME:
                     continue
+                if entry_path == _PROPERTIES_FILENAME:
+                    # Enforce the RCON keys on the imported server.properties (#335):
+                    # always overwrite enable-rcon / rcon.port, but set rcon.password
+                    # only when the archive's is missing/empty -- preserving an
+                    # importer's known credential so it keeps working. The fill-in
+                    # password reuses CreateServer's injected token generator so it is
+                    # a fresh secret (and deterministic under test).
+                    data = set_rcon_properties(
+                        data, password=self.create_server.token_generator()
+                    )
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from mc_server_dashboard_api.servers.domain.server_properties import set_server_port
+from mc_server_dashboard_api.servers.domain.server_properties import (
+    RCON_PORT,
+    set_rcon_properties,
+    set_server_port,
+)
 
 
 def test_replaces_existing_server_port_line() -> None:
@@ -48,3 +52,47 @@ def test_no_trailing_newline_input_appends_without_adding_blank_line() -> None:
     # The file had no trailing newline; the append still lands on its own line and
     # a trailing newline is added (matching the seeded-file convention).
     assert set_server_port(content, 25570) == b"motd=hi\nserver-port=25570\n"
+
+
+# --- RCON enforcement (issue #335) -----------------------------------------
+
+
+def test_set_rcon_appends_all_keys_to_empty_content() -> None:
+    out = set_rcon_properties(b"", password="s3cret")
+    assert out == (
+        f"enable-rcon=true\nrcon.port={RCON_PORT}\nrcon.password=s3cret\n".encode()
+    )
+
+
+def test_set_rcon_overwrites_disabled_enable_and_port() -> None:
+    content = b"enable-rcon=false\nrcon.port=1234\nmotd=hi\n"
+    out = set_rcon_properties(content, password="s3cret")
+    assert out == (
+        f"enable-rcon=true\nrcon.port={RCON_PORT}\nmotd=hi\nrcon.password=s3cret\n".encode()
+    )
+
+
+def test_set_rcon_preserves_existing_non_empty_password() -> None:
+    content = b"enable-rcon=false\nrcon.password=known\nrcon.port=1234\n"
+    out = set_rcon_properties(content, password="generated")
+    # The non-empty existing password is preserved; enable/port are enforced.
+    assert out == (
+        f"enable-rcon=true\nrcon.password=known\nrcon.port={RCON_PORT}\n".encode()
+    )
+
+
+def test_set_rcon_fills_empty_existing_password() -> None:
+    content = b"enable-rcon=false\nrcon.password=\nrcon.port=1234\n"
+    out = set_rcon_properties(content, password="generated")
+    assert out == (
+        f"enable-rcon=true\nrcon.password=generated\nrcon.port={RCON_PORT}\n".encode()
+    )
+
+
+def test_set_rcon_preserves_other_lines_and_order() -> None:
+    content = b"#comment\nlevel-name=world\nserver-port=25565\n"
+    out = set_rcon_properties(content, password="s3cret")
+    assert out == (
+        b"#comment\nlevel-name=world\nserver-port=25565\n"
+        + f"enable-rcon=true\nrcon.port={RCON_PORT}\nrcon.password=s3cret\n".encode()
+    )
