@@ -211,6 +211,35 @@ async def test_download_dir_root_zips_whole_tree(tmp_path: Path) -> None:
     assert names == {"a.txt", "sub/b.txt"}
 
 
+async def test_export_dir_appends_extra_entries(tmp_path: Path) -> None:
+    """The export zip carries the working set plus the in-memory extra entries."""
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"server.properties": b"top", "world/level.dat": b"world-bytes"},
+    )
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.export_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path=".",
+        extra=[("export_metadata.json", b'{"format": 1}')],
+    )
+    blob = b"".join([chunk async for chunk in stream])
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    assert contents == {
+        "server.properties": b"top",
+        "world/level.dat": b"world-bytes",
+        "export_metadata.json": b'{"format": 1}',
+    }
+
+
 async def test_download_dir_missing_is_file_not_found(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = _scope()

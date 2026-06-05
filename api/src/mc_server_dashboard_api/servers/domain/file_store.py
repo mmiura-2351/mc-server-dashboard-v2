@@ -125,6 +125,24 @@ class FileStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    def export_dir(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        extra: list[tuple[str, bytes]],
+    ) -> AsyncIterator[bytes]:
+        """Stream a zip of a subtree plus ``extra`` in-memory entries (issue #274).
+
+        Like :meth:`download_dir` (same incremental, bounded-memory streaming sink),
+        but each ``(arcname, bytes)`` in ``extra`` is appended to the zip after the
+        subtree's files. The whole-server export uses this to carry an
+        ``export_metadata.json`` descriptor alongside the working set in one stream.
+        Raises the same errors as :meth:`download_dir`.
+        """
+
+    @abc.abstractmethod
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[str]:

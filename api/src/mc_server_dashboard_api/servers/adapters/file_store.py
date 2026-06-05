@@ -160,8 +160,26 @@ class StorageFileStoreAdapter(FileStore):
         # the tree is refused at the seam, not zipped.
         return self._download_dir_gen(community_id, server_id, rel_path)
 
+    def export_dir(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        extra: list[tuple[str, bytes]],
+    ) -> AsyncIterator[bytes]:
+        # Same incremental, bounded-memory zip stream as download_dir, with the
+        # ``extra`` in-memory entries (the export_metadata.json descriptor, issue
+        # #274) appended after the subtree's files.
+        return self._download_dir_gen(community_id, server_id, rel_path, extra=extra)
+
     async def _download_dir_gen(
-        self, community_id: CommunityId, server_id: ServerId, rel_path: str
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        *,
+        extra: list[tuple[str, bytes]] | None = None,
     ) -> AsyncIterator[bytes]:
         # Verify the directory exists up front so a missing/invalid path surfaces
         # the servers error before any bytes are streamed.
@@ -177,6 +195,10 @@ class StorageFileStoreAdapter(FileStore):
             async for arcname, content in self._walk_files(
                 community_id, server_id, rel_path
             ):
+                zf.writestr(arcname, content)
+                for chunk in sink.drain():
+                    yield chunk
+            for arcname, content in extra or ():
                 zf.writestr(arcname, content)
                 for chunk in sink.drain():
                     yield chunk

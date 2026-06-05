@@ -167,6 +167,10 @@ from mc_server_dashboard_api.servers.application.backups import (
     ListBackups,
     RestoreBackup,
 )
+from mc_server_dashboard_api.servers.application.export_import import (
+    ExportServer,
+    ImportServer,
+)
 from mc_server_dashboard_api.servers.application.files import (
     DeleteFile,
     DownloadFile,
@@ -1112,6 +1116,44 @@ def get_download_file(
     session_factory = create_session_factory(get_engine(request))
     return DownloadFile(
         uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+    )
+
+
+def get_export_server(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> ExportServer:
+    """Assemble the :class:`ExportServer` use case (file:read, issue #274).
+
+    Binds the file seam to Storage (the export source is the authoritative working
+    set) and the clock seam so ``export_metadata.json``'s ``exported_at`` comes
+    from the time Port, never a direct wall-clock read.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return ExportServer(
+        uow=ServersUnitOfWork(session_factory),
+        clock=ServersSystemClock(),
+        file_store=file_store,
+    )
+
+
+def get_import_server(
+    request: Request,
+    create_server: Annotated[CreateServer, Depends(get_create_server)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> ImportServer:
+    """Assemble the :class:`ImportServer` use case (server:create, issue #274).
+
+    Composes :class:`CreateServer` so import reuses the SAME validation (version
+    validator, edition, name uniqueness) and the #243 port auto-assign, and binds
+    the file seam so the archive contents publish as the new working set through
+    the hardened extraction.
+    """
+
+    return ImportServer(
+        create_server=create_server,
         file_store=file_store,
     )
 

@@ -54,6 +54,13 @@ SERVER_START: Final = "server:start"
 SERVER_STOP: Final = "server:stop"
 SERVER_RESTART: Final = "server:restart"
 SERVER_COMMAND: Final = "server:command"
+# Whole-server ZIP export / import (M2 Epic C2, issue #274). These name the
+# operation, not a permission code: export is gated by file:read (bulk file read)
+# and import by server:create; there is no server:export / server:import
+# permission in the catalog. The ``operation`` column is free text (see module
+# docstring), so a recording-only code is fine.
+SERVER_EXPORT: Final = "server:export"
+SERVER_IMPORT: Final = "server:import"
 
 # Backup create/restore/delete (FR-BAK-*).
 BACKUP_CREATE: Final = "backup:create"

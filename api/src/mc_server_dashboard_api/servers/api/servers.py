@@ -18,7 +18,16 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -32,6 +41,8 @@ from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
     get_create_server,
     get_delete_server,
+    get_export_server,
+    get_import_server,
     get_list_servers,
     get_read_server,
     get_restart_server,
@@ -41,6 +52,11 @@ from mc_server_dashboard_api.dependencies import (
     get_update_server,
     require_permission,
 )
+from mc_server_dashboard_api.servers.application.export_import import (
+    ExportServer,
+    ImportServer,
+)
+from mc_server_dashboard_api.servers.application.files import MAX_UPLOAD_BYTES
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     SendServerCommand,
@@ -67,7 +83,9 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     ExecutionBackendImmutableError,
+    FileTooLargeError,
     InvalidBackupScheduleError,
+    InvalidExportMetadataError,
     InvalidLifecycleTransitionError,
     InvalidServerNameError,
     InvalidSnapshotIntervalError,
@@ -76,6 +94,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
+    ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotRunningError,
@@ -99,6 +118,10 @@ from mc_server_dashboard_api.servers.domain.version_validator import (
 router = APIRouter()
 
 _SERVER_RESOURCE_TYPE = "server"
+
+# How much of the multipart import body to pull per chunk while counting it
+# against the upload cap (the bounded-read loop in ``_read_capped_upload``).
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 class CreateServerRequest(BaseModel):
@@ -254,6 +277,80 @@ async def create_server(
     return ServerResponse.from_entity(server)
 
 
+@router.post(
+    "/communities/{community_id}/servers/import",
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_server(
+    community_id: uuid.UUID,
+    file: UploadFile,
+    authorized: Annotated[
+        AuthUser, Depends(require_permission(Permission("server:create")))
+    ],
+    use_case: Annotated[ImportServer, Depends(get_import_server)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    name: Annotated[str, Form(min_length=1)],
+    execution_backend: Annotated[str, Form(min_length=1)],
+) -> ServerResponse:
+    """Import a whole server from a ZIP export (server:create, issue #274).
+
+    Multipart: the ``file`` is the export zip; ``name`` and ``execution_backend``
+    come from the request (the name is NOT taken from the metadata, so the usual
+    uniqueness 409 applies). The archive's ``export_metadata.json`` is parsed and
+    validated (wrong/missing format or malformed -> 422 ``invalid_export_metadata``;
+    the server_type/version run the SAME create-path validator, so spigot is 422
+    ``spigot_unsupported`` etc.). A row is created with an auto-assigned game port
+    (#243); ``accept_eula`` is never implied. The archive contents then publish as
+    the initial working set through the hardened extraction (zip-slip / size / entry
+    caps -> 413 / 422). A publish failure after the row commits is 503
+    ``seed_failed`` (the row is repairable via the files API).
+    """
+
+    content = await _read_capped_upload(file)
+    try:
+        server = await use_case(
+            community_id=CommunityId(community_id),
+            name=name,
+            execution_backend=execution_backend,
+            content=content,
+        )
+    except InvalidExportMetadataError as exc:
+        raise _unprocessable("invalid_export_metadata") from exc
+    except UnsupportedEditionError as exc:
+        raise _unprocessable("unsupported_edition") from exc
+    except UnknownServerTypeError as exc:
+        raise _unprocessable("invalid_server_type") from exc
+    except UnknownExecutionBackendError as exc:
+        raise _unprocessable("invalid_execution_backend") from exc
+    except SpigotUnsupportedError as exc:
+        raise _unprocessable("spigot_unsupported") from exc
+    except UnsupportedServerTypeError as exc:
+        raise _unprocessable("unsupported_server_type") from exc
+    except CatalogUnknownVersionError as exc:
+        raise _unprocessable("unknown_version") from exc
+    except CatalogUnavailableError as exc:
+        raise _service_unavailable("catalog_unavailable") from exc
+    except InvalidServerNameError as exc:
+        raise _unprocessable("invalid_server_name") from exc
+    except FileTooLargeError as exc:
+        # The uploaded archive (or its cumulative extracted size / entry count)
+        # exceeded the caps reused from the upload path (issue #262).
+        raise _too_large() from exc
+    except PortRangeExhaustedError as exc:
+        raise _service_unavailable("port_range_exhausted") from exc
+    except ServerNameAlreadyExistsError as exc:
+        raise _conflict("server_name_exists") from exc
+    except WorkingSetSeedFailedError as exc:
+        # The row committed but publishing the working set failed mid-way: the
+        # server is degraded-but-repairable via the files API (same posture as
+        # create's seeding failure, #243/#252). Surface a mapped 503.
+        raise _service_unavailable("seed_failed") from exc
+    await _record(
+        recorder, ops.SERVER_IMPORT, authorized, community_id, server.id.value
+    )
+    return ServerResponse.from_entity(server)
+
+
 @router.get("/communities/{community_id}/servers")
 async def list_servers(
     community_id: uuid.UUID,
@@ -290,6 +387,49 @@ async def read_server(
     except ServerNotFoundError as exc:
         raise _not_found() from exc
     return ServerResponse.from_entity(server)
+
+
+@router.get("/communities/{community_id}/servers/{server_id}/export")
+async def export_server(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("file:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ExportServer, Depends(get_export_server)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> StreamingResponse:
+    """Export a whole server as a streamed ZIP at rest (issue #274).
+
+    Gated by ``file:read``: an export is a bulk read of the whole working set, so
+    it reuses the file-read permission (and the per-resource grant) rather than a
+    dedicated code -- the same permission the directory download uses. At rest only
+    (Section 6.9): a running server is 409 ``server_unsettled`` (the authoritative
+    copy is only well-defined at rest). The zip carries the working set plus an
+    ``export_metadata.json`` descriptor. Recorded under ``server:export``.
+    """
+
+    try:
+        stream = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_denied(
+            recorder, ops.SERVER_EXPORT, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+    await _record(recorder, ops.SERVER_EXPORT, authorized, community_id, server_id)
+    return StreamingResponse(stream, media_type="application/zip")
 
 
 @router.patch("/communities/{community_id}/servers/{server_id}")
@@ -549,6 +689,49 @@ async def _record(
     )
 
 
+async def _record_denied(
+    recorder: AuditRecorder,
+    operation: str,
+    authorized: AuthUser,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+) -> None:
+    """Record a refused server operation (DENIED), e.g. an export of a live server."""
+
+    await recorder.record(
+        AuditEvent(
+            operation=operation,
+            outcome=Outcome.DENIED,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_SERVER,
+            target_id=server_id,
+        )
+    )
+
+
+async def _read_capped_upload(file: UploadFile) -> bytes:
+    """Pull a multipart body in chunks, aborting with 413 past the upload cap.
+
+    Mirrors the files-router reader (issue #262): ``file.read()`` with no argument
+    would pull the whole part into memory at once, so read in bounded chunks and
+    refuse as soon as the running count crosses MAX_UPLOAD_BYTES. The use case
+    re-checks the cap, so this is the edge's early-out, not the only guard.
+    """
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise _too_large()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 # Failed lifecycle/command attempts worth a row (issue #131): a refused state
 # transition (DENIED) or a transient fleet/provisioning failure (ERROR). Each
 # entry maps the typed domain error to its audit outcome and HTTP rendering, so
@@ -638,6 +821,15 @@ def _conflict(reason: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={"reason": reason},
+    )
+
+
+def _too_large() -> HTTPException:
+    # The uploaded import archive (or its cumulative extracted size / entry count)
+    # exceeded the caps reused from the upload path (issue #262).
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail={"reason": "file_too_large"},
     )
 
 
