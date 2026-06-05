@@ -57,8 +57,14 @@ from mc_server_dashboard_api.dependencies import (
     get_upload_file,
     get_write_file,
 )
-from mc_server_dashboard_api.servers.application.files import DirListing, SearchResult
+from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
+from mc_server_dashboard_api.servers.application.files import (
+    DirListing,
+    SearchResult,
+    WriteFile,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailableError
+from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     FileTooLargeError,
@@ -69,9 +75,24 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId as ServerCommunityId,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    DesiredState,
+    ExecutionBackend,
+    ObservedState,
+    ServerName,
+    ServerType,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    ServerId as ServerScopeId,
+)
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
+from tests.servers.fakes import FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -1185,3 +1206,81 @@ def test_file_read_grant_on_one_server_opens_exactly_that_server() -> None:
 
     blocked = client.get(_url(community, server_y), params={"path": "f"})
     assert blocked.status_code == 403
+
+
+# --- RelPath control-char hardening, end-to-end edge (issue #266) -----------
+
+
+_NOW_SERVER = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+
+
+def _stopped_server(community: uuid.UUID, server: uuid.UUID) -> Server:
+    return Server(
+        id=ServerScopeId(server),
+        community_id=ServerCommunityId(community),
+        name=ServerName("survival"),
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type=ServerType.VANILLA,
+        execution_backend=ExecutionBackend.HOST_PROCESS,
+        config={},
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+        observed_at=_NOW_SERVER,
+        assigned_worker_id=None,
+        created_at=_NOW_SERVER,
+        updated_at=_NOW_SERVER,
+    )
+
+
+def _real_write_app(
+    tmp_path: object, community: uuid.UUID, server: uuid.UUID
+) -> object:
+    """Wire the write route to a REAL WriteFile over real fs Storage.
+
+    Drives the actual RelPath through the seam (rather than a faked use case), so a
+    control-character path is rejected by RelPath and surfaces as a 422 at the edge
+    exactly as a traversal path does.
+    """
+
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_stopped_server(community, server))
+    file_store = StorageFileStoreAdapter(storage=FsStorage(tmp_path))  # type: ignore[arg-type]
+    use_case = WriteFile(uow=uow, control_plane=None, file_store=file_store)  # type: ignore[arg-type]
+
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: make_user()
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=True
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: _FakeChecker(allow=True)
+    app.dependency_overrides[get_write_file] = lambda: use_case
+    return app
+
+
+@pytest.mark.parametrize("bad", ["foo\x00bar", "config\r\nx", "a\x1fb"])
+def test_write_control_char_path_is_422(tmp_path: object, bad: str) -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _real_write_app(tmp_path, community, server)
+    client = next(_client(app))
+
+    resp = client.put(
+        _url(community, server),
+        params={"path": bad},
+        json={"content_base64": ""},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "invalid_path"
+
+
+def test_write_unicode_path_is_accepted(tmp_path: object) -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _real_write_app(tmp_path, community, server)
+    client = next(_client(app))
+
+    resp = client.put(
+        _url(community, server),
+        params={"path": "世界/レベル.dat"},
+        json={"content_base64": ""},
+    )
+    assert resp.status_code == 204

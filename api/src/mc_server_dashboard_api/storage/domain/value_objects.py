@@ -42,6 +42,14 @@ class ServerId:
 # Section 3.2): exactly 64 hex characters.
 _SHA256_HEX = re.compile(r"\A[0-9a-f]{64}\Z")
 
+# ASCII control characters (C0 range 0x00-0x1F plus DEL 0x7F). A path component
+# carrying one is never a legitimate filename and is an injection surface anywhere
+# a component is reflected into a header (Content-Disposition) or a log line —
+# notably CR/LF, which can split a header. Everything else (quotes, non-ASCII
+# unicode) stays allowed: unicode filenames are legitimate, and the quote is
+# neutralised at the one reflection point (the RFC 6266 Content-Disposition helper).
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
 
 @dataclass(frozen=True)
 class JarKey:
@@ -98,12 +106,16 @@ class RelPath:
     """A caller-supplied path, validated as relative-and-contained at the string level.
 
     Construction enforces the string-level traversal rules (STORAGE.md Section 6):
-    the path must not be absolute and must not contain a ``..`` component. ``.``
-    components and redundant separators are normalised away. ``.`` (or the empty
-    string) denotes the server root itself — legal for :meth:`list_dir` (browse
-    the working-set root), so :attr:`parts` may be empty. The stored parts are the
-    clean POSIX components the adapter joins under the server root; the adapter
-    then performs the filesystem-level containment + symlink-escape check.
+    the path must not be absolute, must not contain a ``..`` component, and no
+    component may carry an ASCII control character (C0 0x00-0x1F or DEL 0x7F) —
+    the latter is a header/log injection surface (CRLF can split a header).
+    Quotes and non-ASCII unicode stay allowed (legitimate filenames; the quote is
+    handled at the Content-Disposition reflection point). ``.`` components and
+    redundant separators are normalised away. ``.`` (or the empty string) denotes
+    the server root itself — legal for :meth:`list_dir` (browse the working-set
+    root), so :attr:`parts` may be empty. The stored parts are the clean POSIX
+    components the adapter joins under the server root; the adapter then performs
+    the filesystem-level containment + symlink-escape check.
     """
 
     parts: tuple[str, ...]
@@ -120,6 +132,10 @@ class RelPath:
                 raise PathTraversalError(f"rel_path must not contain '..': {raw!r}")
             if part in ("", "."):
                 continue
+            if _CONTROL_CHARS.search(part):
+                raise PathTraversalError(
+                    f"rel_path component has a control character: {raw!r}"
+                )
             parts.append(part)
         object.__setattr__(self, "parts", tuple(parts))
 
