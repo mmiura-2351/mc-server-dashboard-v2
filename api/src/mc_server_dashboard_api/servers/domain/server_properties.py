@@ -25,6 +25,11 @@ def set_server_port(content: bytes, port: int) -> bytes:
     exists, appends ``server-port=<port>``. Other lines and their order are
     preserved. An empty ``content`` yields a file with just the port line. The
     result always ends with a single trailing newline (Mojang's convention).
+
+    The rewritten line is normalized to ``\n`` regardless of the file's existing
+    line endings, so a CRLF file gains mixed endings on that one line. This is
+    harmless: ``server.properties`` is parsed line-by-line and trailing ``\r`` is
+    stripped as whitespace.
     """
 
     text = content.decode()
