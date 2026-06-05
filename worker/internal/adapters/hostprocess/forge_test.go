@@ -236,6 +236,65 @@ func TestForgeInstallOutputWrittenToLog(t *testing.T) {
 	launch.exit(nil)
 }
 
+// A Stop that wins the stopping latch after the installer has exited but before
+// the launch is spawned must abort the launch: no server process is started, Stop
+// reports cleanly (no survived-SIGKILL error), and the instance ends stopped with
+// no orphan record of the dead installer (issue #306). The beforeLaunch hook fires
+// in the exact install-exit→launch window the critical section must close, driving
+// a Stop to win the latch there.
+func TestForgeStopWinsLatchBeforeLaunch(t *testing.T) {
+	dir := t.TempDir()
+	installer := newFakeProcess()
+	// Only the installer is queued; a launch spawn would fail the test, proving no
+	// launch happened once the Stop won the latch.
+	spawn, recs := queueSpawn(t, installer)
+	d := forgeDriver(spawn)
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	hostInst := inst.(*instance)
+
+	stopErr := make(chan error, 1)
+	hostInst.beforeLaunch = func() {
+		// The installer has exited and the args file is present; a Stop arriving now
+		// must win the latch and abort the launch. Run it and wait until it has
+		// latched stopping before returning so the handoff observes a set latch.
+		go func() { stopErr <- inst.Stop(context.Background(), false) }()
+		for inst.Status() != execution.StateStopping {
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// The installer produces the args file (so the re-plan finds it and reaches the
+	// handoff window) then exits cleanly.
+	writeForgeArgsfile(t, dir)
+	installer.exit(nil)
+
+	drainTo(t, inst.Events(), execution.StateStopped)
+
+	if err := <-stopErr; err != nil {
+		t.Fatalf("Stop returned %v, want clean nil (no survived-SIGKILL orphan)", err)
+	}
+	if inst.Status() != execution.StateStopped {
+		t.Fatalf("final status = %v, want stopped (no server left running)", inst.Status())
+	}
+	if len(*recs) != 1 {
+		t.Fatalf("spawns = %d, want 1 (install only; the launch must be aborted)", len(*recs))
+	}
+}
+
+func writeForgeArgsfile(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, forgeArgsRel)), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, forgeArgsRel), []byte("-x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func hasArg(args []string, want string) bool {
 	for _, a := range args {
 		if a == want {

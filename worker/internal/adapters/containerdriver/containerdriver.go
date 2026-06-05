@@ -154,14 +154,14 @@ func (d *Driver) RconHost(serverID string) string {
 // Start resolves the base image and the launch plan, then either launches the
 // server container directly or — for a Forge args-file launch whose working set
 // is not yet installed — runs a supervised install container first and returns
-// immediately; a supervisor goroutine runs the install to completion, removes the
-// install container, then creates+starts the launch container as the SAME
-// instance (issue #305). The install container carries a distinct name
-// (mcsd-<id>-install) so it never collides with the deterministic launch name,
-// and is removed before the launch create so the #233 wait-for-name-free loop is
-// not entered against a still-present install container. It emits starting then
-// running (or crashed if the install fails); a successful return means the
-// install or launch container was started.
+// immediately; a supervisor goroutine runs the install to completion, then
+// creates+starts the launch container as the SAME instance and removes the exited
+// install container once the launch's fate is decided (issue #305). The install
+// container carries a distinct name (mcsd-<id>-install) so it never collides with
+// the deterministic launch name, so the #233 wait-for-name-free loop is not
+// entered against the still-present install container. It emits starting then
+// running (or crashed if the install fails); a successful return means the install
+// or launch container was started.
 func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
 	image, err := d.images.Select(spec.MinecraftVersion)
 	if err != nil {
@@ -282,9 +282,12 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 		Binds:      []string{spec.WorkingDir + ":" + containerWorkDir},
 		Labels:     d.labels(spec.ServerID),
 	}
-	// The install name is distinct from the launch name, so a plain create suffices
-	// (no #233 wait-for-name-free loop): a leftover install container from a crash
-	// is reaped by the startup Sweep, which the worker-id label scopes.
+	// createContainer carries the #233 wait-for-name-free loop, but the distinct
+	// install name almost never hits it: a leftover install container from a crash
+	// is reaped by the startup Sweep (which the worker-id label scopes), and the
+	// loop self-heals the rare case where a prior install container under the same
+	// name has not finished tearing down yet. Do not "simplify" this to a bare
+	// docker.Create — that would lose the stale-install-container self-healing.
 	id, err := d.createContainer(ctx, create)
 	if err != nil {
 		return "", err
@@ -477,6 +480,13 @@ type instance struct {
 	logWG     sync.WaitGroup
 	logCancel context.CancelFunc
 
+	// beforeLaunch is a test-only hook fired inside superviseInstall after the
+	// launch container is created but immediately before the latch-check-and-start
+	// critical section, so a test can drive a Stop into the exact
+	// install-exit→launch window the section must close (issue #306). Nil in
+	// production.
+	beforeLaunch func()
+
 	mu       sync.Mutex
 	state    execution.ServerState
 	stopping bool
@@ -504,6 +514,14 @@ func (i *instance) currentContainerID() string {
 // through the same path as a plain start (issue #305).
 func (i *instance) beginLaunch(id string) {
 	i.setContainerID(id)
+	i.beginLaunchTail(id)
+}
+
+// beginLaunchTail wires log capture, marks the instance running, and starts the
+// exit supervisor for an already-published launch container. superviseInstall
+// calls it after publishing and starting the launch under the latch lock, so the
+// publish and the stopping re-check stay one critical section (issue #306).
+func (i *instance) beginLaunchTail(id string) {
 	// Follow the container's multiplexed log stream into the per-instance pump.
 	// The follow is bound to logCtx so supervise can end it on container exit;
 	// supervise then waits on logWG before closing the pump (FR-MON-2).
@@ -521,13 +539,14 @@ func (i *instance) beginLaunch(id string) {
 }
 
 // superviseInstall waits for the supervised install container to exit, captures
-// its output to logs/forge-install.log, removes it, then creates+starts the
-// launch container as the SAME instance (issue #305). On a non-zero install exit
-// the instance goes crashed and no launch container is created; a Stop that
-// terminated the install container reports stopped. The install container is
-// removed before the launch create so the launch create never contends with a
-// still-present container (the names differ, but removal also reaps the install
-// container promptly rather than leaving it for the startup sweep).
+// its output to logs/forge-install.log, then creates+starts the launch container
+// as the SAME instance (issue #305). On a non-zero install exit the instance goes
+// crashed and no launch container is created; a Stop that terminated the install
+// container reports stopped. The install container is removed once its fate is
+// decided (in every terminal branch, and after the launch is published): keeping
+// it as the current container until then gives a concurrent Stop a valid target
+// through the install-exit→launch handoff window (issue #306). Its distinct name
+// (mcsd-<id>-install) means the launch create never contends with it.
 func (i *instance) superviseInstall(installID string) {
 	i.captureInstallOutput(installID)
 	_, waitErr := i.docker.Wait(context.Background(), installID)
@@ -536,21 +555,23 @@ func (i *instance) superviseInstall(installID string) {
 	stopping := i.stopping
 	i.mu.Unlock()
 
-	// Remove the install container regardless of outcome: it has exited and is no
-	// longer needed (best-effort; the worker-id label lets the sweep reap a leak).
-	_ = i.docker.Remove(context.Background(), installID)
-
 	if stopping {
+		// A Stop terminated the install container: it is still the current container
+		// (the launch was never published), so Stop acts on a valid exited container;
+		// remove it and report stopped.
+		_ = i.docker.Remove(context.Background(), installID)
 		i.finishTerminal(execution.StateStopped, "")
 		return
 	}
 	if waitErr != nil {
+		_ = i.docker.Remove(context.Background(), installID)
 		i.finishTerminal(execution.StateCrashed, "forge install failed: "+waitErr.Error())
 		return
 	}
 
 	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, containerPathResolver(i.spec.WorkingDir))
 	if err != nil || plan.NeedsInstall {
+		_ = i.docker.Remove(context.Background(), installID)
 		detail := "forge install produced no args file"
 		if err != nil {
 			detail = "forge re-plan after install failed: " + err.Error()
@@ -559,17 +580,66 @@ func (i *instance) superviseInstall(installID string) {
 		return
 	}
 
-	id, err := i.launchAfterInstall(plan.LaunchArgs)
+	// Create the launch container outside the lock: the create rides the Docker API
+	// and may run the #233 wait-for-name-free loop, so it must not block a
+	// concurrent Stop. The launch name differs from the install name, so the create
+	// does not contend with the still-present install container; the install
+	// container is removed only after the launch decision, so until then it remains
+	// the current container and a concurrent Stop has a valid target (issue #306).
+	// The created launch container is not started yet.
+	id, err := i.createLaunchContainer(plan.LaunchArgs)
 	if err != nil {
+		_ = i.docker.Remove(context.Background(), installID)
 		i.finishTerminal(execution.StateCrashed, "forge launch after install failed: "+err.Error())
 		return
 	}
-	i.beginLaunch(id)
+
+	if i.beforeLaunch != nil {
+		i.beforeLaunch()
+	}
+
+	// The latch re-check, the publish, and the start are one critical section
+	// (issue #306). Holding the lock across the single docker start (not the
+	// expensive create above) is the container analogue of the host-process driver
+	// holding the lock across cmd.Start: a Stop racing this window either wins the
+	// lock first — observed below, aborting and removing the unstarted launch
+	// container — or blocks for the one start call and then acts on the
+	// already-started launch. There is therefore no published-but-unstarted
+	// sub-window for Stop to mishandle.
+	i.mu.Lock()
+	if i.stopping {
+		// A Stop won the latch after the install exited but before the launch
+		// started. The current container is still the (exited) install container, so
+		// Stop acts on a valid target; remove the unstarted launch container we
+		// created and the install container, then report stopped. Stop's waitExit is
+		// released by finishTerminal closing i.exited (issue #306).
+		i.mu.Unlock()
+		_ = i.docker.Remove(context.Background(), id)
+		_ = i.docker.Remove(context.Background(), installID)
+		i.finishTerminal(execution.StateStopped, "")
+		return
+	}
+	if err := i.docker.Start(context.Background(), id); err != nil {
+		i.mu.Unlock()
+		_ = i.docker.Remove(context.Background(), id)
+		_ = i.docker.Remove(context.Background(), installID)
+		i.finishTerminal(execution.StateCrashed, "forge launch after install failed: "+err.Error())
+		return
+	}
+	i.containerID = id
+	i.mu.Unlock()
+
+	// The launch is now the current container; reap the exited install container.
+	_ = i.docker.Remove(context.Background(), installID)
+
+	i.beginLaunchTail(id)
 }
 
-// launchAfterInstall creates and starts the launch container after a successful
-// install, reusing the driver's create+start helper through the captured fields.
-func (i *instance) launchAfterInstall(launchArgs []string) (string, error) {
+// createLaunchContainer creates (but does not start) the launch container after a
+// successful install, reusing the driver's create helper through the captured
+// fields. Starting is deferred to the latch-guarded critical section so a Stop can
+// abort the launch before it starts (issue #306).
+func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 	gamePort, rconPort := ports(i.spec.WorkingDir)
 	portMappings := []PortMapping{
 		{ContainerPort: gamePort, HostIP: i.gameBindIP, HostPort: gamePort},
@@ -588,15 +658,7 @@ func (i *instance) launchAfterInstall(launchArgs []string) (string, error) {
 		Network:    i.network,
 		Labels:     i.labels,
 	}
-	id, err := i.createFn(context.Background(), create)
-	if err != nil {
-		return "", err
-	}
-	if err := i.docker.Start(context.Background(), id); err != nil {
-		_ = i.docker.Remove(context.Background(), id)
-		return "", err
-	}
-	return id, nil
+	return i.createFn(context.Background(), create)
 }
 
 // captureInstallOutput follows the install container's log stream and writes it to

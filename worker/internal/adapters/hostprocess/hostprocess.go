@@ -170,6 +170,12 @@ type instance struct {
 	logPump *execution.LogPump
 	logWG   sync.WaitGroup
 
+	// beforeLaunch is a test-only hook fired inside superviseInstall after the
+	// re-plan but immediately before the latch-check-and-spawn critical section, so
+	// a test can drive a Stop into the exact install-exit→launch window the section
+	// must close (issue #306). Nil in production.
+	beforeLaunch func()
+
 	mu       sync.Mutex
 	state    execution.ServerState
 	stopping bool
@@ -206,9 +212,18 @@ func (i *instance) currentProc() process {
 // beginLaunch wires the launch process's log capture, marks the instance running,
 // and starts the exit supervisor. It is the shared tail of a direct launch and a
 // post-install launch, so a Forge install+launch reaches running through the same
-// path as a plain start (issue #305).
+// path as a plain start (issue #305). The caller has already published proc as the
+// current process (setProc), so a Stop racing this tail acts on the live launch.
 func (i *instance) beginLaunch(proc process) {
 	i.setProc(proc)
+	i.beginLaunchTail(proc)
+}
+
+// beginLaunchTail wires log capture, marks the instance running, and starts the
+// exit supervisor for an already-published launch process. superviseInstall calls
+// it after publishing the launch under the latch lock, so the publish and the
+// stopping re-check stay one critical section (issue #306).
+func (i *instance) beginLaunchTail(proc process) {
 	// Capture stdout/stderr into the per-instance log pump. The scan goroutines
 	// end at EOF (process exit closes the pipes); supervise waits on logWG before
 	// closing the pump so the consumer's range over Logs() terminates cleanly.
@@ -261,12 +276,37 @@ func (i *instance) superviseInstall(installer process) {
 		return
 	}
 
+	if i.beforeLaunch != nil {
+		i.beforeLaunch()
+	}
+
+	// The latch re-check and the launch handoff are one critical section (issue
+	// #306). The cheap glob/re-plan above ran outside the lock; here the lock is
+	// held across spawn (which is exec.Cmd.Start, cheap) so a Stop racing this
+	// window either wins the lock first — observed below, aborting the launch — or
+	// blocks briefly until the launch process is published and then signals the
+	// live launch. There is no publish-before-start sub-window: spawn starts the
+	// process under the lock, so Stop never sees a published-but-unstarted handle.
+	i.mu.Lock()
+	if i.stopping {
+		// A Stop won the latch after the installer exited but before the launch:
+		// abort the launch entirely and report stopped (issue #306). The installer
+		// has already exited, so there is nothing to terminate; Stop's waitExit is
+		// released by finishTerminal closing i.exited.
+		i.mu.Unlock()
+		i.finishTerminal(execution.StateStopped, "")
+		return
+	}
 	proc, err := i.spawn(context.Background(), i.javaPath, plan.LaunchArgs, i.spec.WorkingDir)
 	if err != nil {
+		i.mu.Unlock()
 		i.finishTerminal(execution.StateCrashed, installFailDetail("forge launch after install failed", err))
 		return
 	}
-	i.beginLaunch(proc)
+	i.proc = proc
+	i.mu.Unlock()
+
+	i.beginLaunchTail(proc)
 }
 
 // captureInstallOutput appends the installer's stdout and stderr to the

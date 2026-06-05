@@ -341,6 +341,52 @@ func TestJarContainerCmdParity(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
+// A Stop that wins the stopping latch after the install container has exited but
+// before the launch container is started must abort the launch: no launch
+// container is started, Stop reports cleanly, and the instance ends stopped with
+// no server left running (issue #306). The beforeLaunch hook fires in the exact
+// install-exit→launch window the critical section must close, driving a Stop to
+// win the latch there. The launch container has been created at that point, so the
+// abort must remove it before it can start.
+func TestForgeContainerStopWinsLatchBeforeLaunch(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	d := forgeDriver(docker)
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	contInst := inst.(*instance)
+
+	stopErr := make(chan error, 1)
+	contInst.beforeLaunch = func() {
+		// The install container has exited and the launch container is created (but
+		// not started); a Stop arriving now must win the latch and abort the launch.
+		go func() { stopErr <- inst.Stop(context.Background(), false) }()
+		for inst.Status() != execution.StateStopping {
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// The install produces the args file, then exits cleanly, driving the supervisor
+	// into the handoff window.
+	writeArgsfile(t, dir)
+	docker.exit("mcsd-s1-install", 0, nil)
+
+	drainTo(t, inst.Events(), execution.StateStopped)
+
+	if err := <-stopErr; err != nil {
+		t.Fatalf("Stop returned %v, want clean nil (no orphan, no survived-kill)", err)
+	}
+	if inst.Status() != execution.StateStopped {
+		t.Fatalf("final status = %v, want stopped (no server left running)", inst.Status())
+	}
+	if !docker.wasRemoved("mcsd-s1") {
+		t.Fatal("the created-but-unstarted launch container must be removed on abort")
+	}
+}
+
 func hasArg(args []string, want string) bool {
 	for _, a := range args {
 		if a == want {
