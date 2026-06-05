@@ -208,6 +208,11 @@ async def read_or_list_files(
             truncated=listing.truncated,
         )
 
+    # This base64 JSON read stays whole-bytes by design (not streamed like the
+    # file download, issue #265): the bytes ARE the response payload (base64 in
+    # the JSON body), so there is nothing to stream into — it is an interactive
+    # small-file read, not a bulk download. A large file is downloaded via
+    # /files/download (the streamed branch).
     try:
         content = await read_use_case(
             community_id=CommunityId(community_id),
@@ -473,16 +478,29 @@ async def download_file(
                 headers={"Content-Disposition": _content_disposition(f"{name}.zip")},
             )
         else:
-            content = await use_case.file_bytes(
+            # Stream the file's bytes (issue #265) so a large single-file download
+            # never buffers the whole file in RAM. The size is resolved from the
+            # cheap parent listing for a Content-Length header when known; absent
+            # (e.g. the path has no listable parent), the response falls back to
+            # chunked transfer.
+            size = await use_case.file_size(
+                community_id=CommunityId(community_id),
+                server_id=ServerId(server_id),
+                rel_path=path,
+            )
+            file_stream = await use_case.file_stream(
                 community_id=CommunityId(community_id),
                 server_id=ServerId(server_id),
                 rel_path=path,
             )
             name = posixpath.basename(path) or "download"
-            response = Response(
-                content=content,
+            headers = {"Content-Disposition": _content_disposition(name)}
+            if size is not None:
+                headers["Content-Length"] = str(size)
+            response = StreamingResponse(
+                file_stream,
                 media_type="application/octet-stream",
-                headers={"Content-Disposition": _content_disposition(name)},
+                headers=headers,
             )
     except ServerNotFoundError as exc:
         raise _not_found() from exc

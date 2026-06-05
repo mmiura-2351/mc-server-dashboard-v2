@@ -146,9 +146,25 @@ class _FakeDownload:
             raise self._error
         return self._is_dir
 
-    async def file_bytes(self, **kwargs: object) -> bytes:
-        self.calls.append("file_bytes")
-        return self._file_content
+    async def file_stream(self, **kwargs: object) -> object:
+        self.calls.append("file_stream")
+        content = self._file_content
+
+        async def _gen() -> object:
+            # Yield in two chunks (when non-empty) so the route's StreamingResponse
+            # is exercised as a real stream, not a single buffered blob (#265).
+            half = len(content) // 2
+            if half:
+                yield content[:half]
+                yield content[half:]
+            elif content:
+                yield content
+
+        return _gen()
+
+    async def file_size(self, **kwargs: object) -> int | None:
+        self.calls.append("file_size")
+        return len(self._file_content)
 
     async def dir_zip(self, **kwargs: object) -> object:
         self.calls.append("dir_zip")
@@ -556,6 +572,9 @@ def test_download_file_returns_bytes() -> None:
     )
     assert resp.status_code == 200
     assert resp.content == raw
+    # The single-file branch streams (issue #265) with a Content-Length from the
+    # cheap size lookup when known.
+    assert resp.headers["content-length"] == str(len(raw))
     cd = resp.headers["content-disposition"]
     assert cd.startswith("attachment; ")
     assert 'filename="level.dat"' in cd

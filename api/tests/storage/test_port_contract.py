@@ -351,6 +351,64 @@ async def test_read_missing_file_is_not_found(harness: StorageHarness) -> None:
         await harness.storage.read_file(community, server, RelPath("missing.txt"))
 
 
+async def test_open_file_stream_round_trips_content(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"motd=hello"})
+    blob = await drain(
+        harness.storage.open_file_stream(
+            community, server, RelPath("server.properties")
+        )
+    )
+    assert blob == b"motd=hello"
+
+
+async def test_open_file_stream_missing_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"x"})
+    with pytest.raises(NotFoundError):
+        await drain(
+            harness.storage.open_file_stream(community, server, RelPath("missing.txt"))
+        )
+
+
+async def test_open_file_stream_before_any_publish_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    with pytest.raises(NotFoundError):
+        await drain(
+            harness.storage.open_file_stream(community, server, RelPath("eula.txt"))
+        )
+
+
+async def test_open_file_stream_is_chunked_for_a_multi_chunk_file(
+    harness: StorageHarness,
+) -> None:
+    """A file larger than the egress chunk surfaces as multiple bounded yields,
+    never one whole-file buffer (the bounded-memory contract, issue #265)."""
+
+    community, server = new_scope()
+    payload = b"y" * (3 * 1024 * 1024 + 17)  # larger than the fs/object egress chunk
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(
+        handle, tar_stream({"world/region.mca": payload}, chunk=1024 * 1024)
+    )
+    await harness.storage.commit_snapshot(handle)
+
+    chunks = [
+        chunk
+        async for chunk in harness.storage.open_file_stream(
+            community, server, RelPath("world/region.mca")
+        )
+    ]
+    assert len(chunks) > 1  # incremental, not one buffered blob
+    assert b"".join(chunks) == payload
+
+
 async def test_list_dir_lists_entries(harness: StorageHarness) -> None:
     community, server = new_scope()
     await harness.publish(

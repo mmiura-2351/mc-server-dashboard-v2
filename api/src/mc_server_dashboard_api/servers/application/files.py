@@ -36,9 +36,9 @@ from __future__ import annotations
 import io
 import tarfile
 import zipfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from dataclasses import dataclass
-from typing import IO
+from typing import IO, cast
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
@@ -555,18 +555,45 @@ class DownloadFile:
     uow: UnitOfWork
     file_store: FileStore
 
-    async def file_bytes(
+    async def file_stream(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
-    ) -> bytes:
-        # A single-file download reads the whole file into memory for M2: the
-        # FileStore read seam returns whole bytes and there is no per-file size
-        # cap on download (a file already on disk may exceed the upload cap, e.g.
-        # a large world region). Streaming / capping the single-file branch is
-        # tracked in issue #265; the directory-zip branch is already bounded.
+    ) -> AsyncIterator[bytes]:
+        # A single-file download streams the file in bounded chunks (issue #265):
+        # a file on disk may be arbitrarily large (e.g. a world region exceeding
+        # the upload cap), so it must never be buffered whole in RAM. The seam's
+        # per-file stream resolves + locates the file on first iteration and
+        # surfaces ServerFileNotFoundError there.
         await self._require_at_rest(community_id, server_id)
-        return await self.file_store.read_file(
+        return self.file_store.open_file_stream(
             community_id=community_id, server_id=server_id, rel_path=rel_path
         )
+
+    async def file_size(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> int | None:
+        """Return the file's size for a Content-Length header, or ``None``.
+
+        Reads the cheap parent listing (no file bytes) to find the entry's size;
+        a path the listing cannot resolve cheaply (the working-set root has no
+        parent, or a listing miss) yields ``None`` so the edge falls back to
+        chunked transfer rather than failing. The actual bytes still flow through
+        :meth:`file_stream`; this is only the optional length hint (issue #265).
+        """
+
+        await self._require_at_rest(community_id, server_id)
+        parent, _, name = rel_path.rstrip("/").rpartition("/")
+        try:
+            entries = await self.file_store.list_dir(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=parent or ".",
+            )
+        except ServerFileNotFoundError:
+            return None
+        for entry in entries:
+            if entry.name == name and not entry.is_dir:
+                return entry.size
+        return None
 
     async def dir_zip(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -601,10 +628,24 @@ class DownloadFile:
             )
             return True
         except ServerFileNotFoundError:
-            # Not a directory; confirm it is a readable file (else re-raise).
-            await self.file_store.read_file(
-                community_id=community_id, server_id=server_id, rel_path=rel_path
+            # Not a directory; confirm it is a readable file (else re-raise). Probe
+            # the per-file stream rather than read_file so a huge file is not
+            # buffered whole just to confirm existence (issue #265): the stream
+            # resolves + locates the file on its first iteration, so consuming one
+            # chunk (or hitting a clean EOF for an empty file) is enough; missing
+            # surfaces ServerFileNotFoundError there.
+            stream = cast(
+                "AsyncGenerator[bytes, None]",
+                self.file_store.open_file_stream(
+                    community_id=community_id, server_id=server_id, rel_path=rel_path
+                ),
             )
+            try:
+                await stream.__anext__()
+            except StopAsyncIteration:
+                pass
+            finally:
+                await stream.aclose()
             return False
 
     async def _require_at_rest(

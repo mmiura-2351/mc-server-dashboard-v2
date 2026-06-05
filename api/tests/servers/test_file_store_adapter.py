@@ -59,6 +59,38 @@ async def test_read_returns_published_bytes(tmp_path: Path) -> None:
     assert out == b"motd=original"
 
 
+async def test_open_file_stream_round_trips_bytes(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.open_file_stream(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path="server.properties",
+    )
+    out = b"".join([chunk async for chunk in stream])
+    assert out == b"motd=original"
+
+
+async def test_open_file_stream_missing_translates_to_file_not_found(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.open_file_stream(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path="nope.txt",
+    )
+    with pytest.raises(ServerFileNotFoundError):
+        await anext(stream)
+
+
 async def test_edit_history_rollback_round_trip(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = _scope()

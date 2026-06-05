@@ -277,7 +277,31 @@ class FileStore(abc.ABC):
     async def read_file(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> bytes:
-        """Read one file from ``current/``. Raises :class:`~.errors.NotFoundError`."""
+        """Read one file from ``current/``. Raises :class:`~.errors.NotFoundError`.
+
+        Whole-bytes by design: this is the small-edit / preview read (and the
+        plain ``GET ?path=`` base64 route, where the bytes *are* the JSON
+        payload). A large single-file *download* must use
+        :meth:`open_file_stream` instead so it does not buffer the whole file in
+        RAM (issue #265).
+        """
+
+    @abc.abstractmethod
+    def open_file_stream(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> ByteStream:
+        """Open a chunked read stream over one file in ``current/`` (issue #265).
+
+        The per-file analogue of :meth:`open_hydrate_source`: a large single-file
+        download streams through without buffering the whole file in memory. The
+        contract matches the hydrate stream exactly — the live snapshot is
+        resolved and the active-reader lease taken on the FIRST iteration (so a
+        stream that is opened but never consumed never pins a snapshot), and the
+        lease is released exactly once when the stream finishes, is closed early,
+        or raises (Section 4.2 reader safety). Raises
+        :class:`~.errors.NotFoundError` if the file (or any published snapshot) is
+        absent.
+        """
 
     @abc.abstractmethod
     async def list_dir(

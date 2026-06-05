@@ -59,6 +59,19 @@ class FileStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    def open_file_stream(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        """Stream one file's bytes from ``current/`` in chunks (issue #265).
+
+        The bounded-memory read seam for a large single-file download: the bytes
+        are yielded incrementally so the whole file is never buffered in RAM
+        (unlike :meth:`read_file`, which is the small-edit / base64-payload read).
+        Raises :class:`ServerFileNotFoundError` for a missing path and
+        :class:`InvalidFilePathError` for a traversal-unsafe one.
+        """
+
+    @abc.abstractmethod
     async def list_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:

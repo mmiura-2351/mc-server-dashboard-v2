@@ -632,6 +632,29 @@ class FsStorage(Storage):
             raise NotFoundError(f"file not found: {rel_path.value}")
         return target.read_bytes()
 
+    def open_file_stream(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> ByteStream:
+        # The per-file analogue of open_hydrate_source (issue #265): the live
+        # snapshot is resolved and leased on the FIRST iteration, not at open
+        # time, so a stream opened but never consumed never pins a snapshot, and
+        # the leased snapshot is exactly the one the file is read out of (Section
+        # 4.2 reader safety). The lease protects the snapshot dir from a
+        # concurrent publish/sweep for the whole duration of a large read.
+        def _open() -> tuple[Path, Callable[[], None]]:
+            current = self._current_dir(community_id, server_id)
+            self._acquire_lease(current)
+            try:
+                target = self._safe_target(current, rel_path)
+                if not target.is_file():
+                    raise NotFoundError(f"file not found: {rel_path.value}")
+            except BaseException:
+                self._release_lease(current)
+                raise
+            return target, lambda: self._release_lease(current)
+
+        return _leased_file_stream(_open)
+
     async def list_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> list[DirEntry]:
@@ -1021,6 +1044,37 @@ def _file_stream(path: Path) -> AsyncIterator[bytes]:
                 yield chunk
         finally:
             await asyncio.to_thread(handle.close)
+
+    return _gen()
+
+
+def _leased_file_stream(
+    open_source: Callable[[], tuple[Path, Callable[[], None]]],
+) -> AsyncIterator[bytes]:
+    """Stream one file's bytes in chunks under an active-reader lease (issue #265).
+
+    ``open_source`` is called on the first iteration: it resolves the live
+    snapshot, takes the active-reader lease, locates the target file, and returns
+    the file path plus the matching lease-release callback. Deferring it to first
+    iteration means a stream opened but never consumed never pins a snapshot
+    (mirroring :func:`_tar_stream`). The lease is released exactly once when the
+    stream finishes, is closed early, or raises.
+    """
+
+    async def _gen() -> AsyncIterator[bytes]:
+        path, on_close = await asyncio.to_thread(open_source)
+        try:
+            handle = await asyncio.to_thread(open, path, "rb")
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(handle.read, _CHUNK)
+                    if not chunk:
+                        return
+                    yield chunk
+            finally:
+                await asyncio.to_thread(handle.close)
+        finally:
+            on_close()
 
     return _gen()
 
