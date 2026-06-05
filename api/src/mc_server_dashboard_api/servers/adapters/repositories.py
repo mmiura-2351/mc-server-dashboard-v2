@@ -167,9 +167,25 @@ class SqlAlchemyServerRepository(ServerRepository):
         # start can re-place under require_unassigned (issue #206).
         if unassign:
             values["assigned_worker_id"] = None
+        # Monotonic guard (issue #216): drop a write stamped no later than the row's
+        # current observed_at, so a stale convergence write (stop SERVER_NOT_FOUND,
+        # redispatch_start INVALID_STATE) cannot clobber a fresher StatusChange that
+        # already landed. All observed-state writers stamp clock.now(). A never-
+        # observed row has observed_at IS NULL and must still accept its first write.
+        # Strict ``<`` (not ``<=``) is right here: observed_at is timestamptz with
+        # microsecond resolution and every writer uses the same API clock, so equal
+        # timestamps mean a genuine same-instant duplicate that is safe to drop. The
+        # guard and the unassign live in one UPDATE, so a stale write's unassign
+        # decision is dropped atomically with the state write.
         stmt = (
             update(ServerModel)
-            .where(ServerModel.id == server_id.value)
+            .where(
+                ServerModel.id == server_id.value,
+                or_(
+                    ServerModel.observed_at.is_(None),
+                    ServerModel.observed_at < observed_at,
+                ),
+            )
             .values(**values)
         )
         await self._session.execute(stmt)
@@ -177,6 +193,11 @@ class SqlAlchemyServerRepository(ServerRepository):
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:
+        # No monotonic guard (issue #216): this is a bulk cache-invalidation marking
+        # state LESS certain (-> unknown) on a worker disconnect. It must always win,
+        # even against a row with a newer observed_at — that fresher report came from
+        # the now-disconnected worker and is exactly the untrustworthy data this
+        # write exists to invalidate.
         stmt = (
             update(ServerModel)
             .where(ServerModel.assigned_worker_id == worker_id.value)
@@ -191,6 +212,9 @@ class SqlAlchemyServerRepository(ServerRepository):
         # Assigned rows whose observed state is non-terminal (an in-flight cache
         # of a worker report). Terminal/cache-stable states (stopped, crashed,
         # unknown) stay truthful across a restart, so they are excluded.
+        # No monotonic guard (issue #216): like mark_worker_servers_unknown this is a
+        # bulk cache-invalidation marking state LESS certain (-> unknown) on API
+        # restart, and must always win regardless of the row's observed_at.
         stmt = (
             update(ServerModel)
             .where(
