@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"regexp"
 	"sync"
+	"time"
 )
 
 // MaxLogLineBytes bounds a single captured log line. A longer line is truncated
@@ -14,6 +16,13 @@ const MaxLogLineBytes = 8 * 1024
 
 // truncationMarker is appended to a line that exceeded MaxLogLineBytes.
 const truncationMarker = "…[truncated]"
+
+// readyMarker matches the Minecraft server's startup-complete line, e.g.
+// `[Server thread/INFO]: Done (12.345s)! For help, type "help"`. Vanilla, Paper
+// and Forge all print this once the server is listening (RCON included), so it
+// is the readiness signal a driver waits for before reporting StateRunning
+// (issue #345).
+var readyMarker = regexp.MustCompile(`Done \([0-9.]+s\)! For help`)
 
 // LogPump captures a server's stdout/stderr line by line into a bounded, lossy
 // per-instance buffer (FR-MON-2). Logs are best-effort: under backpressure the
@@ -25,6 +34,11 @@ const truncationMarker = "…[truncated]"
 type LogPump struct {
 	serverID string
 	out      chan LogEvent
+
+	// ready is closed once a captured line matches readyMarker, signalling the
+	// server is up and listening (issue #345). readyOnce guards the one-shot close.
+	ready     chan struct{}
+	readyOnce sync.Once
 
 	mu            sync.Mutex
 	dropped       uint64
@@ -41,12 +55,48 @@ func NewLogPump(serverID string, bufSize int) *LogPump {
 	return &LogPump{
 		serverID: serverID,
 		out:      make(chan LogEvent, bufSize),
+		ready:    make(chan struct{}),
 	}
 }
 
 // Logs is the captured-line stream. It closes once every Scan goroutine has
 // finished and Close has been called.
 func (p *LogPump) Logs() <-chan LogEvent { return p.out }
+
+// Ready is closed the first time a captured line reports the server finished
+// starting (the Minecraft "Done (X.XXXs)! For help" line). A driver selects on
+// it to hold StateStarting until the server is actually listening (issue #345).
+// It never fires if the marker is never seen; the driver pairs it with a
+// bounded fallback timeout.
+func (p *LogPump) Ready() <-chan struct{} { return p.ready }
+
+// markReadyIfDone closes the ready channel (once) when line is the startup-
+// complete marker.
+func (p *LogPump) markReadyIfDone(line string) {
+	if readyMarker.MatchString(line) {
+		p.readyOnce.Do(func() { close(p.ready) })
+	}
+}
+
+// WaitReady blocks until the server signals readiness (ready closed), the
+// fallback timeout elapses, or the instance exits first (exited closed). It
+// reports whether the caller should transition starting→running: true when the
+// server became ready or the fallback fired, false when the instance exited
+// first (the exit path owns the terminal state). The fallback bounds the wait so
+// a server whose log format omits the marker never sticks in starting forever
+// (issue #345).
+func WaitReady(ready, exited <-chan struct{}, fallback time.Duration) bool {
+	timer := time.NewTimer(fallback)
+	defer timer.Stop()
+	select {
+	case <-ready:
+		return true
+	case <-timer.C:
+		return true
+	case <-exited:
+		return false
+	}
+}
 
 // Scan reads r line by line and emits each as a LogEvent on the given stream
 // until r reaches EOF or errors. It returns when r is exhausted; callers run it
@@ -136,6 +186,10 @@ func (p *LogPump) emit(line string, stream LogStream) {
 		return
 	}
 	p.mu.Unlock()
+
+	// Detect the readiness marker before queuing, so a Done line still fires Ready
+	// even if backpressure later drops it from the buffer (issue #345).
+	p.markReadyIfDone(line)
 
 	ev := LogEvent{ServerID: p.serverID, Line: line, Stream: stream}
 	select {

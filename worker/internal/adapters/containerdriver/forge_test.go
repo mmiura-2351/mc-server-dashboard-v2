@@ -145,6 +145,7 @@ func forgeDriver(docker dockerAPI) *Driver {
 		WorkerID:             "w1",
 		StopTimeout:          50 * time.Millisecond,
 		GameBindIP:           "0.0.0.0",
+		ReadinessTimeout:     20 * time.Millisecond,
 		ConflictPollInterval: time.Millisecond,
 		ConflictDeadline:     100 * time.Millisecond,
 	})
