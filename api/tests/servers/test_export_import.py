@@ -206,10 +206,105 @@ async def test_export_then_import_round_trips_files_and_metadata() -> None:
     assert server.mc_version == "1.21.1"
     assert server.server_type is ServerType.VANILLA
     assert server.game_port is not None
-    # The working set is published identically, and the metadata file is excluded.
-    assert dst_store.files["server.properties"] == b"motd=hi"
+    # The working set is published identically except that import enforces the RCON
+    # keys on server.properties (#335); the metadata file is excluded.
+    props = dst_store.files["server.properties"].decode()
+    assert "motd=hi" in props
+    assert "enable-rcon=true" in props
+    assert "rcon.port=25575" in props
     assert dst_store.files["world/level.dat"] == b"\x00\x01\x02"
     assert EXPORT_METADATA_FILENAME not in dst_store.files
+
+
+# --- import: RCON enforcement (issue #335) ---------------------------------
+
+
+async def test_import_enforces_rcon_on_disabled_properties() -> None:
+    # An archive whose server.properties has RCON off / a stray port gets RCON
+    # enabled and the port corrected, with a generated password filled in.
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip(
+        {
+            EXPORT_METADATA_FILENAME: _metadata(),
+            "server.properties": b"enable-rcon=false\nrcon.port=1234\nmotd=hi\n",
+        }
+    )
+    await imp(
+        community_id=CommunityId(community),
+        name="fresh",
+        execution_backend="host_process",
+        content=archive,
+    )
+    props = dict(
+        line.split("=", 1)
+        for line in dst_store.files["server.properties"].decode().splitlines()
+        if "=" in line
+    )
+    assert props["enable-rcon"] == "true"
+    assert props["rcon.port"] == "25575"
+    assert props["rcon.password"] != ""
+    assert props["motd"] == "hi"
+
+
+async def test_import_preserves_existing_non_empty_rcon_password() -> None:
+    # A non-empty existing rcon.password is kept (an importer's known credential),
+    # while enable-rcon / rcon.port are still enforced.
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip(
+        {
+            EXPORT_METADATA_FILENAME: _metadata(),
+            "server.properties": (
+                b"enable-rcon=false\nrcon.password=known-secret\nrcon.port=1234\n"
+            ),
+        }
+    )
+    await imp(
+        community_id=CommunityId(community),
+        name="fresh",
+        execution_backend="host_process",
+        content=archive,
+    )
+    props = dict(
+        line.split("=", 1)
+        for line in dst_store.files["server.properties"].decode().splitlines()
+        if "=" in line
+    )
+    assert props["enable-rcon"] == "true"
+    assert props["rcon.port"] == "25575"
+    assert props["rcon.password"] == "known-secret"
+
+
+async def test_import_seeds_rcon_when_archive_has_no_properties() -> None:
+    # An archive with no server.properties at all still ends up with one carrying
+    # the enforced RCON keys, so the imported server's console works out of the box.
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"\x00"})
+    await imp(
+        community_id=CommunityId(community),
+        name="fresh",
+        execution_backend="host_process",
+        content=archive,
+    )
+    props = dict(
+        line.split("=", 1)
+        for line in dst_store.files["server.properties"].decode().splitlines()
+        if "=" in line
+    )
+    assert props["enable-rcon"] == "true"
+    assert props["rcon.port"] == "25575"
+    assert props["rcon.password"] != ""
 
 
 # --- import validation -----------------------------------------------------

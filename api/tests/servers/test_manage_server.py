@@ -284,9 +284,17 @@ async def test_create_rejects_unknown_version() -> None:
     assert uow.commits == 0
 
 
+# The server.properties content create seeds with port + the RCON keys (#243,
+# #335). The password is the injected fixed token, so the expectation is exact.
+_SEEDED_PROPERTIES = (
+    b"server-port=25565\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+)
+
+
 async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
     # accept_eula=True composes eula.txt with the always-seeded server.properties
-    # (port assignment, #243): both land in the initial working set, in order.
+    # (port assignment #243 + RCON enablement #335): both land in the initial
+    # working set, in order.
     uow = FakeUnitOfWork()
     file_store = FakeFileStore()
     server = await CreateServer(
@@ -295,6 +303,7 @@ async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        token_generator=lambda: "tok",
     )(
         community_id=CommunityId(uuid.uuid4()),
         name="survival",
@@ -306,18 +315,44 @@ async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
         accept_eula=True,
     )
     assert file_store.writes == [
-        ("server.properties", b"server-port=25565\n"),
+        ("server.properties", _SEEDED_PROPERTIES),
         ("eula.txt", b"eula=true\n"),
     ]
     assert file_store.files["eula.txt"] == b"eula=true\n"
-    assert file_store.files["server.properties"] == b"server-port=25565\n"
+    assert file_store.files["server.properties"] == _SEEDED_PROPERTIES
     assert uow.commits == 1
     assert uow.servers.by_id[server.id] is server
 
 
 async def test_create_without_accept_eula_still_seeds_properties() -> None:
     # Default (accept_eula omitted): server.properties is still seeded with the
-    # assigned game port (#243), but no eula.txt (issue #198 unchanged).
+    # assigned game port (#243) and RCON keys (#335), but no eula.txt (issue #198
+    # unchanged).
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+    assert file_store.writes == [("server.properties", _SEEDED_PROPERTIES)]
+    assert "eula.txt" not in file_store.files
+
+
+async def test_create_seeds_rcon_with_random_password_by_default() -> None:
+    # Without an injected token generator, create still seeds all four properties
+    # and the password is a non-empty random secret (default secrets-backed).
     uow = FakeUnitOfWork()
     file_store = FakeFileStore()
     await CreateServer(
@@ -335,8 +370,12 @@ async def test_create_without_accept_eula_still_seeds_properties() -> None:
         execution_backend="host_process",
         config={},
     )
-    assert file_store.writes == [("server.properties", b"server-port=25565\n")]
-    assert "eula.txt" not in file_store.files
+    seeded = file_store.files["server.properties"].decode()
+    props = dict(line.split("=", 1) for line in seeded.splitlines() if "=" in line)
+    assert props["server-port"] == "25565"
+    assert props["enable-rcon"] == "true"
+    assert props["rcon.port"] == "25575"
+    assert props["rcon.password"] != ""
 
 
 # --- create: game port assignment (#243) -----------------------------------
@@ -359,6 +398,7 @@ async def test_create_auto_assigns_lowest_free_port() -> None:
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        token_generator=lambda: "tok",
     )(
         community_id=community,
         name="survival",
@@ -370,7 +410,12 @@ async def test_create_auto_assigns_lowest_free_port() -> None:
     )
     assert server.game_port == 25567
     assert uow.servers.by_id[server.id].game_port == 25567
-    assert file_store.writes == [("server.properties", b"server-port=25567\n")]
+    assert file_store.writes == [
+        (
+            "server.properties",
+            b"server-port=25567\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n",
+        )
+    ]
 
 
 async def test_create_honors_explicit_free_port() -> None:
@@ -1019,6 +1064,7 @@ async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        token_generator=lambda: "tok",
     )(
         community_id=community,
         name="survival",
@@ -1041,9 +1087,9 @@ async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
             StorageServerId(server.id.value),
         )
     )
-    # Both seeds compose into the first published working set (#243 + #198).
+    # Both seeds compose into the first published working set (#243 + #198 + #335).
     assert read_tar(blob) == {
-        "server.properties": b"server-port=25565\n",
+        "server.properties": _SEEDED_PROPERTIES,
         "eula.txt": b"eula=true\n",
     }
 
@@ -1062,6 +1108,7 @@ async def test_create_without_accept_eula_seeds_properties_at_rest(
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        token_generator=lambda: "tok",
     )(
         community_id=community,
         name="survival",
@@ -1075,7 +1122,7 @@ async def test_create_without_accept_eula_seeds_properties_at_rest(
     at_rest = await file_store.read_file(
         community_id=community, server_id=server.id, rel_path="server.properties"
     )
-    assert at_rest == b"server-port=25565\n"
+    assert at_rest == _SEEDED_PROPERTIES
     with pytest.raises(ServerFileNotFoundError):
         await file_store.read_file(
             community_id=community, server_id=server.id, rel_path="eula.txt"
@@ -1099,6 +1146,7 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        token_generator=lambda: "tok",
     )(
         community_id=community,
         name="survival",
@@ -1122,14 +1170,19 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
     )
     assert updated.game_port == 25570
 
+    # The port rewrite changes server-port in place and leaves the seeded RCON keys
+    # (#335) untouched.
+    expected = (
+        b"server-port=25570\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+    )
     at_rest = await file_store.read_file(
         community_id=community, server_id=server.id, rel_path="server.properties"
     )
-    assert at_rest == b"server-port=25570\n"
+    assert at_rest == expected
     blob = await drain(
         storage.open_hydrate_source(
             StorageCommunityId(community.value),
             StorageServerId(server.id.value),
         )
     )
-    assert read_tar(blob) == {"server.properties": b"server-port=25570\n"}
+    assert read_tar(blob) == {"server.properties": expected}

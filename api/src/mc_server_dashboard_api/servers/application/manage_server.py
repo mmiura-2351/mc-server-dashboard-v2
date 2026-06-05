@@ -19,7 +19,9 @@ assume an authorized member and only do the data work.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import secrets
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from mc_server_dashboard_api.servers.domain.backup_schedule import (
@@ -47,7 +49,10 @@ from mc_server_dashboard_api.servers.domain.ports import (
     pick_lowest_free_port,
     validate_explicit_port,
 )
-from mc_server_dashboard_api.servers.domain.server_properties import set_server_port
+from mc_server_dashboard_api.servers.domain.server_properties import (
+    set_rcon_properties,
+    set_server_port,
+)
 from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
     SNAPSHOT_INTERVAL_CONFIG_KEY,
     override_from_config,
@@ -78,11 +83,24 @@ _SUPPORTED_EDITION = "java"
 _EULA_REL_PATH = "eula.txt"
 _EULA_ACCEPTED_CONTENT = b"eula=true\n"
 
-# The server.properties key Mojang's server reads for its listen port. Create
-# seeds it with the assigned game port (issue #243) into the initial working set,
-# so the server boots on its tracked port without a manual edit. The trailing
-# newline matches the line format Mojang writes.
+# The server.properties Mojang's server reads on start. Create seeds it with the
+# assigned game port (issue #243) and the RCON keys (enable-rcon / rcon.port /
+# rcon.password, issue #335) into the initial working set, so the server boots on
+# its tracked port AND RCON is on out of the box (the console / graceful-stop path
+# needs it). The trailing newline matches the line format Mojang writes.
 _PROPERTIES_REL_PATH = "server.properties"
+
+# The number of random bytes behind the per-server RCON password (issue #335). The
+# password lives only in server.properties (the worker reads it there); it is never
+# persisted in the DB. ``secrets.token_urlsafe`` returns ~1.3 chars per byte.
+_RCON_PASSWORD_BYTES = 32
+
+
+def _new_rcon_password() -> str:
+    """Generate a fresh per-server RCON secret (the default token generator)."""
+
+    return secrets.token_urlsafe(_RCON_PASSWORD_BYTES)
+
 
 _logger = logging.getLogger(__name__)
 
@@ -145,13 +163,20 @@ class CreateServer:
     After the row commits, an **initial working-set seeding** step writes any seed
     files into the server's first published version through the Storage write path
     (the #208 initialize-first-version behavior). It seeds ``server.properties``
-    with ``server-port=<port>`` so the server boots on its tracked port, and
-    ``eula.txt`` when ``accept_eula`` is true (issue #198); both compose when both
-    apply (sequential write_file calls on a fresh server publish correctly). A
-    storage failure during seeding is caught, WARN-logged, and surfaced as a typed
-    :class:`WorkingSetSeedFailedError` (mapped to 503 at the edge): the committed
-    row stays in a degraded-but-repairable state (the missing files can be written
-    via the files API), rather than leaking an unmapped 500.
+    with ``server-port=<port>`` so the server boots on its tracked port (#243) plus
+    the RCON keys (``enable-rcon=true`` / ``rcon.port`` / a fresh random
+    ``rcon.password``) so the console / graceful-stop path works out of the box
+    (issue #335), and ``eula.txt`` when ``accept_eula`` is true (issue #198); both
+    files compose when both apply (sequential write_file calls on a fresh server
+    publish correctly). A storage failure during seeding is caught, WARN-logged, and
+    surfaced as a typed :class:`WorkingSetSeedFailedError` (mapped to 503 at the
+    edge): the committed row stays in a degraded-but-repairable state (the missing
+    files can be written via the files API), rather than leaking an unmapped 500.
+
+    The RCON password is generated via the injected ``token_generator`` (default a
+    ``secrets``-backed random token), kept injectable so tests are deterministic;
+    the secret lives only in ``server.properties`` (the worker's canonical source),
+    never in the DB.
     """
 
     uow: UnitOfWork
@@ -159,6 +184,7 @@ class CreateServer:
     version_validator: VersionValidator
     file_store: FileStore
     port_range: PortRange
+    token_generator: Callable[[], str] = field(default=_new_rcon_password)
 
     async def __call__(
         self,
@@ -239,8 +265,10 @@ class CreateServer:
         version on a never-snapshotted server (the #208 behavior); sequential
         writes on a fresh server compose correctly (the #252 review finding), so
         ``server.properties`` and ``eula.txt`` may both be seeded in one create.
-        ``server.properties`` is always seeded with the assigned game port (#243);
-        ``eula.txt`` only when the operator accepted at create (issue #198).
+        ``server.properties`` is always seeded with the assigned game port (#243)
+        and the RCON keys (#335: ``enable-rcon=true``, ``rcon.port``, and a fresh
+        random ``rcon.password``); ``eula.txt`` only when the operator accepted at
+        create (issue #198).
 
         A storage failure is caught and re-raised as
         :class:`WorkingSetSeedFailedError` (mapped to 503): the row is already
@@ -248,8 +276,11 @@ class CreateServer:
         server — it only signals the degraded state.
         """
 
+        properties = set_rcon_properties(
+            set_server_port(b"", game_port), password=self.token_generator()
+        )
         seeds: list[tuple[str, bytes]] = [
-            (_PROPERTIES_REL_PATH, f"server-port={game_port}\n".encode()),
+            (_PROPERTIES_REL_PATH, properties),
         ]
         if accept_eula:
             seeds.append((_EULA_REL_PATH, _EULA_ACCEPTED_CONTENT))

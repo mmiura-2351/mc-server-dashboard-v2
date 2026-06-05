@@ -1,21 +1,84 @@
-"""Minimal ``server.properties`` ``server-port`` rewrite (issue #311).
+"""Minimal ``server.properties`` line rewrites (issues #311, #335).
 
-When the game port is changed via the API, the at-rest ``server.properties`` must
-be rewritten so the real bind port and the tracked ``game_port`` stay in sync.
-This is the pure, standard-library-only helper that does the line edit: it
-rewrites the existing ``server-port=<port>`` line in place (preserving every other
-line and ordering), or appends one when the file has no such line. A wholly absent
+The at-rest ``server.properties`` must sometimes be rewritten so what the server
+binds matches what the platform tracks: the ``server-port`` line is kept in sync
+with the DB ``game_port`` (#311), and the RCON keys are enforced so the console /
+graceful-stop path works out of the box (#335). These are pure,
+standard-library-only helpers that do the line edits, preserving every other line
+and its order, or appending a key when the file has no such line. A wholly absent
 file (a legacy server with no seeded properties, #243) is handled by the caller,
-which passes an empty body so this produces a file with just the port line.
+which passes an empty body so the helper produces a file with just its keys.
 
-Mojang's ``server.properties`` is a Java ``.properties`` file; for the single key
-we touch, ``key=value`` line matching on a comment-aware, whitespace-trimmed key
-is sufficient (we never need to parse values or escapes).
+Mojang's ``server.properties`` is a Java ``.properties`` file; for the few keys we
+touch, ``key=value`` line matching on a comment-aware, whitespace-trimmed key is
+sufficient (we never need to parse values or escapes).
 """
 
 from __future__ import annotations
 
 _PORT_KEY = "server-port"
+_ENABLE_RCON_KEY = "enable-rcon"
+_RCON_PORT_KEY = "rcon.port"
+_RCON_PASSWORD_KEY = "rcon.password"
+
+# The in-container RCON port the worker connects to (issue #335). It is never
+# published to the host (the container driver drops the host RCON publication,
+# #218), so a fixed value is fine across servers.
+RCON_PORT = 25575
+
+
+def _split_content_lines(content: bytes) -> list[str]:
+    """Decode ``content`` into property lines, dropping the trailing-newline empty.
+
+    An empty input becomes no lines, so callers that only append produce a file
+    with just their appended lines.
+    """
+
+    lines = content.decode().split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _is_key_line(line: str, key: str) -> bool:
+    """True when ``line`` is the live (non-comment) ``key=...`` property line."""
+
+    stripped = line.lstrip()
+    return (
+        not stripped.startswith("#")
+        and "=" in stripped
+        and stripped.split("=", 1)[0].strip() == key
+    )
+
+
+def _get_property(lines: list[str], key: str) -> str | None:
+    """Return the value of the first live ``key=...`` line, or ``None`` if absent."""
+
+    for line in lines:
+        if _is_key_line(line, key):
+            return line.split("=", 1)[1]
+    return None
+
+
+def _set_property(lines: list[str], key: str, value: str) -> list[str]:
+    """Set ``key`` to ``value`` in ``lines``, rewriting in place or appending.
+
+    Rewrites the first live (non-comment) ``key=...`` line; if none exists,
+    appends ``key=value``. Other lines and their order are preserved.
+    """
+
+    new_line = f"{key}={value}"
+    replaced = False
+    out: list[str] = []
+    for line in lines:
+        if not replaced and _is_key_line(line, key):
+            out.append(new_line)
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(new_line)
+    return out
 
 
 def set_server_port(content: bytes, port: int) -> bytes:
@@ -32,34 +95,28 @@ def set_server_port(content: bytes, port: int) -> bytes:
     stripped as whitespace.
     """
 
-    text = content.decode()
-    new_line = f"{_PORT_KEY}={port}"
-
-    # Split into content lines, dropping a single trailing empty element from a
-    # trailing newline so an append lands on its own line. An empty input becomes
-    # no lines, so the result is just the port line.
-    lines = text.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-
-    replaced = False
-    out: list[str] = []
-    for line in lines:
-        stripped = line.lstrip()
-        if (
-            not replaced
-            and not stripped.startswith("#")
-            and "=" in stripped
-            and stripped.split("=", 1)[0].strip() == _PORT_KEY
-        ):
-            out.append(new_line)
-            replaced = True
-        else:
-            out.append(line)
-
-    if not replaced:
-        out.append(new_line)
-
+    lines = _set_property(_split_content_lines(content), _PORT_KEY, str(port))
     # Always end with a single trailing newline (Mojang's convention and the
     # create-seed format ``server-port=<port>\n``).
-    return ("\n".join(out) + "\n").encode()
+    return ("\n".join(lines) + "\n").encode()
+
+
+def set_rcon_properties(content: bytes, *, password: str) -> bytes:
+    """Return ``content`` with RCON enabled and its port/password enforced (#335).
+
+    ``enable-rcon=true`` and ``rcon.port=<RCON_PORT>`` are always set (rewritten in
+    place or appended), so a fresh or imported ``server.properties`` with RCON off
+    or a stray port is corrected. ``rcon.password`` is set to ``password`` only when
+    the file has no live password line or its value is empty: a non-empty existing
+    password is preserved, so an importer's known credential keeps working. Other
+    lines and their order are preserved; the result ends with a single trailing
+    newline.
+    """
+
+    lines = _split_content_lines(content)
+    lines = _set_property(lines, _ENABLE_RCON_KEY, "true")
+    lines = _set_property(lines, _RCON_PORT_KEY, str(RCON_PORT))
+    existing = _get_property(lines, _RCON_PASSWORD_KEY)
+    if not existing:
+        lines = _set_property(lines, _RCON_PASSWORD_KEY, password)
+    return ("\n".join(lines) + "\n").encode()
