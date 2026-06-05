@@ -36,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownServerTypeError,
     UnsupportedEditionError,
 )
+from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
     SNAPSHOT_INTERVAL_CONFIG_KEY,
     override_from_config,
@@ -58,6 +59,13 @@ _SERVER_RESOURCE_TYPE = "server"
 
 # The only MC edition the version catalog can serve at M1 (Java-only; FR-VER-1).
 _SUPPORTED_EDITION = "java"
+
+# The EULA-acceptance file Mojang's server reads on start. Seeding it with
+# ``eula=true`` at create time (when the operator accepts) records consent in the
+# server's initial working set, so the first start does not crash on the default
+# ``eula=false`` (issue #198). The trailing newline matches the file Mojang writes.
+_EULA_REL_PATH = "eula.txt"
+_EULA_ACCEPTED_CONTENT = b"eula=true\n"
 
 # Config keys that are *operationally safe* to edit in any server state (issue
 # #115). The criterion is narrow: a key qualifies only if it is read solely by an
@@ -107,11 +115,18 @@ class CreateServer:
     ensure-on-start ruling). The check rejects an unsupported edition (the catalog
     is Java-only at M1), an unsupported type (forge at M1), and an unoffered version
     before the row is staged (FR-VER-1).
+
+    After the row commits, an **initial working-set seeding** step writes any seed
+    files into the server's first published version through the Storage write path
+    (the #208 initialize-first-version behavior). At M1 the only seed is
+    ``eula.txt`` when ``accept_eula`` is true (issue #198); the step is the
+    extension point #243's port assignment hangs ``server.properties`` seeding off.
     """
 
     uow: UnitOfWork
     clock: Clock
     version_validator: VersionValidator
+    file_store: FileStore
 
     async def __call__(
         self,
@@ -123,6 +138,7 @@ class CreateServer:
         server_type: str,
         execution_backend: str,
         config: dict[str, Any],
+        accept_eula: bool = False,
     ) -> Server:
         if mc_edition != _SUPPORTED_EDITION:
             # The catalog is Java-only at M1 (FR-VER-1); reject other editions
@@ -155,7 +171,41 @@ class CreateServer:
         async with self.uow:
             await self.uow.servers.add(server)
             await self.uow.commit()
+        await self._seed_initial_working_set(
+            community_id=community_id,
+            server_id=server.id,
+            accept_eula=accept_eula,
+        )
         return server
+
+    async def _seed_initial_working_set(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        accept_eula: bool,
+    ) -> None:
+        """Write the create-time seed files into the server's first version.
+
+        Generic over a list of ``(rel_path, content)`` seeds so #243's
+        ``server.properties`` seeding extends it without a new path. Each seed is
+        written through :meth:`FileStore.write_file`, which initializes the first
+        published version on a never-snapshotted server (the #208 behavior). At M1
+        the only seed is ``eula.txt`` when the operator accepted the EULA at create
+        (issue #198); with no seeds, the working set stays unpublished — exactly
+        today's create behavior.
+        """
+
+        seeds: list[tuple[str, bytes]] = []
+        if accept_eula:
+            seeds.append((_EULA_REL_PATH, _EULA_ACCEPTED_CONTENT))
+        for rel_path, content in seeds:
+            await self.file_store.write_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=rel_path,
+                content=content,
+            )
 
 
 @dataclass(frozen=True)

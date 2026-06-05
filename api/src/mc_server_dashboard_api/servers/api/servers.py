@@ -106,6 +106,11 @@ class CreateServerRequest(BaseModel):
     # ``validate_config`` and yields the typed ``config_invalid_shape`` 422 rather
     # than Pydantic's generic validation error.
     config: Any = Field(default_factory=dict)
+    # Explicit EULA consent (issue #198). When true, create seeds ``eula.txt`` with
+    # ``eula=true`` into the server's initial working set so the first start does
+    # not crash on Mojang's default ``eula=false``. Default false keeps today's
+    # create behavior (no eula.txt; first start crashes and is repairable).
+    accept_eula: bool = False
 
 
 class UpdateServerRequest(BaseModel):
@@ -185,6 +190,7 @@ async def create_server(
             server_type=body.server_type,
             execution_backend=body.execution_backend,
             config=config,
+            accept_eula=body.accept_eula,
         )
     except UnsupportedEditionError as exc:
         # The catalog is Java-only at M1 (FR-VER-1): a non-java edition is rejected

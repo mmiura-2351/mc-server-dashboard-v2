@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from pathlib import Path
 
 import pytest
 
+from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
 from mc_server_dashboard_api.servers.application.manage_server import (
     CreateServer,
     DeleteServer,
@@ -24,6 +26,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
     InvalidSnapshotIntervalError,
+    ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -44,11 +47,20 @@ from mc_server_dashboard_api.servers.domain.version_validator import (
     UnknownVersionError,
     UnsupportedServerTypeError,
 )
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    CommunityId as StorageCommunityId,
+)
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    ServerId as StorageServerId,
+)
 from tests.servers.fakes import (
     FakeClock,
+    FakeFileStore,
     FakeUnitOfWork,
     FakeVersionValidator,
 )
+from tests.storage.helpers import drain, read_tar
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _LATER = dt.datetime(2026, 6, 4, 13, 0, tzinfo=dt.timezone.utc)
@@ -90,6 +102,7 @@ async def test_create_defaults_to_stopped_and_commits() -> None:
         uow=uow,
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
     )(
         community_id=community,
         name="survival",
@@ -116,6 +129,7 @@ async def test_create_accepts_java_edition() -> None:
         uow=uow,
         clock=FakeClock(_NOW),
         version_validator=validator,
+        file_store=FakeFileStore(),
     )(
         community_id=CommunityId(uuid.uuid4()),
         name="survival",
@@ -137,6 +151,7 @@ async def test_create_rejects_non_java_edition() -> None:
             uow=uow,
             clock=FakeClock(_NOW),
             version_validator=validator,
+            file_store=FakeFileStore(),
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -158,6 +173,7 @@ async def test_create_rejects_unknown_server_type() -> None:
             uow=uow,
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -177,6 +193,7 @@ async def test_create_rejects_unknown_execution_backend() -> None:
             uow=uow,
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -196,6 +213,7 @@ async def test_create_rejects_unsupported_type_forge() -> None:
             uow=uow,
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(unsupported={"forge"}),
+            file_store=FakeFileStore(),
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -215,6 +233,7 @@ async def test_create_rejects_unknown_version() -> None:
             uow=uow,
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(offered={"vanilla": {"1.21.1"}}),
+            file_store=FakeFileStore(),
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -225,6 +244,55 @@ async def test_create_rejects_unknown_version() -> None:
             config={},
         )
     assert uow.commits == 0
+
+
+async def test_create_with_accept_eula_seeds_eula_file() -> None:
+    # accept_eula=True records consent by seeding eula.txt into the server's
+    # initial working set, so the first start does not crash (issue #198).
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+        accept_eula=True,
+    )
+    assert file_store.writes == [("eula.txt", b"eula=true\n")]
+    assert file_store.files["eula.txt"] == b"eula=true\n"
+    assert uow.commits == 1
+    assert uow.servers.by_id[server.id] is server
+
+
+async def test_create_without_accept_eula_seeds_nothing() -> None:
+    # Default (accept_eula omitted): no seeding — today's create behavior, where
+    # the first start crashes and is repairable (issue #198).
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+    assert file_store.writes == []
+    assert "eula.txt" not in file_store.files
 
 
 # --- read / list -----------------------------------------------------------
@@ -597,3 +665,74 @@ async def test_delete_other_communitys_server_is_not_found() -> None:
             community_id=CommunityId(uuid.uuid4()), server_id=server.id
         )
     assert uow.resource_grants.swept == []
+
+
+# --- create EULA seeding over real fs Storage ------------------------------
+
+
+async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
+    tmp_path: Path,
+) -> None:
+    # End-to-end over a real FsStorage (no Storage-side fakes): accept_eula seeds
+    # eula.txt into the initial published working set, so it is readable at rest
+    # and present in the hydrate stream the Worker pulls on first start (#198).
+    storage = FsStorage(tmp_path)
+    file_store = StorageFileStoreAdapter(storage=storage)
+    community = CommunityId(uuid.uuid4())
+    server = await CreateServer(
+        uow=FakeUnitOfWork(),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+    )(
+        community_id=community,
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+        accept_eula=True,
+    )
+
+    at_rest = await file_store.read_file(
+        community_id=community, server_id=server.id, rel_path="eula.txt"
+    )
+    assert at_rest == b"eula=true\n"
+
+    blob = await drain(
+        storage.open_hydrate_source(
+            StorageCommunityId(community.value),
+            StorageServerId(server.id.value),
+        )
+    )
+    assert read_tar(blob) == {"eula.txt": b"eula=true\n"}
+
+
+async def test_create_without_accept_eula_has_no_eula_at_rest(
+    tmp_path: Path,
+) -> None:
+    # Without the flag, nothing is seeded: reading eula.txt 404s (the working set
+    # is never published), matching today's repairable first-start crash (#198).
+    storage = FsStorage(tmp_path)
+    file_store = StorageFileStoreAdapter(storage=storage)
+    community = CommunityId(uuid.uuid4())
+    server = await CreateServer(
+        uow=FakeUnitOfWork(),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+    )(
+        community_id=community,
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+
+    with pytest.raises(ServerFileNotFoundError):
+        await file_store.read_file(
+            community_id=community, server_id=server.id, rel_path="eula.txt"
+        )

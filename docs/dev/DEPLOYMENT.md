@@ -109,6 +109,18 @@ platform admin directly in the database (the only out-of-band step).
    (`user` is a reserved word in SQL, hence the quotes. Use the `POSTGRES_USER` /
    `POSTGRES_DB` values from your `.env` if you changed them.)
 
+### Accepting the Minecraft EULA on first run
+
+Mojang's server refuses to start until you accept its EULA: a fresh server writes
+`eula.txt` with `eula=false` and exits. The primary path is to accept the EULA at
+creation — pass `accept_eula: true` on `POST /communities/{cid}/servers`, which
+seeds `eula.txt` with `eula=true` into the server's initial working set so the
+first start does not crash. Acceptance is recorded as part of the audited create.
+
+If you create a server without `accept_eula`, the first start still crashes on the
+default `eula=false`; recover by editing `eula.txt` to `eula=true` (the file API)
+and starting again.
+
 ## 6. How Minecraft server ports reach clients
 
 The worker's container driver reads each server's `server.properties` and

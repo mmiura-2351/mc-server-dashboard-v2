@@ -24,7 +24,11 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import BackupNotFoundError
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupNotFoundError,
+    ServerFileNotFoundError,
+)
+from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     JarProvisioningError,
@@ -99,6 +103,60 @@ class FakeVersionValidator(VersionValidator):
             return
         if version not in self._offered.get(server_type, set()):
             raise UnknownVersionError(f"{server_type} {version}")
+
+
+class FakeFileStore(FileStore):
+    """In-memory authoritative-copy file store keyed by rel_path.
+
+    Backs the create-seeding tests: ``write_file`` records each seed write so a
+    test can assert what landed in the initial working set, and ``read_file``
+    serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path).
+    """
+
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+        self.writes: list[tuple[str, bytes]] = []
+
+    def validate_rel_path(self, rel_path: str) -> None:
+        return None
+
+    async def read_file(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bytes:
+        if rel_path not in self.files:
+            raise ServerFileNotFoundError(str(server_id.value))
+        return self.files[rel_path]
+
+    async def list_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> list[FileEntry]:
+        return []
+
+    async def write_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> None:
+        self.files[rel_path] = content
+        self.writes.append((rel_path, content))
+
+    async def list_versions(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> list[str]:
+        return []
+
+    async def rollback(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        version_id: str,
+    ) -> None:
+        return None
 
 
 class FakeClock(Clock):
