@@ -102,6 +102,10 @@ select = ["E", "F", "I"]
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+# test_migration_metadata_sync.py imports ``model_registry`` after a runtime
+# ``sys.path.insert(.../migrations)``; exposing that dir lets mypy resolve and
+# type-check the import regardless of invocation (``mypy .`` vs ``mypy src tests``).
+mypy_path = ["migrations"]
 # Generated stubs (mypy-protobuf output) are excluded from strict checking;
 # they are machine-generated and consumed via their own .pyi types.
 exclude = ["^src/mcsd/"]
