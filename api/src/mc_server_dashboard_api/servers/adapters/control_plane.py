@@ -161,11 +161,10 @@ class FleetControlPlaneAdapter(ControlPlane):
         # ONLINE means the Worker has a live, recently-beating session. A DRAINING
         # Worker stays connected (it just declines new placement), so it counts as
         # connected for snapshots of servers already on it.
-        target = _fleet_worker(worker_id)
-        return any(
-            snapshot.id == target
-            and snapshot.status in (WorkerStatus.ONLINE, WorkerStatus.DRAINING)
-            for snapshot in self._registry.list_workers()
+        snapshot = self._registry.get(_fleet_worker(worker_id))
+        return snapshot is not None and snapshot.status in (
+            WorkerStatus.ONLINE,
+            WorkerStatus.DRAINING,
         )
 
     def increment_assignment(self, *, worker_id: WorkerId) -> None:

@@ -239,6 +239,40 @@ def test_reregistration_resets_assignment_count() -> None:
     assert registry.list_workers()[0].assigned_count == 0
 
 
+# --- per-id lookup (#322) --------------------------------------------------
+
+
+def test_get_returns_registered_worker_snapshot() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    snapshot = registry.get(WorkerId("worker-1"))
+
+    assert snapshot is not None
+    assert snapshot.id == WorkerId("worker-1")
+    assert snapshot.status is WorkerStatus.ONLINE
+
+
+def test_get_returns_none_for_unknown_worker() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+
+    assert registry.get(WorkerId("ghost")) is None
+
+
+def test_get_reflects_disconnected_worker() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    session = registry.register(make_worker(at=_T0))
+
+    registry.mark_disconnected(WorkerId("worker-1"), session)
+
+    snapshot = registry.get(WorkerId("worker-1"))
+    assert snapshot is not None
+    assert snapshot.status is WorkerStatus.OFFLINE
+
+
 # --- placement candidates ---------------------------------------------------
 
 

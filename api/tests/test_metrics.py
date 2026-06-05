@@ -51,6 +51,9 @@ class _EmptyRegistry(WorkerRegistry):
     def list_workers(self) -> list[WorkerSnapshot]:
         return []
 
+    def get(self, worker_id):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
 
 class _FailingSession:
     """Async session whose query raises, simulating a DB outage at scrape."""
