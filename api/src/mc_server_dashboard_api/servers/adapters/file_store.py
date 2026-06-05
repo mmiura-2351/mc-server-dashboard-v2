@@ -15,6 +15,9 @@ layer.
 
 from __future__ import annotations
 
+import zipfile
+from collections.abc import AsyncIterator
+
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     ServerFileNotFoundError,
@@ -112,6 +115,70 @@ class StorageFileStoreAdapter(FileStore):
         except PathTraversalError as exc:
             raise InvalidFilePathError(rel_path) from exc
 
+    def download_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        # Build the zip incrementally over the Storage read stream (issue #259):
+        # walk the subtree via list_dir (cheap listings), then for each file read
+        # its bytes and write one zip entry, draining the zip's buffer after each
+        # entry. Peak memory is one in-flight file plus its just-written zip
+        # block — never the whole subtree. Storage's read_file / list_dir apply
+        # the filesystem-level traversal containment, so a hostile symlink inside
+        # the tree is refused at the seam, not zipped.
+        return self._download_dir_gen(community_id, server_id, rel_path)
+
+    async def _download_dir_gen(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        # Verify the directory exists up front so a missing/invalid path surfaces
+        # the servers error before any bytes are streamed.
+        await self.list_dir(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+        sink = _ZipStreamSink()
+        # An unseekable sink drives zipfile's streaming mode (data descriptors,
+        # no seek-back to patch headers), so each entry's bytes can be flushed
+        # out as soon as they are written. Peak memory is one in-flight file plus
+        # its just-written zip block, never the whole subtree.
+        with zipfile.ZipFile(sink, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            async for arcname, content in self._walk_files(
+                community_id, server_id, rel_path
+            ):
+                zf.writestr(arcname, content)
+                for chunk in sink.drain():
+                    yield chunk
+        for chunk in sink.drain():
+            yield chunk
+
+    async def _walk_files(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[tuple[str, bytes]]:
+        """Yield ``(arcname, bytes)`` for every file under ``rel_path``, depth-first.
+
+        Arcnames are relative to ``rel_path`` so the zip contains the subtree
+        itself, not the path leading to it.
+        """
+
+        base = "" if rel_path in ("", ".") else rel_path.rstrip("/")
+        stack = [base]
+        while stack:
+            current = stack.pop()
+            entries = await self.list_dir(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=current or ".",
+            )
+            for entry in entries:
+                child = f"{current}/{entry.name}" if current else entry.name
+                if entry.is_dir:
+                    stack.append(child)
+                    continue
+                content = await self.read_file(
+                    community_id=community_id, server_id=server_id, rel_path=child
+                )
+                arcname = child[len(base) + 1 :] if base else child
+                yield arcname, content
+
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[str]:
@@ -143,3 +210,40 @@ class StorageFileStoreAdapter(FileStore):
             raise InvalidFilePathError(rel_path) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
+
+
+class _ZipStreamSink:
+    """An unseekable byte sink for :class:`zipfile.ZipFile` streaming output.
+
+    ``ZipFile`` treats a sink that is not seekable as a stream: it emits data
+    descriptors instead of seeking back to patch each entry's local header, so
+    bytes can be flushed out as soon as they are written. The sink buffers what
+    ``ZipFile`` writes and hands it off in :meth:`drain`; ``tell`` reports the
+    running offset ``ZipFile`` needs for the central directory.
+    """
+
+    def __init__(self) -> None:
+        self._pending: list[bytes] = []
+        self._offset = 0
+
+    def write(self, data: bytes, /) -> int:
+        self._pending.append(bytes(data))
+        self._offset += len(data)
+        return len(data)
+
+    def tell(self) -> int:
+        return self._offset
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def seekable(self) -> bool:
+        return False
+
+    def drain(self) -> list[bytes]:
+        chunks = self._pending
+        self._pending = []
+        return chunks

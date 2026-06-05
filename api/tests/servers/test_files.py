@@ -15,18 +15,25 @@ plus the edit-size cap, rollback's at-rest-only rule, and the Worker file-status
 from __future__ import annotations
 
 import datetime as dt
+import io
 import logging
+import tarfile
 import uuid
+import zipfile
+from collections.abc import AsyncIterator
 from pathlib import PurePosixPath
 
 import pytest
 
 from mc_server_dashboard_api.servers.application.files import (
     MAX_EDIT_BYTES,
+    MAX_UPLOAD_BYTES,
+    DownloadFile,
     ListDir,
     ListFileVersions,
     ReadFile,
     RollbackFile,
+    UploadFile,
     WriteFile,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
@@ -113,6 +120,16 @@ class FakeFileStore(FileStore):
             raise InvalidFilePathError(rel_path)
         self.files[rel_path] = content
         self.writes.append((rel_path, content))
+
+    def download_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        async def _gen() -> AsyncIterator[bytes]:
+            if self.missing:
+                raise ServerFileNotFoundError(str(server_id.value))
+            yield b"zip-bytes"
+
+        return _gen()
 
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -885,3 +902,336 @@ async def test_rollback_running_is_not_stopped() -> None:
             version_id="v1",
         )
     assert store.rollbacks == []
+
+
+# --- upload: state branching + validation + extraction ---------------------
+
+
+def _stopped_uow(community: uuid.UUID, server_id: uuid.UUID) -> FakeUnitOfWork:
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+        ),
+    )
+    return uow
+
+
+def _running_uow(community: uuid.UUID, server_id: uuid.UUID) -> FakeUnitOfWork:
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=uuid.uuid4(),
+        ),
+    )
+    return uow
+
+
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _tar_gz_bytes(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+async def test_upload_at_rest_writes_single_file() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path="plugins",
+        filename="mod.jar",
+        content=b"jar-bytes",
+        extract=False,
+    )
+    assert store.files["plugins/mod.jar"] == b"jar-bytes"
+
+
+async def test_upload_root_dir_joins_filename_only() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path=".",
+        filename="server.properties",
+        content=b"x",
+        extract=False,
+    )
+    assert store.files["server.properties"] == b"x"
+
+
+async def test_upload_running_is_unsettled() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_running_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFilesUnsettledError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="f",
+            content=b"x",
+            extract=False,
+        )
+    assert store.files == {}
+
+
+async def test_upload_traversal_dir_is_invalid_path() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id), file_store=FakeFileStore()
+    )
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path="../escape",
+            filename="f",
+            content=b"x",
+            extract=False,
+        )
+
+
+async def test_upload_traversal_filename_is_invalid_path() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id), file_store=FakeFileStore()
+    )
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="../escape",
+            content=b"x",
+            extract=False,
+        )
+
+
+async def test_upload_over_cap_is_too_large() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id), file_store=FakeFileStore()
+    )
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="big.bin",
+            content=b"x" * (MAX_UPLOAD_BYTES + 1),
+            extract=False,
+        )
+
+
+async def test_upload_extract_zip_writes_each_entry() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    archive = _zip_bytes({"a.txt": b"A", "nested/b.txt": b"B"})
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path="datapacks",
+        filename="pack.zip",
+        content=archive,
+        extract=True,
+    )
+    assert store.files["datapacks/a.txt"] == b"A"
+    assert store.files["datapacks/nested/b.txt"] == b"B"
+
+
+async def test_upload_extract_tar_gz_writes_each_entry() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    archive = _tar_gz_bytes({"a.txt": b"A", "nested/b.txt": b"B"})
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path=".",
+        filename="pack.tar.gz",
+        content=archive,
+        extract=True,
+    )
+    assert store.files["a.txt"] == b"A"
+    assert store.files["nested/b.txt"] == b"B"
+
+
+async def test_upload_extract_zip_slip_entry_is_invalid_path() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    archive = _zip_bytes({"../escape.txt": b"pwned"})
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="evil.zip",
+            content=archive,
+            extract=True,
+        )
+
+
+async def test_upload_extract_zip_symlink_entry_is_invalid_path() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    # A zip member flagged as a unix symlink (S_IFLNK in external attrs).
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        info = zipfile.ZipInfo("link")
+        info.external_attr = (0o120777 & 0xFFFF) << 16
+        zf.writestr(info, "/etc/passwd")
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="evil.zip",
+            content=buf.getvalue(),
+            extract=True,
+        )
+
+
+async def test_upload_extract_over_size_cap_is_too_large() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    # A highly compressible payload: the archive is tiny (passes the raw-upload
+    # cap) but the cumulative extracted size exceeds it: the decompression-bomb
+    # guard. Use deflate so the zeros compress to almost nothing.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for i in range(600):
+            zf.writestr(f"f{i}.bin", b"\x00" * (1024 * 1024))
+    archive = buf.getvalue()
+    assert len(archive) <= MAX_UPLOAD_BYTES  # raw upload is under the cap
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="bomb.zip",
+            content=archive,
+            extract=True,
+        )
+
+
+async def test_upload_extract_unknown_archive_type_is_invalid_path() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id), file_store=FakeFileStore()
+    )
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="not-an-archive.bin",
+            content=b"x",
+            extract=True,
+        )
+
+
+# --- download: state branching + file vs dir -------------------------------
+
+
+async def test_download_file_bytes_at_rest() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = b"motd=hi"
+    use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    out = await use_case.file_bytes(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+    )
+    assert out == b"motd=hi"
+
+
+async def test_download_running_is_unsettled() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = DownloadFile(
+        uow=_running_uow(community, server_id), file_store=FakeFileStore()
+    )
+    with pytest.raises(ServerFilesUnsettledError):
+        await use_case.file_bytes(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="f",
+        )
+
+
+async def test_download_dir_zip_at_rest() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    stream = await use_case.dir_zip(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="world",
+    )
+    blob = b"".join([chunk async for chunk in stream])
+    assert blob == b"zip-bytes"
+
+
+async def test_download_is_dir_true_for_root() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = DownloadFile(
+        uow=_stopped_uow(community, server_id), file_store=FakeFileStore()
+    )
+    assert await use_case.is_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=".",
+    )
+
+
+async def test_download_is_dir_false_for_file() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = b"x"
+    store.missing = True  # list_dir raises -> falls through to read_file
+    use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    assert not await use_case.is_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+    )

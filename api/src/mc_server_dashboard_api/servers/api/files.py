@@ -7,39 +7,62 @@ opens exactly that server's files (FR-AUTHZ-2). The catalog codes are ``file:rea
 (browse + read), ``file:edit`` (write), ``file:history`` (versions), and
 ``file:rollback``.
 
-File content is carried base64-encoded in JSON so reads/writes are bytes-faithful
-(the proto fields are ``bytes``; no text/encoding mangling). The router is thin:
-it resolves use cases via DI, runs them, and maps the servers file errors to HTTP
-codes (404 keeps the no-existence-signal posture; a traversal-unsafe path is 422;
-an oversized edit is 413; a transitional server is 409; a disconnected worker is
-503).
+File content for the JSON read/write routes is carried base64-encoded so they are
+bytes-faithful (the proto fields are ``bytes``; no text/encoding mangling). Bulk
+transfer takes a different shape (issue #259): ``/files/upload`` is a multipart
+upload (``file:edit``) and ``/files/download`` streams a file's bytes or a
+directory as a zip (``file:read``); both are at-rest only (running -> 409
+``server_unsettled``) and are audited. The router is thin: it resolves use cases
+via DI, runs them, and maps the servers file errors to HTTP codes (404 keeps the
+no-existence-signal posture; a traversal-unsafe path is 422; an oversized edit /
+upload is 413; a transitional server is 409; a disconnected worker is 503).
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import posixpath
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from mc_server_dashboard_api.community.domain.value_objects import Permission
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
+from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
+    get_download_file,
     get_list_dir,
     get_list_file_versions,
     get_read_file,
     get_rollback_file,
+    get_upload_file,
     get_write_file,
     require_permission,
 )
 from mc_server_dashboard_api.servers.application.files import (
+    DownloadFile,
     ListDir,
     ListFileVersions,
     ReadFile,
     RollbackFile,
     WriteFile,
+)
+from mc_server_dashboard_api.servers.application.files import (
+    UploadFile as UploadFileUseCase,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
@@ -294,6 +317,178 @@ async def rollback_file(
         raise _unprocessable("invalid_path") from exc
     except ServerNotStoppedError as exc:
         raise _conflict("server_not_stopped") from exc
+
+
+@router.post(
+    "/communities/{community_id}/servers/{server_id}/files/upload",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def upload_file(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    file: UploadFile,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("file:edit"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[UploadFileUseCase, Depends(get_upload_file)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    path: Annotated[str, Query()] = ".",
+    extract: Annotated[bool, Query()] = False,
+) -> None:
+    """Upload a multipart file into ``path`` at rest (file:edit, FR-FILE-*).
+
+    At rest only (Section 6.9): a running server is 409 ``server_unsettled``,
+    reusing the unsettled posture other bulk at-rest ops take. With
+    ``extract=true`` a zip / tar.gz is expanded under ``path`` with per-entry
+    traversal validation (zip-slip defence) and a total-extracted-size cap.
+    """
+
+    filename = file.filename or ""
+    content = await file.read()
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            dir_path=path,
+            filename=filename,
+            content=content,
+            extract=extract,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable("invalid_path") from exc
+    except FileTooLargeError as exc:
+        raise _too_large() from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+    await _record_file(recorder, ops.FILE_UPLOAD, authorized, community_id, server_id)
+
+
+@router.get("/communities/{community_id}/servers/{server_id}/files/download")
+async def download_file(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("file:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[DownloadFile, Depends(get_download_file)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    path: Annotated[str, Query()] = ".",
+) -> Response:
+    """Download a file (bytes) or a directory (streamed zip) at rest (file:read).
+
+    At rest only (Section 6.9): a running server is 409 ``server_unsettled``. A
+    directory streams as a zip built incrementally over the Storage read stream
+    (bounded memory); a file streams its bytes with an attachment disposition.
+    """
+
+    try:
+        is_dir = await use_case.is_dir(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            rel_path=path,
+        )
+        if is_dir:
+            stream = await use_case.dir_zip(
+                community_id=CommunityId(community_id),
+                server_id=ServerId(server_id),
+                rel_path=path,
+            )
+            name = posixpath.basename(path.rstrip("/")) or "root"
+            response: Response = StreamingResponse(
+                stream,
+                media_type="application/zip",
+                headers={"Content-Disposition": f'attachment; filename="{name}.zip"'},
+            )
+        else:
+            content = await use_case.file_bytes(
+                community_id=CommunityId(community_id),
+                server_id=ServerId(server_id),
+                rel_path=path,
+            )
+            name = posixpath.basename(path) or "download"
+            response = Response(
+                content=content,
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{name}"'},
+            )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFileNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable("invalid_path") from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+    await _record_file(recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id)
+    return response
+
+
+async def _record_file(
+    recorder: AuditRecorder,
+    operation: str,
+    authorized: AuthUser,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+) -> None:
+    """Record a successful file upload/download (FR-AUD-1).
+
+    A file has no UUID id of its own, so the event targets the owning server
+    (``target_type=file``); the path lives off the audit row's UUID columns.
+    """
+
+    await recorder.record(
+        AuditEvent(
+            operation=operation,
+            outcome=Outcome.SUCCESS,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_FILE,
+            target_id=server_id,
+        )
+    )
+
+
+async def _record_file_failure(
+    recorder: AuditRecorder,
+    operation: str,
+    authorized: AuthUser,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+) -> None:
+    """Record a refused file op (DENIED — server unsettled), targeting the server."""
+
+    await recorder.record(
+        AuditEvent(
+            operation=operation,
+            outcome=Outcome.DENIED,
+            actor_id=authorized.user_id.value,
+            community_id=community_id,
+            target_type=ops.TARGET_FILE,
+            target_id=server_id,
+        )
+    )
 
 
 def _decode(content_base64: str) -> bytes:

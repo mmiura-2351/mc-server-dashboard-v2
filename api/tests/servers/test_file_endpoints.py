@@ -39,12 +39,14 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.dependencies import (
     get_current_user,
+    get_download_file,
     get_list_dir,
     get_list_file_versions,
     get_membership_visibility,
     get_permission_checker,
     get_read_file,
     get_rollback_file,
+    get_upload_file,
     get_write_file,
 )
 from mc_server_dashboard_api.servers.application.files import DirListing
@@ -100,6 +102,54 @@ def _client(app: object) -> Iterator[TestClient]:
         yield client
 
 
+class _FakeUpload:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self._error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(self, **kwargs: object) -> None:
+        self.calls.append(kwargs)
+        if self._error is not None:
+            raise self._error
+
+
+class _FakeDownload:
+    """Fake :class:`DownloadFile` with its file/dir method surface."""
+
+    def __init__(
+        self,
+        *,
+        is_dir: bool = False,
+        file_content: bytes = b"",
+        zip_chunks: list[bytes] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._is_dir = is_dir
+        self._file_content = file_content
+        self._zip_chunks = zip_chunks or [b"zip"]
+        self._error = error
+        self.calls: list[str] = []
+
+    async def is_dir(self, **kwargs: object) -> bool:
+        self.calls.append("is_dir")
+        if self._error is not None:
+            raise self._error
+        return self._is_dir
+
+    async def file_bytes(self, **kwargs: object) -> bytes:
+        self.calls.append("file_bytes")
+        return self._file_content
+
+    async def dir_zip(self, **kwargs: object) -> object:
+        self.calls.append("dir_zip")
+
+        async def _gen() -> object:
+            for chunk in self._zip_chunks:
+                yield chunk
+
+        return _gen()
+
+
 def _app(
     *,
     member: bool,
@@ -109,6 +159,8 @@ def _app(
     write: _FakeUseCase | None = None,
     history: _FakeUseCase | None = None,
     rollback: _FakeUseCase | None = None,
+    upload: _FakeUpload | None = None,
+    download: _FakeDownload | None = None,
 ) -> object:
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: make_user()
@@ -126,6 +178,10 @@ def _app(
         app.dependency_overrides[get_list_file_versions] = lambda: history
     if rollback is not None:
         app.dependency_overrides[get_rollback_file] = lambda: rollback
+    if upload is not None:
+        app.dependency_overrides[get_upload_file] = lambda: upload
+    if download is not None:
+        app.dependency_overrides[get_download_file] = lambda: download
     return app
 
 
@@ -373,6 +429,163 @@ def test_rollback_while_running_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["detail"]["reason"] == "server_not_stopped"
+
+
+# --- upload ----------------------------------------------------------------
+
+
+def test_upload_single_file_is_204() -> None:
+    upload = _FakeUpload()
+    app = _app(member=True, allow=True, upload=upload)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        params={"path": "plugins"},
+        files={"file": ("mod.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 204
+    assert upload.calls[0]["filename"] == "mod.jar"
+    assert upload.calls[0]["content"] == b"jar-bytes"
+    assert upload.calls[0]["dir_path"] == "plugins"
+    assert upload.calls[0]["extract"] is False
+
+
+def test_upload_extract_flag_passed() -> None:
+    upload = _FakeUpload()
+    app = _app(member=True, allow=True, upload=upload)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        params={"path": ".", "extract": "true"},
+        files={"file": ("pack.zip", b"zip-bytes", "application/zip")},
+    )
+    assert resp.status_code == 204
+    assert upload.calls[0]["extract"] is True
+
+
+def test_upload_requires_file_edit_permission() -> None:
+    app = _app(member=True, allow=False, upload=_FakeUpload())
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+    assert resp.status_code == 403
+
+
+def test_upload_traversal_filename_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        upload=_FakeUpload(error=InvalidFilePathError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "invalid_path"
+
+
+def test_upload_running_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        upload=_FakeUpload(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
+
+
+def test_upload_over_cap_is_413() -> None:
+    app = _app(
+        member=True, allow=True, upload=_FakeUpload(error=FileTooLargeError("x"))
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["detail"]["reason"] == "file_too_large"
+
+
+# --- download --------------------------------------------------------------
+
+
+def test_download_file_returns_bytes() -> None:
+    raw = bytes(range(256))
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(is_dir=False, file_content=raw)
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "level.dat"},
+    )
+    assert resp.status_code == 200
+    assert resp.content == raw
+    assert "attachment" in resp.headers["content-disposition"]
+    assert resp.headers["content-disposition"].endswith('"level.dat"')
+
+
+def test_download_dir_returns_zip_stream() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(is_dir=True, zip_chunks=[b"PK", b"zip-tail"]),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "world"},
+    )
+    assert resp.status_code == 200
+    assert resp.content == b"PKzip-tail"
+    assert resp.headers["content-type"] == "application/zip"
+    assert resp.headers["content-disposition"].endswith('"world.zip"')
+
+
+def test_download_requires_file_read_permission() -> None:
+    app = _app(member=True, allow=False, download=_FakeDownload())
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+    )
+    assert resp.status_code == 403
+
+
+def test_download_missing_is_404() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=ServerFileNotFoundError("x")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+    )
+    assert resp.status_code == 404
+
+
+def test_download_running_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
 
 
 # --- per-resource grant (real checker) -------------------------------------
