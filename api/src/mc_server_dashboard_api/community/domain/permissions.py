@@ -46,6 +46,8 @@ COMMUNITY_PERMISSIONS: frozenset[Permission] = frozenset(
         "role:manage",
         "grant:read",
         "grant:manage",
+        "group:read",
+        "group:manage",
         "community:read",
         "community:update",
         "community:delete",

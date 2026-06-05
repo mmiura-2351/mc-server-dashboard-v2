@@ -91,6 +91,16 @@ FILE_SEARCH: Final = "file:search"
 WORKER_DRAIN_SET: Final = "worker:drain_set"
 WORKER_DRAIN_CLEAR: Final = "worker:drain_clear"
 
+# Player-group CRUD / player edits / attach-detach (issue #276). Recorded under
+# the group:manage permission the mutating routes require.
+GROUP_CREATE: Final = "group:create"
+GROUP_UPDATE: Final = "group:update"
+GROUP_DELETE: Final = "group:delete"
+GROUP_PLAYER_ADD: Final = "group:player_add"
+GROUP_PLAYER_REMOVE: Final = "group:player_remove"
+GROUP_ATTACH: Final = "group:attach"
+GROUP_DETACH: Final = "group:detach"
+
 # Target-type names (the ``target_type`` column).
 TARGET_COMMUNITY: Final = "community"
 TARGET_USER: Final = "user"
@@ -100,3 +110,4 @@ TARGET_SERVER: Final = "server"
 TARGET_BACKUP: Final = "backup"
 TARGET_WORKER: Final = "worker"
 TARGET_FILE: Final = "file"
+TARGET_GROUP: Final = "group"

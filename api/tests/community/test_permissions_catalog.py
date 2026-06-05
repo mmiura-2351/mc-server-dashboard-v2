@@ -50,6 +50,8 @@ def test_community_codes_match_appendix_a() -> None:
         "role:manage",
         "grant:read",
         "grant:manage",
+        "group:read",
+        "group:manage",
         "community:read",
         "community:update",
         "community:delete",

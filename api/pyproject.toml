@@ -313,7 +313,10 @@ forbidden_modules = [
 # by id value only, DATABASE.md Section 7; the backend enum is duplicated rather
 # than imported from fleet). The server-delete grant sweep is composed at the
 # adapter layer (the servers UnitOfWork reuses the community resource-grant
-# adapter on one session), so the domain never reaches across.
+# adapter on one session), so the domain never reaches across. The player-groups
+# slice (issue #276) lives inside this same context (servers.{domain,application,
+# adapters,api}.groups), so it is covered by these contracts and adds none — the
+# kept-contract count stays 23.
 [[tool.importlinter.contracts]]
 name = "servers context layers (domain <- application <- api; adapters at the edge)"
 type = "layers"

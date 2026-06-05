@@ -192,6 +192,19 @@ from mc_server_dashboard_api.servers.application.files import (
     UploadFile,
     WriteFile,
 )
+from mc_server_dashboard_api.servers.application.groups import (
+    AddPlayer,
+    AttachGroup,
+    CreateGroup,
+    DeleteGroup,
+    DetachGroup,
+    ListGroups,
+    ListGroupServers,
+    ListServerGroups,
+    ReadGroup,
+    RemovePlayer,
+    RenameGroup,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     SendServerCommand,
@@ -948,6 +961,102 @@ def get_delete_server(request: Request) -> DeleteServer:
 
     session_factory = create_session_factory(get_engine(request))
     return DeleteServer(uow=ServersUnitOfWork(session_factory))
+
+
+def get_create_group(request: Request) -> CreateGroup:
+    """Assemble the :class:`CreateGroup` use case (group:manage, issue #276)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return CreateGroup(uow=ServersUnitOfWork(session_factory))
+
+
+def get_list_groups(request: Request) -> ListGroups:
+    """Assemble the :class:`ListGroups` use case (group:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListGroups(uow=ServersUnitOfWork(session_factory))
+
+
+def get_read_group(request: Request) -> ReadGroup:
+    """Assemble the :class:`ReadGroup` use case (group:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ReadGroup(uow=ServersUnitOfWork(session_factory))
+
+
+def get_rename_group(request: Request) -> RenameGroup:
+    """Assemble the :class:`RenameGroup` use case (group:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RenameGroup(uow=ServersUnitOfWork(session_factory))
+
+
+def get_delete_group(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> DeleteGroup:
+    """Assemble the :class:`DeleteGroup` use case (group:manage).
+
+    Binds the file seam so deleting a group resyncs the at-rest servers it was
+    attached to (its players leave their ops.json / whitelist.json).
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteGroup(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+
+
+def get_add_player(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> AddPlayer:
+    """Assemble the :class:`AddPlayer` use case (group:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return AddPlayer(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+
+
+def get_remove_player(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> RemovePlayer:
+    """Assemble the :class:`RemovePlayer` use case (group:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RemovePlayer(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+
+
+def get_attach_group(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> AttachGroup:
+    """Assemble the :class:`AttachGroup` use case (group:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return AttachGroup(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+
+
+def get_detach_group(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> DetachGroup:
+    """Assemble the :class:`DetachGroup` use case (group:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DetachGroup(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+
+
+def get_list_group_servers(request: Request) -> ListGroupServers:
+    """Assemble the :class:`ListGroupServers` use case (group:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListGroupServers(uow=ServersUnitOfWork(session_factory))
+
+
+def get_list_server_groups(request: Request) -> ListServerGroups:
+    """Assemble the :class:`ListServerGroups` use case (group:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListServerGroups(uow=ServersUnitOfWork(session_factory))
 
 
 def _port_range(request: Request) -> PortRange:

@@ -247,3 +247,46 @@ class InvalidExportMetadataError(ServerError):
     ``mc_version`` themselves are validated downstream by the shared create path
     (the version validator), which yields its own distinct 422 reasons.
     """
+
+
+class InvalidGroupNameError(ServerError):
+    """A player-group name failed its validation rules (e.g. blank, issue #276)."""
+
+
+class InvalidGroupKindError(ServerError):
+    """The group ``kind`` is outside the supported set (op / whitelist, #276).
+
+    The edge maps this to 422.
+    """
+
+
+class InvalidPlayerError(ServerError):
+    """A player entry was invalid (e.g. blank username, issue #276).
+
+    The edge maps this to 422.
+    """
+
+
+class GroupNotFoundError(ServerError):
+    """A group operation targeted a group that does not exist in the community.
+
+    Raised when the group id is unknown or belongs to a *different* community
+    (cross-community access): reported as not-found so no cross-community existence
+    signal leaks (FR-COMM-3), the same posture as a missing server. The edge maps
+    this to 404.
+    """
+
+
+class GroupNameAlreadyExistsError(ServerError):
+    """Create/rename hit the per-community, per-kind group name uniqueness rule.
+
+    A group name is unique within ``(community_id, kind)``. The edge maps this to
+    409 (issue #276).
+    """
+
+
+class GroupAttachmentNotFoundError(ServerError):
+    """A detach targeted a group/server pair that is not attached (issue #276).
+
+    The edge maps this to 404.
+    """
