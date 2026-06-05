@@ -150,3 +150,43 @@ func TestLogPumpEmitAfterCloseIsNoOp(t *testing.T) {
 		t.Fatal("expected no lines after Close")
 	}
 }
+
+// The pump fires its readiness signal when a Minecraft "Done (X.XXXs)! For
+// help" startup line passes through, so a driver can hold StateStarting until
+// the server is actually accepting connections (issue #345).
+func TestLogPumpReadyOnDoneLine(t *testing.T) {
+	p := NewLogPump("s1", 16)
+	p.Emit(`[12:00:00] [Server thread/INFO]: Done (12.345s)! For help, type "help"`, LogStreamStdout)
+
+	select {
+	case <-p.Ready():
+	default:
+		t.Fatal("expected Ready to fire on the Done startup line")
+	}
+}
+
+// A line that is not the readiness marker leaves Ready unfired.
+func TestLogPumpNotReadyOnOtherLines(t *testing.T) {
+	p := NewLogPump("s1", 16)
+	p.Emit("[Server thread/INFO]: Preparing spawn area: 23%", LogStreamStdout)
+
+	select {
+	case <-p.Ready():
+		t.Fatal("Ready fired on a non-readiness line")
+	default:
+	}
+}
+
+// Ready is a one-shot: a second matching line does not re-close the channel
+// (which would panic).
+func TestLogPumpReadyFiresOnce(t *testing.T) {
+	p := NewLogPump("s1", 16)
+	p.Emit(`Done (1.000s)! For help, type "help"`, LogStreamStdout)
+	p.Emit(`Done (2.000s)! For help, type "help"`, LogStreamStdout)
+
+	select {
+	case <-p.Ready():
+	default:
+		t.Fatal("expected Ready to fire")
+	}
+}

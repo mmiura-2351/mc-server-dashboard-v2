@@ -10,7 +10,9 @@ server state per the 6.9 table:
   act here.
 - **running** (desired=running, observed=running, a worker assigned) → the
   Worker's live working set, through the :class:`ControlPlane` seam's
-  ReadFile/EditFile (ARCHITECTURE.md Section 7.2). A disconnected worker surfaces
+  ReadFile/EditFile (ARCHITECTURE.md Section 7.2). A running edit first snapshots
+  the authoritative copy into a version (#344) so it is as recoverable as an
+  at-rest edit (FR-FILE-3). A disconnected worker surfaces
   :class:`WorkerUnavailableError` (the edge returns 503).
 - **anything else** (starting/stopping/restarting/crashed, or a desired/observed
   mismatch) → :class:`ServerFilesUnsettledError` (the edge returns 409): neither
@@ -297,6 +299,13 @@ class WriteFile:
             return
         if _is_running(server):
             self.file_store.validate_rel_path(rel_path)
+            # Version the authoritative copy before the worker overwrites the live
+            # working set, so a running edit is as recoverable as an at-rest one
+            # (FR-FILE-3, #344). The worker's EditFile mutates only the live set and
+            # the stop-time snapshot then publishes it as the new authoritative copy,
+            # laundering away whatever it replaced — so the prior content must be
+            # snapshotted HERE or it is lost forever.
+            await self._snapshot_authoritative(community_id, server_id, rel_path)
             outcome = await self.control_plane.edit_file(
                 worker_id=server.assigned_worker_id,  # type: ignore[arg-type]
                 server_id=server_id,
@@ -315,13 +324,55 @@ class WriteFile:
         # flow is possible post-M1.)
         raise ServerFilesUnsettledError(str(server_id.value))
 
+    async def _snapshot_authoritative(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        """Retain the current authoritative bytes of ``rel_path`` as a version.
+
+        Re-writes the file's current bytes unchanged through the seam, which
+        retains them as a version via the same retain-before-overwrite path the
+        at-rest edit uses (FileStore.write_file, FR-FILE-3) while leaving the
+        authoritative ``current/`` content identical.
+
+        Subtleties:
+
+        - The authoritative copy may be STALE relative to the live working set
+          (a worker holds the live set; Storage's ``current/`` is frozen until the
+          next snapshot). We can only retain what Storage holds — that staleness is
+          inherent, not a bug.
+        - A file created while running has no authoritative copy yet
+          (:class:`ServerFileNotFoundError`): there is nothing to retain, so the
+          edit proceeds unversioned rather than failing.
+        - Each running edit snapshots again, so repeated running edits to the same
+          path retain a version per edit (of the same frozen authoritative bytes).
+          This mirrors the at-rest edit (one version per edit) and is kept simple;
+          deduping would need a retain-only-if-changed primitive the seam does not
+          expose.
+        """
+
+        try:
+            current = await self.file_store.read_file(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+        except ServerFileNotFoundError:
+            return
+        await self.file_store.write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=rel_path,
+            content=current,
+        )
+
 
 @dataclass(frozen=True)
 class ListFileVersions:
     """List retained prior versions of a file (file:history, FR-FILE-3).
 
     History lives only on the authoritative copy; a running server still answers
-    from Storage (versions are produced by authoritative-copy edits).
+    from Storage. Versions are produced by every user edit: an at-rest edit
+    retains the prior content before overwriting, and a running edit snapshots the
+    authoritative copy before dispatching to the worker (#344), so both branches
+    populate history.
     """
 
     uow: UnitOfWork

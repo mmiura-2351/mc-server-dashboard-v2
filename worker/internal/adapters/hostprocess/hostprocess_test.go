@@ -126,6 +126,16 @@ func (fixedSelector) Select(string) (string, error) { return "/jvm/21/bin/java",
 
 func newTestDriver(t *testing.T, proc *fakeProcess, ctrl execution.ServerControl, ctrlErr error) *Driver {
 	t.Helper()
+	// A short readiness fallback lets tests that do not feed a Done marker reach
+	// running promptly via the timeout path (issue #345).
+	return newReadinessTestDriver(t, proc, 20*time.Millisecond, ctrl, ctrlErr)
+}
+
+// newReadinessTestDriver builds a driver with an explicit readiness fallback
+// timeout so the readiness tests (issue #345) can isolate the marker path (long
+// timeout) from the fallback path (short timeout).
+func newReadinessTestDriver(t *testing.T, proc *fakeProcess, readinessTimeout time.Duration, ctrl execution.ServerControl, ctrlErr error) *Driver {
+	t.Helper()
 	spawn := func(_ context.Context, _ string, _ []string, _ string) (process, error) {
 		if proc.startErr != nil {
 			return nil, proc.startErr
@@ -135,11 +145,52 @@ func newTestDriver(t *testing.T, proc *fakeProcess, ctrl execution.ServerControl
 	}
 	return New(fixedSelector{}, spawn, func(context.Context, execution.InstanceSpec) (execution.ServerControl, error) {
 		return ctrl, ctrlErr
-	}, Options{StopTimeout: 50 * time.Millisecond})
+	}, Options{StopTimeout: 50 * time.Millisecond, ReadinessTimeout: readinessTimeout})
 }
 
 func spec() execution.InstanceSpec {
 	return execution.InstanceSpec{ServerID: "s1", WorkingDir: "/scratch/s1", MinecraftVersion: "1.21"}
+}
+
+// awaitLogLine reads the Logs() stream until a line containing want surfaces. It
+// is the deterministic synchronization point the hold-on-starting test relies on:
+// once a benign boot line appears on Logs(), the scan goroutine has consumed the
+// boot window, and since markReadyIfDone runs synchronously before a line is
+// queued (logpump.go), any readiness marker present would already have fired
+// Ready. So the marker has provably NOT been seen yet — no sleep needed.
+func awaitLogLine(t *testing.T, ch <-chan execution.LogEvent, want string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("log channel closed before reaching %q", want)
+			}
+			if strings.Contains(ev.Line, want) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for log line %q", want)
+		}
+	}
+}
+
+// observedRunning reports whether any StateRunning event is currently buffered on
+// ch. It drains non-blocking: every emit up to the caller's synchronization point
+// has already completed, so a running event — if one was wrongly emitted before
+// readiness — is sitting in the buffer to be observed here.
+func observedRunning(ch <-chan execution.StatusEvent) bool {
+	for {
+		select {
+		case ev := <-ch:
+			if ev.State == execution.StateRunning {
+				return true
+			}
+		default:
+			return false
+		}
+	}
 }
 
 // drainTo collects status events until it sees want or times out.
@@ -172,6 +223,96 @@ func TestStartReachesRunning(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateRunning)
 	if inst.Status() != execution.StateRunning {
 		t.Fatalf("Status = %v, want running", inst.Status())
+	}
+}
+
+// Running is reported only after the server logs its startup-complete "Done"
+// line; until then the instance holds StateStarting so a client gating console
+// input on running does not hit the RCON boot window (issue #345).
+//
+// This pins the PR's core invariant: running is never observed BEFORE the
+// readiness marker. The stdout stream is held open (an io.Pipe) without the Done
+// line and the readiness timeout is long, so neither the marker path nor the
+// fallback can fire. A benign boot line driven through to Logs() is the
+// deterministic synchronization point (see awaitLogLine): once it surfaces, the
+// instance must still be starting with no running event emitted; only after the
+// Done line is written does running arrive. Re-introducing the pre-fix immediate
+// StateRunning emit in beginLaunchTail makes the negative assertions below fail.
+func TestStartHoldsStartingUntilReadyMarker(t *testing.T) {
+	pr, pw := io.Pipe()
+	proc := newFakeProcess()
+	proc.stdout = pr
+	// A long readiness timeout means only the Done marker can drive running here;
+	// the fallback path is covered by TestStartReachesRunningViaFallbackTimeout.
+	d := newReadinessTestDriver(t, proc, 10*time.Second, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	src, ok := inst.(execution.LogSource)
+	if !ok {
+		t.Fatal("host-process instance should be a LogSource")
+	}
+
+	// Drive a benign boot line (NOT the marker) and wait for it on Logs(). Its
+	// arrival proves the scan goroutine consumed the boot window without seeing the
+	// marker, so awaitReady cannot have transitioned to running.
+	if _, err := io.WriteString(pw,
+		"[12:00:00] [Server thread/INFO]: Starting minecraft server\n"); err != nil {
+		t.Fatalf("write boot line: %v", err)
+	}
+	awaitLogLine(t, src.Logs(), "Starting minecraft server")
+
+	// The negative assertions: the instance is still starting and no running event
+	// was emitted before the readiness marker.
+	if got := inst.Status(); got != execution.StateStarting {
+		t.Fatalf("Status = %v before the readiness marker, want starting", got)
+	}
+	if observedRunning(inst.Events()) {
+		t.Fatal("running was emitted before the readiness marker")
+	}
+
+	// Now feed the marker; running must arrive.
+	if _, err := io.WriteString(pw,
+		`[12:00:03] [Server thread/INFO]: Done (3.210s)! For help, type "help"`+"\n"); err != nil {
+		t.Fatalf("write done line: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+	_ = pw.Close()
+}
+
+// With no readiness marker in the logs, the instance still reaches running once
+// the fallback timeout elapses, so a server whose log format differs never
+// sticks in starting forever (issue #345).
+func TestStartReachesRunningViaFallbackTimeout(t *testing.T) {
+	proc := newFakeProcess() // empty stdout/stderr: the Done marker never appears
+	d := newReadinessTestDriver(t, proc, 30*time.Millisecond, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+}
+
+// A process that exits while still starting (before any readiness marker)
+// surfaces as crashed, not running: a boot crash (e.g. eula=false) must not be
+// masked by the readiness wait (issue #345).
+func TestStartExitDuringStartingReportsCrashed(t *testing.T) {
+	proc := newFakeProcess()
+	// A long readiness timeout: the exit, not the fallback, must drive the state.
+	d := newReadinessTestDriver(t, proc, 10*time.Second, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The process exits before any Done line; the instance must go crashed.
+	proc.exit(errors.New("exit status 1"))
+	drainTo(t, inst.Events(), execution.StateCrashed)
+	if inst.Status() == execution.StateRunning {
+		t.Fatal("instance reported running after a boot crash")
 	}
 }
 

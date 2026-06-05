@@ -8,9 +8,11 @@
 // or fails it falls back to SIGTERM, then escalates to SIGKILL after the
 // configured stop timeout. A forced stop skips RCON and signals directly.
 //
-// Readiness posture (M1): a successful spawn transitions starting→running
-// immediately. Log-based "Done" readiness detection is deliberately out of scope
-// for this milestone (it lands with log streaming, FR-MON-2).
+// Readiness posture: a successful spawn enters StateStarting; the instance is
+// held there until the server logs its startup-complete "Done (X.XXXs)! For
+// help" line (by which point RCON is listening), then transitions to running. A
+// bounded fallback timeout reports running anyway if the marker never appears,
+// so a server whose log format omits it never sticks in starting (issue #345).
 package hostprocess
 
 import (
@@ -59,16 +61,28 @@ type Options struct {
 	// StopTimeout bounds each escalation step of a graceful stop (RCON→SIGTERM,
 	// SIGTERM→SIGKILL). Zero uses defaultStopTimeout.
 	StopTimeout time.Duration
+	// ReadinessTimeout bounds how long the driver holds StateStarting waiting for
+	// the server's startup-complete log marker before falling back to running
+	// (issue #345). Zero uses defaultReadinessTimeout.
+	ReadinessTimeout time.Duration
 }
 
 const defaultStopTimeout = 30 * time.Second
 
+// defaultReadinessTimeout bounds how long the driver holds StateStarting waiting
+// for the server's startup-complete log marker before falling back to running
+// (issue #345). It is generous enough for a modded server's boot (tens of
+// seconds) while never leaving a server stuck in starting when its log format
+// omits the marker.
+const defaultReadinessTimeout = 5 * time.Minute
+
 // Driver is the host-process ExecutionDriver.
 type Driver struct {
-	selector    execution.JavaRuntimeSelector
-	spawn       spawnFunc
-	openControl controlFunc
-	stopTimeout time.Duration
+	selector         execution.JavaRuntimeSelector
+	spawn            spawnFunc
+	openControl      controlFunc
+	stopTimeout      time.Duration
+	readinessTimeout time.Duration
 }
 
 // New builds a host-process Driver. selector picks the Java runtime; spawn is the
@@ -78,11 +92,16 @@ func New(selector execution.JavaRuntimeSelector, spawn spawnFunc, openControl co
 	if timeout <= 0 {
 		timeout = defaultStopTimeout
 	}
+	readinessTimeout := opts.ReadinessTimeout
+	if readinessTimeout <= 0 {
+		readinessTimeout = defaultReadinessTimeout
+	}
 	return &Driver{
-		selector:    selector,
-		spawn:       spawn,
-		openControl: openControl,
-		stopTimeout: timeout,
+		selector:         selector,
+		spawn:            spawn,
+		openControl:      openControl,
+		stopTimeout:      timeout,
+		readinessTimeout: readinessTimeout,
 	}
 }
 
@@ -105,15 +124,16 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	}
 
 	inst := &instance{
-		spec:        spec,
-		javaPath:    javaPath,
-		spawn:       d.spawn,
-		openControl: d.openControl,
-		stopTimeout: d.stopTimeout,
-		events:      make(chan execution.StatusEvent, 8),
-		exited:      make(chan struct{}),
-		state:       execution.StateStarting,
-		logPump:     execution.NewLogPump(spec.ServerID, logBufferLines),
+		spec:             spec,
+		javaPath:         javaPath,
+		spawn:            d.spawn,
+		openControl:      d.openControl,
+		stopTimeout:      d.stopTimeout,
+		readinessTimeout: d.readinessTimeout,
+		events:           make(chan execution.StatusEvent, 8),
+		exited:           make(chan struct{}),
+		state:            execution.StateStarting,
+		logPump:          execution.NewLogPump(spec.ServerID, logBufferLines),
 	}
 	inst.emit(execution.StateStarting, "")
 
@@ -159,6 +179,9 @@ type instance struct {
 	proc        process
 	openControl controlFunc
 	stopTimeout time.Duration
+	// readinessTimeout bounds the hold-on-starting wait before falling back to
+	// running (issue #345).
+	readinessTimeout time.Duration
 
 	events chan execution.StatusEvent
 	// exited is closed by supervise once the process has reached a terminal
@@ -219,8 +242,9 @@ func (i *instance) beginLaunch(proc process) {
 	i.beginLaunchTail(proc)
 }
 
-// beginLaunchTail wires log capture, marks the instance running, and starts the
-// exit supervisor for an already-published launch process. superviseInstall calls
+// beginLaunchTail wires log capture, starts the exit supervisor, and holds
+// StateStarting until the server reports readiness (the startup-complete log
+// marker) before transitioning to running (issue #345). superviseInstall calls
 // it after publishing the launch under the latch lock, so the publish and the
 // stopping re-check stay one critical section (issue #306).
 func (i *instance) beginLaunchTail(proc process) {
@@ -231,10 +255,28 @@ func (i *instance) beginLaunchTail(proc process) {
 	go i.scan(proc.Stdout(), execution.LogStreamStdout)
 	go i.scan(proc.Stderr(), execution.LogStreamStderr)
 
-	i.set(execution.StateRunning)
-	i.emit(execution.StateRunning, "")
-
 	go i.supervise()
+	go i.awaitReady()
+}
+
+// awaitReady holds StateStarting until the server's startup-complete log marker
+// appears (RCON is listening by then), the readiness fallback elapses, or the
+// process exits first; only the first two transition to running (issue #345).
+// The transition is gated under the lock on the instance still being in
+// StateStarting, so a process that crashed while booting (supervise set crashed)
+// or a Stop that latched stopping is never overwritten with running.
+func (i *instance) awaitReady() {
+	if !execution.WaitReady(i.logPump.Ready(), i.exited, i.readinessTimeout) {
+		return // the process exited first; supervise owns the terminal state.
+	}
+	i.mu.Lock()
+	if i.state != execution.StateStarting {
+		i.mu.Unlock()
+		return
+	}
+	i.state = execution.StateRunning
+	i.mu.Unlock()
+	i.emit(execution.StateRunning, "")
 }
 
 // superviseInstall runs the supervised Forge installer to completion, then execs
