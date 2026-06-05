@@ -20,7 +20,10 @@
     "  orphan_pending     - a failed-stop orphan is recorded (issue #251/#253)",
     "  driver_unavailable - the requested driver is not offered by this Worker",
     "  missing_path       - the file/dir target does not exist in the working set",
-    "  unsafe_path        - a traversal-rejected path (FR-FILE-4)"
+    "  unsafe_path        - a traversal-rejected path (FR-FILE-4)",
+    "This table pins the deterministic per-kind precondition codes only; the",
+    "environment-dependent 'internal' and 'transfer_failed' codes are",
+    "intentionally left unpinned."
   ],
   "rows": [
     {"kind": "StartServer", "precondition": "instance_stopped", "code": "ok"},

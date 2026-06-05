@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - "api/**"
+      - "proto/contract/**"
       - "Makefile"
       - ".github/workflows/api.yml"
   push:
     branches: [main]
     paths:
       - "api/**"
+      - "proto/contract/**"
       - "Makefile"
       - ".github/workflows/api.yml"
 
