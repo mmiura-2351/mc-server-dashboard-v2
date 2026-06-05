@@ -89,10 +89,11 @@ BACKUP_DOWNLOAD: Final = "backup:download"
 #
 # Audit rule for file routes (issue #263): MUTATIONS are audited (write,
 # rollback, rename, delete, mkdir, upload), and so are bulk / exfiltration-shaped
-# READS (download) -- but granular reads (read a single file, list a directory,
-# list a file's versions) are NOT, as they are high-volume and low-signal. This
-# matches the backup posture: backup create/restore/delete/upload/download are
-# audited while the granular backup:read routes (list, statistics) are not.
+# or enumerating READS (download, search) -- but granular reads (read a single
+# file, list a directory, list a file's versions) are NOT, as they are
+# high-volume and low-signal. This matches the backup posture: backup
+# create/restore/delete/upload/download are audited while the granular
+# backup:read routes (list, statistics) are not.
 FILE_WRITE: Final = "file:write"
 FILE_ROLLBACK: Final = "file:rollback"
 FILE_UPLOAD: Final = "file:upload"
