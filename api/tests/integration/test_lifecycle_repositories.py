@@ -169,6 +169,201 @@ async def test_record_observed_state_unassign_clears_assignment(
     assert loaded.assigned_worker_id is None
 
 
+async def test_record_observed_state_drops_stale_write(engine: AsyncEngine) -> None:
+    # Monotonic guard (issue #216): a write stamped older than the row's current
+    # observed_at is a no-op, so a stale convergence write cannot clobber a fresher
+    # StatusChange that already landed.
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.STOPPED, observed_at=_OLD
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.RUNNING
+    assert loaded.observed_at == _NOW
+
+
+async def test_record_observed_state_applies_fresh_write(engine: AsyncEngine) -> None:
+    # A write stamped newer than the row's current observed_at wins.
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.RUNNING, observed_at=_OLD
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.STOPPED, observed_at=_NOW
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.STOPPED
+    assert loaded.observed_at == _NOW
+
+
+async def test_record_observed_state_accepts_first_write_on_null_observed_at(
+    engine: AsyncEngine,
+) -> None:
+    # A never-observed row has observed_at IS NULL; the guard must still accept the
+    # first write (NULL < anything would otherwise drop it).
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        created = await uow.servers.get_by_id(server_id)
+    assert created is not None
+    assert created.observed_at is None
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.RUNNING
+    assert loaded.observed_at == _NOW
+
+
+async def test_record_observed_state_drops_stale_unassign_in_same_statement(
+    engine: AsyncEngine,
+) -> None:
+    # The guard and the #220 unassign share one UPDATE: when the write is stale its
+    # unassign decision is stale too, so dropping the row keeps the assignment.
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    worker = uuid.uuid4()
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        server.desired_state = DesiredState.RUNNING
+        server.assigned_worker_id = WorkerId(worker)
+        server.updated_at = _NOW
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        # A fresh observed write lands first.
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
+        )
+        await uow.commit()
+
+    # A stale stop-convergence write would unassign — but it is older, so the whole
+    # statement is a no-op and the assignment survives.
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.record_observed_state(
+            server_id,
+            observed_state=ObservedState.STOPPED,
+            observed_at=_OLD,
+            unassign=True,
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.RUNNING
+    assert loaded.assigned_worker_id == WorkerId(worker)
+
+
+async def test_mark_worker_servers_unknown_overrides_fresher_observed_at(
+    engine: AsyncEngine,
+) -> None:
+    # Bulk cache-invalidation always wins (issue #216 ruling): a worker disconnect
+    # marks state LESS certain (-> unknown) and must override even a row whose
+    # observed_at is newer than the invalidation stamp.
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    worker = uuid.uuid4()
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        server.desired_state = DesiredState.RUNNING
+        server.assigned_worker_id = WorkerId(worker)
+        server.updated_at = _NOW
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
+        )
+        await uow.commit()
+
+    # _OLD is earlier than the row's _NOW observed_at, yet the invalidation lands.
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.mark_worker_servers_unknown(WorkerId(worker), _OLD)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.UNKNOWN
+    assert loaded.observed_at == _OLD
+
+
+async def test_reset_unverifiable_overrides_fresher_observed_at(
+    engine: AsyncEngine,
+) -> None:
+    # The startup reset is bulk cache-invalidation too: it always wins regardless
+    # of the row's observed_at (issue #216 ruling).
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    worker = uuid.uuid4()
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        server.desired_state = DesiredState.RUNNING
+        server.assigned_worker_id = WorkerId(worker)
+        server.updated_at = _NOW
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        count = await uow.servers.reset_unverifiable_observed_states(_OLD)
+        await uow.commit()
+    assert count == 1
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.UNKNOWN
+    assert loaded.observed_at == _OLD
+
+
 async def test_update_lifecycle_compare_and_set_rejects_lost_race(
     engine: AsyncEngine,
 ) -> None:
