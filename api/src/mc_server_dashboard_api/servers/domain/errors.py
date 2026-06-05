@@ -234,3 +234,16 @@ class InvalidBackupScheduleError(ServerError):
     when present; a non-integer or non-positive value is rejected. The edge maps
     this to 422.
     """
+
+
+class InvalidExportMetadataError(ServerError):
+    """A server-import archive carried a missing/malformed ``export_metadata.json``.
+
+    The import (issue #274) reads the descriptor from the uploaded zip's root and
+    validates its ``format`` version and required fields before creating anything.
+    A non-zip body, a missing/unreadable metadata member, malformed JSON, an
+    unsupported format version (legacy incompatibility is loud, not silent), or a
+    missing field is rejected; the edge maps this to 422. The ``server_type`` /
+    ``mc_version`` themselves are validated downstream by the shared create path
+    (the version validator), which yields its own distinct 422 reasons.
+    """

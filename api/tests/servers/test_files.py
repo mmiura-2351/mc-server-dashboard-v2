@@ -171,6 +171,31 @@ class FakeFileStore(FileStore):
 
         return _gen()
 
+    def export_dir(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        extra: list[tuple[str, bytes]],
+    ) -> AsyncIterator[bytes]:
+        # Build a real zip of every seeded file plus the ``extra`` entries so a
+        # round-trip test can re-open and compare the bytes (issue #274).
+        files = dict(self.files)
+
+        async def _gen() -> AsyncIterator[bytes]:
+            if self.missing:
+                raise ServerFileNotFoundError(str(server_id.value))
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, mode="w") as zf:
+                for path, content in files.items():
+                    zf.writestr(path, content)
+                for arcname, content in extra:
+                    zf.writestr(arcname, content)
+            yield buf.getvalue()
+
+        return _gen()
+
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[str]:

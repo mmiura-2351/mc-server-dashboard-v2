@@ -239,3 +239,39 @@ docker run --rm -v mc-server-dashboard-v2_api-storage:/data \
 names for your project directory.) The worker scratch dir
 (`MCSD_SCRATCH_DIR`) is a working set rebuilt from the API on demand and does not
 need backing up beyond the persisted `worker-id`.
+
+## 10. Server export / import (ZIP)
+
+A whole server moves in and out as a single ZIP archive:
+
+- **Export** — `GET /communities/{community_id}/servers/{server_id}/export`
+  streams a ZIP of the server's authoritative working set plus an
+  `export_metadata.json` descriptor. Export is at-rest only: a running server is
+  refused (409) because the authoritative copy is only well-defined when stopped.
+- **Import** — `POST /communities/{community_id}/servers/import` takes a multipart
+  ZIP upload, creates a fresh server (auto-assigned game port; EULA is **not**
+  implied — the imported working set carries its own `eula.txt` if any), and
+  publishes the archive contents as the new server's initial working set. The new
+  server's `name` and `execution_backend` come from the request, not the archive.
+
+### Export format (`format: 1`)
+
+`export_metadata.json` lives at the root of the ZIP and carries:
+
+| field         | meaning                                              |
+| ------------- | ---------------------------------------------------- |
+| `format`      | the format version — currently `1`                   |
+| `name`        | the source server's name (informational; import uses the request name) |
+| `mc_edition`  | the Minecraft edition (`java`)                       |
+| `mc_version`  | the Minecraft version                                |
+| `server_type` | the server type (`vanilla` / `paper` / `fabric`)     |
+| `exported_at` | the export timestamp (ISO 8601, UTC)                 |
+
+On import the `format` field must equal `1`, and `server_type` / `mc_version` are
+re-validated against the version catalog (the same check `create` runs), so an
+unsupported type — e.g. `spigot` — is rejected. The `export_metadata.json` member
+itself is never written into the new working set.
+
+**Legacy incompatibility (one honest line):** archives produced by the legacy
+system carry a different metadata shape and are **not** importable here; a
+converter to the `format: 1` shape can be written later against this spec.
