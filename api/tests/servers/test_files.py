@@ -1190,6 +1190,98 @@ async def test_upload_extract_zip_slip_entry_is_invalid_path() -> None:
         )
 
 
+async def test_upload_extract_rejection_at_entry_n_writes_nothing() -> None:
+    # The atomic-extraction posture (#269): a mid-archive rejection (here a
+    # zip-slip entry preceded by valid entries) leaves NOTHING written. The
+    # validate-first pass refuses the whole archive before the write pass begins.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    archive = _zip_bytes(
+        {
+            "a.txt": b"A",
+            "nested/b.txt": b"B",
+            "../escape.txt": b"pwned",
+            "c.txt": b"C",
+        }
+    )
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path="datapacks",
+            filename="evil.zip",
+            content=archive,
+            extract=True,
+        )
+    assert store.files == {}
+    assert store.writes == []
+
+
+async def test_upload_extract_size_cap_rejection_writes_nothing() -> None:
+    # A cumulative-size cap breach mid-archive (a later member trips the cap) must
+    # leave nothing written, not the under-cap members preceding it. The members
+    # are highly compressible so the raw zip stays under the body cap (the
+    # decompression-bomb path), and the first member alone is under the cap so the
+    # cap is only crossed by a *later* member -- exercising the mid-archive case.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_bytes=4 * 1024 * 1024,
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Three 2 MiB members of zeros: the first fits under the 4 MiB cap, the
+        # cumulative total crosses it on the second/third, and the deflated archive
+        # is tiny (well under the raw-body cap), so the cumulative-extraction guard
+        # is what trips -- not the body-size guard.
+        for i in range(3):
+            zf.writestr(f"f{i}.bin", b"\x00" * (2 * 1024 * 1024))
+    archive = buf.getvalue()
+    assert len(archive) <= use_case.max_bytes  # raw body is under the cap
+
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="bomb.zip",
+            content=archive,
+            extract=True,
+        )
+    assert store.files == {}
+    assert store.writes == []
+
+
+async def test_upload_extract_entry_count_cap_rejection_writes_nothing() -> None:
+    # An entry-count cap breach must leave nothing written: the validate-first
+    # pass counts the whole archive before the write pass churns N versioned writes.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_entries=5,
+    )
+
+    archive = _zip_bytes({f"f{i}.txt": b"x" for i in range(20)})
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="many.zip",
+            content=archive,
+            extract=True,
+        )
+    assert store.files == {}
+    assert store.writes == []
+
+
 async def test_upload_extract_zip_symlink_entry_is_invalid_path() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
