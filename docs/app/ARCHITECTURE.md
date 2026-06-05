@@ -109,9 +109,9 @@ the Go side). The exact tooling and how to run it locally are in
 swappable technologies). `worker/` benefits equally: its domain core is "the
 desired/observed lifecycle of a local server instance", its key Port is
 `ExecutionDriver`, and its adapters are the host-process and container drivers.
-Keeping the Worker Hexagonal is what lets a future Kubernetes driver
-(REQUIREMENTS.md FR-EXE-4) drop in without touching Worker business logic, and
-lets the Worker's lifecycle logic be unit-tested with a fake driver
+Keeping the Worker Hexagonal means a Kubernetes driver
+(REQUIREMENTS.md FR-EXE-4) could drop in without touching Worker business logic,
+and lets the Worker's lifecycle logic be unit-tested with a fake driver
 (NFR-TEST-1).
 
 ---
