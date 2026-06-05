@@ -19,9 +19,12 @@ import datetime as dt
 import uuid
 from collections.abc import Iterator
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.community.adapters.permission_checker import (
     RepositoryMembershipVisibility,
     RoleGrantPermissionChecker,
@@ -38,13 +41,16 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_current_user,
+    get_download_file,
     get_list_dir,
     get_list_file_versions,
     get_membership_visibility,
     get_permission_checker,
     get_read_file,
     get_rollback_file,
+    get_upload_file,
     get_write_file,
 )
 from mc_server_dashboard_api.servers.application.files import DirListing
@@ -58,6 +64,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
 
@@ -100,6 +107,54 @@ def _client(app: object) -> Iterator[TestClient]:
         yield client
 
 
+class _FakeUpload:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self._error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(self, **kwargs: object) -> None:
+        self.calls.append(kwargs)
+        if self._error is not None:
+            raise self._error
+
+
+class _FakeDownload:
+    """Fake :class:`DownloadFile` with its file/dir method surface."""
+
+    def __init__(
+        self,
+        *,
+        is_dir: bool = False,
+        file_content: bytes = b"",
+        zip_chunks: list[bytes] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._is_dir = is_dir
+        self._file_content = file_content
+        self._zip_chunks = zip_chunks or [b"zip"]
+        self._error = error
+        self.calls: list[str] = []
+
+    async def is_dir(self, **kwargs: object) -> bool:
+        self.calls.append("is_dir")
+        if self._error is not None:
+            raise self._error
+        return self._is_dir
+
+    async def file_bytes(self, **kwargs: object) -> bytes:
+        self.calls.append("file_bytes")
+        return self._file_content
+
+    async def dir_zip(self, **kwargs: object) -> object:
+        self.calls.append("dir_zip")
+
+        async def _gen() -> object:
+            for chunk in self._zip_chunks:
+                yield chunk
+
+        return _gen()
+
+
 def _app(
     *,
     member: bool,
@@ -109,6 +164,9 @@ def _app(
     write: _FakeUseCase | None = None,
     history: _FakeUseCase | None = None,
     rollback: _FakeUseCase | None = None,
+    upload: _FakeUpload | None = None,
+    download: _FakeDownload | None = None,
+    recorder: RecordingAuditRecorder | None = None,
 ) -> object:
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: make_user()
@@ -126,6 +184,12 @@ def _app(
         app.dependency_overrides[get_list_file_versions] = lambda: history
     if rollback is not None:
         app.dependency_overrides[get_rollback_file] = lambda: rollback
+    if upload is not None:
+        app.dependency_overrides[get_upload_file] = lambda: upload
+    if download is not None:
+        app.dependency_overrides[get_download_file] = lambda: download
+    if recorder is not None:
+        app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return app
 
 
@@ -373,6 +437,313 @@ def test_rollback_while_running_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["detail"]["reason"] == "server_not_stopped"
+
+
+# --- upload ----------------------------------------------------------------
+
+
+def test_upload_single_file_is_204() -> None:
+    upload = _FakeUpload()
+    app = _app(member=True, allow=True, upload=upload)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        params={"path": "plugins"},
+        files={"file": ("mod.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 204
+    assert upload.calls[0]["filename"] == "mod.jar"
+    assert upload.calls[0]["content"] == b"jar-bytes"
+    assert upload.calls[0]["dir_path"] == "plugins"
+    assert upload.calls[0]["extract"] is False
+
+
+def test_upload_extract_flag_passed() -> None:
+    upload = _FakeUpload()
+    app = _app(member=True, allow=True, upload=upload)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        params={"path": ".", "extract": "true"},
+        files={"file": ("pack.zip", b"zip-bytes", "application/zip")},
+    )
+    assert resp.status_code == 204
+    assert upload.calls[0]["extract"] is True
+
+
+def test_upload_requires_file_edit_permission() -> None:
+    app = _app(member=True, allow=False, upload=_FakeUpload())
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+    assert resp.status_code == 403
+
+
+def test_upload_traversal_filename_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        upload=_FakeUpload(error=InvalidFilePathError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "invalid_path"
+
+
+def test_upload_running_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        upload=_FakeUpload(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
+
+
+def test_upload_over_cap_is_413() -> None:
+    app = _app(
+        member=True, allow=True, upload=_FakeUpload(error=FileTooLargeError("x"))
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["detail"]["reason"] == "file_too_large"
+
+
+# --- download --------------------------------------------------------------
+
+
+def test_download_file_returns_bytes() -> None:
+    raw = bytes(range(256))
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(is_dir=False, file_content=raw)
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "level.dat"},
+    )
+    assert resp.status_code == 200
+    assert resp.content == raw
+    cd = resp.headers["content-disposition"]
+    assert cd.startswith("attachment; ")
+    assert 'filename="level.dat"' in cd
+    assert "filename*=UTF-8''level.dat" in cd
+
+
+def test_download_dir_returns_zip_stream() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(is_dir=True, zip_chunks=[b"PK", b"zip-tail"]),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "world"},
+    )
+    assert resp.status_code == 200
+    assert resp.content == b"PKzip-tail"
+    assert resp.headers["content-type"] == "application/zip"
+    cd = resp.headers["content-disposition"]
+    assert 'filename="world.zip"' in cd
+    assert "filename*=UTF-8''world.zip" in cd
+
+
+def test_download_requires_file_read_permission() -> None:
+    app = _app(member=True, allow=False, download=_FakeDownload())
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+    )
+    assert resp.status_code == 403
+
+
+def test_download_missing_is_404() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=ServerFileNotFoundError("x")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+    )
+    assert resp.status_code == 404
+
+
+def test_download_running_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
+
+
+# --- download Content-Disposition (RFC 6266 / 5987) ------------------------
+
+
+def test_download_filename_with_quote_is_sanitized() -> None:
+    # A file named evil".zip must not break out of the quoted-string and inject
+    # extra Content-Disposition parameters; the quote is replaced in the ASCII
+    # fallback and the real name is carried percent-encoded in filename*.
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=False))
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": 'evil".zip'}
+    )
+    assert resp.status_code == 200
+    cd = resp.headers["content-disposition"]
+    # The fallback must be a clean quoted-string with no embedded quote, so the
+    # crafted name cannot inject extra parameters.
+    assert cd == "attachment; filename=\"evil_.zip\"; filename*=UTF-8''evil%22.zip"
+
+
+def test_download_unicode_filename_does_not_500() -> None:
+    # A legitimate Unicode name (ワールド.zip) used to 500 when Starlette latin-1
+    # encoded the header; it now succeeds with an ASCII fallback + UTF-8 filename*.
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=False))
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "ワールド.zip"},
+    )
+    assert resp.status_code == 200
+    cd = resp.headers["content-disposition"]
+    assert 'filename="____.zip"' in cd  # 4 non-ASCII kana -> 4 underscores
+    assert "filename*=UTF-8''" in cd
+    assert "%E3%83" in cd  # UTF-8 percent-encoding of the kana
+
+
+# --- upload streaming cap (413 before full buffer) -------------------------
+
+
+def test_upload_over_cap_body_is_413_before_use_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The route counts the multipart body in chunks and aborts past the cap
+    # before the use case is invoked. Patch the cap small so the fixture stays
+    # tiny; the streamed loop trips on it.
+    import mc_server_dashboard_api.servers.api.files as files_module
+
+    monkeypatch.setattr(files_module, "MAX_UPLOAD_BYTES", 16)
+    upload = _FakeUpload()
+    app = _app(member=True, allow=True, upload=upload)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("big.bin", b"x" * 1024, "application/octet-stream")},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["detail"]["reason"] == "file_too_large"
+    assert upload.calls == []  # aborted before the use case ran
+
+
+# --- audit recording -------------------------------------------------------
+
+
+def test_upload_success_records_file_upload_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, upload=_FakeUpload(), recorder=recorder)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("mod.jar", b"jar", "application/octet-stream")},
+    )
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.FILE_UPLOAD]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert recorder.events[0].target_type == ops.TARGET_FILE
+
+
+def test_upload_unsettled_records_denied_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        upload=_FakeUpload(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+    assert resp.status_code == 409
+    assert [e.operation for e in recorder.events] == [ops.FILE_UPLOAD]
+    assert recorder.events[0].outcome is Outcome.DENIED
+
+
+def test_download_success_records_file_download_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(is_dir=False, file_content=b"x"),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+    )
+    assert resp.status_code == 200
+    assert [e.operation for e in recorder.events] == [ops.FILE_DOWNLOAD]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+
+
+def test_download_unsettled_records_denied_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+    )
+    assert resp.status_code == 409
+    assert [e.operation for e in recorder.events] == [ops.FILE_DOWNLOAD]
+    assert recorder.events[0].outcome is Outcome.DENIED
+
+
+def test_download_validation_failure_is_not_audited() -> None:
+    # 422 (invalid path) raises before the audit record, matching the existing
+    # posture: validation rejects are not audited.
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=InvalidFilePathError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "../escape"}
+    )
+    assert resp.status_code == 422
+    assert recorder.events == []
 
 
 # --- per-resource grant (real checker) -------------------------------------

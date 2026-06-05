@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import replace
 
 from mc_server_dashboard_api.servers.domain.backup import Backup, BackupId
@@ -147,6 +148,15 @@ class FakeFileStore(FileStore):
             raise RuntimeError("forced storage write failure")
         self.files[rel_path] = content
         self.writes.append((rel_path, content))
+
+    def download_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        async def _gen() -> AsyncIterator[bytes]:
+            return
+            yield b""  # pragma: no cover - empty async generator
+
+        return _gen()
 
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

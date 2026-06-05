@@ -9,7 +9,9 @@ InvalidFilePathError, FR-FILE-4).
 
 from __future__ import annotations
 
+import io
 import uuid
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -153,6 +155,76 @@ async def test_list_dir_browses_root(tmp_path: Path) -> None:
     )
     names = {e.name for e in entries}
     assert names == {"server.properties", "world"}
+
+
+async def test_download_dir_streams_zip_of_subtree(tmp_path: Path) -> None:
+    """The directory-download zip contains the subtree, with relative arcnames."""
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {
+            "server.properties": b"top",
+            "world/level.dat": b"world-bytes",
+            "world/region/r.0.0.mca": b"region-bytes",
+        },
+    )
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.download_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path="world",
+    )
+    blob = b"".join([chunk async for chunk in stream])
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    assert contents == {
+        "level.dat": b"world-bytes",
+        "region/r.0.0.mca": b"region-bytes",
+    }
+
+
+async def test_download_dir_root_zips_whole_tree(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"a.txt": b"a", "sub/b.txt": b"b"},
+    )
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.download_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path=".",
+    )
+    blob = b"".join([chunk async for chunk in stream])
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        names = set(zf.namelist())
+    assert names == {"a.txt", "sub/b.txt"}
+
+
+async def test_download_dir_missing_is_file_not_found(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.download_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path="nope",
+    )
+    with pytest.raises(ServerFileNotFoundError):
+        async for _ in stream:
+            pass
 
 
 async def test_read_missing_is_file_not_found(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ no storage type crosses into the application layer.
 from __future__ import annotations
 
 import abc
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -77,6 +78,19 @@ class FileStore(abc.ABC):
         content: bytes,
     ) -> None:
         """Edit one file in ``current/``, retaining the prior version (FR-FILE-3)."""
+
+    @abc.abstractmethod
+    def download_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        """Stream a zip of a directory subtree of the authoritative ``current/``.
+
+        Used by the directory-download branch (issue #259). The zip is generated
+        incrementally so peak memory is bounded by one in-flight file plus the
+        stream buffer, never the whole subtree. ``rel_path == "."`` zips the
+        working-set root. Raises :class:`ServerFileNotFoundError` for a missing
+        directory and :class:`InvalidFilePathError` for a traversal-unsafe one.
+        """
 
     @abc.abstractmethod
     async def list_versions(

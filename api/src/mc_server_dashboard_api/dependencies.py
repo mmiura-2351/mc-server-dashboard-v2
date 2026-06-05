@@ -168,10 +168,12 @@ from mc_server_dashboard_api.servers.application.backups import (
     RestoreBackup,
 )
 from mc_server_dashboard_api.servers.application.files import (
+    DownloadFile,
     ListDir,
     ListFileVersions,
     ReadFile,
     RollbackFile,
+    UploadFile,
     WriteFile,
 )
 from mc_server_dashboard_api.servers.application.lifecycle import (
@@ -1079,6 +1081,32 @@ def get_rollback_file(
 
     session_factory = create_session_factory(get_engine(request))
     return RollbackFile(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+    )
+
+
+def get_upload_file(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> UploadFile:
+    """Assemble the :class:`UploadFile` use case (file:edit)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UploadFile(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+    )
+
+
+def get_download_file(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> DownloadFile:
+    """Assemble the :class:`DownloadFile` use case (file:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DownloadFile(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
     )

@@ -60,6 +60,11 @@ BACKUP_CREATE: Final = "backup:create"
 BACKUP_RESTORE: Final = "backup:restore"
 BACKUP_DELETE: Final = "backup:delete"
 
+# File upload / download (FR-FILE-*, issue #259). Recorded under the file:edit /
+# file:read permissions they require.
+FILE_UPLOAD: Final = "file:upload"
+FILE_DOWNLOAD: Final = "file:download"
+
 # Worker drain set/clear (FR-WRK-5).
 WORKER_DRAIN_SET: Final = "worker:drain_set"
 WORKER_DRAIN_CLEAR: Final = "worker:drain_clear"
@@ -72,3 +77,4 @@ TARGET_GRANT: Final = "grant"
 TARGET_SERVER: Final = "server"
 TARGET_BACKUP: Final = "backup"
 TARGET_WORKER: Final = "worker"
+TARGET_FILE: Final = "file"
