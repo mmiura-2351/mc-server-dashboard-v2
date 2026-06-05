@@ -62,6 +62,19 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def list_ids_missing_game_port(self) -> list[ServerId]:
+        """Return the ids of servers with no tracked game port (issue #310).
+
+        Legacy/imported rows that predate port tracking (#243) carry
+        ``game_port IS NULL``; they are excluded from the deployment-wide taken
+        set (:meth:`list_game_ports`), so auto-assignment can hand their real
+        (server.properties-bound) host port to a new server and collide. This
+        read powers the startup WARN that lists those rows so an operator can
+        backfill them (DEPLOYMENT.md Section 6). Spans all communities — a
+        deployment-wide gap, not scoped to one community.
+        """
+
+    @abc.abstractmethod
     async def update(self, server: Server) -> None:
         """Persist the mutable fields of ``server`` (name, config, timestamps)."""
 

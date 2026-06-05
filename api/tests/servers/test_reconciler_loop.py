@@ -25,6 +25,9 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.startup_reset import (
     ResetUnverifiableObservedStates,
 )
+from mc_server_dashboard_api.servers.application.warn_missing_ports import (
+    WarnLegacyMissingPorts,
+)
 
 
 class _SpyReconciler:
@@ -50,11 +53,28 @@ class _SpyReset:
         return 0
 
 
-def _start_loop(spy: _SpyReconciler, reset: _SpyReset) -> asyncio.Task[None]:
+class _SpyWarnPorts:
+    def __init__(self, *, fail_times: int = 0) -> None:
+        self.calls = 0
+        self._fail_times = fail_times
+
+    async def __call__(self) -> int:
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            raise RuntimeError("db down")
+        return 0
+
+
+def _start_loop(
+    spy: _SpyReconciler,
+    reset: _SpyReset,
+    warn: _SpyWarnPorts | None = None,
+) -> asyncio.Task[None]:
     return asyncio.create_task(
         run_reconciler_loop(
             cast(RunReconcilerTick, spy),
             reset=cast(ResetUnverifiableObservedStates, reset),
+            warn_missing_ports=cast(WarnLegacyMissingPorts, warn or _SpyWarnPorts()),
             tick_seconds=0,
         )
     )
@@ -135,3 +155,28 @@ async def test_reset_runs_exactly_once_after_success() -> None:
     # The reset succeeded on its first call and is never invoked again.
     assert reset.calls == 1
     assert spy.ticks >= 5
+
+
+# --- legacy-port startup WARN (issue #310) ---------------------------------
+
+
+async def test_warn_missing_ports_runs_once_after_success() -> None:
+    spy = _SpyReconciler()
+    warn = _SpyWarnPorts()
+    task = _start_loop(spy, _SpyReset(), warn)
+    await _run_until(lambda: spy.ticks >= 5, task=task)
+    # The legacy-port check succeeded on its first call and is never repeated.
+    assert warn.calls == 1
+    assert spy.ticks >= 5
+
+
+async def test_warn_missing_ports_failure_does_not_gate_ticking() -> None:
+    # Unlike the reset, the legacy-port WARN is informational: its failure must
+    # not block ticking. The loop ticks even while the check keeps failing, and
+    # retries the check on each iteration until it succeeds once.
+    spy = _SpyReconciler()
+    warn = _SpyWarnPorts(fail_times=2)
+    task = _start_loop(spy, _SpyReset(), warn)
+    await _run_until(lambda: spy.ticks >= 3, task=task)
+    assert spy.ticks >= 3
+    assert warn.calls >= 3

@@ -39,7 +39,12 @@ async def test_reconciler_loop_counts_ticks_and_stamps_success() -> None:
     reconciler.tick.side_effect = [None, asyncio.CancelledError()]
 
     with pytest.raises(asyncio.CancelledError):
-        await run_reconciler_loop(reconciler, reset=reset, tick_seconds=0)
+        await run_reconciler_loop(
+            reconciler,
+            reset=reset,
+            warn_missing_ports=AsyncMock(),
+            tick_seconds=0,
+        )
 
     assert metrics.reconciler_ticks_total._value.get() >= ticks_before + 1
     assert metrics.reconciler_last_success_timestamp_seconds._value.get() > ts_before
