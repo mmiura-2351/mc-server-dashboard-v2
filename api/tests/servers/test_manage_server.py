@@ -72,6 +72,21 @@ _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _LATER = dt.datetime(2026, 6, 4, 13, 0, tzinfo=dt.timezone.utc)
 _PORTS = PortRange(start=25565, end=25664)
 
+# A fixed RCON password so the seeded server.properties is deterministic in tests
+# (production injects ``secrets.token_urlsafe``). Issue #335.
+_RCON_PW = "test-rcon-pw"
+
+
+def _seeded_properties(port: int, *, rcon_password: str = _RCON_PW) -> bytes:
+    """The server.properties create seeds: game port + the three RCON keys (#335)."""
+
+    return (
+        f"server-port={port}\n"
+        f"enable-rcon=true\n"
+        f"rcon.port=25575\n"
+        f"rcon.password={rcon_password}\n"
+    ).encode()
+
 
 def _server(
     *,
@@ -295,6 +310,7 @@ async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        rcon_password_factory=lambda: _RCON_PW,
     )(
         community_id=CommunityId(uuid.uuid4()),
         name="survival",
@@ -306,11 +322,11 @@ async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
         accept_eula=True,
     )
     assert file_store.writes == [
-        ("server.properties", b"server-port=25565\n"),
+        ("server.properties", _seeded_properties(25565)),
         ("eula.txt", b"eula=true\n"),
     ]
     assert file_store.files["eula.txt"] == b"eula=true\n"
-    assert file_store.files["server.properties"] == b"server-port=25565\n"
+    assert file_store.files["server.properties"] == _seeded_properties(25565)
     assert uow.commits == 1
     assert uow.servers.by_id[server.id] is server
 
@@ -326,6 +342,7 @@ async def test_create_without_accept_eula_still_seeds_properties() -> None:
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        rcon_password_factory=lambda: _RCON_PW,
     )(
         community_id=CommunityId(uuid.uuid4()),
         name="survival",
@@ -335,8 +352,65 @@ async def test_create_without_accept_eula_still_seeds_properties() -> None:
         execution_backend="host_process",
         config={},
     )
-    assert file_store.writes == [("server.properties", b"server-port=25565\n")]
+    assert file_store.writes == [("server.properties", _seeded_properties(25565))]
     assert "eula.txt" not in file_store.files
+
+
+async def test_create_seeds_rcon_keys_with_factory_password() -> None:
+    # The seeded server.properties enables RCON so /command and graceful stop work
+    # out of the box (issue #335): enable-rcon=true, rcon.port=25575, and the
+    # per-server password from the injected factory.
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        rcon_password_factory=lambda: "from-factory",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+    seeded = file_store.files["server.properties"]
+    assert b"enable-rcon=true\n" in seeded
+    assert b"rcon.port=25575\n" in seeded
+    assert b"rcon.password=from-factory\n" in seeded
+
+
+async def test_create_default_rcon_password_is_random_and_nonempty() -> None:
+    # Without an injected factory, each create mints a fresh high-entropy password
+    # (issue #335): two creates do not collide and neither is blank.
+    async def _make_props() -> bytes:
+        uow = FakeUnitOfWork()
+        file_store = FakeFileStore()
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=file_store,
+            port_range=_PORTS,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={},
+        )
+        return file_store.files["server.properties"]
+
+    first = await _make_props()
+    second = await _make_props()
+    assert b"\nrcon.password=\n" not in first
+    assert first != second
 
 
 # --- create: game port assignment (#243) -----------------------------------
@@ -359,6 +433,7 @@ async def test_create_auto_assigns_lowest_free_port() -> None:
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        rcon_password_factory=lambda: _RCON_PW,
     )(
         community_id=community,
         name="survival",
@@ -370,7 +445,7 @@ async def test_create_auto_assigns_lowest_free_port() -> None:
     )
     assert server.game_port == 25567
     assert uow.servers.by_id[server.id].game_port == 25567
-    assert file_store.writes == [("server.properties", b"server-port=25567\n")]
+    assert file_store.writes == [("server.properties", _seeded_properties(25567))]
 
 
 async def test_create_honors_explicit_free_port() -> None:
@@ -1019,6 +1094,7 @@ async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        rcon_password_factory=lambda: _RCON_PW,
     )(
         community_id=community,
         name="survival",
@@ -1041,9 +1117,9 @@ async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
             StorageServerId(server.id.value),
         )
     )
-    # Both seeds compose into the first published working set (#243 + #198).
+    # Both seeds compose into the first published working set (#243 + #198 + #335).
     assert read_tar(blob) == {
-        "server.properties": b"server-port=25565\n",
+        "server.properties": _seeded_properties(25565),
         "eula.txt": b"eula=true\n",
     }
 
@@ -1062,6 +1138,7 @@ async def test_create_without_accept_eula_seeds_properties_at_rest(
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        rcon_password_factory=lambda: _RCON_PW,
     )(
         community_id=community,
         name="survival",
@@ -1075,7 +1152,7 @@ async def test_create_without_accept_eula_seeds_properties_at_rest(
     at_rest = await file_store.read_file(
         community_id=community, server_id=server.id, rel_path="server.properties"
     )
-    assert at_rest == b"server-port=25565\n"
+    assert at_rest == _seeded_properties(25565)
     with pytest.raises(ServerFileNotFoundError):
         await file_store.read_file(
             community_id=community, server_id=server.id, rel_path="eula.txt"
@@ -1099,6 +1176,7 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
         version_validator=FakeVersionValidator(),
         file_store=file_store,
         port_range=_PORTS,
+        rcon_password_factory=lambda: _RCON_PW,
     )(
         community_id=community,
         name="survival",
@@ -1122,14 +1200,16 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
     )
     assert updated.game_port == 25570
 
+    # The port update rewrites only server-port in place; the seeded RCON keys
+    # (#335) are preserved.
     at_rest = await file_store.read_file(
         community_id=community, server_id=server.id, rel_path="server.properties"
     )
-    assert at_rest == b"server-port=25570\n"
+    assert at_rest == _seeded_properties(25570)
     blob = await drain(
         storage.open_hydrate_source(
             StorageCommunityId(community.value),
             StorageServerId(server.id.value),
         )
     )
-    assert read_tar(blob) == {"server.properties": b"server-port=25570\n"}
+    assert read_tar(blob) == {"server.properties": _seeded_properties(25570)}

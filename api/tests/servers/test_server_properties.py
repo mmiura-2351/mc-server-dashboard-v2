@@ -1,8 +1,11 @@
-"""Tests for the ``server.properties`` server-port rewrite (issue #311)."""
+"""Tests for the ``server.properties`` key rewrites (issues #311, #335)."""
 
 from __future__ import annotations
 
-from mc_server_dashboard_api.servers.domain.server_properties import set_server_port
+from mc_server_dashboard_api.servers.domain.server_properties import (
+    apply_rcon_settings,
+    set_server_port,
+)
 
 
 def test_replaces_existing_server_port_line() -> None:
@@ -48,3 +51,47 @@ def test_no_trailing_newline_input_appends_without_adding_blank_line() -> None:
     # The file had no trailing newline; the append still lands on its own line and
     # a trailing newline is added (matching the seeded-file convention).
     assert set_server_port(content, 25570) == b"motd=hi\nserver-port=25570\n"
+
+
+# --- apply_rcon_settings (#335) --------------------------------------------
+
+
+def test_apply_rcon_appends_all_keys_to_empty_content() -> None:
+    assert apply_rcon_settings(b"", "s3cret") == (
+        b"enable-rcon=true\nrcon.port=25575\nrcon.password=s3cret\n"
+    )
+
+
+def test_apply_rcon_appends_keys_preserving_existing_lines() -> None:
+    content = b"motd=hi\nserver-port=25565\n"
+    assert apply_rcon_settings(content, "s3cret") == (
+        b"motd=hi\nserver-port=25565\n"
+        b"enable-rcon=true\nrcon.port=25575\nrcon.password=s3cret\n"
+    )
+
+
+def test_apply_rcon_overwrites_disabled_and_wrong_port() -> None:
+    # An imported archive with RCON off / a stale port: enable-rcon and rcon.port
+    # are forced to the platform's required values, in place.
+    content = b"enable-rcon=false\nrcon.port=9999\n"
+    assert apply_rcon_settings(content, "s3cret") == (
+        b"enable-rcon=true\nrcon.port=25575\nrcon.password=s3cret\n"
+    )
+
+
+def test_apply_rcon_keeps_existing_non_empty_password() -> None:
+    # An importer's known password survives; only enable-rcon / rcon.port are
+    # forced.
+    content = b"enable-rcon=false\nrcon.password=known\nrcon.port=25575\n"
+    assert apply_rcon_settings(content, "rotated") == (
+        b"enable-rcon=true\nrcon.password=known\nrcon.port=25575\n"
+    )
+
+
+def test_apply_rcon_sets_password_when_present_but_empty() -> None:
+    # A blank password is treated as absent (the worker refuses an empty
+    # password): the generated one is written.
+    content = b"enable-rcon=true\nrcon.password=\nrcon.port=25575\n"
+    assert apply_rcon_settings(content, "generated") == (
+        b"enable-rcon=true\nrcon.password=generated\nrcon.port=25575\n"
+    )

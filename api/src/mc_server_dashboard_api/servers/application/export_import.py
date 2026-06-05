@@ -41,8 +41,8 @@ import io
 import json
 import logging
 import zipfile
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
@@ -50,7 +50,10 @@ from mc_server_dashboard_api.servers.application.files import (
     _archive_entries,
     _validate_archive,
 )
-from mc_server_dashboard_api.servers.application.manage_server import CreateServer
+from mc_server_dashboard_api.servers.application.manage_server import (
+    CreateServer,
+    _generate_rcon_password,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -62,6 +65,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.server_properties import apply_rcon_settings
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
@@ -77,6 +81,12 @@ EXPORT_FORMAT_VERSION = 1
 # set that already holds a file by this name would collide, so import treats the
 # member as metadata only and never materializes it.
 EXPORT_METADATA_FILENAME = "export_metadata.json"
+
+# The archive member that carries a server's RCON / port settings. When an
+# imported archive includes it, the three RCON keys are enforced on the way in so
+# the console / graceful-stop path works out of the box (issue #335); when the
+# archive omits it, create's own seeding (which also enables RCON) survives.
+_PROPERTIES_REL_PATH = "server.properties"
 
 # The cap on the (decompressed) metadata descriptor. The descriptor is a handful
 # of short string fields, so 64 KiB is generous; the bound exists only to refuse a
@@ -157,6 +167,12 @@ class ImportServer:
     set, with the metadata member itself excluded. The name comes from the caller,
     not the metadata.
 
+    The imported ``server.properties`` (if any) has the three RCON keys enforced on
+    the way in (``enable-rcon=true``, ``rcon.port=25575``, and a generated
+    ``rcon.password`` when the archive's is blank), so ``/command`` works out of
+    the box (issue #335); an archive that omits ``server.properties`` keeps the
+    RCON-enabled file create's own seeding wrote.
+
     The caps are fields (not bare constants) so a test can inject tiny caps and
     trip the size / entry-count guards with a small archive; production wiring uses
     the defaults.
@@ -166,6 +182,7 @@ class ImportServer:
     file_store: FileStore
     max_bytes: int = MAX_UPLOAD_BYTES
     max_entries: int = MAX_ARCHIVE_ENTRIES
+    rcon_password_factory: Callable[[], str] = field(default=_generate_rcon_password)
 
     async def __call__(
         self,
@@ -234,6 +251,11 @@ class ImportServer:
             ):
                 if entry_path == EXPORT_METADATA_FILENAME:
                     continue
+                if entry_path == _PROPERTIES_REL_PATH:
+                    # The imported properties may have RCON off / blank; enforce the
+                    # three RCON keys so /command works out of the box (issue #335).
+                    # An importer's known password survives; a blank one is filled.
+                    data = apply_rcon_settings(data, self.rcon_password_factory())
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,

@@ -206,10 +206,15 @@ async def test_export_then_import_round_trips_files_and_metadata() -> None:
     assert server.mc_version == "1.21.1"
     assert server.server_type is ServerType.VANILLA
     assert server.game_port is not None
-    # The working set is published identically, and the metadata file is excluded.
-    assert dst_store.files["server.properties"] == b"motd=hi"
+    # The world file round-trips identically and the metadata file is excluded; the
+    # imported server.properties has RCON enforced on the way in (issue #335).
     assert dst_store.files["world/level.dat"] == b"\x00\x01\x02"
     assert EXPORT_METADATA_FILENAME not in dst_store.files
+    seeded = dst_store.files["server.properties"]
+    assert seeded.startswith(b"motd=hi\n")
+    assert b"enable-rcon=true\n" in seeded
+    assert b"rcon.port=25575\n" in seeded
+    assert b"\nrcon.password=\n" not in seeded
 
 
 # --- import validation -----------------------------------------------------
@@ -302,6 +307,88 @@ async def test_import_assigns_game_port() -> None:
         content=archive,
     )
     assert _PORT_RANGE.start <= server.game_port <= _PORT_RANGE.end  # type: ignore[operator]
+
+
+async def test_import_enforces_rcon_on_disabled_properties() -> None:
+    # An archive whose server.properties has RCON off / no port: import forces
+    # enable-rcon=true and rcon.port=25575 and fills the blank password (issue #335).
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store),
+        file_store=dst_store,
+        rcon_password_factory=lambda: "generated",
+    )
+    archive = _zip(
+        {
+            EXPORT_METADATA_FILENAME: _metadata(),
+            "server.properties": b"enable-rcon=false\nmotd=hi\n",
+        }
+    )
+    await imp(
+        community_id=CommunityId(community),
+        name="fresh",
+        execution_backend="host_process",
+        content=archive,
+    )
+    seeded = dst_store.files["server.properties"]
+    assert b"enable-rcon=true\n" in seeded
+    assert b"enable-rcon=false\n" not in seeded
+    assert b"rcon.port=25575\n" in seeded
+    assert b"rcon.password=generated\n" in seeded
+    assert b"motd=hi\n" in seeded
+
+
+async def test_import_keeps_known_rcon_password() -> None:
+    # An importer's known, non-empty password survives; only enable-rcon /
+    # rcon.port are forced (issue #335).
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store),
+        file_store=dst_store,
+        rcon_password_factory=lambda: "rotated",
+    )
+    archive = _zip(
+        {
+            EXPORT_METADATA_FILENAME: _metadata(),
+            "server.properties": (
+                b"enable-rcon=false\nrcon.password=known\nrcon.port=9999\n"
+            ),
+        }
+    )
+    await imp(
+        community_id=CommunityId(community),
+        name="fresh",
+        execution_backend="host_process",
+        content=archive,
+    )
+    seeded = dst_store.files["server.properties"]
+    assert b"rcon.password=known\n" in seeded
+    assert b"rotated" not in seeded
+    assert b"enable-rcon=true\n" in seeded
+    assert b"rcon.port=25575\n" in seeded
+
+
+async def test_import_without_properties_keeps_create_seeded_rcon() -> None:
+    # An archive with no server.properties: create's own seeding (RCON-enabled,
+    # issue #335) survives the publish pass.
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"\x00"})
+    await imp(
+        community_id=CommunityId(community),
+        name="fresh",
+        execution_backend="host_process",
+        content=archive,
+    )
+    seeded = dst_store.files["server.properties"]
+    assert b"enable-rcon=true\n" in seeded
+    assert b"rcon.port=25575\n" in seeded
+    assert b"\nrcon.password=\n" not in seeded
 
 
 async def test_import_oversized_is_too_large() -> None:

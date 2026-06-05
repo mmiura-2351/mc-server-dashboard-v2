@@ -219,6 +219,18 @@ The in-code default is `127.0.0.1` (loopback-only); this `compose.yaml` override
 it to `0.0.0.0` so a started server accepts players out of the box, leaving the
 host firewall to govern which game ports are actually exposed.
 
+**RCON is enabled at create.** The console (`/command`) and the graceful-stop
+`save-all` + RCON `stop` path both need RCON on, but Minecraft generates
+`server.properties` with `enable-rcon=false` on first boot. So create seeds three
+RCON keys into the new server's `server.properties` alongside `server-port`
+(issue #335): `enable-rcon=true`, `rcon.port=25575` (in-container only; never
+published to the host), and a per-server random `rcon.password`. `server.properties`
+is the canonical source of a server's RCON settings — the worker reads the
+password and port from it; there is no DB column. The import path enforces the
+same three keys on an imported `server.properties`, overwriting `enable-rcon` /
+`rcon.port` and generating a `rcon.password` only when the archive's is blank (a
+known password in the archive is preserved).
+
 The **RCON port** is the worker's control channel and is never exposed off-host.
 Its handling depends on `driver.container.network` (env
 `MCD_WORKER_DRIVER_CONTAINER_NETWORK`):
