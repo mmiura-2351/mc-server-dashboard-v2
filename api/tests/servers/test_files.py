@@ -28,6 +28,7 @@ import pytest
 from mc_server_dashboard_api.servers.application.files import (
     MAX_EDIT_BYTES,
     MAX_SEARCH_RESULTS,
+    MAX_SEARCH_SCANNED,
     MAX_UPLOAD_BYTES,
     DeleteFile,
     DownloadFile,
@@ -91,6 +92,7 @@ class FakeFileStore(FileStore):
         self.deleted_files: list[str] = []
         self.deleted_dirs: list[str] = []
         self.made_dirs: list[str] = []
+        self.read_paths: list[str] = []
         self.missing = False
         self.bad_path = False
         # When set, list_dir raises ServerFileNotFoundError for a path that is not
@@ -109,6 +111,7 @@ class FakeFileStore(FileStore):
     async def read_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> bytes:
+        self.read_paths.append(rel_path)
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
         if rel_path not in self.files:
@@ -1688,6 +1691,15 @@ async def test_rename_running_is_unsettled() -> None:
     assert store.deleted_files == []
 
 
+def test_rename_docstring_notes_crash_window() -> None:
+    # Doc-only nit from the #271 review: the read/write/delete composition is not
+    # atomic, so a mid-op crash can leave BOTH source and destination present. The
+    # docstring must call this crash window out.
+    doc = RenameFile.__doc__ or ""
+    assert "crash" in doc.lower()
+    assert "both" in doc.lower()
+
+
 # --- search (name / content, issue #259) -----------------------------------
 
 
@@ -1746,6 +1758,10 @@ async def test_search_content_skips_oversized_files() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = _search_store()
     store.files["config/motd.txt"] = b"hello" + b"x" * 1000
+    store.dirs["config"] = [
+        FileEntry(name="ops.json", is_dir=False, size=2),
+        FileEntry(name="motd.txt", is_dir=False, size=1005),
+    ]
     use_case = SearchFiles(
         uow=_stopped_uow(community, server_id),
         file_store=store,
@@ -1761,6 +1777,64 @@ async def test_search_content_skips_oversized_files() -> None:
     )
     # The oversized motd file is skipped; only the small properties file matches.
     assert set(result.paths) == {"server.properties"}
+
+
+async def test_search_content_skips_oversized_file_without_reading_it() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _search_store()
+    # Mark config/motd.txt as oversized via its listed size; its bytes still hold
+    # the needle, so a read would match — proving the skip gates on size BEFORE
+    # any read_file call rather than reading first and discarding.
+    store.dirs["config"] = [
+        FileEntry(name="ops.json", is_dir=False, size=2),
+        FileEntry(name="motd.txt", is_dir=False, size=1000),
+    ]
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_file_bytes=10,  # below the listed motd size -> skipped pre-read
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="hello",
+        by="content",
+        max_results=100,
+    )
+    assert set(result.paths) == {"server.properties"}
+    assert "config/motd.txt" not in store.read_paths
+
+
+async def test_search_content_aggregate_scan_cap_sets_truncated() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["."] = [
+        FileEntry(name=f"f{i}.txt", is_dir=False, size=1) for i in range(5)
+    ]
+    for i in range(5):
+        store.files[f"f{i}.txt"] = b"x"  # no match for the needle
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_scanned=3,  # fewer than the 5 files present
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="zzz",  # matches nothing, so results never truncate
+        by="content",
+        max_results=100,
+    )
+    # No matches, but the scan stopped at the aggregate cap -> truncated.
+    assert result.paths == []
+    assert result.truncated is True
+    assert len(store.read_paths) == 3
+
+
+def test_max_search_scanned_is_ten_thousand() -> None:
+    assert MAX_SEARCH_SCANNED == 10_000
 
 
 async def test_search_bounds_results_and_sets_truncated() -> None:

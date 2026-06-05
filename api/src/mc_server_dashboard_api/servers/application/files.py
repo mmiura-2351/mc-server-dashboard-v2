@@ -130,6 +130,16 @@ MAX_SEARCH_RESULTS = 500
 # is intentional (no config knob requested); document if it ever needs tuning.
 MAX_SEARCH_FILE_BYTES = 1024 * 1024
 
+# The aggregate scanned-files cap for a search. The per-file cap bounds a single
+# read, but a content search over a working set of tens of thousands of files
+# would still issue one read_file per under-cap file until the result cap (500) is
+# reached — a cost unbounded by the small match count. 10_000 files comfortably
+# covers a real working set's text config / datapack tree while bounding the total
+# scan; exceeding it stops the walk and sets ``truncated`` (a partial result is
+# still useful), the same partial-result posture the result cap takes. A constant
+# is intentional (no config knob requested); document if it ever needs tuning.
+MAX_SEARCH_SCANNED = 10_000
+
 
 async def _load(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
@@ -788,6 +798,12 @@ class RenameFile:
     :class:`FileAlreadyExistsError` (409): rename never clobbers, so a typo cannot
     silently overwrite data. Renaming a directory is out of scope for this slice
     (the read/write seam is file-granular); ``from`` must name a file.
+
+    The composition (write destination, then delete source) is not atomic: a crash
+    in the window between the two leaves BOTH the source and the destination
+    present. This favours never losing data (the source survives) over strict
+    move-once semantics; a caller seeing both can safely retry or delete the stale
+    source.
     """
 
     uow: UnitOfWork
@@ -852,16 +868,19 @@ class SearchFiles:
     ``by="name"`` matches a case-insensitive substring of each entry's *basename*
     (substring, not glob — the simpler, no-surprise choice; documented). ``by=
     "content"`` scans each file's raw bytes for the UTF-8-encoded query as a plain
-    byte substring (case-sensitive), skipping any file larger than
-    :data:`MAX_SEARCH_FILE_BYTES` (a content search is for text configs, not
-    multi-GiB region files). Results are bounded to ``max_results`` (capped at
-    :data:`MAX_SEARCH_RESULTS`); hitting the bound sets ``truncated`` rather than
-    erroring (a partial result is still useful).
+    byte substring (case-sensitive), skipping any file whose *listed* size exceeds
+    :data:`MAX_SEARCH_FILE_BYTES` — gated before any read, so a bulk binary /
+    multi-GiB region file is never pulled into memory (a content search is for text
+    configs). Results are bounded to ``max_results`` (capped at
+    :data:`MAX_SEARCH_RESULTS`) and the whole walk is bounded to
+    :data:`MAX_SEARCH_SCANNED` files; hitting either bound sets ``truncated``
+    rather than erroring (a partial result is still useful).
     """
 
     uow: UnitOfWork
     file_store: FileStore
     max_file_bytes: int = MAX_SEARCH_FILE_BYTES
+    max_scanned: int = MAX_SEARCH_SCANNED
 
     async def __call__(
         self,
@@ -881,12 +900,19 @@ class SearchFiles:
 
         paths: list[str] = []
         truncated = False
-        async for rel_path, name in self._walk(community_id, server_id):
+        scanned = 0
+        async for rel_path, name, size in self._walk(community_id, server_id):
+            if scanned >= self.max_scanned:
+                # The aggregate scan budget is spent: stop the walk and report a
+                # partial result rather than reading the whole tree.
+                truncated = True
+                break
+            scanned += 1
             if by == "name":
                 matched = name_needle in name.lower()
             else:
                 matched = await self._content_matches(
-                    community_id, server_id, rel_path, content_needle
+                    community_id, server_id, rel_path, size, content_needle
                 )
             if not matched:
                 continue
@@ -898,8 +924,8 @@ class SearchFiles:
 
     async def _walk(
         self, community_id: CommunityId, server_id: ServerId
-    ) -> AsyncIterator[tuple[str, str]]:
-        """Yield ``(rel_path, basename)`` for every file under the root, depth-first."""
+    ) -> AsyncIterator[tuple[str, str, int]]:
+        """Yield ``(rel_path, basename, size)`` for every file, depth-first."""
 
         stack = ["."]
         while stack:
@@ -913,20 +939,23 @@ class SearchFiles:
                 if entry.is_dir:
                     stack.append(child)
                 else:
-                    yield child, entry.name
+                    yield child, entry.name, entry.size
 
     async def _content_matches(
         self,
         community_id: CommunityId,
         server_id: ServerId,
         rel_path: str,
+        size: int,
         needle: bytes,
     ) -> bool:
+        # Gate on the already-listed entry size BEFORE reading: skip a bulk binary /
+        # huge file without ever pulling it into memory (the per-file cap's point).
+        if size > self.max_file_bytes:
+            return False
         data = await self.file_store.read_file(
             community_id=community_id, server_id=server_id, rel_path=rel_path
         )
-        if len(data) > self.max_file_bytes:
-            return False  # skip-cap: don't grep bulk binary / huge files
         return needle in data
 
     async def _require_at_rest(
