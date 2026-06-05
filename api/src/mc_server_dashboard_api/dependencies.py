@@ -124,15 +124,23 @@ from mc_server_dashboard_api.identity.adapters.password_hasher import (
 from mc_server_dashboard_api.identity.adapters.sleeper import AsyncioSleeper
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
+from mc_server_dashboard_api.identity.application.admin_delete_user import (
+    AdminDeleteUser,
+)
 from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
 )
 from mc_server_dashboard_api.identity.application.change_password import ChangePassword
 from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
+from mc_server_dashboard_api.identity.application.list_users import ListUsers
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
+from mc_server_dashboard_api.identity.application.set_platform_admin import (
+    SetPlatformAdmin,
+)
+from mc_server_dashboard_api.identity.application.set_user_active import SetUserActive
 from mc_server_dashboard_api.identity.application.update_profile import UpdateProfile
 from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.entities import User
@@ -488,6 +496,48 @@ def get_delete_account(request: Request) -> DeleteAccount:
     return DeleteAccount(
         uow=SqlAlchemyUnitOfWork(session_factory),
         ownership=CommunityBackedOwnership(CommunityUnitOfWork(session_factory)),
+        clock=SystemClock(),
+    )
+
+
+def get_list_users(request: Request) -> ListUsers:
+    """Assemble the :class:`ListUsers` use case (platform-admin only, #278)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListUsers(uow=SqlAlchemyUnitOfWork(session_factory))
+
+
+def get_set_user_active(request: Request) -> SetUserActive:
+    """Assemble the :class:`SetUserActive` use case (platform-admin only, #278)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SetUserActive(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        clock=SystemClock(),
+    )
+
+
+def get_admin_delete_user(request: Request) -> AdminDeleteUser:
+    """Assemble the :class:`AdminDeleteUser` use case (platform-admin only, #278).
+
+    Binds the community-ownership seam to the community store so the admin delete
+    refuses a community owner, the same as the self-delete guard.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return AdminDeleteUser(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        ownership=CommunityBackedOwnership(CommunityUnitOfWork(session_factory)),
+        clock=SystemClock(),
+    )
+
+
+def get_set_platform_admin(request: Request) -> SetPlatformAdmin:
+    """Assemble the :class:`SetPlatformAdmin` use case (platform-admin only, #278)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SetPlatformAdmin(
+        uow=SqlAlchemyUnitOfWork(session_factory),
         clock=SystemClock(),
     )
 

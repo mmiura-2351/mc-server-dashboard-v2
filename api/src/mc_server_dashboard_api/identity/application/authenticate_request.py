@@ -2,8 +2,13 @@
 
 Backs the FastAPI auth dependency that every protected endpoint relies on. It
 verifies the access token's signature/expiry via the :class:`TokenService` and
-loads the referenced user. A bad token, or a token whose subject no longer
-exists, raises :class:`InvalidAccessTokenError` — the edge maps that to 401.
+loads the referenced user. A bad token, a token whose subject no longer exists,
+or a token for a *deactivated* account raises :class:`InvalidAccessTokenError` —
+the edge maps that to the uniform 401. The deactivation check here is what makes
+an outstanding access token unusable the moment an admin deactivates the account
+(issue #278): the user row is already loaded per request, so the flag check is
+free, and the response is the same 401 a token-gone race returns (no oracle that
+distinguishes a deactivated account from any other invalid token).
 """
 
 from __future__ import annotations
@@ -27,6 +32,6 @@ class AuthenticateRequest:
         user_id = self.tokens.verify_access_token(access_token)
         async with self.uow:
             user = await self.uow.users.get_by_id(user_id)
-        if user is None:
+        if user is None or not user.active:
             raise InvalidAccessTokenError
         return user

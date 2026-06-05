@@ -66,7 +66,13 @@ class _FakeUserRepository(UserRepository):
     async def delete(self, user_id: UserId) -> None:
         raise NotImplementedError
 
-    async def count_platform_admins(self) -> int:
+    async def list_page(self, *, limit: int, offset: int) -> list[User]:
+        raise NotImplementedError
+
+    async def count_all(self) -> int:
+        raise NotImplementedError
+
+    async def count_active_platform_admins(self) -> int:
         raise NotImplementedError
 
 

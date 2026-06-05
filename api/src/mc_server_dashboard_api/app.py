@@ -56,7 +56,7 @@ from mc_server_dashboard_api.identity.adapters.login_attempt_store import (
 from mc_server_dashboard_api.identity.adapters.prune_login_attempts_loop import (
     run_prune_login_attempts_loop,
 )
-from mc_server_dashboard_api.identity.api import auth, users
+from mc_server_dashboard_api.identity.api import admin_users, auth, users
 from mc_server_dashboard_api.identity.application.prune_login_attempts import (
     PruneLoginAttempts,
 )
@@ -500,6 +500,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.middleware("http")(correlation_id_middleware)
     app.include_router(health.router)
     app.include_router(users.router)
+    # Registered after users.router so the exact ``/users/me`` self-service paths
+    # still match before this router's templated ``/users/{user_id}`` paths.
+    app.include_router(admin_users.router)
     app.include_router(auth.router)
     app.include_router(communities.router)
     app.include_router(members.router)

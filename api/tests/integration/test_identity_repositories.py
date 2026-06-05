@@ -426,11 +426,13 @@ async def test_delete_cascades_to_membership_grant_and_token(
         assert await uow.refresh_tokens.get_by_token_hash("hashed-token") is None
 
 
-async def test_count_platform_admins_zero_one_and_many(engine: AsyncEngine) -> None:
+async def test_count_active_platform_admins_zero_one_and_many(
+    engine: AsyncEngine,
+) -> None:
     factory = create_session_factory(engine)
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
-        assert await uow.users.count_platform_admins() == 0
+        assert await uow.users.count_active_platform_admins() == 0
 
     admin1 = _user(username="admin1", email="admin1@example.com")
     admin1.is_platform_admin = True
@@ -441,7 +443,7 @@ async def test_count_platform_admins_zero_one_and_many(engine: AsyncEngine) -> N
         await uow.commit()
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
-        assert await uow.users.count_platform_admins() == 1
+        assert await uow.users.count_active_platform_admins() == 1
 
     admin2 = _user(username="admin2", email="admin2@example.com")
     admin2.is_platform_admin = True
@@ -453,4 +455,72 @@ async def test_count_platform_admins_zero_one_and_many(engine: AsyncEngine) -> N
         await uow.commit()
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
-        assert await uow.users.count_platform_admins() == 3
+        assert await uow.users.count_active_platform_admins() == 3
+
+
+async def test_count_active_platform_admins_excludes_deactivated(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+
+    active = _user(username="active", email="active@example.com")
+    active.is_platform_admin = True
+    inactive = _user(username="inactive", email="inactive@example.com")
+    inactive.is_platform_admin = True
+    inactive.active = False
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(active)
+        await uow.users.add(inactive)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        # The deactivated admin is not counted toward the last-admin invariant.
+        assert await uow.users.count_active_platform_admins() == 1
+
+
+async def test_list_page_orders_by_created_at_and_paginates(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+
+    first = _user(username="first", email="first@example.com")
+    first.created_at = _NOW
+    second = _user(username="second", email="second@example.com")
+    second.created_at = _NOW + dt.timedelta(minutes=1)
+    third = _user(username="third", email="third@example.com")
+    third.created_at = _NOW + dt.timedelta(minutes=2)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        # Add out of creation order to prove the query, not insert order, sorts.
+        await uow.users.add(third)
+        await uow.users.add(first)
+        await uow.users.add(second)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.users.count_all() == 3
+        page = await uow.users.list_page(limit=2, offset=0)
+        assert [u.username.value for u in page] == ["first", "second"]
+        page2 = await uow.users.list_page(limit=2, offset=2)
+        assert [u.username.value for u in page2] == ["third"]
+
+
+async def test_update_persists_active_and_platform_admin(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    user = _user()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(user)
+        await uow.commit()
+
+    user.active = False
+    user.is_platform_admin = True
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.update(user)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        reloaded = await uow.users.get_by_id(user.id)
+        assert reloaded is not None
+        assert reloaded.active is False
+        assert reloaded.is_platform_admin is True

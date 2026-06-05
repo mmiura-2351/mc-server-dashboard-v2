@@ -50,9 +50,13 @@ class DeleteAccount:
             user = await self.uow.users.get_by_id(user_id)
             if user is None:
                 raise UserNotFoundError(str(user_id.value))
+            # The invariant counts ACTIVE admins only (issue #278): a deactivated
+            # admin cannot act, so it does not keep the platform administrable.
+            # The self-deleting user is itself active (it passed get_current_user),
+            # so a count of 1 means it is the last active admin.
             if (
                 user.is_platform_admin
-                and await self.uow.users.count_platform_admins() <= 1
+                and await self.uow.users.count_active_platform_admins() <= 1
             ):
                 raise LastPlatformAdminError(str(user_id.value))
 

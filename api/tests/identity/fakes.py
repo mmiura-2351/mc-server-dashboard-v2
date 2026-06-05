@@ -86,8 +86,17 @@ class FakeUserRepository(UserRepository):
     async def delete(self, user_id: UserId) -> None:
         self.by_id.pop(user_id, None)
 
-    async def count_platform_admins(self) -> int:
-        return sum(1 for user in self.by_id.values() if user.is_platform_admin)
+    async def list_page(self, *, limit: int, offset: int) -> list[User]:
+        ordered = sorted(self.by_id.values(), key=lambda u: (u.created_at, u.id.value))
+        return ordered[offset : offset + limit]
+
+    async def count_all(self) -> int:
+        return len(self.by_id)
+
+    async def count_active_platform_admins(self) -> int:
+        return sum(
+            1 for user in self.by_id.values() if user.is_platform_admin and user.active
+        )
 
 
 class FakeRefreshTokenRepository(RefreshTokenRepository):
@@ -317,6 +326,8 @@ def make_user(
     email: str = "alice@example.com",
     password: str = "Wm7!qz#Lp2vT",
     now: dt.datetime | None = None,
+    is_platform_admin: bool = False,
+    active: bool = True,
 ) -> User:
     moment = now or dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
     return User(
@@ -326,4 +337,6 @@ def make_user(
         password_hash=f"hashed::{password}",
         created_at=moment,
         updated_at=moment,
+        is_platform_admin=is_platform_admin,
+        active=active,
     )

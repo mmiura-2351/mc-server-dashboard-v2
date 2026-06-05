@@ -9,7 +9,7 @@ boolean literal (``sqlalchemy.false()`` -> ``false``), not the function call
 from __future__ import annotations
 
 from sqlalchemy import DefaultClause
-from sqlalchemy.sql.elements import False_
+from sqlalchemy.sql.elements import False_, True_
 
 from mc_server_dashboard_api.identity.adapters.models import UserModel
 
@@ -20,3 +20,11 @@ def test_is_platform_admin_server_default_is_boolean_literal() -> None:
     # ``False_`` renders as the literal ``false``; ``func.false()`` would render
     # the invalid ``false()`` call instead (issue #62).
     assert isinstance(server_default.arg, False_)
+
+
+def test_active_server_default_is_boolean_literal() -> None:
+    server_default = UserModel.__table__.c.active.server_default
+    assert isinstance(server_default, DefaultClause)
+    # ``True_`` renders the literal ``true`` so existing rows backfill active
+    # (#278); ``func.true()`` would render the invalid ``true()`` call (#62).
+    assert isinstance(server_default.arg, True_)

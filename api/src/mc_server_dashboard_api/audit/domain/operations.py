@@ -28,6 +28,17 @@ AUTH_PASSWORD_CHANGE: Final = "auth:password_change"
 AUTH_PROFILE_UPDATE: Final = "auth:profile_update"
 AUTH_ACCOUNT_DELETE: Final = "auth:account_delete"
 
+# Platform-admin user administration (M2 Epic A2, issue #278): an admin acting on
+# another user's lifecycle. These name the operation, not a permission code --
+# the admin axis is gated by the platform-admin flag, not a catalog permission --
+# but follow the same ``<resource>:<action>`` shape; the actor is the admin and
+# the target is the affected user.
+USER_DEACTIVATE: Final = "user:deactivate"
+USER_REACTIVATE: Final = "user:reactivate"
+USER_DELETE: Final = "user:delete"
+USER_PLATFORM_ADMIN_GRANT: Final = "user:platform_admin_grant"
+USER_PLATFORM_ADMIN_REVOKE: Final = "user:platform_admin_revoke"
+
 # Community provisioning/management (FR-COMM-*).
 COMMUNITY_PROVISION: Final = "community:provision"
 COMMUNITY_UPDATE: Final = "community:update"

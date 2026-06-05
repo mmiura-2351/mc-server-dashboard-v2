@@ -63,6 +63,45 @@ async def test_upgrade_creates_tables_then_downgrade_drops_them() -> None:
         await engine.dispose()
 
 
+async def test_user_active_column_present_and_defaults_true() -> None:
+    # The 0011 migration adds ``user.active`` NOT NULL defaulting to ``true`` so
+    # existing rows backfill active (#278). Insert a row without the column and
+    # read it back to prove the server default applies.
+    assert _DB_URL is not None
+    await downgrade_base(_DB_URL)
+    await upgrade_head(_DB_URL)
+
+    engine = create_async_engine(_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {
+                    c["name"] for c in inspect(sync_conn).get_columns("user")
+                }
+            )
+            assert "active" in columns
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    'INSERT INTO "user" '
+                    "(id, username, email, password_hash, is_platform_admin, "
+                    "created_at, updated_at) VALUES "
+                    "(gen_random_uuid(), 'carol', 'c@example.com', 'h', false, "
+                    "now(), now())"
+                )
+            )
+        async with engine.connect() as conn:
+            active = (
+                await conn.execute(
+                    text("SELECT active FROM \"user\" WHERE username = 'carol'")
+                )
+            ).scalar_one()
+            assert active is True
+    finally:
+        await engine.dispose()
+        await downgrade_base(_DB_URL)
+
+
 async def test_case_insensitive_username_uniqueness_is_enforced() -> None:
     assert _DB_URL is not None
     await downgrade_base(_DB_URL)
