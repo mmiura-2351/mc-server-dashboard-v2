@@ -71,6 +71,9 @@ class _Registry(WorkerRegistry):
     def list_workers(self) -> list[WorkerSnapshot]:
         return self._snapshots
 
+    def get(self, worker_id):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
 
 def _snapshot(status: WorkerStatus) -> WorkerSnapshot:
     now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)

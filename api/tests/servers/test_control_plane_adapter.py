@@ -6,10 +6,12 @@ scope and hand the Worker the URL + the shared credential as the transfer token.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 
 import pytest
 
+from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     Command,
     CommandResult,
@@ -46,6 +48,10 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.fleet.fakes import FakeClock, make_worker
+
+_T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+_TIMEOUT = dt.timedelta(seconds=30)
 
 
 class _CapturingFleetControlPlane(FleetControlPlane):
@@ -257,3 +263,60 @@ async def test_hydrate_without_base_url_is_worker_unavailable() -> None:
             community_id=CommunityId(uuid.uuid4()),
             server_id=ServerId(uuid.uuid4()),
         )
+
+
+# --- is_worker_connected via the registry per-id lookup (#322) --------------
+
+
+def _registry_adapter(
+    registry: InMemoryWorkerRegistry,
+) -> FleetControlPlaneAdapter:
+    return FleetControlPlaneAdapter(
+        registry=registry,
+        control_plane=_CapturingFleetControlPlane(),
+    )
+
+
+def test_is_worker_connected_true_for_online_worker() -> None:
+    worker_uuid = uuid.uuid4()
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+
+    adapter = _registry_adapter(registry)
+
+    assert adapter.is_worker_connected(worker_id=WorkerId(worker_uuid)) is True
+
+
+def test_is_worker_connected_true_for_draining_worker() -> None:
+    worker_uuid = uuid.uuid4()
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    registry.set_draining(FleetWorkerId(str(worker_uuid)), True)
+
+    adapter = _registry_adapter(registry)
+
+    assert adapter.is_worker_connected(worker_id=WorkerId(worker_uuid)) is True
+
+
+def test_is_worker_connected_false_for_unknown_worker() -> None:
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+
+    adapter = _registry_adapter(registry)
+
+    assert adapter.is_worker_connected(worker_id=WorkerId(uuid.uuid4())) is False
+
+
+def test_is_worker_connected_false_for_offline_worker() -> None:
+    worker_uuid = uuid.uuid4()
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    session = registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+
+    registry.mark_disconnected(FleetWorkerId(str(worker_uuid)), session)
+
+    adapter = _registry_adapter(registry)
+
+    assert adapter.is_worker_connected(worker_id=WorkerId(worker_uuid)) is False

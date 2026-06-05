@@ -118,15 +118,21 @@ class InMemoryWorkerRegistry(WorkerRegistry):
 
     def list_workers(self) -> list[WorkerSnapshot]:
         now = self._clock.now()
-        return [
-            WorkerSnapshot(
-                id=worker.id,
-                version=worker.version,
-                capabilities=worker.capabilities,
-                registered_at=worker.registered_at,
-                last_heartbeat_at=worker.last_heartbeat_at,
-                status=worker.status(now=now, timeout=self._timeout),
-                assigned_count=self._assignments[worker.id],
-            )
-            for worker in self._workers.values()
-        ]
+        return [self._snapshot(worker, now=now) for worker in self._workers.values()]
+
+    def get(self, worker_id: WorkerId) -> WorkerSnapshot | None:
+        worker = self._workers.get(worker_id)
+        if worker is None:
+            return None
+        return self._snapshot(worker, now=self._clock.now())
+
+    def _snapshot(self, worker: Worker, *, now: dt.datetime) -> WorkerSnapshot:
+        return WorkerSnapshot(
+            id=worker.id,
+            version=worker.version,
+            capabilities=worker.capabilities,
+            registered_at=worker.registered_at,
+            last_heartbeat_at=worker.last_heartbeat_at,
+            status=worker.status(now=now, timeout=self._timeout),
+            assigned_count=self._assignments[worker.id],
+        )

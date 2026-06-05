@@ -128,3 +128,11 @@ class WorkerRegistry(abc.ABC):
     @abc.abstractmethod
     def list_workers(self) -> list[WorkerSnapshot]:
         """Return every registered Worker with its liveness resolved now."""
+
+    @abc.abstractmethod
+    def get(self, worker_id: WorkerId) -> WorkerSnapshot | None:
+        """Return the Worker's snapshot with liveness resolved now, or ``None``.
+
+        A per-id accessor for liveness checks that would otherwise scan
+        :meth:`list_workers`; returns ``None`` for an unknown Worker.
+        """
