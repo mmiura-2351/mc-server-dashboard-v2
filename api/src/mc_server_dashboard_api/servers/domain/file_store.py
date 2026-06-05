@@ -80,6 +80,38 @@ class FileStore(abc.ABC):
         """Edit one file in ``current/``, retaining the prior version (FR-FILE-3)."""
 
     @abc.abstractmethod
+    async def delete_file(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        """Delete one file from ``current/``, retaining the prior content (#259).
+
+        Raises :class:`ServerFileNotFoundError` for a missing path and
+        :class:`InvalidFilePathError` for a traversal-unsafe one.
+        """
+
+    @abc.abstractmethod
+    async def delete_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        """Recursively delete a directory subtree from ``current/`` (#259).
+
+        No per-file version capture (the Storage Port contract); whole-subtree
+        recovery is the backups' job. Raises the same errors as :meth:`delete_file`.
+        """
+
+    @abc.abstractmethod
+    async def make_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        """Create an (empty) directory in ``current/`` (#259).
+
+        Backend-dependent: fs materializes a real empty directory; object storage
+        cannot represent one (no-op there). Raises :class:`InvalidFilePathError`
+        for a traversal-unsafe path and :class:`ServerFileNotFoundError` when no
+        working set has been published yet (fs has no snapshot to create it in).
+        """
+
+    @abc.abstractmethod
     def download_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:

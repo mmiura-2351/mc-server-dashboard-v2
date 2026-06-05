@@ -115,6 +115,39 @@ class StorageFileStoreAdapter(FileStore):
         except PathTraversalError as exc:
             raise InvalidFilePathError(rel_path) from exc
 
+    async def delete_file(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        community, server = _scope(community_id, server_id)
+        try:
+            await self._storage.delete_file(community, server, _rel_path(rel_path))
+        except PathTraversalError as exc:
+            raise InvalidFilePathError(rel_path) from exc
+        except NotFoundError as exc:
+            raise ServerFileNotFoundError(str(server_id.value)) from exc
+
+    async def delete_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        community, server = _scope(community_id, server_id)
+        try:
+            await self._storage.delete_dir(community, server, _rel_path(rel_path))
+        except PathTraversalError as exc:
+            raise InvalidFilePathError(rel_path) from exc
+        except NotFoundError as exc:
+            raise ServerFileNotFoundError(str(server_id.value)) from exc
+
+    async def make_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        community, server = _scope(community_id, server_id)
+        try:
+            await self._storage.make_dir(community, server, _rel_path(rel_path))
+        except PathTraversalError as exc:
+            raise InvalidFilePathError(rel_path) from exc
+        except NotFoundError as exc:
+            raise ServerFileNotFoundError(str(server_id.value)) from exc
+
     def download_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:

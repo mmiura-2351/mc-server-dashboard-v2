@@ -168,11 +168,15 @@ from mc_server_dashboard_api.servers.application.backups import (
     RestoreBackup,
 )
 from mc_server_dashboard_api.servers.application.files import (
+    DeleteFile,
     DownloadFile,
     ListDir,
     ListFileVersions,
+    MakeDir,
     ReadFile,
+    RenameFile,
     RollbackFile,
+    SearchFiles,
     UploadFile,
     WriteFile,
 )
@@ -1107,6 +1111,58 @@ def get_download_file(
 
     session_factory = create_session_factory(get_engine(request))
     return DownloadFile(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+    )
+
+
+def get_delete_file(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> DeleteFile:
+    """Assemble the :class:`DeleteFile` use case (file:edit, issue #259)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteFile(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+    )
+
+
+def get_make_dir(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> MakeDir:
+    """Assemble the :class:`MakeDir` use case (file:edit, issue #259)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return MakeDir(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+    )
+
+
+def get_rename_file(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> RenameFile:
+    """Assemble the :class:`RenameFile` use case (file:edit, issue #259)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RenameFile(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+    )
+
+
+def get_search_files(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> SearchFiles:
+    """Assemble the :class:`SearchFiles` use case (file:read, issue #259)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SearchFiles(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
     )

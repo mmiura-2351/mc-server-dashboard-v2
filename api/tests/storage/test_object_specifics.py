@@ -24,6 +24,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     ObjectStorage,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    NotFoundError,
     PathTraversalError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -369,6 +370,28 @@ async def test_sweep_reclaims_crash_leftover_staging_with_no_handle() -> None:
         k.startswith(_server_prefix(community, server) + "incoming/")
         for k in store.objects
     )
+
+
+async def test_make_dir_is_a_noop_empty_dir_not_represented() -> None:
+    """Object storage has no real directories, so make_dir writes no object.
+
+    An empty directory exists only as the shared key-prefix of its files
+    (Section 7.3); there is nothing to create until a file lands under it. The
+    documented limitation (issue #259): make_dir is a no-op on object storage —
+    it neither errors nor leaves a marker object that would pollute listings.
+    """
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"server.properties": b"x"})
+
+    before = set(store.objects)
+    await storage.make_dir(community, server, RelPath("plugins"))
+    assert set(store.objects) == before  # no marker object written
+
+    # The empty directory is not observable (a prefix scan finds no members).
+    with pytest.raises(NotFoundError):
+        await storage.list_dir(community, server, RelPath("plugins"))
 
 
 async def test_subkey_traversal_is_confined_to_server_prefix() -> None:

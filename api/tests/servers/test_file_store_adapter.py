@@ -227,6 +227,97 @@ async def test_download_dir_missing_is_file_not_found(tmp_path: Path) -> None:
             pass
 
 
+async def test_delete_file_removes_and_retains_version(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"a.txt": b"gone", "b.txt": b"stays"},
+    )
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    await adapter.delete_file(community_id=cid, server_id=sid, rel_path="a.txt")
+
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.read_file(community_id=cid, server_id=sid, rel_path="a.txt")
+    assert (
+        await adapter.read_file(community_id=cid, server_id=sid, rel_path="b.txt")
+        == b"stays"
+    )
+    # The deleted content is retained as a version (reversible delete).
+    versions = await adapter.list_versions(
+        community_id=cid, server_id=sid, rel_path="a.txt"
+    )
+    assert len(versions) == 1
+
+
+async def test_delete_missing_file_is_file_not_found(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.delete_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="nope.txt",
+        )
+
+
+async def test_delete_dir_removes_subtree(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"world/level.dat": b"a", "world/region/r.mca": b"b", "keep.txt": b"k"},
+    )
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    await adapter.delete_dir(community_id=cid, server_id=sid, rel_path="world")
+
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.list_dir(community_id=cid, server_id=sid, rel_path="world")
+    assert (
+        await adapter.read_file(community_id=cid, server_id=sid, rel_path="keep.txt")
+        == b"k"
+    )
+
+
+async def test_make_dir_creates_empty_directory(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    await adapter.make_dir(community_id=cid, server_id=sid, rel_path="plugins")
+    entries = await adapter.list_dir(
+        community_id=cid, server_id=sid, rel_path="plugins"
+    )
+    assert entries == []
+
+
+async def test_delete_traversal_is_invalid_path(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    with pytest.raises(InvalidFilePathError):
+        await adapter.delete_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="../escape",
+        )
+
+
 async def test_read_missing_is_file_not_found(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = _scope()

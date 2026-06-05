@@ -722,6 +722,61 @@ class ObjectStorage(Storage):
         finally:
             self._release_staging(incoming)
 
+    async def delete_file(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        sub = self._safe_subkey(rel_path)
+        async with self._client_factory() as client:
+            snapshot_prefix = await self._live_snapshot_prefix(
+                client, community_id, server_id
+            )
+            key = snapshot_prefix + sub
+            if await client.head_object(key) is None:
+                raise NotFoundError(f"file not found: {rel_path.value}")
+            # Capture the content BEFORE removing it (Section 5), so a delete is
+            # reversible by rollback exactly like an overwrite is.
+            await self._capture_version(client, community_id, server_id, rel_path, key)
+            self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+            await client.delete_object(key)
+            # Re-write the pointer so the published state stays named explicitly,
+            # mirroring write_file's post-mutation pointer rewrite (Section 4.4).
+            await client.put_object(
+                self._pointer_key(community_id, server_id),
+                json.dumps({"snapshot": snapshot_prefix}).encode(),
+            )
+
+    async def delete_dir(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        sub = self._safe_subkey(rel_path)
+        dir_suffix = sub + "/" if sub else ""
+        async with self._client_factory() as client:
+            snapshot_prefix = await self._live_snapshot_prefix(
+                client, community_id, server_id
+            )
+            objs = await client.list_objects(snapshot_prefix + dir_suffix)
+            if not objs:
+                raise NotFoundError(f"directory not found: {rel_path.value}")
+            # No per-file version capture (Port contract): whole-subtree recovery
+            # is the backups' job (Section 3.3). Delete every object under the dir
+            # prefix, then re-write the pointer to keep the state named explicitly.
+            for obj in objs:
+                await client.delete_object(obj.key)
+            await client.put_object(
+                self._pointer_key(community_id, server_id),
+                json.dumps({"snapshot": snapshot_prefix}).encode(),
+            )
+
+    async def make_dir(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        # Object storage has no real directories — a directory exists only as the
+        # shared key-prefix of its files (Section 7.3), so an empty directory
+        # cannot be represented and make_dir is a no-op (the documented limitation,
+        # issue #259). Validate the path so a traversal-unsafe input is still
+        # rejected at the seam rather than silently accepted.
+        self._safe_subkey(rel_path)
+
     # --- file version retention / rollback (Section 3.5, Section 5) ---------
 
     async def _capture_version(

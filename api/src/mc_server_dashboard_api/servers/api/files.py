@@ -45,22 +45,30 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
+    get_delete_file,
     get_download_file,
     get_list_dir,
     get_list_file_versions,
+    get_make_dir,
     get_read_file,
+    get_rename_file,
     get_rollback_file,
+    get_search_files,
     get_upload_file,
     get_write_file,
     require_permission,
 )
 from mc_server_dashboard_api.servers.application.files import (
     MAX_UPLOAD_BYTES,
+    DeleteFile,
     DownloadFile,
     ListDir,
     ListFileVersions,
+    MakeDir,
     ReadFile,
+    RenameFile,
     RollbackFile,
+    SearchFiles,
     WriteFile,
 )
 from mc_server_dashboard_api.servers.application.files import (
@@ -71,6 +79,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
     ServerFileNotFoundError,
@@ -124,6 +133,28 @@ class FileVersionsResponse(BaseModel):
 
 class RollbackRequest(BaseModel):
     version_id: str = Field(min_length=1)
+
+
+class RenameRequest(BaseModel):
+    """Source and destination rel-paths for a rename (issue #259)."""
+
+    # Aliased to the issue's ``from`` / ``to`` field names (``from`` is a Python
+    # keyword, so the model attributes are ``from_`` / ``to``).
+    from_: str = Field(alias="from", min_length=1)
+    to: str = Field(min_length=1)
+
+
+class SearchRequest(BaseModel):
+    """A name/content search query with a result cap (issue #259)."""
+
+    query: str
+    by: str = Field(default="name")
+    max_results: int = Field(default=100, ge=1)
+
+
+class SearchResponse(BaseModel):
+    paths: list[str]
+    truncated: bool
 
 
 @router.get("/communities/{community_id}/servers/{server_id}/files")
@@ -449,6 +480,205 @@ async def download_file(
         raise _conflict("server_unsettled") from exc
     await _record_file(recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id)
     return response
+
+
+@router.post(
+    "/communities/{community_id}/servers/{server_id}/files/rename",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def rename_file(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    body: RenameRequest,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("file:edit"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[RenameFile, Depends(get_rename_file)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> None:
+    """Rename/move a file at rest (file:edit, FR-FILE-*).
+
+    At rest only (Section 6.9): a running server is 409 ``server_unsettled``. Both
+    paths are traversal-validated (422 on a bad path); a missing source is 404 and
+    an existing destination is 409 ``destination_exists`` (rename never clobbers).
+    """
+
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            from_path=body.from_,
+            to_path=body.to,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFileNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable("invalid_path") from exc
+    except FileAlreadyExistsError as exc:
+        raise _conflict("destination_exists") from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_RENAME, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+    await _record_file(recorder, ops.FILE_RENAME, authorized, community_id, server_id)
+
+
+@router.delete(
+    "/communities/{community_id}/servers/{server_id}/files",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_file(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("file:edit"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[DeleteFile, Depends(get_delete_file)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    path: Annotated[str, Query()],
+) -> None:
+    """Delete a file or directory (recursive) at rest (file:edit, FR-FILE-*).
+
+    At rest only (Section 6.9): a running server is 409 ``server_unsettled``. The
+    path is resolved to a file or directory; a missing path is 404 and a
+    traversal-unsafe one is 422. A file delete retains the prior content (rollback
+    can resurrect it); a directory delete does not (backups cover whole subtrees).
+    """
+
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            rel_path=path,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFileNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable("invalid_path") from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_DELETE, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+    await _record_file(recorder, ops.FILE_DELETE, authorized, community_id, server_id)
+
+
+@router.post(
+    "/communities/{community_id}/servers/{server_id}/files/directories",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def make_directory(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("file:edit"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[MakeDir, Depends(get_make_dir)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    path: Annotated[str, Query()],
+) -> None:
+    """Create an (empty) directory at rest (file:edit, FR-FILE-*).
+
+    At rest only (Section 6.9): a running server is 409 ``server_unsettled``. The
+    path is traversal-validated (422). Backend-dependent: object storage cannot
+    represent an empty directory (the seam is a no-op there) — the directory
+    becomes observable once a file is written under it.
+    """
+
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            rel_path=path,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFileNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable("invalid_path") from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_MKDIR, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+    await _record_file(recorder, ops.FILE_MKDIR, authorized, community_id, server_id)
+
+
+@router.post("/communities/{community_id}/servers/{server_id}/files/search")
+async def search_files(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    body: SearchRequest,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("file:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[SearchFiles, Depends(get_search_files)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> SearchResponse:
+    """Search the authoritative copy by name or content at rest (file:read).
+
+    At rest only (Section 6.9): a running server is 409 ``server_unsettled``,
+    matching the other three mutations' posture (search reads the authoritative
+    Storage copy, which is only well-defined at rest). ``by`` must be ``name`` or
+    ``content`` (else 422). Results are bounded; ``truncated`` flags a clipped
+    result.
+    """
+
+    try:
+        result = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            query=body.query,
+            by=body.by,
+            max_results=body.max_results,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFileNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable("invalid_path") from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_SEARCH, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+    await _record_file(recorder, ops.FILE_SEARCH, authorized, community_id, server_id)
+    return SearchResponse(paths=result.paths, truncated=result.truncated)
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:

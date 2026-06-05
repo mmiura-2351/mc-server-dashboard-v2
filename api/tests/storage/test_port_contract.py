@@ -401,6 +401,95 @@ async def test_rollback_restores_and_is_reversible(
     assert latest == b"second"
 
 
+# --- delete / mkdir (Section 3.4, issue #259) ------------------------------
+
+
+async def test_delete_file_removes_and_retains_prior_content(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"cfg": b"keep-me", "other": b"x"})
+
+    await harness.storage.delete_file(community, server, RelPath("cfg"))
+
+    with pytest.raises(NotFoundError):
+        await harness.storage.read_file(community, server, RelPath("cfg"))
+    # The sibling is untouched.
+    assert await harness.storage.read_file(community, server, RelPath("other")) == b"x"
+    # The deleted content is retained, so a rollback can resurrect it.
+    versions = await harness.storage.list_file_versions(
+        community, server, RelPath("cfg")
+    )
+    assert len(versions) == 1
+    assert (
+        await harness.storage.read_file_version(
+            community, server, RelPath("cfg"), versions[0]
+        )
+        == b"keep-me"
+    )
+
+
+async def test_delete_missing_file_is_not_found(harness: StorageHarness) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"x"})
+    with pytest.raises(NotFoundError):
+        await harness.storage.delete_file(community, server, RelPath("missing"))
+
+
+async def test_delete_dir_removes_subtree(harness: StorageHarness) -> None:
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {
+            "world/level.dat": b"a",
+            "world/region/r.mca": b"b",
+            "server.properties": b"keep",
+        },
+    )
+
+    await harness.storage.delete_dir(community, server, RelPath("world"))
+
+    with pytest.raises(NotFoundError):
+        await harness.storage.list_dir(community, server, RelPath("world"))
+    with pytest.raises(NotFoundError):
+        await harness.storage.read_file(
+            community, server, RelPath("world/region/r.mca")
+        )
+    # A sibling outside the deleted subtree survives.
+    assert (
+        await harness.storage.read_file(community, server, RelPath("server.properties"))
+        == b"keep"
+    )
+
+
+async def test_delete_missing_dir_is_not_found(harness: StorageHarness) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"x"})
+    with pytest.raises(NotFoundError):
+        await harness.storage.delete_dir(community, server, RelPath("nope"))
+
+
+async def test_make_dir_then_write_file_under_it(harness: StorageHarness) -> None:
+    """make_dir followed by a write under it makes the directory observable.
+
+    The empty-directory itself is backend-dependent (fs materializes it; object
+    storage cannot represent an empty dir), so the portable contract is: after a
+    file is written under the new directory, the directory lists that file.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"x"})
+
+    await harness.storage.make_dir(community, server, RelPath("plugins"))
+    await harness.storage.write_file(
+        community, server, RelPath("plugins/p.jar"), b"jar"
+    )
+
+    entries = await harness.storage.list_dir(community, server, RelPath("plugins"))
+    assert {e.name for e in entries} == {"p.jar"}
+
+
 async def test_sweep_never_reclaims_live_snapshot(harness: StorageHarness) -> None:
     community, server = new_scope()
     await harness.publish(community, server, {"f": b"LIVE"})

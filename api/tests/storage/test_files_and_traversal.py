@@ -66,6 +66,29 @@ async def test_internal_symlink_within_root_is_allowed(tmp_path: Path) -> None:
     )
 
 
+async def test_make_dir_materializes_empty_dir_and_survives_hydrate(
+    tmp_path: Path,
+) -> None:
+    """fs materializes a real empty directory that survives a hydrate round-trip.
+
+    The hydrate tar is built with ``tar.add`` (recursive), which emits directory
+    members, so an empty directory created via ``make_dir`` is preserved in the
+    streamed working set — the fs realization of the empty-dir support (issue
+    #259). Object storage cannot represent an empty dir (see object specifics).
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"server.properties": b"x"})
+
+    await storage.make_dir(community, server, RelPath("plugins"))
+
+    live = snapshot_dir(tmp_path, community, server)
+    assert (live / "plugins").is_dir()
+    # The empty dir lists as empty rather than 404-ing.
+    assert await storage.list_dir(community, server, RelPath("plugins")) == []
+
+
 def test_version_ids_sort_chronologically_across_time_low_wrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
