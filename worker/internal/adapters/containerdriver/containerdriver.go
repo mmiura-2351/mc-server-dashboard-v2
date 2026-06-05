@@ -42,6 +42,15 @@ const (
 // daemon escalates to SIGKILL.
 const defaultStopTimeout = 30 * time.Second
 
+// defaultConflictPollInterval and defaultConflictDeadline bound the
+// wait-for-name-free loop createContainer runs on a create name conflict: it
+// polls every interval until the deadline for the deterministic name to free as
+// the async exit-watcher finishes the previous container's teardown (issue #233).
+const (
+	defaultConflictPollInterval = 250 * time.Millisecond
+	defaultConflictDeadline     = 10 * time.Second
+)
+
 // defaultGameBindIP is the host interface the game port is published on when
 // Options.GameBindIP is unset: loopback, preserving the historical behavior.
 // rconBindIP is fixed: RCON is a control channel and must not be exposed.
@@ -74,6 +83,11 @@ type Options struct {
 	// attaches each container to this network, drops the RCON host publication, and
 	// dials RCON at the container name over the network (issue #218).
 	Network string
+	// ConflictPollInterval and ConflictDeadline tune the wait-for-name-free loop
+	// createContainer runs on a create name conflict (issue #233). Zero uses the
+	// production defaults; tests set short values to keep the suite fast.
+	ConflictPollInterval time.Duration
+	ConflictDeadline     time.Duration
 }
 
 // Driver is the container ExecutionDriver.
@@ -85,6 +99,9 @@ type Driver struct {
 	stopTimeout time.Duration
 	gameBindIP  string
 	network     string
+	// conflictPoll and conflictDeadline bound the wait-for-name-free loop (#233).
+	conflictPoll     time.Duration
+	conflictDeadline time.Duration
 }
 
 // New builds a container Driver. docker is the Engine seam; images resolves a
@@ -99,14 +116,24 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	if gameBindIP == "" {
 		gameBindIP = defaultGameBindIP
 	}
+	conflictPoll := opts.ConflictPollInterval
+	if conflictPoll <= 0 {
+		conflictPoll = defaultConflictPollInterval
+	}
+	conflictDeadline := opts.ConflictDeadline
+	if conflictDeadline <= 0 {
+		conflictDeadline = defaultConflictDeadline
+	}
 	return &Driver{
-		docker:      docker,
-		images:      images,
-		openControl: openControl,
-		workerID:    opts.WorkerID,
-		stopTimeout: timeout,
-		gameBindIP:  gameBindIP,
-		network:     opts.Network,
+		docker:           docker,
+		images:           images,
+		openControl:      openControl,
+		workerID:         opts.WorkerID,
+		stopTimeout:      timeout,
+		gameBindIP:       gameBindIP,
+		network:          opts.Network,
+		conflictPoll:     conflictPoll,
+		conflictDeadline: conflictDeadline,
 	}
 }
 
@@ -198,43 +225,79 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	return inst, nil
 }
 
-// createContainer creates the container, healing the create name conflict that a
-// back-to-back restart hits when the exit-watcher's async removal of the exited
-// container has not yet won the race (issue #226). On a 409 name conflict it
-// inspects the conflicting container: if it carries THIS Worker's label and is
-// not running it is a stale leftover (the just-exited container or a name the
-// startup sweep missed), so the driver removes it and retries the create exactly
-// once. If the inspect returns 404 the async remover already won the race — the
-// name is free — so the driver retries the create directly (issue #229). A
-// foreign label, a running container, or a non-404 inspect failure is left
-// untouched and the conflict is returned, wrapped with the decline reason so a
-// field diagnosis does not require code reading. A second conflict after the
-// retry is returned as-is.
+// createContainer creates the container, healing the create name conflict a
+// back-to-back restart hits while the exit-watcher's async removal of the exited
+// container has not yet freed the deterministic name. Three successive one-shot
+// fixes each lost to a new interleaving of this race (#226 name conflict, #229
+// inspect-404, #233 remove-already-in-progress), so on a 409 name conflict the
+// driver runs a bounded wait-for-name-free loop instead of a single special case
+// (issue #233): it polls (every conflictPoll, until conflictDeadline, honoring
+// ctx) for the name to free.
+//
+// Each iteration inspects the conflicting name:
+//   - 404: the name is free, so retry the create. Success returns; a fresh 409
+//     means the name flickered while the daemon finishes teardown, so keep
+//     polling; any other create error is returned.
+//   - this Worker's label and not running: a stale leftover, so issue a remove.
+//     A DELETE 409 ("removal in progress") is the watcher already removing it —
+//     progress, keep polling. Any other remove error: the watcher may still win,
+//     keep polling until the deadline.
+//   - foreign label or running: fail immediately, never removing a container we
+//     do not own or a live server (the conservative posture is unchanged).
+//   - any other inspect error: transient, keep polling until the deadline.
+//
+// On deadline expiry the original conflict is returned wrapped with the last
+// decline reason, so a field diagnosis does not require code reading (keeping
+// #231's observability).
 func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string, error) {
 	id, err := d.docker.Create(ctx, create)
 	if !errors.Is(err, errNameConflict) {
 		return id, err
 	}
+	conflict := err
 
-	info, inspectErr := d.docker.Inspect(ctx, create.Name)
-	if errors.Is(inspectErr, errNotFound) {
-		// The conflicting container is already gone (the async remover won the
-		// race); the name is free, so retry the create directly.
-		return d.docker.Create(ctx, create)
+	timer := time.NewTimer(d.conflictDeadline)
+	defer timer.Stop()
+
+	lastReason := "name still in use"
+	for {
+		info, inspectErr := d.docker.Inspect(ctx, create.Name)
+		switch {
+		case errors.Is(inspectErr, errNotFound):
+			// The name is free; retry the create.
+			id, createErr := d.docker.Create(ctx, create)
+			if createErr == nil {
+				return id, nil
+			}
+			if !errors.Is(createErr, errNameConflict) {
+				return "", createErr
+			}
+			lastReason = "create still conflicts after the name freed"
+		case inspectErr != nil:
+			lastReason = fmt.Sprintf("inspect failed: %v", inspectErr)
+		case info.Labels[labelWorkerID] != d.workerID:
+			return "", fmt.Errorf("declined conflict resolution: conflicting container not owned by this worker: %w", conflict)
+		case info.Running:
+			return "", fmt.Errorf("declined conflict resolution: conflicting container is running: %w", conflict)
+		default:
+			if removeErr := d.docker.Remove(ctx, info.ID); removeErr != nil && !errors.Is(removeErr, errRemovalInProgress) {
+				lastReason = fmt.Sprintf("remove failed: %v", removeErr)
+			}
+		}
+
+		// Wait one poll interval for the name to free, honoring the deadline and
+		// ctx cancellation.
+		poll := time.NewTimer(d.conflictPoll)
+		select {
+		case <-ctx.Done():
+			poll.Stop()
+			return "", fmt.Errorf("conflict resolution cancelled (%s): %w", lastReason, ctx.Err())
+		case <-timer.C:
+			poll.Stop()
+			return "", fmt.Errorf("conflict resolution timed out (%s): %w", lastReason, conflict)
+		case <-poll.C:
+		}
 	}
-	if inspectErr != nil {
-		return "", fmt.Errorf("declined conflict resolution: inspect failed: %v: %w", inspectErr, err)
-	}
-	if info.Labels[labelWorkerID] != d.workerID {
-		return "", fmt.Errorf("declined conflict resolution: conflicting container not owned by this worker: %w", err)
-	}
-	if info.Running {
-		return "", fmt.Errorf("declined conflict resolution: conflicting container is running: %w", err)
-	}
-	if removeErr := d.docker.Remove(ctx, info.ID); removeErr != nil {
-		return "", fmt.Errorf("declined conflict resolution: remove failed: %v: %w", removeErr, err)
-	}
-	return d.docker.Create(ctx, create)
 }
 
 // logBufferLines bounds the per-instance captured-log buffer; matches the

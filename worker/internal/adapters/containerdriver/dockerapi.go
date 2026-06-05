@@ -25,6 +25,13 @@ var errNameConflict = errors.New("containerdriver: container name already in use
 // (issue #229).
 var errNotFound = errors.New("containerdriver: container not found")
 
+// errRemovalInProgress is the error Remove returns when the daemon answers 409
+// Conflict because a removal of the container is already in flight. During the
+// wait-for-name-free loop the driver matches it with errors.Is to treat the
+// in-progress removal as progress — the exit-watcher will free the name shortly
+// — so it keeps polling instead of declining (issue #233).
+var errRemovalInProgress = errors.New("containerdriver: container removal already in progress")
+
 // Container label keys. The worker-id label scopes the startup orphan sweep to
 // this Worker's containers; the server-id label identifies which server a
 // container runs.
