@@ -444,8 +444,35 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	if err := i.docker.Kill(ctx, i.containerID); err != nil {
 		return fmt.Errorf("containerdriver: kill: %w", err)
 	}
-	i.waitExit(ctx, i.stopTimeout)
+	// Confirm the kill actually terminated the container. A container that survives
+	// docker kill leaves this final wait timing out; report it as a stop failure so
+	// the manager reports the command failed, the API keeps the assignment, and the
+	// reconciler retries (issue #211). Reporting success here would let the API
+	// unassign while the container lingers. The instance was already evicted from
+	// the manager's map (handleStop's take()), so the linger is owned by the startup
+	// sweep and the reconciler, not re-tracked here.
+	//
+	// This wait does not honor ctx cancellation: the kill is already issued, so a
+	// cancelled caller context must not be read as a lingering container when the
+	// container did in fact exit. Only the timeout means it survived.
+	if !i.waitExitDone(i.stopTimeout) {
+		return fmt.Errorf("containerdriver: container survived docker kill after %s", i.stopTimeout)
+	}
 	return nil
+}
+
+// waitExitDone reports whether the container reached a terminal state within d,
+// observing only the exit and the timeout (not caller-context cancellation). It
+// confirms a kill terminated the container (issue #211).
+func (i *instance) waitExitDone(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-i.exited:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // isTerminal reports whether s is a state the container can no longer leave.
