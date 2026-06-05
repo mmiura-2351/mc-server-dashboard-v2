@@ -25,10 +25,16 @@ type fakeProcess struct {
 	// killNoExit models a process that survives SIGKILL: Kill records the call but
 	// does not release Wait, so the post-Kill waitExit times out.
 	killNoExit bool
-	startErr   error
-	startedAt  bool
-	stdout     io.Reader
-	stderr     io.Reader
+	// killSurvive counts how many leading Kill calls survive (do not release Wait);
+	// each Kill decrements it, and a Kill at zero exits the process. It models a
+	// process that lingers through the first kill(s) and dies on a later retry,
+	// driving the re-attemptable-Stop path (issue #253).
+	killSurvive int
+	killCalls   int
+	startErr    error
+	startedAt   bool
+	stdout      io.Reader
+	stderr      io.Reader
 }
 
 func newFakeProcess() *fakeProcess {
@@ -72,12 +78,22 @@ func (p *fakeProcess) Signal(sig os.Signal) error {
 func (p *fakeProcess) Kill() error {
 	p.mu.Lock()
 	p.killed = true
-	noExit := p.killNoExit
+	p.killCalls++
+	survive := p.killNoExit || p.killSurvive > 0
+	if p.killSurvive > 0 {
+		p.killSurvive--
+	}
 	p.mu.Unlock()
-	if !noExit {
+	if !survive {
 		p.exit(errors.New("killed"))
 	}
 	return nil
+}
+
+func (p *fakeProcess) killCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.killCalls
 }
 
 // exit releases Wait with the given error, simulating process termination.
@@ -269,6 +285,59 @@ func TestStopFailsWhenProcessSurvivesKill(t *testing.T) {
 	}
 	if !proc.killed {
 		t.Fatal("expected SIGKILL escalation")
+	}
+}
+
+// After a Stop that fails because the process survives SIGKILL, a retry Stop must
+// re-run the kill-and-confirm sequence rather than short-circuit on the stopping
+// latch. When the process then dies on the retry kill, the retry returns success
+// (issue #253). Without the latch reset the retry would return a false nil.
+func TestStopReattemptableAfterSurvivedKill(t *testing.T) {
+	proc := newFakeProcess()
+	proc.killSurvive = 1 // first kill survives, the next kill exits the process
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected first Stop to fail when the process survives SIGKILL")
+	}
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("retry Stop = %v, want success once the process dies on the retry kill", err)
+	}
+	if proc.killCount() != 2 {
+		t.Fatalf("Kill called %d times, want 2 (initial + retry re-issues the kill)", proc.killCount())
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+}
+
+// A retry Stop while the process is STILL surviving the kill must fail again,
+// never return a false nil: the orphan is still alive and the API must keep the
+// assignment (issue #253).
+func TestRetryStopStillSurvivingFailsAgain(t *testing.T) {
+	proc := newFakeProcess()
+	proc.killNoExit = true // every kill survives
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected first Stop to fail")
+	}
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("retry Stop returned nil while the process still survives; want a failure")
+	}
+	if proc.killCount() != 2 {
+		t.Fatalf("Kill called %d times, want 2 (the retry must re-issue the kill, not short-circuit)", proc.killCount())
 	}
 }
 

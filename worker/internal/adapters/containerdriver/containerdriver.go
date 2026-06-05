@@ -456,6 +456,19 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	// cancelled caller context must not be read as a lingering container when the
 	// container did in fact exit. Only the timeout means it survived.
 	if !i.waitExitDone(i.stopTimeout) {
+		// The container survived the kill, so this Stop failed but the container is
+		// still alive. Reset the stopping latch (and the recorded state back to
+		// running, since the container is still alive) so a subsequent Stop re-runs
+		// the full graceful→docker stop→docker kill→confirm sequence instead of
+		// short-circuiting on the entry guard and returning a false success (issue
+		// #253). The reset is confined to this failure path: a successful stop or a
+		// terminal state keeps stopping latched so supervise reports the eventual
+		// exit as stopped and concurrent stops still dedupe. supervise has not run
+		// here (the container has not exited), so clearing stopping is safe.
+		i.mu.Lock()
+		i.stopping = false
+		i.state = execution.StateRunning
+		i.mu.Unlock()
 		return fmt.Errorf("containerdriver: container survived docker kill after %s", i.stopTimeout)
 	}
 	return nil
