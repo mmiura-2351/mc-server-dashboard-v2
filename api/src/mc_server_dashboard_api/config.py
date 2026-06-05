@@ -244,6 +244,29 @@ class ReconcilerSettings(_Section):
         return self
 
 
+class PortsSettings(_Section):
+    """Game-port range for create-time auto-assignment (issue #243).
+
+    The API tracks each server's Minecraft game port (``server.game_port``,
+    DATABASE.md Section 7) and assigns the lowest free in-range port at create,
+    unique deployment-wide. ``range_start`` / ``range_end`` bound the assignable
+    range (inclusive); the default ``25565..25664`` is a hundred-port window from
+    the conventional Minecraft port. Both must be a valid TCP port (1..65535) and
+    ``range_start <= range_end`` (an inverted range admits no assignable port).
+    """
+
+    range_start: int = Field(default=25565, gt=0, le=65535)
+    range_end: int = Field(default=25664, gt=0, le=65535)
+
+    @model_validator(mode="after")
+    def _enforce_start_below_end(self) -> PortsSettings:
+        # An inverted range (start > end) admits no port to assign; reject it at
+        # load (fail-fast). Equal is fine (a single assignable port).
+        if self.range_start > self.range_end:
+            raise ValueError("ports.range_start must be <= ports.range_end")
+        return self
+
+
 class PasswordSettings(_Section):
     """Password hashing + policy (CONFIGURATION.md Sections 5.3 and 7.1).
 
@@ -415,6 +438,7 @@ class Settings(BaseSettings):
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     backup: BackupSettings = Field(default_factory=BackupSettings)
     reconciler: ReconcilerSettings = Field(default_factory=ReconcilerSettings)
+    ports: PortsSettings = Field(default_factory=PortsSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
 
     @classmethod
@@ -460,6 +484,7 @@ class Settings(BaseSettings):
             "snapshot": self.snapshot.model_dump(),
             "backup": self.backup.model_dump(),
             "reconciler": self.reconciler.model_dump(),
+            "ports": self.ports.model_dump(),
             "auth": auth,
         }
 

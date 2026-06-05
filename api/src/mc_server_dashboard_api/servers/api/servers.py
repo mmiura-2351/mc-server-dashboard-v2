@@ -73,6 +73,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidSnapshotIntervalError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
+    PortAlreadyTakenError,
+    PortOutOfRangeError,
+    PortRangeExhaustedError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotRunningError,
@@ -80,6 +83,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
@@ -111,6 +115,11 @@ class CreateServerRequest(BaseModel):
     # not crash on Mojang's default ``eula=false``. Default false keeps today's
     # create behavior (no eula.txt; first start crashes and is repairable).
     accept_eula: bool = False
+    # Optional explicit game port (issue #243). Omitted (None) lets create assign
+    # the lowest free in-range port; supplied, it is validated against the range
+    # (422 out of range) and the taken set (409 taken). Schema bounds it to a valid
+    # TCP port so a wildly invalid value is a 422 at parse time.
+    game_port: int | None = Field(default=None, gt=0, le=65535)
 
 
 class UpdateServerRequest(BaseModel):
@@ -138,6 +147,7 @@ class ServerResponse(BaseModel):
     server_type: str
     execution_backend: str
     config: dict[str, Any]
+    game_port: int | None
     desired_state: str
     observed_state: str
     observed_at: str | None
@@ -154,6 +164,7 @@ class ServerResponse(BaseModel):
             server_type=server.server_type.value,
             execution_backend=server.execution_backend.value,
             config=server.config,
+            game_port=server.game_port,
             desired_state=server.desired_state.value,
             observed_state=server.observed_state.value,
             observed_at=(
@@ -191,6 +202,7 @@ async def create_server(
             execution_backend=body.execution_backend,
             config=config,
             accept_eula=body.accept_eula,
+            game_port=body.game_port,
         )
     except UnsupportedEditionError as exc:
         # The catalog is Java-only at M1 (FR-VER-1): a non-java edition is rejected
@@ -212,8 +224,24 @@ async def create_server(
         raise _service_unavailable("catalog_unavailable") from exc
     except InvalidServerNameError as exc:
         raise _unprocessable("invalid_server_name") from exc
+    except PortOutOfRangeError as exc:
+        # An explicit game_port outside the configured range (issue #243).
+        raise _unprocessable("port_out_of_range") from exc
+    except PortAlreadyTakenError as exc:
+        # An explicit game_port already held by another server (issue #243).
+        raise _conflict("port_taken") from exc
+    except PortRangeExhaustedError as exc:
+        # Auto-assign found no free port; a transient capacity condition that a
+        # delete frees up, so 503 (not a client-state 409). Issue #243.
+        raise _service_unavailable("port_range_exhausted") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except WorkingSetSeedFailedError as exc:
+        # The row committed but seeding the working set failed (issue #243). The
+        # server is left in a degraded-but-repairable state (the files API can
+        # write the missing eula.txt/server.properties); the use case WARN-logged
+        # it. Surface a mapped 503 rather than an unmapped 500.
+        raise _service_unavailable("seed_failed") from exc
     await _record(
         recorder, ops.SERVER_CREATE, authorized, community_id, server.id.value
     )

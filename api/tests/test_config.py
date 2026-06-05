@@ -570,3 +570,61 @@ def test_token_access_ttl_below_refresh_is_accepted(
     settings = load_settings(config_file=cfg)
     assert settings.auth.token.access_ttl_seconds == 900
     assert settings.auth.token.refresh_ttl_seconds == 901
+
+
+def test_ports_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.ports.range_start == 25565
+    assert settings.ports.range_end == 25664
+
+
+def test_ports_from_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[ports]\nrange_start = 30000\nrange_end = 30010\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.ports.range_start == 30000
+    assert settings.ports.range_end == 30010
+
+
+@pytest.mark.parametrize("value", [0, 65536])
+def test_ports_range_start_rejects_out_of_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: int
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f"[ports]\nrange_start = {value}\nrange_end = 65535\n")
+    with pytest.raises(ValidationError, match="range_start"):
+        load_settings(config_file=cfg)
+
+
+@pytest.mark.parametrize("value", [0, 65536])
+def test_ports_range_end_rejects_out_of_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: int
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f"[ports]\nrange_start = 1\nrange_end = {value}\n")
+    with pytest.raises(ValidationError, match="range_end"):
+        load_settings(config_file=cfg)
+
+
+def test_ports_start_above_end_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[ports]\nrange_start = 30000\nrange_end = 29999\n")
+    with pytest.raises(ValidationError, match="range_start"):
+        load_settings(config_file=cfg)
+
+
+def test_ports_start_equal_to_end_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A single-port range is valid (start == end): exactly one assignable port.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[ports]\nrange_start = 25565\nrange_end = 25565\n")
+    settings = load_settings(config_file=cfg)
+    assert settings.ports.range_start == 25565
+    assert settings.ports.range_end == 25565

@@ -52,6 +52,16 @@ class ServerRepository(abc.ABC):
         """Return all servers in ``community_id`` (the ``server:read`` listing)."""
 
     @abc.abstractmethod
+    async def list_game_ports(self) -> set[int]:
+        """Return the game ports currently taken across all servers (issue #243).
+
+        Deployment-wide (not community-scoped): a game port is a deployment
+        resource, unique across every server. Used by create to pick the lowest
+        free in-range port and by the availability endpoints. NULL ports (legacy
+        rows) hold no port and are excluded.
+        """
+
+    @abc.abstractmethod
     async def update(self, server: Server) -> None:
         """Persist the mutable fields of ``server`` (name, config, timestamps)."""
 

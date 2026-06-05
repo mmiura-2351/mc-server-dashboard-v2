@@ -27,6 +27,14 @@ def test_unique_community_name() -> None:
     assert "uq_server_community_name" in names
 
 
+def test_game_port_is_nullable_and_unique() -> None:
+    # The tracked game port is nullable (legacy rows have none) and unique
+    # deployment-wide (issue #243).
+    assert _TABLE.c.game_port.nullable is True
+    names = {c.name for c in _TABLE.constraints if isinstance(c, UniqueConstraint)}
+    assert "uq_server_game_port" in names
+
+
 def test_check_constraints_present() -> None:
     for name in (
         "ck_server_type",

@@ -32,15 +32,18 @@ from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    PortAlreadyTakenError,
     ServerNameAlreadyExistsError,
 )
 from mc_server_dashboard_api.servers.domain.repositories import ResourceGrantSweeper
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 
-# Unique constraint (migration 0005) mapped to the domain error to raise when a
-# concurrent insert violates it, so the duplicate race surfaces as the same error
-# a use-case pre-check would raise.
+# Unique constraints mapped to the domain error to raise when a concurrent insert
+# violates one, so the race surfaces as the same error a use-case pre-check would
+# raise. ``uq_server_community_name`` (migration 0005) is the name backstop;
+# ``uq_server_game_port`` (migration 0009) is the game-port backstop.
 _SERVER_NAME_CONSTRAINTS = frozenset({"uq_server_community_name"})
+_GAME_PORT_CONSTRAINTS = frozenset({"uq_server_game_port"})
 
 
 class _ResourceGrantSweeperAdapter(ResourceGrantSweeper):
@@ -107,6 +110,8 @@ def _translate_integrity_error(exc: IntegrityError) -> None:
     constraint = _constraint_name(exc)
     if constraint in _SERVER_NAME_CONSTRAINTS:
         raise ServerNameAlreadyExistsError(str(constraint)) from exc
+    if constraint in _GAME_PORT_CONSTRAINTS:
+        raise PortAlreadyTakenError(str(constraint)) from exc
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:

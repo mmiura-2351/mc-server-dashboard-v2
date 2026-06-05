@@ -18,6 +18,7 @@ assume an authorized member and only do the data work.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,8 +36,14 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.ports import (
+    PortRange,
+    pick_lowest_free_port,
+    validate_explicit_port,
+)
 from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
     SNAPSHOT_INTERVAL_CONFIG_KEY,
     override_from_config,
@@ -66,6 +73,14 @@ _SUPPORTED_EDITION = "java"
 # ``eula=false`` (issue #198). The trailing newline matches the file Mojang writes.
 _EULA_REL_PATH = "eula.txt"
 _EULA_ACCEPTED_CONTENT = b"eula=true\n"
+
+# The server.properties key Mojang's server reads for its listen port. Create
+# seeds it with the assigned game port (issue #243) into the initial working set,
+# so the server boots on its tracked port without a manual edit. The trailing
+# newline matches the line format Mojang writes.
+_PROPERTIES_REL_PATH = "server.properties"
+
+_logger = logging.getLogger(__name__)
 
 # Config keys that are *operationally safe* to edit in any server state (issue
 # #115). The criterion is narrow: a key qualifies only if it is read solely by an
@@ -116,17 +131,30 @@ class CreateServer:
     is Java-only at M1), an unsupported type (forge at M1), and an unoffered version
     before the row is staged (FR-VER-1).
 
+    Create assigns the server's **game port** (issue #243): the lowest free
+    in-range port from ``port_range``, or an operator-supplied ``game_port``
+    validated against the range (422 out of range) and the taken set (409 taken).
+    The deployment-wide ``UNIQUE(game_port)`` constraint is the ultimate guard; the
+    pre-read is the friendly check that turns the common case into a typed error
+    rather than an IntegrityError. The assigned port is persisted on the row.
+
     After the row commits, an **initial working-set seeding** step writes any seed
     files into the server's first published version through the Storage write path
-    (the #208 initialize-first-version behavior). At M1 the only seed is
-    ``eula.txt`` when ``accept_eula`` is true (issue #198); the step is the
-    extension point #243's port assignment hangs ``server.properties`` seeding off.
+    (the #208 initialize-first-version behavior). It seeds ``server.properties``
+    with ``server-port=<port>`` so the server boots on its tracked port, and
+    ``eula.txt`` when ``accept_eula`` is true (issue #198); both compose when both
+    apply (sequential write_file calls on a fresh server publish correctly). A
+    storage failure during seeding is caught, WARN-logged, and surfaced as a typed
+    :class:`WorkingSetSeedFailedError` (mapped to 503 at the edge): the committed
+    row stays in a degraded-but-repairable state (the missing files can be written
+    via the files API), rather than leaking an unmapped 500.
     """
 
     uow: UnitOfWork
     clock: Clock
     version_validator: VersionValidator
     file_store: FileStore
+    port_range: PortRange
 
     async def __call__(
         self,
@@ -139,6 +167,7 @@ class CreateServer:
         execution_backend: str,
         config: dict[str, Any],
         accept_eula: bool = False,
+        game_port: int | None = None,
     ) -> Server:
         if mc_edition != _SUPPORTED_EDITION:
             # The catalog is Java-only at M1 (FR-VER-1); reject other editions
@@ -150,30 +179,43 @@ class CreateServer:
             server_type=server_type, version=mc_version
         )
         now = self.clock.now()
-        server = Server(
-            id=ServerId.new(),
-            community_id=community_id,
-            name=ServerName(name),
-            mc_edition=mc_edition,
-            mc_version=mc_version,
-            server_type=parsed_type,
-            execution_backend=parsed_backend,
-            config=config,
-            # A new server is at rest: the operator has not asked it to run, and
-            # no Worker has reported on it (DATABASE.md Section 7).
-            desired_state=DesiredState.STOPPED,
-            observed_state=ObservedState.STOPPED,
-            observed_at=None,
-            assigned_worker_id=None,
-            created_at=now,
-            updated_at=now,
-        )
         async with self.uow:
+            # Resolve the game port inside the transaction that adds the row, so the
+            # taken-set read and the insert are consistent; the UNIQUE constraint
+            # backstops a concurrent racer (raises on commit). An explicit port is
+            # validated (range -> 422, taken -> 409); otherwise pick the lowest free.
+            taken = await self.uow.servers.list_game_ports()
+            if game_port is None:
+                assigned_port = pick_lowest_free_port(self.port_range, taken=taken)
+            else:
+                assigned_port = validate_explicit_port(
+                    game_port, self.port_range, taken=taken
+                )
+            server = Server(
+                id=ServerId.new(),
+                community_id=community_id,
+                name=ServerName(name),
+                mc_edition=mc_edition,
+                mc_version=mc_version,
+                server_type=parsed_type,
+                execution_backend=parsed_backend,
+                config=config,
+                game_port=assigned_port,
+                # A new server is at rest: the operator has not asked it to run, and
+                # no Worker has reported on it (DATABASE.md Section 7).
+                desired_state=DesiredState.STOPPED,
+                observed_state=ObservedState.STOPPED,
+                observed_at=None,
+                assigned_worker_id=None,
+                created_at=now,
+                updated_at=now,
+            )
             await self.uow.servers.add(server)
             await self.uow.commit()
         await self._seed_initial_working_set(
             community_id=community_id,
             server_id=server.id,
+            game_port=assigned_port,
             accept_eula=accept_eula,
         )
         return server
@@ -183,29 +225,47 @@ class CreateServer:
         *,
         community_id: CommunityId,
         server_id: ServerId,
+        game_port: int,
         accept_eula: bool,
     ) -> None:
         """Write the create-time seed files into the server's first version.
 
-        Generic over a list of ``(rel_path, content)`` seeds so #243's
-        ``server.properties`` seeding extends it without a new path. Each seed is
-        written through :meth:`FileStore.write_file`, which initializes the first
-        published version on a never-snapshotted server (the #208 behavior). At M1
-        the only seed is ``eula.txt`` when the operator accepted the EULA at create
-        (issue #198); with no seeds, the working set stays unpublished — exactly
-        today's create behavior.
+        Generic over a list of ``(rel_path, content)`` seeds. Each is written
+        through :meth:`FileStore.write_file`, which initializes the first published
+        version on a never-snapshotted server (the #208 behavior); sequential
+        writes on a fresh server compose correctly (the #252 review finding), so
+        ``server.properties`` and ``eula.txt`` may both be seeded in one create.
+        ``server.properties`` is always seeded with the assigned game port (#243);
+        ``eula.txt`` only when the operator accepted at create (issue #198).
+
+        A storage failure is caught and re-raised as
+        :class:`WorkingSetSeedFailedError` (mapped to 503): the row is already
+        committed and is repairable via the files API, so this never rolls back the
+        server — it only signals the degraded state.
         """
 
-        seeds: list[tuple[str, bytes]] = []
+        seeds: list[tuple[str, bytes]] = [
+            (_PROPERTIES_REL_PATH, f"server-port={game_port}\n".encode()),
+        ]
         if accept_eula:
             seeds.append((_EULA_REL_PATH, _EULA_ACCEPTED_CONTENT))
-        for rel_path, content in seeds:
-            await self.file_store.write_file(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path=rel_path,
-                content=content,
+        try:
+            for rel_path, content in seeds:
+                await self.file_store.write_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=rel_path,
+                    content=content,
+                )
+        except Exception as exc:
+            # The committed row stays (degraded but repairable via the files API);
+            # surface a mapped 503 instead of an unmapped 500.
+            _logger.warning(
+                "initial working-set seeding failed; server row committed but "
+                "working set is unseeded (repairable via files API)",
+                extra={"server_id": str(server_id.value)},
             )
+            raise WorkingSetSeedFailedError(str(server_id.value)) from exc
 
 
 @dataclass(frozen=True)

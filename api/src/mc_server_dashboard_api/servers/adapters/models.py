@@ -20,6 +20,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     UniqueConstraint,
 )
@@ -53,6 +54,9 @@ class ServerModel(Base):
     __table_args__ = (
         # A server name is unique within its community (DATABASE.md Section 7).
         UniqueConstraint("community_id", "name", name="uq_server_community_name"),
+        # The tracked game port is unique deployment-wide (issue #243); NULLs are
+        # allowed (legacy/imported rows carry none) and never collide under Postgres.
+        UniqueConstraint("game_port", name="uq_server_game_port"),
         CheckConstraint(
             _in_clause("server_type", _SERVER_TYPES), name="ck_server_type"
         ),
@@ -84,6 +88,9 @@ class ServerModel(Base):
     server_type: Mapped[str] = mapped_column(String, nullable=False)
     execution_backend: Mapped[str] = mapped_column(String, nullable=False)
     config: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    # The Minecraft game port (issue #243), assigned at create from the configured
+    # range and unique deployment-wide. Nullable: legacy/imported rows carry none.
+    game_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     desired_state: Mapped[str] = mapped_column(String, nullable=False)
     observed_state: Mapped[str] = mapped_column(String, nullable=False)
     observed_at: Mapped[dt.datetime | None] = mapped_column(

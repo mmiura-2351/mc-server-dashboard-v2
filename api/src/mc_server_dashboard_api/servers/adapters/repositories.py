@@ -39,6 +39,7 @@ def _to_server(row: ServerModel) -> Server:
         server_type=ServerType(row.server_type),
         execution_backend=ExecutionBackend(row.execution_backend),
         config=dict(row.config),
+        game_port=row.game_port,
         desired_state=DesiredState(row.desired_state),
         observed_state=ObservedState(row.observed_state),
         observed_at=row.observed_at,
@@ -67,6 +68,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 server_type=server.server_type.value,
                 execution_backend=server.execution_backend.value,
                 config=server.config,
+                game_port=server.game_port,
                 desired_state=server.desired_state.value,
                 observed_state=server.observed_state.value,
                 observed_at=server.observed_at,
@@ -98,6 +100,11 @@ class SqlAlchemyServerRepository(ServerRepository):
         stmt = select(ServerModel).where(ServerModel.community_id == community_id.value)
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_server(row) for row in rows]
+
+    async def list_game_ports(self) -> set[int]:
+        stmt = select(ServerModel.game_port).where(ServerModel.game_port.is_not(None))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {port for port in rows if port is not None}
 
     async def update(self, server: Server) -> None:
         stmt = (
