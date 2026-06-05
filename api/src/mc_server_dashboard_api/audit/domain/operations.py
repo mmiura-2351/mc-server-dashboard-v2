@@ -84,7 +84,18 @@ BACKUP_UPLOAD: Final = "backup:upload"
 BACKUP_DOWNLOAD: Final = "backup:download"
 
 # File upload / download / rename / delete / mkdir / search (FR-FILE-*, issue
-# #259). Recorded under the file:edit / file:read permissions they require.
+# #259) plus write / rollback (issue #263). Recorded under the file:edit /
+# file:read permissions they require.
+#
+# Audit rule for file routes (issue #263): MUTATIONS are audited (write,
+# rollback, rename, delete, mkdir, upload), and so are bulk / exfiltration-shaped
+# or enumerating READS (download, search) -- but granular reads (read a single
+# file, list a directory, list a file's versions) are NOT, as they are
+# high-volume and low-signal. This matches the backup posture: backup
+# create/restore/delete/upload/download are audited while the granular
+# backup:read routes (list, statistics) are not.
+FILE_WRITE: Final = "file:write"
+FILE_ROLLBACK: Final = "file:rollback"
 FILE_UPLOAD: Final = "file:upload"
 FILE_DOWNLOAD: Final = "file:download"
 FILE_RENAME: Final = "file:rename"

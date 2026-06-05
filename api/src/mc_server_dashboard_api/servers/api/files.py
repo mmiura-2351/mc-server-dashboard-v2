@@ -239,8 +239,8 @@ async def write_file(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     body: WriteFileRequest,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("file:edit"),
@@ -250,9 +250,15 @@ async def write_file(
         ),
     ],
     use_case: Annotated[WriteFile, Depends(get_write_file)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     path: Annotated[str, Query()] = ".",
 ) -> None:
-    """Edit a file, branching on server state (Section 6.9)."""
+    """Edit a file, branching on server state (Section 6.9).
+
+    A successful write is audited (``file:write``); a write refused because the
+    server is unsettled is recorded DENIED, matching the upload posture (issue
+    #263).
+    """
 
     content = _decode(body.content_base64)
     try:
@@ -271,11 +277,15 @@ async def write_file(
     except FileTooLargeError as exc:
         raise _too_large() from exc
     except ServerFilesUnsettledError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_WRITE, authorized, community_id, server_id
+        )
         raise _conflict("server_unsettled") from exc
     except WorkerUnavailableError as exc:
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
         raise _conflict("command_failed") from exc
+    await _record_file(recorder, ops.FILE_WRITE, authorized, community_id, server_id)
 
 
 @router.get("/communities/{community_id}/servers/{server_id}/files/history")
@@ -320,8 +330,8 @@ async def rollback_file(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     body: RollbackRequest,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("file:rollback"),
@@ -331,12 +341,15 @@ async def rollback_file(
         ),
     ],
     use_case: Annotated[RollbackFile, Depends(get_rollback_file)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     path: Annotated[str, Query()],
 ) -> None:
     """Roll a file back to a retained version (file:rollback).
 
     Requires the server at rest (Section 6.9): rollback republishes the
-    authoritative copy, so it is 409 while running.
+    authoritative copy, so it is 409 while running. A successful rollback is
+    audited (``file:rollback``); a rollback refused because the server is not
+    stopped is recorded DENIED (issue #263).
     """
 
     try:
@@ -353,7 +366,11 @@ async def rollback_file(
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
     except ServerNotStoppedError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
+        )
         raise _conflict("server_not_stopped") from exc
+    await _record_file(recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id)
 
 
 @router.post(
