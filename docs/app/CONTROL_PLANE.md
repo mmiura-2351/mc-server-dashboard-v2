@@ -298,8 +298,8 @@ classes a Worker can hit:
 
 | Code | When |
 |---|---|
-| `SERVER_NOT_FOUND` | The target server is unknown to this Worker. |
-| `INVALID_STATE` | The command is invalid for the current state (e.g. start a running server, RCON on a stopped one). |
+| `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, or a missing file target). |
+| `INVALID_STATE` | The command is invalid for the current state (e.g. start or hydrate a running server). |
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
 | `FILE_ACCESS_DENIED` | A file path was rejected (traversal / not found / not permitted). |
 | `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |
@@ -307,6 +307,27 @@ classes a Worker can hit:
 
 A registration refusal is reported differently: `RegisterAck.accepted=false`
 with a `rejection_reason`, since it predates any command.
+
+### 7.1 Command-error contract (binding)
+
+Which code the Worker emits for a given command kind and instance precondition
+is pinned, as data, by
+[`proto/contract/command_error_contract.json`](../../proto/contract/command_error_contract.json)
+— the single source of truth shared across both languages. The table above
+classifies the codes; the JSON binds the exact `(kind, precondition) -> code`
+rows. Two table-driven tests hold both sides to it (issue #204):
+
+- the Worker test
+  (`worker/internal/application/instancemanager/contract_test.go`) drives the
+  instancemanager into each precondition and asserts the emitted code equals the
+  table, so a code change without a table update fails the Worker suite;
+- the API test (`api/tests/servers/test_command_error_contract.py`) asserts every
+  `CommandStatus` the API's convergence / special-case logic matches on is a
+  `(kind, code)` the table says the Worker actually emits, so an API match on a
+  code the Worker never produces (the #202 incident) fails the API suite.
+
+Add a new convergence match or change a Worker emission only together with the
+table; the asymmetry is intentional — drift on either side fails that side's CI.
 
 ---
 

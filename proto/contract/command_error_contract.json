@@ -1,0 +1,54 @@
+{
+  "$comment": [
+    "Cross-language contract guard (issue #204). The SINGLE SOURCE OF TRUTH for",
+    "which CommandErrorCode the Worker's instancemanager emits per command kind",
+    "and instance precondition. Two table-driven tests pin to this file:",
+    "  - worker: worker/internal/application/instancemanager/contract_test.go",
+    "    drives the instancemanager into each precondition and asserts the",
+    "    emitted code equals 'code' below.",
+    "  - api: api/tests/servers/test_command_error_contract.py asserts every",
+    "    (kind, CommandStatus) the API's convergence/special-case logic matches",
+    "    on appears here -- so an API match on a (kind, code) the Worker never",
+    "    emits FAILS that test (the #202 incident).",
+    "Rows mirror worker/internal/application/instancemanager/instancemanager.go.",
+    "'kind' is the Worker command kind (Handle's switch). 'code' is the wire",
+    "CommandErrorCode name (CONTROL_PLANE.md Section 7); 'ok' means success.",
+    "Preconditions:",
+    "  instance_running   - a tracked running instance exists for the server id",
+    "  instance_stopped   - no tracked instance and no orphan for the id",
+    "  instance_absent    - the server id is unknown to this Worker",
+    "  orphan_pending     - a failed-stop orphan is recorded (issue #251/#253)",
+    "  driver_unavailable - the requested driver is not offered by this Worker",
+    "  missing_path       - the file/dir target does not exist in the working set",
+    "  unsafe_path        - a traversal-rejected path (FR-FILE-4)"
+  ],
+  "rows": [
+    {"kind": "StartServer", "precondition": "instance_stopped", "code": "ok"},
+    {"kind": "StartServer", "precondition": "instance_running", "code": "invalid_state"},
+    {"kind": "StartServer", "precondition": "orphan_pending", "code": "invalid_state"},
+    {"kind": "StartServer", "precondition": "driver_unavailable", "code": "driver_unavailable"},
+
+    {"kind": "StopServer", "precondition": "instance_running", "code": "ok"},
+    {"kind": "StopServer", "precondition": "instance_absent", "code": "server_not_found"},
+
+    {"kind": "RestartServer", "precondition": "instance_running", "code": "ok"},
+    {"kind": "RestartServer", "precondition": "instance_absent", "code": "server_not_found"},
+
+    {"kind": "ServerCommand", "precondition": "instance_running", "code": "ok"},
+    {"kind": "ServerCommand", "precondition": "instance_absent", "code": "server_not_found"},
+
+    {"kind": "HydrateTrigger", "precondition": "instance_stopped", "code": "ok"},
+    {"kind": "HydrateTrigger", "precondition": "instance_running", "code": "invalid_state"},
+    {"kind": "HydrateTrigger", "precondition": "orphan_pending", "code": "invalid_state"},
+
+    {"kind": "SnapshotTrigger", "precondition": "instance_stopped", "code": "ok"},
+
+    {"kind": "ReadFile", "precondition": "missing_path", "code": "server_not_found"},
+    {"kind": "ReadFile", "precondition": "unsafe_path", "code": "file_access_denied"},
+
+    {"kind": "EditFile", "precondition": "unsafe_path", "code": "file_access_denied"},
+
+    {"kind": "ListFiles", "precondition": "missing_path", "code": "server_not_found"},
+    {"kind": "ListFiles", "precondition": "unsafe_path", "code": "file_access_denied"}
+  ]
+}

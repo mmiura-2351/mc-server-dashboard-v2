@@ -736,7 +736,12 @@ class SendServerCommand:
         outcome = await self.control_plane.command(
             worker_id=worker_id, server_id=server_id, line=line
         )
-        if outcome.status is CommandStatus.INVALID_STATE:
+        if outcome.status is CommandStatus.SERVER_NOT_FOUND:
+            # The server stopped between the observed-running check above and this
+            # dispatch: the Worker's handleServerCommand returns SERVER_NOT_FOUND
+            # (no live instance), never INVALID_STATE, for a not-running target
+            # (worker/internal/application/instancemanager/instancemanager.go:412-419,
+            # pinned by the #204 contract guard). Surface it as not-running.
             raise ServerNotRunningError(str(server_id.value))
         if not outcome.success:
             raise _dispatch_failure(
