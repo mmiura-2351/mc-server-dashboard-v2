@@ -243,7 +243,18 @@ channel there is nothing to re-dispatch.
 | `reconciler.backoff_base_seconds` | `30` | | Base of the per-server exponential backoff after a failed re-dispatch; the wait doubles per consecutive failure. Must be positive. |
 | `reconciler.backoff_max_seconds` | `3600` | | Cap on the per-server backoff wait. Must be positive and `>=` `backoff_base_seconds`. |
 
-### 5.7 Game ports
+### 5.7 JAR-pool garbage collection
+
+The API runs a background reference-counted GC that reclaims pooled server JARs
+no live server row references (STORAGE.md Section 3.2). It is gated on the control
+plane like the snapshot/backup/reconciler loops, and a platform admin can also
+trigger a sweep on demand (`POST /versions/jar-pool/gc`).
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `jar_gc.interval_seconds` | `86400` | | Loop resolution: how often the GC wakes to sweep the JAR pool. The pool grows slowly (one entry per distinct resolved JAR), so a daily default is ample. Must be positive. |
+
+### 5.8 Game ports
 
 The API tracks each server's Minecraft game port (DATABASE.md Section 7,
 `server.game_port`) and assigns one at create from this range — the lowest free
@@ -257,7 +268,7 @@ taken. A delete frees the server's port for reuse.
 | `ports.range_start` | `25565` | | Lowest assignable game port (inclusive). Must be `1..65535`. |
 | `ports.range_end` | `25664` | | Highest assignable game port (inclusive). Must be `1..65535` and `>=` `range_start`. |
 
-### 5.8 Observability
+### 5.9 Observability
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|

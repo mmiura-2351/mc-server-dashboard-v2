@@ -9,6 +9,8 @@ Read-only catalog endpoints plus two platform-admin operational windows:
   the last-good payloads (platform admin).
 - ``GET /versions/jar-pool/stats`` — count + total bytes of the pooled JARs
   (platform admin).
+- ``POST /versions/jar-pool/gc`` — reference-counted garbage collection of the
+  pool; returns {scanned, deleted, freed_bytes} (audited, platform admin).
 
 **Auth choice.** The catalog is *global* — it carries no community/server scope
 (STORAGE.md Section 8.1: JARs are shared platform-wide). There is no
@@ -36,6 +38,7 @@ from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
     get_catalog_refresh,
     get_current_user,
+    get_jar_pool_gc,
     get_jar_pool_stats,
     get_list_server_types,
     get_list_versions,
@@ -43,6 +46,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.versions.application.catalog_refresh import CatalogRefresh
+from mc_server_dashboard_api.versions.application.jar_gc import RunJarPoolGc
 from mc_server_dashboard_api.versions.application.jar_pool_stats import GetJarPoolStats
 from mc_server_dashboard_api.versions.application.list_versions import (
     ListServerTypes,
@@ -68,6 +72,14 @@ class JarPoolStatsResponse(BaseModel):
 
     count: int
     total_bytes: int
+
+
+class JarPoolGcResponse(BaseModel):
+    """What a JAR-pool GC pass scanned and reclaimed (issue #293)."""
+
+    scanned: int
+    deleted: int
+    freed_bytes: int
 
 
 @router.get("")
@@ -120,6 +132,34 @@ async def jar_pool_stats(
 
     stats = await use_case()
     return JarPoolStatsResponse(count=stats.count, total_bytes=stats.total_bytes)
+
+
+@router.post("/jar-pool/gc")
+async def jar_pool_gc(
+    admin: Annotated[User, Depends(require_platform_admin)],
+    use_case: Annotated[RunJarPoolGc, Depends(get_jar_pool_gc)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> JarPoolGcResponse:
+    """Reclaim pooled JARs no live server row references (platform admin, #293).
+
+    A bounded scan diffing the pool against the live reference set, skipping JARs
+    inside the safety window; returns what it scanned and freed. Audited like the
+    catalog refresh.
+    """
+
+    result = await use_case()
+    await recorder.record(
+        AuditEvent(
+            operation=ops.VERSION_JAR_GC,
+            outcome=Outcome.SUCCESS,
+            actor_id=admin.id.value,
+        )
+    )
+    return JarPoolGcResponse(
+        scanned=result.scanned,
+        deleted=result.deleted,
+        freed_bytes=result.freed_bytes,
+    )
 
 
 @router.get("/{server_type}")

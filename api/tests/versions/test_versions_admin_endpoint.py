@@ -19,6 +19,7 @@ from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
     get_catalog_refresh,
     get_current_user,
+    get_jar_pool_gc,
     get_jar_pool_stats,
 )
 from mc_server_dashboard_api.identity.domain.entities import User
@@ -28,6 +29,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     Username,
 )
 from mc_server_dashboard_api.storage.domain.port import JarPoolStats
+from mc_server_dashboard_api.versions.application.jar_gc import JarGcResult
 from mc_server_dashboard_api.versions.domain.errors import UnknownServerTypeError
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 
@@ -51,6 +53,15 @@ class _UnknownTypeRefresh:
 class _FakeStats:
     async def __call__(self) -> JarPoolStats:
         return JarPoolStats(count=3, total_bytes=4096)
+
+
+class _FakeGc:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self) -> JarGcResult:
+        self.calls += 1
+        return JarGcResult(scanned=5, deleted=2, freed_bytes=2048)
 
 
 class _RecordingRecorder:
@@ -78,6 +89,7 @@ def _client(
     admin: bool = True,
     refresh: object | None = None,
     stats: object | None = None,
+    gc: object | None = None,
     recorder: object | None = None,
 ) -> TestClient:
     app = create_app()
@@ -86,6 +98,8 @@ def _client(
         app.dependency_overrides[get_catalog_refresh] = lambda: refresh
     if stats is not None:
         app.dependency_overrides[get_jar_pool_stats] = lambda: stats
+    if gc is not None:
+        app.dependency_overrides[get_jar_pool_gc] = lambda: gc
     if recorder is not None:
         app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return TestClient(app)
@@ -150,3 +164,31 @@ def test_jar_pool_stats_requires_platform_admin() -> None:
     with client:
         resp = client.get("/versions/jar-pool/stats")
     assert resp.status_code == 403
+
+
+def test_jar_pool_gc_returns_scanned_deleted_freed() -> None:
+    gc = _FakeGc()
+    client = _client(gc=gc, recorder=_RecordingRecorder())
+    with client:
+        resp = client.post("/versions/jar-pool/gc")
+    assert resp.status_code == 200
+    assert resp.json() == {"scanned": 5, "deleted": 2, "freed_bytes": 2048}
+    assert gc.calls == 1
+
+
+def test_jar_pool_gc_requires_platform_admin() -> None:
+    client = _client(admin=False, gc=_FakeGc())
+    with client:
+        resp = client.post("/versions/jar-pool/gc")
+    assert resp.status_code == 403
+
+
+def test_jar_pool_gc_is_audited() -> None:
+    recorder = _RecordingRecorder()
+    client = _client(gc=_FakeGc(), recorder=recorder)
+    with client:
+        resp = client.post("/versions/jar-pool/gc")
+    assert resp.status_code == 200
+    assert len(recorder.events) == 1
+    event = recorder.events[0]
+    assert event.operation == ops.VERSION_JAR_GC  # type: ignore[attr-defined]

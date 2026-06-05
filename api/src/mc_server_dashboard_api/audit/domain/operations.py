@@ -98,6 +98,11 @@ FILE_SEARCH: Final = "file:search"
 # permission. Platform-level (no community/target resource).
 VERSION_REFRESH: Final = "version:refresh"
 
+# JAR-pool garbage collection (M2 Epic D4, issue #293): a platform admin manually
+# triggering the reference-counted pool sweep. Same platform-level posture as
+# version:refresh -- an operation name, not a permission code.
+VERSION_JAR_GC: Final = "version:jar_gc"
+
 # Worker drain set/clear (FR-WRK-5).
 WORKER_DRAIN_SET: Final = "worker:drain_set"
 WORKER_DRAIN_CLEAR: Final = "worker:drain_clear"

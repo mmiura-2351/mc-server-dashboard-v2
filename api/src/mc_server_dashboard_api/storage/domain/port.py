@@ -23,6 +23,7 @@ authoritative-side semantics.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -60,6 +61,21 @@ class JarPoolStats:
 
     count: int
     total_bytes: int
+
+
+@dataclass(frozen=True)
+class JarPoolEntry:
+    """One pooled JAR's identity, size, and modification time (issue #293).
+
+    The unit the reference-counted GC scans (D4): ``key`` is the content address,
+    ``size_bytes`` the on-store size (the freed-bytes accounting), and
+    ``modified_at`` the store/upload time the GC's safety window reads (never
+    delete a JAR younger than the window). ``modified_at`` is timezone-aware UTC.
+    """
+
+    key: JarKey
+    size_bytes: int
+    modified_at: dt.datetime
 
 
 class SnapshotHandle(abc.ABC):
@@ -156,6 +172,24 @@ class JarStore(abc.ABC):
         A bounded scan of the one content-addressed JAR namespace (Section 3.2) —
         no per-server scope. Operational visibility for a platform admin; this is
         not a GC and does not reference-count (that is #32 / D4).
+        """
+
+    @abc.abstractmethod
+    async def list_jars(self) -> list[JarPoolEntry]:
+        """Enumerate the pooled JARs with key, size, and modification time (#293).
+
+        A bounded scan of the one content-addressed ``jars/`` namespace, the input
+        the reference-counted GC (D4) diffs against the live reference set. Each
+        entry's ``modified_at`` feeds the GC safety window. Sibling of
+        :meth:`jar_pool_stats`, which only aggregates the same scan.
+        """
+
+    @abc.abstractmethod
+    async def delete_jar(self, key: JarKey) -> None:
+        """Remove a pooled JAR. Idempotent (no error if absent, like delete_backup).
+
+        The reclaim primitive the GC (D4) calls on an unreferenced JAR. Storage
+        only deletes the bytes; the reference decision is the GC's.
         """
 
 

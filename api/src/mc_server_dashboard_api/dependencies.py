@@ -245,10 +245,17 @@ from mc_server_dashboard_api.servers.domain.file_store import (
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.storage.domain.port import Storage
+from mc_server_dashboard_api.versions.adapters.clock import (
+    SystemClock as VersionsSystemClock,
+)
 from mc_server_dashboard_api.versions.adapters.http_jar_fetcher import HttpxJarFetcher
+from mc_server_dashboard_api.versions.adapters.server_jar_references import (
+    ServerJarReferences,
+)
 from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
 from mc_server_dashboard_api.versions.application.catalog_refresh import CatalogRefresh
 from mc_server_dashboard_api.versions.application.ensure_jar import EnsureJar
+from mc_server_dashboard_api.versions.application.jar_gc import RunJarPoolGc
 from mc_server_dashboard_api.versions.application.jar_pool_stats import GetJarPoolStats
 from mc_server_dashboard_api.versions.application.list_versions import (
     ListServerTypes,
@@ -344,6 +351,22 @@ def get_jar_pool_stats(request: Request) -> GetJarPoolStats:
     """Assemble the :class:`GetJarPoolStats` use case (JAR-pool stats, issue #286)."""
 
     return GetJarPoolStats(pool=StorageJarPool(jars=get_storage(request)))
+
+
+def get_jar_pool_gc(request: Request) -> RunJarPoolGc:
+    """Assemble the :class:`RunJarPoolGc` use case (JAR-pool GC, issue #293).
+
+    The pool seam over storage's ``JarStore`` (list + delete) plus the live
+    reference set read from server rows (the ``ServerJarReferences`` adapter over
+    the servers repository). The same use case the periodic loop drives.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return RunJarPoolGc(
+        pool=StorageJarPool(jars=get_storage(request)),
+        references=ServerJarReferences(uow=ServersUnitOfWork(session_factory)),
+        clock=VersionsSystemClock(),
+    )
 
 
 # An async lookup of a server's recorded resolved-JAR content key (SHA-256), or

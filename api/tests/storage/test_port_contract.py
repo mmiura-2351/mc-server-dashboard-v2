@@ -195,6 +195,41 @@ async def test_jar_pool_stats_counts_and_sums(harness: StorageHarness) -> None:
     assert stats.total_bytes == len(a) + len(b)
 
 
+async def test_list_jars_returns_keys_sizes_and_mtime(
+    harness: StorageHarness,
+) -> None:
+    a = b"jar-a"
+    b = b"jar-bb"
+    ka = await harness.storage.put_jar(stream_of(a))
+    kb = await harness.storage.put_jar(stream_of(b))
+
+    entries = await harness.storage.list_jars()
+    by_key = {e.key: e for e in entries}
+    assert set(by_key) == {ka, kb}
+    assert by_key[ka].size_bytes == len(a)
+    assert by_key[kb].size_bytes == len(b)
+    # Each entry carries a timezone-aware modification time (the GC safety window
+    # reads it, #293).
+    for entry in entries:
+        assert entry.modified_at.tzinfo is not None
+
+
+async def test_list_jars_empty_pool(harness: StorageHarness) -> None:
+    assert await harness.storage.list_jars() == []
+
+
+async def test_delete_jar_removes_it(harness: StorageHarness) -> None:
+    key = await harness.storage.put_jar(stream_of(b"to-be-deleted"))
+    assert await harness.storage.has_jar(key) is True
+    await harness.storage.delete_jar(key)
+    assert await harness.storage.has_jar(key) is False
+
+
+async def test_delete_jar_is_idempotent(harness: StorageHarness) -> None:
+    # Deleting an absent jar is a no-op (mirrors delete_backup, #293).
+    await harness.storage.delete_jar(JarKey("c" * 64))
+
+
 # --- backup archive create / list / restore / delete (Section 3.3) ---------
 
 

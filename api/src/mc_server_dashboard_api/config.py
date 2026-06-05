@@ -244,6 +244,19 @@ class ReconcilerSettings(_Section):
         return self
 
 
+class JarGcSettings(_Section):
+    """Reference-counted JAR-pool garbage collection cadence (D4, issue #293).
+
+    The GC reclaims pooled JARs no live server row references (a bounded DB scan
+    diffed against the pool). It is gated on the control plane like the
+    snapshot/backup/reconciler loops. ``interval_seconds`` is how often the loop
+    wakes to sweep; a pool grows slowly (one entry per distinct resolved JAR), so
+    a daily default is ample. A platform admin can also trigger a sweep on demand.
+    """
+
+    interval_seconds: int = Field(default=86400, gt=0)
+
+
 class PortsSettings(_Section):
     """Game-port range for create-time auto-assignment (issue #243).
 
@@ -438,6 +451,7 @@ class Settings(BaseSettings):
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     backup: BackupSettings = Field(default_factory=BackupSettings)
     reconciler: ReconcilerSettings = Field(default_factory=ReconcilerSettings)
+    jar_gc: JarGcSettings = Field(default_factory=JarGcSettings)
     ports: PortsSettings = Field(default_factory=PortsSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
 

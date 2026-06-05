@@ -112,16 +112,24 @@ from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.versions.adapters.clock import (
+    SystemClock as VersionsSystemClock,
+)
 from mc_server_dashboard_api.versions.adapters.composite import CompositeCatalog
 from mc_server_dashboard_api.versions.adapters.fabric import FabricCatalog
 from mc_server_dashboard_api.versions.adapters.http_fetcher import HttpxJsonFetcher
 from mc_server_dashboard_api.versions.adapters.http_jar_fetcher import HttpxJarFetcher
+from mc_server_dashboard_api.versions.adapters.jar_gc_loop import run_jar_gc_loop
 from mc_server_dashboard_api.versions.adapters.paper import PaperCatalog
 from mc_server_dashboard_api.versions.adapters.retry_cache import RetryCachingFetcher
+from mc_server_dashboard_api.versions.adapters.server_jar_references import (
+    ServerJarReferences,
+)
 from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
 from mc_server_dashboard_api.versions.adapters.vanilla import VanillaCatalog
 from mc_server_dashboard_api.versions.api import versions as versions_api
 from mc_server_dashboard_api.versions.application.ensure_jar import EnsureJar
+from mc_server_dashboard_api.versions.application.jar_gc import RunJarPoolGc
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.value_objects import (
     ServerType as CatalogServerType,
@@ -335,6 +343,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         snapshot_task: asyncio.Task[None] | None = None
         backup_task: asyncio.Task[None] | None = None
         reconciler_task: asyncio.Task[None] | None = None
+        jar_gc_task: asyncio.Task[None] | None = None
         # Periodic login_attempt prune (SECURITY.md Section 3). Ungated on the
         # control plane: unlike the snapshot/backup loops it drives only the
         # database, so it must run on every API process to keep the append-only
@@ -499,12 +508,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             logging.getLogger(__name__).info("divergence reconciler started")
+            # Run the periodic reference-counted JAR-pool GC as a lifespan task
+            # (D4, issue #293), alongside the other schedulers. Gated on the
+            # control plane like them: it reclaims pooled JARs no live server row
+            # references, and a deployment with no control plane runs no servers,
+            # so the pool has nothing to reclaim. It reuses the same pool seam over
+            # Storage's JarStore (list + delete) and the live-reference scan over
+            # the servers repository as the manual HTTP trigger.
+            jar_gc = RunJarPoolGc(
+                pool=StorageJarPool(jars=storage),
+                references=ServerJarReferences(
+                    uow=ServersUnitOfWork(create_session_factory(engine))
+                ),
+                clock=VersionsSystemClock(),
+            )
+            jar_gc_task = asyncio.create_task(
+                run_jar_gc_loop(
+                    jar_gc,
+                    tick_seconds=settings.jar_gc.interval_seconds,
+                )
+            )
+            logging.getLogger(__name__).info("jar-pool GC started")
         try:
             yield
         finally:
             prune_attempts_task.cancel()
             with suppress(asyncio.CancelledError):
                 await prune_attempts_task
+            if jar_gc_task is not None:
+                jar_gc_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await jar_gc_task
             if reconciler_task is not None:
                 reconciler_task.cancel()
                 with suppress(asyncio.CancelledError):

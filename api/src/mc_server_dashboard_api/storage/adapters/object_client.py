@@ -131,7 +131,15 @@ class _Aioboto3S3Client:
         out: list[S3Object] = []
         async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
             for entry in page.get("Contents", []):
-                out.append(S3Object(key=entry["Key"], size=entry["Size"]))
+                # S3 ``LastModified`` is a timezone-aware datetime (UTC); the JAR-pool
+                # GC safety window reads it through S3Object (#293).
+                out.append(
+                    S3Object(
+                        key=entry["Key"],
+                        size=entry["Size"],
+                        last_modified=entry["LastModified"],
+                    )
+                )
         return out
 
 

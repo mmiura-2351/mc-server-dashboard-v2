@@ -169,9 +169,34 @@ Communities.
 | `put_jar(ReadStream) -> JarKey` | Store a JAR, returning its content key | Idempotent: storing the same bytes yields the same key and no duplicate. Key = `sha256`. |
 | `has_jar(JarKey) -> bool` | Test presence before downloading from an external source | Lets the `VersionCatalog` adapter skip a redundant fetch. |
 | `open_jar(JarKey) -> ReadStream` | Read a stored JAR | The data plane streams this to a Worker as part of hydrate. |
+| `jar_pool_stats() -> JarPoolStats` | Count + total bytes of the pooled JARs | A bounded scan of the one `jars/` namespace; platform-admin operational visibility (#286). |
+| `list_jars() -> [JarPoolEntry]` | Enumerate pooled JARs with key, size, and store time | The input the reference-counted GC diffs against the live reference set; each entry's `modified_at` feeds the GC safety window (#293). |
+| `delete_jar(JarKey)` | Remove a pooled JAR | Idempotent (no error if absent). The reclaim primitive the GC calls on an unreferenced JAR; the reference decision is the GC's, not Storage's. |
 
-The API never deletes JARs implicitly in M1 (a JAR may be referenced by any
-server). JAR garbage collection is a deferred concern (Section 8.5).
+**Reference-counted GC (D4, #293).** The pool is reclaimed by a reference-counted
+garbage collector: a periodic API-side loop (config `jar_gc.interval_seconds`,
+default daily, gated on the control plane with the other schedulers) plus a
+platform-admin `POST /versions/jar-pool/gc` manual trigger (audited; returns
+`{scanned, deleted, freed_bytes}`).
+
+*Reference model.* A pooled JAR is **live** iff some server row's config records it
+as its resolved JAR (`resolved_jar_sha256`, Section 8) — the authoritative
+reference set is that bounded DB scan. Snapshots and backups do **not** pin pool
+JARs: the hydrate endpoint *injects* the resolved JAR into the working-set tar at
+transfer time (Section 8), so the Worker's working dir carries `server.jar` and a
+snapshot/backup of it **embeds the JAR inside its own tar** (the Worker excludes
+nothing when packing at M1). A restore therefore needs no pool copy, and deleting
+a server (which removes its rows, working set, and backups together) drops the
+only reference pinning its JAR. Everything in the pool referenced by no row is an
+orphan to reclaim.
+
+*Safety window.* `StartServer` ensures (downloads + stores) the resolved JAR into
+the pool **before** it commits the server row carrying that JAR's key
+(ensure-then-commit ordering). So a freshly-pooled JAR is briefly present but
+unreferenced — exactly an orphan to the GC — while an in-flight start finishes
+committing. The GC therefore never deletes a JAR younger than a fixed safety
+window (one hour, comfortably beyond a normal start's put-to-commit gap), keyed
+off the JAR's store/upload time.
 
 ### 3.3 Backup archive create / list / restore / delete / transfer
 
@@ -602,8 +627,6 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
 
 ### 8.5 Out of scope / deferred (carried as follow-ups, not implemented here)
 
-- **JAR garbage collection** (Section 3.2): M1 never deletes JARs; a reference-
-  counted GC is deferred.
 - **Orphan-sweep scheduling** (Section 4.3): the recovery sweep is specified;
   *when* it runs (startup, periodic) is an operational detail for the
   implementation epic (#8).

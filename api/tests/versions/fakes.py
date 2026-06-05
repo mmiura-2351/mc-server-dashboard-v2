@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
 from mc_server_dashboard_api.versions.domain.jar_fetcher import JarFetcher
-from mc_server_dashboard_api.versions.domain.jar_pool import JarPool, PoolStats
+from mc_server_dashboard_api.versions.domain.jar_pool import (
+    JarPool,
+    PoolEntry,
+    PoolStats,
+)
 
 
 class FakeJsonFetcher(JsonFetcher):
@@ -80,3 +84,18 @@ class FakeJarPool(JarPool):
             count=len(self.stored),
             total_bytes=sum(len(b) for b in self.stored.values()),
         )
+
+    async def list_entries(self) -> list[PoolEntry]:
+        import datetime as dt
+
+        return [
+            PoolEntry(
+                sha256=key,
+                size_bytes=len(data),
+                modified_at=dt.datetime.now(dt.UTC),
+            )
+            for key, data in self.stored.items()
+        ]
+
+    async def delete(self, sha256: str) -> None:
+        self.stored.pop(sha256, None)

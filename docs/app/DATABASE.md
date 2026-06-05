@@ -329,7 +329,7 @@ assigned Worker.
 | `server_type` | text | `vanilla` / `paper` / `fabric` / `forge` / `spigot` (CHECK enum). Only `vanilla`/`paper`/`fabric` are resolvable by the version catalog; `forge` (worker installer step) and `spigot` (no official distribution API) are accepted by the schema but rejected at create-time by version-validation (FR-VER-1) |
 | `execution_backend` | text | `host_process` / `container` (CHECK enum) |
 | `config` | jsonb | server configuration blob (properties, JVM args, snapshot-interval override per FR-DATA-7) |
-| `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.7) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |
+| `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
