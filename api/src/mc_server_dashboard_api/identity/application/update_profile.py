@@ -48,6 +48,11 @@ class UpdateProfile:
             if user is None:
                 raise UserNotFoundError(str(user_id.value))
 
+            # An empty PATCH (no fields supplied) is a no-op: return the current
+            # profile without committing, so updated_at is not bumped on no change.
+            if new_name is None and new_email is None:
+                return user
+
             if new_name is not None and new_name != user.username:
                 if await self.uow.users.get_by_username(new_name) is not None:
                     raise UsernameAlreadyExistsError(new_name.value)

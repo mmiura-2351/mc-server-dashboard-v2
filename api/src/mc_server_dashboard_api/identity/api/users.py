@@ -40,6 +40,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
     LastPlatformAdminError,
     PasswordPolicyError,
     UsernameAlreadyExistsError,
+    UserNotFoundError,
 )
 from mc_server_dashboard_api.identity.domain.value_objects import UserId
 
@@ -154,6 +155,8 @@ async def change_password(
         )
     except InvalidCredentialsError as exc:
         raise _unauthorized() from exc
+    except UserNotFoundError as exc:
+        raise _user_gone() from exc
     except PasswordPolicyError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -190,6 +193,8 @@ async def update_profile(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": _conflict_reason(exc)},
         ) from exc
+    except UserNotFoundError as exc:
+        raise _user_gone() from exc
     except (InvalidUsernameError, InvalidEmailError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -229,6 +234,8 @@ async def delete_account(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": "last_platform_admin"},
         ) from exc
+    except UserNotFoundError as exc:
+        raise _user_gone() from exc
     await recorder.record(
         AuditEvent(
             operation=ops.AUTH_ACCOUNT_DELETE,
@@ -261,5 +268,17 @@ def _unauthorized() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="invalid_credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _user_gone() -> HTTPException:
+    # The token authenticated but the user row is gone (a concurrent self-delete
+    # raced between get_current_user and the use case's get_by_id). The token now
+    # references a non-existent principal, so it is treated like an invalidated
+    # token: the same 401 invalid_token get_current_user returns, not a 500.
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="invalid_token",
         headers={"WWW-Authenticate": "Bearer"},
     )

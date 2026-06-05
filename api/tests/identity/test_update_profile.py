@@ -54,7 +54,9 @@ async def test_update_only_username_leaves_email() -> None:
     assert updated.email.value == "alice@example.com"
 
 
-async def test_update_no_fields_is_noop_commit() -> None:
+async def test_update_no_fields_is_noop_without_commit() -> None:
+    # An empty PATCH returns the current profile and does not commit, so
+    # updated_at is not bumped on a no-change request.
     user = make_user(username="alice", email="alice@example.com", now=_NOW)
     uow = FakeUnitOfWork()
     uow.users.seed(user)
@@ -63,6 +65,8 @@ async def test_update_no_fields_is_noop_commit() -> None:
 
     assert updated.username.value == "alice"
     assert updated.email.value == "alice@example.com"
+    assert updated.updated_at == _NOW
+    assert uow.commits == 0
 
 
 async def test_update_username_conflict_raises() -> None:

@@ -39,6 +39,10 @@ class DeleteAccount:
     clock: Clock
 
     async def __call__(self, *, user_id: UserId) -> None:
+        # NOTE: both guards below are check-then-act under READ COMMITTED with no
+        # row lock, so concurrent self-deletes can race past them (last-admin and
+        # community-owner TOCTOU). Closing it (FOR UPDATE / SERIALIZABLE / a DB
+        # constraint) is deferred to #260.
         if await self.ownership.owns_any_community(user_id):
             raise CommunityOwnedError(str(user_id.value))
 

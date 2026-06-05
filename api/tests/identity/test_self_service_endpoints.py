@@ -30,6 +30,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
     LastPlatformAdminError,
     PasswordPolicyError,
     UsernameAlreadyExistsError,
+    UserNotFoundError,
 )
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.identity.fakes import make_user
@@ -125,6 +126,21 @@ def test_change_password_weak_new_returns_422_with_reason_no_echo() -> None:
     assert weak not in resp.text
 
 
+def test_change_password_user_gone_returns_401_invalid_token() -> None:
+    # A concurrent self-delete races between get_current_user and the use case's
+    # get_by_id: the use case raises UserNotFoundError and the route returns the
+    # same 401 invalid_token as an invalidated token, not a 500.
+    user = make_user()
+    fake = _Fake(error=UserNotFoundError(str(user.id.value)))
+    client = next(_client(user, change_password=fake))
+    resp = client.put(
+        "/users/me/password",
+        json={"current_password": "old", "new_password": _VALID_PASSWORD},
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "invalid_token"
+
+
 def test_change_password_requires_auth() -> None:
     fake = _Fake(result=None)
     app = create_app()
@@ -175,6 +191,15 @@ def test_update_profile_email_conflict_returns_409() -> None:
     assert resp.json()["detail"]["reason"] == "email_taken"
 
 
+def test_update_profile_user_gone_returns_401_invalid_token() -> None:
+    user = make_user()
+    fake = _Fake(error=UserNotFoundError(str(user.id.value)))
+    client = next(_client(user, update_profile=fake))
+    resp = client.patch("/users/me", json={"username": "alice2"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "invalid_token"
+
+
 # --- DELETE /users/me ------------------------------------------------------
 
 
@@ -207,3 +232,12 @@ def test_delete_account_last_admin_returns_409() -> None:
     resp = client.delete("/users/me")
     assert resp.status_code == 409
     assert resp.json()["detail"]["reason"] == "last_platform_admin"
+
+
+def test_delete_account_user_gone_returns_401_invalid_token() -> None:
+    user = make_user()
+    fake = _Fake(error=UserNotFoundError(str(user.id.value)))
+    client = next(_client(user, delete_account=fake))
+    resp = client.delete("/users/me")
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "invalid_token"
