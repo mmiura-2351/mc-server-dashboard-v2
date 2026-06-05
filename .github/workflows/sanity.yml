@@ -1,0 +1,58 @@
+name: sanity
+
+# WHY this workflow is intentionally UNFILTERED (no `paths:` filter).
+#
+# Every other workflow (api, docs, proto, worker) is path-filtered, so a PR that
+# touches only an unfiltered path (e.g. compose.yaml -- PR #195 precedent)
+# triggers none of them and reports zero checks. Once branch protection requires
+# a status context, such a PR can never satisfy it and can never merge (the #284
+# residual: enabling "Require branches to be up to date"). This workflow runs on
+# EVERY pull_request and push to main, so the required `check` context is always
+# satisfiable. Its job is named `check` to match api/docs/proto/worker, letting a
+# single required context cover all of them. Keep it cheap (<30s, no services).
+# See issue #303.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # The checkers are pure stdlib python3 (ubuntu-latest ships it); no setup
+      # action or dependency install is needed, mirroring docs.yml.
+      - name: Migration guard self-test
+        run: python3 scripts/check_migrations.py --self-test
+
+      - name: Migration guard (single head, no number collisions)
+        run: (cd api && python3 ../scripts/check_migrations.py)
+
+      - name: Docs checker self-test
+        run: python3 scripts/check_docs.py --self-test
+
+      - name: Docs conventions (links, section-mark glyph, v1 term)
+        run: python3 scripts/check_docs.py
+
+      # YAML-parse every workflow so a malformed workflow fails fast. PyYAML is
+      # preinstalled with ubuntu-latest's system python3.
+      - name: Workflow YAML parse
+        run: |
+          python3 -c '
+          import glob, yaml
+          files = sorted(glob.glob(".github/workflows/*.yml"))
+          assert files, "no workflow files found"
+          for f in files:
+              with open(f) as fh:
+                  yaml.safe_load(fh)
+              print("ok:", f)
+          '
