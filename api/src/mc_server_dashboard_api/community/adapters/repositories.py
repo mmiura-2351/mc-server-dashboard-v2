@@ -9,6 +9,7 @@ framework-free domain entities here.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -219,6 +220,15 @@ class SqlAlchemyRoleRepository(RoleRepository):
     async def get_by_id(self, role_id: RoleId) -> Role | None:
         row = await self._session.get(RoleModel, role_id.value)
         return _to_role(row) if row is not None else None
+
+    async def get_by_ids(self, role_ids: Sequence[RoleId]) -> list[Role]:
+        if not role_ids:
+            return []
+        stmt = select(RoleModel).where(
+            RoleModel.id.in_([role_id.value for role_id in role_ids])
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_role(row) for row in rows]
 
     async def list_for_community(self, community_id: CommunityId) -> list[Role]:
         stmt = select(RoleModel).where(RoleModel.community_id == community_id.value)
