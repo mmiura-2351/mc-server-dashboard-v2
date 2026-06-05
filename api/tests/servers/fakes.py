@@ -286,6 +286,9 @@ class FakeServerRepository(ServerRepository):
     async def list_game_ports(self) -> set[int]:
         return {s.game_port for s in self.by_id.values() if s.game_port is not None}
 
+    async def list_ids_missing_game_port(self) -> list[ServerId]:
+        return [s.id for s in self.by_id.values() if s.game_port is None]
+
     async def update(self, server: Server) -> None:
         self.by_id[server.id] = server
 

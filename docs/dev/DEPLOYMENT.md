@@ -172,6 +172,27 @@ For an **imported or legacy server** whose row predates port tracking
 in `server.properties` (via the files API) and keep distinct values per server, as
 before.
 
+### Backfilling legacy `game_port` rows
+
+A row with `game_port = NULL` is **invisible to port auto-assignment**: it is
+excluded from the deployment-wide taken-port set, so the next auto-assigned
+server can be handed the very host port the legacy server already binds (via its
+`server.properties`) — a guaranteed host-port collision when both run. To make
+the gap discoverable, the API logs a **startup WARN** listing the count and ids
+of every `game_port = NULL` server. When you see it, backfill those rows so the
+taken-set math becomes correct again.
+
+For each listed server, read its current bind port from `server.properties` (the
+`server-port=<port>` line, via the files API) and write it into `game_port`:
+
+```sql
+UPDATE server SET game_port = <port-from-its-server.properties> WHERE id = '<id>';
+```
+
+The `game_port` column is `UNIQUE` deployment-wide, so a backfill that would
+duplicate another server's port fails loudly — resolve the duplicate before
+retrying. After backfilling, the WARN stops on the next restart.
+
 The host interface the **game port** binds to is configurable via
 `driver.container.game_bind_ip` (env `MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP`).
 The in-code default is `127.0.0.1` (loopback-only); this `compose.yaml` overrides

@@ -34,6 +34,9 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.startup_reset import (
     ResetUnverifiableObservedStates,
 )
+from mc_server_dashboard_api.servers.application.warn_missing_ports import (
+    WarnLegacyMissingPorts,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -42,6 +45,7 @@ async def run_reconciler_loop(
     reconciler: RunReconcilerTick,
     *,
     reset: ResetUnverifiableObservedStates,
+    warn_missing_ports: WarnLegacyMissingPorts,
     tick_seconds: float,
 ) -> None:
     """Run ``reconciler.tick()`` every ``tick_seconds`` until cancelled.
@@ -50,14 +54,31 @@ async def run_reconciler_loop(
     succeeds the loop retries it each iteration and skips the tick, so a DB that
     is briefly unreachable at startup never crashes the process and the
     reconciler never acts on the stale observed cache.
+
+    After the reset succeeds, the one-time ``warn_missing_ports`` runs (issue
+    #310): a read-only WARN listing servers with no tracked game port so an
+    operator can backfill them. It is informational and failure-tolerant — its
+    own failure is logged and never gates ticking nor crashes the boot, and it is
+    retried on the next iteration until it succeeds once.
     """
 
     reset_done = False
+    warned_ports = False
     while True:
         try:
             if not reset_done:
                 await reset()
                 reset_done = True
+            if not warned_ports:
+                try:
+                    await warn_missing_ports()
+                except Exception:  # noqa: BLE001 - informational; never gate ticking
+                    _LOG.warning(
+                        "startup legacy-port check failed; will retry next iteration",
+                        exc_info=True,
+                    )
+                else:
+                    warned_ports = True
             # Count the tick attempt and stamp the last clean tick, so an operator
             # can alert on a stalled reconciler via /metrics (issue #282).
             reconciler_ticks_total.inc()
