@@ -109,3 +109,84 @@ async def test_aclose_releases_lease_and_sweep_reclaims(tmp_path: Path) -> None:
 
     storage.sweep()
     assert not old_snapshot.exists()
+
+
+# --- per-file streaming read leases (issue #265) ---------------------------
+#
+# open_file_stream takes the SAME active-reader lease open_hydrate_source does
+# (the live snapshot it streams a file out of must not be reclaimed mid-read),
+# so the same lease-lifecycle properties are asserted here.
+
+
+async def test_open_file_stream_open_but_never_iterated_does_not_lease(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+
+    # Open the file stream but NEVER iterate it, then drop the reference. The
+    # lease is acquired on first iteration only, so nothing was ever leased.
+    from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+
+    stream = storage.open_file_stream(community, server, RelPath("f"))
+    del stream
+    gc.collect()
+
+    await publish(storage, community, server, {"f": b"NEW"})
+    assert not old_snapshot.exists()  # never leased -> reclaim removed it
+
+
+async def test_open_file_stream_first_chunk_then_publish_completes_old_content(
+    tmp_path: Path,
+) -> None:
+    # Once iteration has begun (lease taken), a concurrent publish does not pull
+    # the snapshot out from under the reader: the stream finishes the old bytes.
+    from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+
+    stream = cast(
+        AsyncGenerator[bytes, None],
+        storage.open_file_stream(community, server, RelPath("f")),
+    )
+    first_chunk = await stream.__anext__()  # begin iteration -> lease acquired
+
+    await publish(storage, community, server, {"f": b"NEW"})
+    assert old_snapshot.exists()  # leased, so reclaim deferred
+
+    rest = await drain(stream)
+    assert first_chunk + rest == b"OLD"
+
+
+async def test_open_file_stream_aclose_releases_lease_and_sweep_reclaims(
+    tmp_path: Path,
+) -> None:
+    # Mid-iteration release: closing the stream before EOF must release the lease
+    # so a later sweep reclaims the superseded snapshot.
+    from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    # A multi-chunk file so the stream is still mid-iteration when we aclose it.
+    big = b"z" * (3 * 1024 * 1024)
+    await publish(storage, community, server, {"f": big})
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+
+    stream = cast(
+        AsyncGenerator[bytes, None],
+        storage.open_file_stream(community, server, RelPath("f")),
+    )
+    await stream.__anext__()  # begin iteration -> lease acquired (still mid-file)
+
+    await publish(storage, community, server, {"f": b"NEW"})
+    assert old_snapshot.exists()  # leased
+
+    await stream.aclose()  # mid-iteration release
+
+    storage.sweep()
+    assert not old_snapshot.exists()

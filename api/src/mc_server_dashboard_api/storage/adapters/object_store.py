@@ -715,6 +715,40 @@ class ObjectStorage(Storage):
                 raise NotFoundError(f"file not found: {rel_path.value}")
             return await _read_all(client, key)
 
+    def open_file_stream(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> ByteStream:
+        # The per-file analogue of open_hydrate_source (issue #265): a streamed
+        # GET of one object so a large single-file download never buffers the
+        # whole object in RAM. The live snapshot prefix is resolved and the
+        # active-reader lease taken on the FIRST iteration, mirroring the hydrate
+        # stream: a stream opened but never iterated never pins a prefix, and the
+        # leased prefix is exactly the one the object is read out of (Section 4.2
+        # reader safety).
+        sub = self._safe_subkey(rel_path)
+        return self._file_stream_gen(community_id, server_id, sub, rel_path)
+
+    async def _file_stream_gen(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        sub: str,
+        rel_path: RelPath,
+    ) -> AsyncIterator[bytes]:
+        async with self._client_factory() as client:
+            snapshot_prefix = await self._live_snapshot_prefix(
+                client, community_id, server_id
+            )
+            self._acquire_lease(snapshot_prefix)
+            try:
+                key = snapshot_prefix + sub
+                if await client.head_object(key) is None:
+                    raise NotFoundError(f"file not found: {rel_path.value}")
+                async for chunk in await client.get_object(key):
+                    yield chunk
+            finally:
+                self._release_lease(snapshot_prefix)
+
     async def list_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> list[DirEntry]:

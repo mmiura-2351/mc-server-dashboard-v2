@@ -82,6 +82,29 @@ class StorageFileStoreAdapter(FileStore):
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
+    def open_file_stream(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        # Stream the storage per-file read seam (issue #265), translating the
+        # storage errors at the seam. The errors surface lazily (the Storage
+        # stream resolves + locates the file on first iteration), so the
+        # translation wraps the iteration, mirroring read_file's mapping.
+        return self._open_file_stream_gen(community_id, server_id, rel_path)
+
+    async def _open_file_stream_gen(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        community, server = _scope(community_id, server_id)
+        try:
+            async for chunk in self._storage.open_file_stream(
+                community, server, _rel_path(rel_path)
+            ):
+                yield chunk
+        except PathTraversalError as exc:
+            raise InvalidFilePathError(rel_path) from exc
+        except NotFoundError as exc:
+            raise ServerFileNotFoundError(str(server_id.value)) from exc
+
     async def list_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:
@@ -189,29 +212,37 @@ class StorageFileStoreAdapter(FileStore):
         sink = _ZipStreamSink()
         # An unseekable sink drives zipfile's streaming mode (data descriptors,
         # no seek-back to patch headers), so each entry's bytes can be flushed
-        # out as soon as they are written. Peak memory is one in-flight file plus
-        # its just-written zip block, never the whole subtree.
+        # out as soon as they are written. Peak memory is one in-flight CHUNK plus
+        # its just-written zip block, never a whole member or the whole subtree:
+        # each member is read through the Storage per-file stream and copied into
+        # the zip chunk-by-chunk (issue #265).
         with zipfile.ZipFile(sink, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            async for arcname, content in self._walk_files(
+            async for arcname, member_stream in self._walk_files(
                 community_id, server_id, rel_path
             ):
-                zf.writestr(arcname, content)
-                for chunk in sink.drain():
-                    yield chunk
+                with zf.open(arcname, mode="w") as member:
+                    async for chunk in member_stream:
+                        member.write(chunk)
+                        for out in sink.drain():
+                            yield out
+                for out in sink.drain():
+                    yield out
             for arcname, content in extra or ():
                 zf.writestr(arcname, content)
-                for chunk in sink.drain():
-                    yield chunk
-        for chunk in sink.drain():
-            yield chunk
+                for out in sink.drain():
+                    yield out
+        for out in sink.drain():
+            yield out
 
     async def _walk_files(
         self, community_id: CommunityId, server_id: ServerId, rel_path: str
-    ) -> AsyncIterator[tuple[str, bytes]]:
-        """Yield ``(arcname, bytes)`` for every file under ``rel_path``, depth-first.
+    ) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
+        """Yield ``(arcname, byte_stream)`` for every file under ``rel_path``.
 
-        Arcnames are relative to ``rel_path`` so the zip contains the subtree
-        itself, not the path leading to it.
+        Depth-first. Arcnames are relative to ``rel_path`` so the zip contains the
+        subtree itself, not the path leading to it. Each file is handed back as
+        the Storage per-file stream so the caller copies it into the zip
+        chunk-by-chunk (bounded memory, issue #265).
         """
 
         base = "" if rel_path in ("", ".") else rel_path.rstrip("/")
@@ -228,11 +259,15 @@ class StorageFileStoreAdapter(FileStore):
                 if entry.is_dir:
                     stack.append(child)
                     continue
-                content = await self.read_file(
-                    community_id=community_id, server_id=server_id, rel_path=child
-                )
                 arcname = child[len(base) + 1 :] if base else child
-                yield arcname, content
+                yield (
+                    arcname,
+                    self.open_file_stream(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=child,
+                    ),
+                )
 
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

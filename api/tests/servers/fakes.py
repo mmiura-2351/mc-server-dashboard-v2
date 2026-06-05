@@ -149,6 +149,18 @@ class FakeFileStore(FileStore):
             raise ServerFileNotFoundError(str(server_id.value))
         return self.files[rel_path]
 
+    def open_file_stream(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        files = self.files
+
+        async def _gen() -> AsyncIterator[bytes]:
+            if rel_path not in files:
+                raise ServerFileNotFoundError(str(server_id.value))
+            yield files[rel_path]
+
+        return _gen()
+
     async def list_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:

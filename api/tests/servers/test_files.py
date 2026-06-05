@@ -115,6 +115,24 @@ class FakeFileStore(FileStore):
             raise ServerFileNotFoundError(str(server_id.value))
         return self.files[rel_path]
 
+    def open_file_stream(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        # Yield the seeded file in fixed-size chunks so a multi-chunk file
+        # surfaces as more than one yield (the bounded-memory contract, #265).
+        chunk = 4
+
+        async def _gen() -> AsyncIterator[bytes]:
+            if self.bad_path:
+                raise InvalidFilePathError(rel_path)
+            if rel_path not in self.files:
+                raise ServerFileNotFoundError(str(server_id.value))
+            data = self.files[rel_path]
+            for i in range(0, len(data), chunk):
+                yield data[i : i + chunk]
+
+        return _gen()
+
     async def list_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:
@@ -1367,18 +1385,52 @@ async def test_upload_extract_unknown_archive_type_is_invalid_path() -> None:
 # --- download: state branching + file vs dir -------------------------------
 
 
-async def test_download_file_bytes_at_rest() -> None:
+async def test_download_file_stream_at_rest() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     store.files["server.properties"] = b"motd=hi"
     use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
 
-    out = await use_case.file_bytes(
+    stream = await use_case.file_stream(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
         rel_path="server.properties",
     )
+    out = b"".join([chunk async for chunk in stream])
     assert out == b"motd=hi"
+
+
+async def test_download_file_stream_is_chunked_for_a_multi_chunk_file() -> None:
+    # A file larger than the seam's chunk surfaces as multiple bounded yields
+    # (the bounded-memory posture, issue #265): spy that more than one chunk
+    # flows for a multi-chunk file.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["world/region.mca"] = b"abcdefghijklmnop"  # > the fake's 4-byte chunk
+    use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    stream = await use_case.file_stream(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="world/region.mca",
+    )
+    chunks = [chunk async for chunk in stream]
+    assert len(chunks) > 1
+    assert b"".join(chunks) == b"abcdefghijklmnop"
+
+
+async def test_download_file_size_reads_parent_listing() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["world"] = [FileEntry(name="region.mca", is_dir=False, size=16)]
+    use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    size = await use_case.file_size(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="world/region.mca",
+    )
+    assert size == 16
 
 
 async def test_download_running_is_unsettled() -> None:
@@ -1387,7 +1439,7 @@ async def test_download_running_is_unsettled() -> None:
         uow=_running_uow(community, server_id), file_store=FakeFileStore()
     )
     with pytest.raises(ServerFilesUnsettledError):
-        await use_case.file_bytes(
+        await use_case.file_stream(
             community_id=CommunityId(community),
             server_id=ServerId(server_id),
             rel_path="f",
