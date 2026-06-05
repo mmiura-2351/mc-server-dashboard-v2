@@ -1,11 +1,11 @@
-"""Round-trip for the 0011 player-group migration + Owner backfill (issue #276).
+"""Round-trip for the 0012 player-group migration + Owner backfill (issue #276).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). Asserts the three tables exist at head
 and are dropped on downgrade, and that the upgrade backfills the two new
-permission codes onto an existing preset Owner role (seeded at 0010, missing the
-codes) while leaving a non-preset and a non-Owner preset role untouched; downgrade
-strips them again (mirrors 0008's audit:read backfill test).
+permission codes onto an existing preset Owner role (seeded at 0011_user_active,
+missing the codes) while leaving a non-preset and a non-Owner preset role
+untouched; downgrade strips them again (mirrors 0008's audit:read backfill test).
 """
 
 from __future__ import annotations
@@ -80,8 +80,11 @@ async def _perms(conn: AsyncConnection, role_id: uuid.UUID) -> list[str]:
 
 async def test_group_tables_created_and_dropped() -> None:
     assert _DB_URL is not None
-    await downgrade_to("0010_server_type_fabric", _DB_URL)
-    await upgrade_to("0011_player_groups", _DB_URL)
+    # Establish a known state first (mirrors the other migration tests): a clean
+    # run has no ``alembic_version`` row, so ``downgrade_to`` would have no
+    # current head to descend from and Alembic would raise CommandError.
+    await downgrade_to("base", _DB_URL)
+    await upgrade_to("0012_player_groups", _DB_URL)
 
     engine = create_async_engine(_DB_URL)
     try:
@@ -89,7 +92,7 @@ async def test_group_tables_created_and_dropped() -> None:
             tables = await conn.run_sync(lambda sc: set(inspect(sc).get_table_names()))
         assert _GROUP_TABLES <= tables
 
-        await downgrade_to("0010_server_type_fabric", _DB_URL)
+        await downgrade_to("0011_user_active", _DB_URL)
         async with engine.connect() as conn:
             tables_after = await conn.run_sync(
                 lambda sc: set(inspect(sc).get_table_names())
@@ -103,7 +106,7 @@ async def test_group_tables_created_and_dropped() -> None:
 async def test_backfill_adds_group_codes_to_preset_owner_only() -> None:
     assert _DB_URL is not None
     await downgrade_to("base", _DB_URL)
-    await upgrade_to("0010_server_type_fabric", _DB_URL)
+    await upgrade_to("0011_user_active", _DB_URL)
 
     engine = create_async_engine(_DB_URL)
     try:
@@ -111,7 +114,7 @@ async def test_backfill_adds_group_codes_to_preset_owner_only() -> None:
         async with engine.begin() as conn:
             ids = await _seed_owner_roles(conn, community_id)
 
-        await upgrade_to("0011_player_groups", _DB_URL)
+        await upgrade_to("0012_player_groups", _DB_URL)
 
         async with engine.connect() as conn:
             owner_perms = await _perms(conn, ids["owner"])
@@ -123,15 +126,15 @@ async def test_backfill_adds_group_codes_to_preset_owner_only() -> None:
             assert permission not in other_perms
 
         # Idempotent: re-running adds no duplicate.
-        await downgrade_to("0010_server_type_fabric", _DB_URL)
-        await upgrade_to("0011_player_groups", _DB_URL)
+        await downgrade_to("0011_user_active", _DB_URL)
+        await upgrade_to("0012_player_groups", _DB_URL)
         async with engine.connect() as conn:
             owner_perms = await _perms(conn, ids["owner"])
         for permission in _NEW_PERMISSIONS:
             assert owner_perms.count(permission) == 1
 
         # Downgrade strips the codes from the preset Owner role again.
-        await downgrade_to("0010_server_type_fabric", _DB_URL)
+        await downgrade_to("0011_user_active", _DB_URL)
         async with engine.connect() as conn:
             owner_perms = await _perms(conn, ids["owner"])
         for permission in _NEW_PERMISSIONS:

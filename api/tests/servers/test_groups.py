@@ -322,6 +322,63 @@ async def test_delete_group_resyncs_previously_attached_server() -> None:
     assert await uow.groups.get_by_id(group.id) is None
 
 
+class _MiddleFailFileStore(FakeFileStore):
+    """File store that raises only for one server id, recording per-server writes.
+
+    Drives the multi-server partial-failure posture: the middle server's write
+    fails while the other two succeed.
+    """
+
+    def __init__(self, fail_for: ServerId) -> None:
+        super().__init__()
+        self._fail_for = fail_for
+        self.written_servers: list[ServerId] = []
+
+    async def write_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> None:
+        if server_id == self._fail_for:
+            raise RuntimeError("forced storage write failure")
+        self.written_servers.append(server_id)
+
+
+async def test_add_player_continues_past_one_failing_server(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    uow = FakeUnitOfWork()
+    group = _seed_group(uow, kind=GroupKind.OP)
+    # Three at-rest servers; the sync visits them sorted by uuid string, so the
+    # middle id by that order is the one whose write fails.
+    servers = [_server() for _ in range(3)]
+    for server in servers:
+        uow.servers.seed(server)
+        await uow.groups.attach(group.id, server.id)
+    middle = sorted(servers, key=lambda s: str(s.id.value))[1]
+    fs = _MiddleFailFileStore(fail_for=middle.id)
+
+    with caplog.at_level("WARNING"):
+        await AddPlayer(uow=uow, file_store=fs)(
+            community_id=_COMMUNITY,
+            group_id=group.id,
+            player_uuid=uuid.uuid4(),
+            username="alice",
+        )
+
+    # The other two servers were synced; no raise despite the middle failure.
+    synced = {s.value for s in fs.written_servers}
+    assert synced == {s.id.value for s in servers if s.id != middle.id}
+    # Exactly one WARN names the failed server and the group.
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert getattr(warnings[0], "server_id") == str(middle.id.value)
+    assert getattr(warnings[0], "group_id") == str(group.id.value)
+
+
 async def test_list_server_groups_and_group_servers() -> None:
     uow = FakeUnitOfWork()
     group = _seed_group(uow)

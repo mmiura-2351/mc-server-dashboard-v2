@@ -20,8 +20,8 @@ so already-provisioned communities' Owner roles lack them and a data backfill
 grants them. Only preset Owner rows (``is_preset = true`` AND ``name = 'Owner'``)
 are touched; non-preset and non-Owner roles are left alone. Idempotent both ways.
 
-Revision ID: 0011_player_groups
-Revises: 0010_server_type_fabric
+Revision ID: 0012_player_groups
+Revises: 0011_user_active
 Create Date: 2026-06-05
 """
 
@@ -33,8 +33,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0011_player_groups"
-down_revision: str | None = "0010_server_type_fabric"
+revision: str = "0012_player_groups"
+down_revision: str | None = "0011_user_active"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

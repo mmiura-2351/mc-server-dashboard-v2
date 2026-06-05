@@ -2,7 +2,7 @@
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). The schema is created and torn down per
-test via the real 0001-0011 migrations so the adapter runs against the documented
+test via the real 0001-0012 migrations so the adapter runs against the documented
 shape. A community and a server are seeded; the repository's CRUD, player upsert,
 attach/detach, and the cross-direction listings are exercised end to end, plus the
 ``ON DELETE CASCADE`` from server and group deletion.
@@ -126,6 +126,28 @@ async def test_add_get_and_player_save(engine: AsyncEngine) -> None:
         again = await uow.groups.get_by_id(group.id)
     assert again is not None
     assert again.players[0].username == "alice2"
+
+
+async def test_add_group_with_players_round_trips(engine: AsyncEngine) -> None:
+    # Regression: ``add`` must flush the parent player_group row before the
+    # group_player children, or the child INSERT violates the FK. Persisting a
+    # group that already carries players must round-trip the whole set.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    p1, p2 = uuid.uuid4(), uuid.uuid4()
+    group = _group(community_id, [Player(p1, "alice"), Player(p2, "bob")])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.groups.get_by_id(group.id)
+    assert loaded is not None
+    assert {(p.uuid, p.username) for p in loaded.players} == {
+        (p1, "alice"),
+        (p2, "bob"),
+    }
 
 
 async def test_attach_detach_and_listings(engine: AsyncEngine) -> None:

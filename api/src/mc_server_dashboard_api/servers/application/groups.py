@@ -16,6 +16,16 @@ attached group of that kind, deterministically ordered by uuid, so it is byte-
 stable diff-to-diff. The merge is total (no group of that kind attached → an
 empty list, which clears the file).
 
+**Partial-failure posture (PM ruling).** When a single group change touches
+*several* attached servers (delete a group, add/remove a player), the file
+fan-out runs after the DB commit and is **best-effort**: a per-server write
+failure is WARN-logged (server id + group id + error) and the loop continues, so
+one failing server does not strand the rest. The failed at-rest server is left
+stale; a *write* failure is **not** healed by the next hydrate (hydrate only
+covers servers that were not at-rest at sync time). The operator repair is to
+re-trigger the sync — re-attach the group to that server, or edit the group again
+— which reruns the fan-out.
+
 Cross-community safety mirrors the servers use cases: a group or server whose
 ``community_id`` differs from the path community is reported not-found
 (:class:`GroupNotFoundError` / :class:`ServerNotFoundError`), leaking no
@@ -25,6 +35,7 @@ cross-community existence signal (FR-COMM-3).
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 
@@ -51,6 +62,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def _parse_kind(kind: str) -> GroupKind:
@@ -184,11 +197,10 @@ class DeleteGroup:
             await self.uow.commit()
         # Resync each previously-attached server (the group is now gone, so the
         # merge excludes it). Done after commit so the file reflects the persisted
-        # attachment set.
-        for server_id in server_ids:
-            await _sync_server_file(
-                self.uow, self.file_store, community_id, server_id, group.kind
-            )
+        # attachment set; best-effort across servers (see helper docstring).
+        await _sync_servers_best_effort(
+            self.uow, self.file_store, community_id, server_ids, group_id, group.kind
+        )
 
 
 @dataclass(frozen=True)
@@ -213,10 +225,9 @@ class AddPlayer:
             await self.uow.groups.save(group)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
             await self.uow.commit()
-        for server_id in server_ids:
-            await _sync_server_file(
-                self.uow, self.file_store, community_id, server_id, group.kind
-            )
+        await _sync_servers_best_effort(
+            self.uow, self.file_store, community_id, server_ids, group_id, group.kind
+        )
         return group
 
 
@@ -240,10 +251,9 @@ class RemovePlayer:
             await self.uow.groups.save(group)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
             await self.uow.commit()
-        for server_id in server_ids:
-            await _sync_server_file(
-                self.uow, self.file_store, community_id, server_id, group.kind
-            )
+        await _sync_servers_best_effort(
+            self.uow, self.file_store, community_id, server_ids, group_id, group.kind
+        )
         return group
 
 
@@ -315,6 +325,42 @@ class ListGroupServers:
         async with self.uow:
             await _load_group(self.uow, community_id, group_id)
             return await self.uow.groups.list_server_ids_for_group(group_id)
+
+
+async def _sync_servers_best_effort(
+    uow: UnitOfWork,
+    file_store: FileStore,
+    community_id: CommunityId,
+    server_ids: list[ServerId],
+    group_id: GroupId,
+    kind: GroupKind,
+) -> None:
+    """Resync several attached servers, continuing past any single write failure.
+
+    **Partial-failure posture (issue #276, PM ruling).** The DB change is already
+    committed; this fan-out is best-effort. A per-server ``write_file`` failure is
+    WARN-logged (server id + group id + error) and the loop continues, so one bad
+    server does not strand the others. The failed at-rest server is left stale —
+    a *write* failure is **not** healed by the next hydrate (hydrate only covers
+    servers that were not at-rest at sync time). The operator repair is to
+    re-trigger the sync: re-attach the group to that server, or edit the group
+    again, which runs this fan-out afresh.
+    """
+
+    for server_id in server_ids:
+        try:
+            await _sync_server_file(uow, file_store, community_id, server_id, kind)
+        except Exception:
+            _logger.warning(
+                "group file sync failed for one attached server; other servers "
+                "still synced, this one is left stale until the sync is "
+                "re-triggered (re-attach or edit the group)",
+                extra={
+                    "server_id": str(server_id.value),
+                    "group_id": str(group_id.value),
+                },
+                exc_info=True,
+            )
 
 
 async def _sync_server_file(

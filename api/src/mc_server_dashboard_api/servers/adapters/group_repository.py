@@ -44,6 +44,10 @@ class SqlAlchemyGroupRepository(GroupRepository):
                 kind=group.kind.value,
             )
         )
+        # Flush the parent before the children: without an ORM relationship
+        # SQLAlchemy does not order the INSERTs, so the group_player rows would
+        # otherwise hit the FK to player_group before that row exists.
+        await self._session.flush()
         for player in group.players:
             self._session.add(_player_model(group.id, player))
 
