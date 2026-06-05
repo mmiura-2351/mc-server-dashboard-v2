@@ -50,6 +50,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
     ServerFileNotFoundError,
@@ -101,6 +102,22 @@ MAX_ARCHIVE_ENTRIES = 10_000
 # fully materialized in memory before the guard trips (the single-entry
 # decompression-bomb defence).
 _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
+
+# The default result cap for a file search. A search walks the whole authoritative
+# subtree, so an unbounded match list could return a giant response; 500 matches
+# comfortably covers an interactive "find this config" query while bounding the
+# response. Exceeding it sets the ``truncated`` flag rather than erroring (a
+# partial result is still useful). A constant is intentional (no config knob
+# requested); document if it ever needs tuning.
+MAX_SEARCH_RESULTS = 500
+
+# The per-file size cap for a CONTENT search: a file larger than this is skipped
+# (not grepped). Content search decodes a file as text and substring-scans it, so
+# scanning a multi-GiB world region would be pointless (binary) and ruinous
+# (whole file in memory). 1 MiB covers configs / scripts / datapack JSON — the
+# text files a content search is for — while skipping bulk binary data. A constant
+# is intentional (no config knob requested); document if it ever needs tuning.
+MAX_SEARCH_FILE_BYTES = 1024 * 1024
 
 
 async def _load(
@@ -589,6 +606,276 @@ class DownloadFile:
                 community_id=community_id, server_id=server_id, rel_path=rel_path
             )
             return False
+
+    async def _require_at_rest(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+        if not server.is_at_rest():
+            raise ServerFilesUnsettledError(str(server_id.value))
+
+
+async def _path_is_dir(
+    file_store: FileStore,
+    community_id: CommunityId,
+    server_id: ServerId,
+    rel_path: str,
+) -> bool:
+    """Resolve whether ``rel_path`` is a directory (vs a file), at rest.
+
+    Mirrors :meth:`DownloadFile._resolve_is_dir`: the root is always a directory;
+    otherwise a successful ``list_dir`` means a directory, and a
+    :class:`ServerFileNotFoundError` from it falls back to a file read (re-raising
+    if that is missing too). Validates the path first.
+    """
+
+    if rel_path in ("", "."):
+        return True
+    file_store.validate_rel_path(rel_path)
+    try:
+        await file_store.list_dir(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+        return True
+    except ServerFileNotFoundError:
+        await file_store.read_file(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+        return False
+
+
+async def _path_exists(
+    file_store: FileStore,
+    community_id: CommunityId,
+    server_id: ServerId,
+    rel_path: str,
+) -> bool:
+    """True if ``rel_path`` names an existing file or directory at rest."""
+
+    try:
+        await _path_is_dir(file_store, community_id, server_id, rel_path)
+        return True
+    except ServerFileNotFoundError:
+        return False
+
+
+@dataclass(frozen=True)
+class DeleteFile:
+    """Delete a file or directory (recursive) at rest (file:edit, issue #259).
+
+    At rest only: a delete mutates the authoritative copy, so a running server is
+    :class:`ServerFilesUnsettledError` (the edge returns 409), the same unsettled
+    posture the other bulk at-rest ops take. The path is resolved to a file or a
+    directory and dispatched to the matching seam method; a missing path is
+    :class:`ServerFileNotFoundError` (404). A file delete retains the prior
+    content as a version (reversible); a directory delete does not (backups cover
+    whole-subtree recovery).
+    """
+
+    uow: UnitOfWork
+    file_store: FileStore
+
+    async def __call__(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        if rel_path in ("", "."):
+            # Refuse to delete the working-set root itself: that is a wipe, not a
+            # file op (use backups/restore for whole-working-set lifecycle).
+            raise InvalidFilePathError(rel_path)
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+        if not server.is_at_rest():
+            raise ServerFilesUnsettledError(str(server_id.value))
+
+        is_dir = await _path_is_dir(self.file_store, community_id, server_id, rel_path)
+        if is_dir:
+            await self.file_store.delete_dir(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+        else:
+            await self.file_store.delete_file(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+
+
+@dataclass(frozen=True)
+class MakeDir:
+    """Create an (empty) directory at rest (file:edit, issue #259).
+
+    At rest only (running -> 409). Backend-dependent: fs materializes a real empty
+    directory; object storage cannot represent an empty directory and the seam
+    is a no-op there (the documented limitation). The path is traversal-validated.
+    """
+
+    uow: UnitOfWork
+    file_store: FileStore
+
+    async def __call__(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        self.file_store.validate_rel_path(rel_path)
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+        if not server.is_at_rest():
+            raise ServerFilesUnsettledError(str(server_id.value))
+        await self.file_store.make_dir(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+
+
+@dataclass(frozen=True)
+class RenameFile:
+    """Rename/move a file at rest (file:edit, issue #259).
+
+    At rest only (running -> 409). Composed over the existing seam — read the
+    source, write the destination, delete the source — so versioning comes for
+    free (the destination write and the source delete each capture a version) with
+    no new Storage rename primitive. Both paths are traversal-validated; a missing
+    source is :class:`ServerFileNotFoundError` (404) and an existing destination is
+    :class:`FileAlreadyExistsError` (409): rename never clobbers, so a typo cannot
+    silently overwrite data. Renaming a directory is out of scope for this slice
+    (the read/write seam is file-granular); ``from`` must name a file.
+    """
+
+    uow: UnitOfWork
+    file_store: FileStore
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: str,
+        to_path: str,
+    ) -> None:
+        self.file_store.validate_rel_path(from_path)
+        self.file_store.validate_rel_path(to_path)
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+        if not server.is_at_rest():
+            raise ServerFilesUnsettledError(str(server_id.value))
+
+        if from_path == to_path:
+            # A no-op rename onto itself: confirm the source exists (404 if not),
+            # then return without rewriting (no spurious version).
+            await self.file_store.read_file(
+                community_id=community_id, server_id=server_id, rel_path=from_path
+            )
+            return
+
+        # Read the source first (404 if missing). A directory source raises here
+        # (read_file of a dir is NotFound), so a directory rename is refused as a
+        # missing file rather than partially moved.
+        content = await self.file_store.read_file(
+            community_id=community_id, server_id=server_id, rel_path=from_path
+        )
+        if await _path_exists(self.file_store, community_id, server_id, to_path):
+            raise FileAlreadyExistsError(to_path)
+
+        await self.file_store.write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=to_path,
+            content=content,
+        )
+        await self.file_store.delete_file(
+            community_id=community_id, server_id=server_id, rel_path=from_path
+        )
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """A bounded list of matching paths plus whether the result was truncated."""
+
+    paths: list[str]
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class SearchFiles:
+    """Search the authoritative copy by name or content at rest (file:read, #259).
+
+    At rest only (running -> 409): search reads the authoritative Storage copy.
+    ``by="name"`` matches a case-insensitive substring of each entry's *basename*
+    (substring, not glob — the simpler, no-surprise choice; documented). ``by=
+    "content"`` scans each file's raw bytes for the UTF-8-encoded query as a plain
+    byte substring (case-sensitive), skipping any file larger than
+    :data:`MAX_SEARCH_FILE_BYTES` (a content search is for text configs, not
+    multi-GiB region files). Results are bounded to ``max_results`` (capped at
+    :data:`MAX_SEARCH_RESULTS`); hitting the bound sets ``truncated`` rather than
+    erroring (a partial result is still useful).
+    """
+
+    uow: UnitOfWork
+    file_store: FileStore
+    max_file_bytes: int = MAX_SEARCH_FILE_BYTES
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        query: str,
+        by: str,
+        max_results: int,
+    ) -> SearchResult:
+        if by not in ("name", "content"):
+            raise InvalidFilePathError(by)
+        await self._require_at_rest(community_id, server_id)
+        limit = min(max_results, MAX_SEARCH_RESULTS)
+        name_needle = query.lower()
+        content_needle = query.encode("utf-8")
+
+        paths: list[str] = []
+        truncated = False
+        async for rel_path, name in self._walk(community_id, server_id):
+            if by == "name":
+                matched = name_needle in name.lower()
+            else:
+                matched = await self._content_matches(
+                    community_id, server_id, rel_path, content_needle
+                )
+            if not matched:
+                continue
+            if len(paths) >= limit:
+                truncated = True
+                break
+            paths.append(rel_path)
+        return SearchResult(paths=paths, truncated=truncated)
+
+    async def _walk(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> AsyncIterator[tuple[str, str]]:
+        """Yield ``(rel_path, basename)`` for every file under the root, depth-first."""
+
+        stack = ["."]
+        while stack:
+            current = stack.pop()
+            entries = await self.file_store.list_dir(
+                community_id=community_id, server_id=server_id, rel_path=current
+            )
+            base = "" if current == "." else current
+            for entry in entries:
+                child = f"{base}/{entry.name}" if base else entry.name
+                if entry.is_dir:
+                    stack.append(child)
+                else:
+                    yield child, entry.name
+
+    async def _content_matches(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        needle: bytes,
+    ) -> bool:
+        data = await self.file_store.read_file(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+        if len(data) > self.max_file_bytes:
+            return False  # skip-cap: don't grep bulk binary / huge files
+        return needle in data
 
     async def _require_at_rest(
         self, community_id: CommunityId, server_id: ServerId

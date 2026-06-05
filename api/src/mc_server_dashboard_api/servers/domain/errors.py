@@ -188,6 +188,15 @@ class FileTooLargeError(ServerError):
     """
 
 
+class FileAlreadyExistsError(ServerError):
+    """A rename targeted a destination path that already exists (issue #259).
+
+    Rename refuses to clobber an existing destination (file or directory): the
+    caller must delete it first if that is the intent, so a typo cannot silently
+    overwrite data. The edge maps this to 409.
+    """
+
+
 class ServerFilesUnsettledError(ServerError):
     """A file operation hit a server in a transitional state (Section 6.9).
 

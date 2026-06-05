@@ -43,19 +43,24 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
     get_current_user,
+    get_delete_file,
     get_download_file,
     get_list_dir,
     get_list_file_versions,
+    get_make_dir,
     get_membership_visibility,
     get_permission_checker,
     get_read_file,
+    get_rename_file,
     get_rollback_file,
+    get_search_files,
     get_upload_file,
     get_write_file,
 )
-from mc_server_dashboard_api.servers.application.files import DirListing
+from mc_server_dashboard_api.servers.application.files import DirListing, SearchResult
 from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailableError
 from mc_server_dashboard_api.servers.domain.errors import (
+    FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
     ServerFileNotFoundError,
@@ -166,6 +171,10 @@ def _app(
     rollback: _FakeUseCase | None = None,
     upload: _FakeUpload | None = None,
     download: _FakeDownload | None = None,
+    rename: _FakeUseCase | None = None,
+    delete: _FakeUseCase | None = None,
+    mkdir: _FakeUseCase | None = None,
+    search: _FakeUseCase | None = None,
     recorder: RecordingAuditRecorder | None = None,
 ) -> object:
     app = create_app()
@@ -188,6 +197,14 @@ def _app(
         app.dependency_overrides[get_upload_file] = lambda: upload
     if download is not None:
         app.dependency_overrides[get_download_file] = lambda: download
+    if rename is not None:
+        app.dependency_overrides[get_rename_file] = lambda: rename
+    if delete is not None:
+        app.dependency_overrides[get_delete_file] = lambda: delete
+    if mkdir is not None:
+        app.dependency_overrides[get_make_dir] = lambda: mkdir
+    if search is not None:
+        app.dependency_overrides[get_search_files] = lambda: search
     if recorder is not None:
         app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return app
@@ -744,6 +761,287 @@ def test_download_validation_failure_is_not_audited() -> None:
     )
     assert resp.status_code == 422
     assert recorder.events == []
+
+
+# --- rename (issue #259) ---------------------------------------------------
+
+
+def test_rename_is_204_and_passes_paths() -> None:
+    rename = _FakeUseCase()
+    app = _app(member=True, allow=True, rename=rename)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
+        json={"from": "old.txt", "to": "new.txt"},
+    )
+    assert resp.status_code == 204
+    assert rename.calls[0]["from_path"] == "old.txt"
+    assert rename.calls[0]["to_path"] == "new.txt"
+
+
+def test_rename_requires_file_edit_permission() -> None:
+    app = _app(member=True, allow=False, rename=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
+        json={"from": "a", "to": "b"},
+    )
+    assert resp.status_code == 403
+
+
+def test_rename_missing_source_is_404() -> None:
+    app = _app(
+        member=True, allow=True, rename=_FakeUseCase(error=ServerFileNotFoundError("x"))
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
+    )
+    assert resp.status_code == 404
+
+
+def test_rename_existing_destination_is_409() -> None:
+    app = _app(
+        member=True, allow=True, rename=_FakeUseCase(error=FileAlreadyExistsError("b"))
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "destination_exists"
+
+
+def test_rename_traversal_is_422() -> None:
+    app = _app(
+        member=True, allow=True, rename=_FakeUseCase(error=InvalidFilePathError("x"))
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
+        json={"from": "a", "to": "../escape"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "invalid_path"
+
+
+def test_rename_running_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        rename=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
+
+
+def test_rename_success_records_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, rename=_FakeUseCase(), recorder=recorder)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
+    )
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.FILE_RENAME]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+
+
+def test_rename_unsettled_records_denied_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        rename=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
+    )
+    assert resp.status_code == 409
+    assert [e.operation for e in recorder.events] == [ops.FILE_RENAME]
+    assert recorder.events[0].outcome is Outcome.DENIED
+
+
+# --- delete (issue #259) ---------------------------------------------------
+
+
+def test_delete_is_204_and_passes_path() -> None:
+    delete = _FakeUseCase()
+    app = _app(member=True, allow=True, delete=delete)
+    client = next(_client(app))
+    resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "old.txt"})
+    assert resp.status_code == 204
+    assert delete.calls[0]["rel_path"] == "old.txt"
+
+
+def test_delete_requires_file_edit_permission() -> None:
+    app = _app(member=True, allow=False, delete=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
+    assert resp.status_code == 403
+
+
+def test_delete_missing_is_404() -> None:
+    app = _app(
+        member=True, allow=True, delete=_FakeUseCase(error=ServerFileNotFoundError("x"))
+    )
+    client = next(_client(app))
+    resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
+    assert resp.status_code == 404
+
+
+def test_delete_running_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        delete=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
+
+
+def test_delete_success_records_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, delete=_FakeUseCase(), recorder=recorder)
+    client = next(_client(app))
+    resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.FILE_DELETE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+
+
+# --- mkdir (issue #259) ----------------------------------------------------
+
+
+def test_mkdir_is_204_and_passes_path() -> None:
+    mkdir = _FakeUseCase()
+    app = _app(member=True, allow=True, mkdir=mkdir)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "plugins"}
+    )
+    assert resp.status_code == 204
+    assert mkdir.calls[0]["rel_path"] == "plugins"
+
+
+def test_mkdir_requires_file_edit_permission() -> None:
+    app = _app(member=True, allow=False, mkdir=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "p"}
+    )
+    assert resp.status_code == 403
+
+
+def test_mkdir_traversal_is_422() -> None:
+    app = _app(
+        member=True, allow=True, mkdir=_FakeUseCase(error=InvalidFilePathError("x"))
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "../escape"}
+    )
+    assert resp.status_code == 422
+
+
+def test_mkdir_running_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        mkdir=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "p"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
+
+
+def test_mkdir_success_records_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, mkdir=_FakeUseCase(), recorder=recorder)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "p"}
+    )
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.FILE_MKDIR]
+
+
+# --- search (issue #259) ---------------------------------------------------
+
+
+def test_search_returns_paths_and_truncated() -> None:
+    result = SearchResult(paths=["config/ops.json"], truncated=True)
+    search = _FakeUseCase(result=result)
+    app = _app(member=True, allow=True, search=search)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/search"),
+        json={"query": "ops", "by": "name", "max_results": 50},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["paths"] == ["config/ops.json"]
+    assert body["truncated"] is True
+    assert search.calls[0]["query"] == "ops"
+    assert search.calls[0]["by"] == "name"
+    assert search.calls[0]["max_results"] == 50
+
+
+def test_search_requires_file_read_permission() -> None:
+    app = _app(member=True, allow=False, search=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/search"), json={"query": "x"})
+    assert resp.status_code == 403
+
+
+def test_search_invalid_by_is_422() -> None:
+    app = _app(
+        member=True, allow=True, search=_FakeUseCase(error=InvalidFilePathError("x"))
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/search"),
+        json={"query": "x", "by": "regex"},
+    )
+    assert resp.status_code == 422
+
+
+def test_search_running_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        search=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/search"), json={"query": "x"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "server_unsettled"
+
+
+def test_search_success_records_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        search=_FakeUseCase(result=SearchResult(paths=[], truncated=False)),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/search"), json={"query": "x"})
+    assert resp.status_code == 200
+    assert [e.operation for e in recorder.events] == [ops.FILE_SEARCH]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
 
 
 # --- per-resource grant (real checker) -------------------------------------

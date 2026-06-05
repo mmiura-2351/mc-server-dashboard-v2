@@ -197,6 +197,18 @@ paths are not part of this Port.
 | `read_file(community_id, server_id, rel_path) -> bytes` | Read one file from `current/` | `rel_path` is validated against traversal (Section 6). |
 | `list_dir(community_id, server_id, rel_path) -> [entry]` | Browse a directory in `current/` | Same path validation. |
 | `write_file(community_id, server_id, rel_path, bytes)` | Edit one file in `current/`, retaining the prior version | Captures the previous content into `versions/` (Section 5) before overwriting. The per-file write is atomic (Section 4.4). |
+| `delete_file(community_id, server_id, rel_path)` | Delete one file from `current/`, retaining the prior content | Captures the content into `versions/` (Section 5) **before** removing, so a delete is reversible by rollback exactly like an edit. Missing path → `NotFoundError`. |
+| `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. |
+| `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. |
+
+**Empty-directory limitation (`make_dir`).** fs / remote-fs materialize a real
+empty directory, which rides the hydrate tar as a directory member (the tar is
+built recursively, so empty dirs survive a snapshot round-trip). **Object storage
+has no real directories** — a directory exists only as the shared key-prefix of
+its files (Section 7.3), so an *empty* directory cannot be represented and
+`make_dir` is a no-op there; the directory becomes observable once a file is
+written under it. This is documented honestly rather than papered over with a
+marker object that would pollute listings.
 
 ### 3.5 File version retention / rollback
 

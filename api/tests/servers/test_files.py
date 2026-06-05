@@ -27,12 +27,17 @@ import pytest
 
 from mc_server_dashboard_api.servers.application.files import (
     MAX_EDIT_BYTES,
+    MAX_SEARCH_RESULTS,
     MAX_UPLOAD_BYTES,
+    DeleteFile,
     DownloadFile,
     ListDir,
     ListFileVersions,
+    MakeDir,
     ReadFile,
+    RenameFile,
     RollbackFile,
+    SearchFiles,
     UploadFile,
     WriteFile,
 )
@@ -50,6 +55,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
     ServerFileNotFoundError,
@@ -76,14 +82,22 @@ _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 class FakeFileStore(FileStore):
     """In-memory authoritative-copy file store keyed by rel_path."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, strict_dirs: bool = False) -> None:
         self.files: dict[str, bytes] = {}
         self.dirs: dict[str, list[FileEntry]] = {}
         self.versions: dict[str, list[str]] = {}
         self.writes: list[tuple[str, bytes]] = []
         self.rollbacks: list[tuple[str, str]] = []
+        self.deleted_files: list[str] = []
+        self.deleted_dirs: list[str] = []
+        self.made_dirs: list[str] = []
         self.missing = False
         self.bad_path = False
+        # When set, list_dir raises ServerFileNotFoundError for a path that is not
+        # a seeded directory, so the file-vs-dir resolution (delete / rename /
+        # search) can tell a file from a directory; off by default to preserve the
+        # existing browse tests' "unknown dir lists empty" behaviour.
+        self.strict_dirs = strict_dirs
 
     def validate_rel_path(self, rel_path: str) -> None:
         # Mirror the seam's string-level traversal rule (absolute / ".."
@@ -106,6 +120,8 @@ class FakeFileStore(FileStore):
     ) -> list[FileEntry]:
         if self.missing:
             raise ServerFileNotFoundError(str(server_id.value))
+        if self.strict_dirs and rel_path not in self.dirs:
+            raise ServerFileNotFoundError(str(server_id.value))
         return self.dirs.get(rel_path, [])
 
     async def write_file(
@@ -120,6 +136,30 @@ class FakeFileStore(FileStore):
             raise InvalidFilePathError(rel_path)
         self.files[rel_path] = content
         self.writes.append((rel_path, content))
+
+    async def delete_file(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        if self.bad_path:
+            raise InvalidFilePathError(rel_path)
+        if rel_path not in self.files:
+            raise ServerFileNotFoundError(str(server_id.value))
+        del self.files[rel_path]
+        self.deleted_files.append(rel_path)
+
+    async def delete_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        if rel_path not in self.dirs:
+            raise ServerFileNotFoundError(str(server_id.value))
+        self.deleted_dirs.append(rel_path)
+
+    async def make_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        if self.bad_path:
+            raise InvalidFilePathError(rel_path)
+        self.made_dirs.append(rel_path)
 
     def download_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -1367,3 +1407,348 @@ async def test_download_is_dir_false_for_file() -> None:
         server_id=ServerId(server_id),
         rel_path="server.properties",
     )
+
+
+# --- delete (file / directory, issue #259) ---------------------------------
+
+
+async def test_delete_file_at_rest_removes_file() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["plugins/old.jar"] = b"x"
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="plugins/old.jar",
+    )
+    assert store.deleted_files == ["plugins/old.jar"]
+    assert "plugins/old.jar" not in store.files
+
+
+async def test_delete_directory_at_rest_removes_subtree() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="world",
+    )
+    assert store.deleted_dirs == ["world"]
+    assert store.deleted_files == []
+
+
+async def test_delete_missing_is_file_not_found() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)  # neither a known dir nor a file
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="nope",
+        )
+
+
+async def test_delete_root_is_invalid_path() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=".",
+        )
+
+
+async def test_delete_running_is_unsettled() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["f"] = b"x"
+    use_case = DeleteFile(uow=_running_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFilesUnsettledError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="f",
+        )
+    assert store.deleted_files == []
+
+
+# --- mkdir (issue #259) ----------------------------------------------------
+
+
+async def test_make_dir_at_rest_creates_directory() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="datapacks",
+    )
+    assert store.made_dirs == ["datapacks"]
+
+
+async def test_make_dir_traversal_is_invalid_path() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = MakeDir(
+        uow=_stopped_uow(community, server_id), file_store=FakeFileStore()
+    )
+
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="../escape",
+        )
+
+
+async def test_make_dir_running_is_unsettled() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = MakeDir(uow=_running_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFilesUnsettledError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="datapacks",
+        )
+    assert store.made_dirs == []
+
+
+# --- rename (issue #259) ---------------------------------------------------
+
+
+async def test_rename_at_rest_moves_file() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["old.txt"] = b"payload"
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="old.txt",
+        to_path="new.txt",
+    )
+    # Composed read -> write(dest) -> delete(source): dest written, source gone.
+    assert store.files.get("new.txt") == b"payload"
+    assert store.deleted_files == ["old.txt"]
+
+
+async def test_rename_missing_source_is_file_not_found() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="ghost.txt",
+            to_path="new.txt",
+        )
+
+
+async def test_rename_existing_destination_is_conflict() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["old.txt"] = b"a"
+    store.files["taken.txt"] = b"b"
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(FileAlreadyExistsError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="old.txt",
+            to_path="taken.txt",
+        )
+    # Nothing moved: the source survives and the destination is untouched.
+    assert store.files["old.txt"] == b"a"
+    assert store.files["taken.txt"] == b"b"
+    assert store.deleted_files == []
+
+
+async def test_rename_traversal_path_is_invalid() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="old.txt",
+            to_path="../escape",
+        )
+
+
+async def test_rename_running_is_unsettled() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["old.txt"] = b"x"
+    use_case = RenameFile(uow=_running_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFilesUnsettledError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="old.txt",
+            to_path="new.txt",
+        )
+    assert store.deleted_files == []
+
+
+# --- search (name / content, issue #259) -----------------------------------
+
+
+def _search_store() -> FakeFileStore:
+    """A small two-level tree for the search walk."""
+
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["."] = [
+        FileEntry(name="server.properties", is_dir=False, size=3),
+        FileEntry(name="config", is_dir=True, size=0),
+    ]
+    store.dirs["config"] = [
+        FileEntry(name="ops.json", is_dir=False, size=2),
+        FileEntry(name="motd.txt", is_dir=False, size=5),
+    ]
+    store.files["server.properties"] = b"motd=hello"
+    store.files["config/ops.json"] = b"[]"
+    store.files["config/motd.txt"] = b"hello world"
+    return store
+
+
+async def test_search_by_name_matches_basename_case_insensitive() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server_id), file_store=_search_store()
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="MOTD",
+        by="name",
+        max_results=100,
+    )
+    assert set(result.paths) == {"config/motd.txt"}
+    assert result.truncated is False
+
+
+async def test_search_by_content_matches_substring() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server_id), file_store=_search_store()
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="hello",
+        by="content",
+        max_results=100,
+    )
+    assert set(result.paths) == {"server.properties", "config/motd.txt"}
+
+
+async def test_search_content_skips_oversized_files() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _search_store()
+    store.files["config/motd.txt"] = b"hello" + b"x" * 1000
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_file_bytes=10,  # below the motd file size -> skipped
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="hello",
+        by="content",
+        max_results=100,
+    )
+    # The oversized motd file is skipped; only the small properties file matches.
+    assert set(result.paths) == {"server.properties"}
+
+
+async def test_search_bounds_results_and_sets_truncated() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server_id), file_store=_search_store()
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="",  # empty substring matches every basename
+        by="name",
+        max_results=2,
+    )
+    assert len(result.paths) == 2
+    assert result.truncated is True
+
+
+async def test_search_caps_max_results_at_ceiling() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server_id), file_store=_search_store()
+    )
+
+    # A caller asking for more than the ceiling is clamped to it; with only 3
+    # files total it cannot truncate, proving the clamp does not over-collect.
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="",
+        by="name",
+        max_results=MAX_SEARCH_RESULTS * 10,
+    )
+    assert len(result.paths) == 3
+    assert result.truncated is False
+
+
+async def test_search_invalid_by_is_invalid_path() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server_id), file_store=_search_store()
+    )
+
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            query="x",
+            by="regex",
+            max_results=10,
+        )
+
+
+async def test_search_running_is_unsettled() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = SearchFiles(
+        uow=_running_uow(community, server_id), file_store=_search_store()
+    )
+
+    with pytest.raises(ServerFilesUnsettledError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            query="x",
+            by="name",
+            max_results=10,
+        )

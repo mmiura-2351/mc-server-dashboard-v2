@@ -213,6 +213,48 @@ class FileStore(abc.ABC):
         Section 4.4) so a concurrent read never sees a torn file.
         """
 
+    @abc.abstractmethod
+    async def delete_file(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        """Delete one file from ``current/``, retaining the prior content first.
+
+        Captures the current content into ``versions/`` (Section 5) *before*
+        removing the file, so a delete is reversible the same way an edit is
+        (rollback restores the captured version). Raises
+        :class:`~.errors.NotFoundError` for a missing path so a no-op delete is
+        not silently reported as a success.
+        """
+
+    @abc.abstractmethod
+    async def delete_dir(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        """Recursively delete a directory subtree from ``current/`` (issue #259).
+
+        Unlike :meth:`delete_file`, a directory delete does **not** capture
+        per-file versions: file versioning is the fine-grained single-file-edit
+        mechanism (Section 5), whereas whole-subtree recovery is what backups
+        (Section 3.3) exist for; capturing a version per member of an arbitrarily
+        large subtree would be a storage-amplification bomb for no design benefit.
+        Raises :class:`~.errors.NotFoundError` for a missing directory.
+        """
+
+    @abc.abstractmethod
+    async def make_dir(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        """Create an (empty) directory in ``current/`` (issue #259).
+
+        fs / remote-fs materialize a real empty directory. **Object storage has no
+        real directories** — a directory exists only as the shared key-prefix of
+        its files (Section 7.3), so an *empty* directory cannot be represented and
+        ``make_dir`` is a no-op there; the directory becomes observable once a file
+        is written under it. This backend-dependent semantics is the honest
+        limitation, documented rather than papered over with a marker object that
+        would pollute listings. Idempotent: creating an existing directory is fine.
+        """
+
 
 class FileVersionStore(abc.ABC):
     """Port slice: file version retention / rollback (STORAGE.md Section 3.5)."""

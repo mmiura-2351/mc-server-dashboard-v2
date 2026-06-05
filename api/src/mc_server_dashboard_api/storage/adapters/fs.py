@@ -631,6 +631,61 @@ class FsStorage(Storage):
         finally:
             self._release_staging(staging)
 
+    async def delete_file(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        await asyncio.to_thread(self._delete_file, community_id, server_id, rel_path)
+
+    def _delete_file(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        current = self._current_dir(community_id, server_id)
+        target = self._safe_target(current, rel_path)
+        if not target.is_file():
+            raise NotFoundError(f"file not found: {rel_path.value}")
+        # Capture the content BEFORE removing it (Section 5), so a delete is
+        # reversible by rollback exactly like an overwrite is.
+        self._capture_version(community_id, server_id, rel_path, target)
+        self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+        target.unlink()
+        _fsync_dir(target.parent)
+
+    async def delete_dir(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        await asyncio.to_thread(self._delete_dir, community_id, server_id, rel_path)
+
+    def _delete_dir(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        current = self._current_dir(community_id, server_id)
+        target = self._safe_target(current, rel_path)
+        if not target.is_dir():
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        # No per-file version capture (Port contract): whole-subtree recovery is
+        # the backups' job (Section 3.3), and capturing a version per member would
+        # be a storage-amplification bomb on a large subtree.
+        shutil.rmtree(target)
+        _fsync_dir(target.parent)
+
+    async def make_dir(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        await asyncio.to_thread(self._make_dir, community_id, server_id, rel_path)
+
+    def _make_dir(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        # fs materializes a real empty directory in the live snapshot (it rides the
+        # hydrate tar's directory members). A never-snapshotted server has no live
+        # snapshot, so _current_dir raises NotFoundError; mkdir requires a working
+        # set to exist first (servers seed one at create, issue #243). Idempotent:
+        # an existing directory is fine (make_dir contract).
+        current = self._current_dir(community_id, server_id)
+        target = self._safe_target(current, rel_path)
+        target.mkdir(parents=True, exist_ok=True)
+        _fsync_dir(target.parent)
+
     def _atomic_write(self, target: Path, data: bytes) -> None:
         """temp-sibling + fsync + atomic rename (Section 4.4)."""
 

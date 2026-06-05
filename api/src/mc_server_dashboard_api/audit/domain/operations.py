@@ -60,10 +60,14 @@ BACKUP_CREATE: Final = "backup:create"
 BACKUP_RESTORE: Final = "backup:restore"
 BACKUP_DELETE: Final = "backup:delete"
 
-# File upload / download (FR-FILE-*, issue #259). Recorded under the file:edit /
-# file:read permissions they require.
+# File upload / download / rename / delete / mkdir / search (FR-FILE-*, issue
+# #259). Recorded under the file:edit / file:read permissions they require.
 FILE_UPLOAD: Final = "file:upload"
 FILE_DOWNLOAD: Final = "file:download"
+FILE_RENAME: Final = "file:rename"
+FILE_DELETE: Final = "file:delete"
+FILE_MKDIR: Final = "file:mkdir"
+FILE_SEARCH: Final = "file:search"
 
 # Worker drain set/clear (FR-WRK-5).
 WORKER_DRAIN_SET: Final = "worker:drain_set"
