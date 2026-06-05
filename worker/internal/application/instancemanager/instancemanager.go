@@ -279,6 +279,14 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 			fmt.Sprintf("instancemanager: driver %q not offered by this Worker", cmd.Driver))
 	}
 
+	launchMode, ok := launchModeFor(cmd.LaunchMode)
+	if !ok {
+		// An unrecognized launch mode is a malformed command, not a per-precondition
+		// case in the #294 contract table; it surfaces as the unpinned INTERNAL code.
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: unknown launch mode %q", cmd.LaunchMode))
+	}
+
 	m.mu.Lock()
 	if _, running := m.instances[cmd.ServerID]; running {
 		m.mu.Unlock()
@@ -306,6 +314,7 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 		WorkingDir:       workingDir,
 		MinecraftVersion: cmd.MinecraftVersion,
 		JarRelpath:       cmd.JarRelpath,
+		LaunchMode:       launchMode,
 	})
 	if err != nil {
 		return fail(cmd.CommandID, startErrorCode(err),
@@ -988,6 +997,21 @@ func (m *Manager) forgetIf(serverID string, inst execution.Instance) {
 	if m.instances[serverID] == inst {
 		delete(m.instances, serverID)
 		delete(m.startCmds, serverID)
+	}
+}
+
+// launchModeFor maps the command's wire launch-mode name to the execution
+// LaunchMode, reporting false for an unrecognized name (issue #305). An empty
+// name (an unset field) maps to LaunchModeJar, so a command from an API that
+// does not set the field launches exactly as before this field existed.
+func launchModeFor(name string) (execution.LaunchMode, bool) {
+	switch name {
+	case "", "jar":
+		return execution.LaunchModeJar, true
+	case "forge-argsfile":
+		return execution.LaunchModeForgeArgsfile, true
+	default:
+		return 0, false
 	}
 }
 

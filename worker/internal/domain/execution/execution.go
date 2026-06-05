@@ -50,6 +50,25 @@ func (s ServerState) String() string {
 	}
 }
 
+// LaunchMode selects how a driver builds a server's launch command (issue #305).
+// It is carried explicitly on the start command, never inferred from the
+// working-set contents. The zero value (LaunchModeJar) is the historical
+// behavior (a `java -jar <jar> nogui` launch), so an unset launch mode launches
+// exactly as before this field existed.
+type LaunchMode int
+
+const (
+	// LaunchModeJar runs the server JAR directly: `java -jar <jar> nogui`. It is
+	// the zero value, so an unspecified launch mode is byte-for-byte the original
+	// launch (vanilla, Paper, etc.).
+	LaunchModeJar LaunchMode = iota
+	// LaunchModeForgeArgsfile launches Forge via its generated unix args file
+	// (libraries/net/minecraftforge/forge/*/unix_args.txt). When that args file is
+	// absent the working set is uninstalled, so the driver first runs the installer
+	// (`java -jar <jar> --installServer`) as a supervised phase of the start.
+	LaunchModeForgeArgsfile
+)
+
 // InstanceSpec is everything a driver needs to launch one server instance. It is
 // backend-neutral: a host-process, container, or future k8s driver all consume
 // the same spec (FR-EXE-4). The working set under WorkingDir is prepared by the
@@ -65,7 +84,12 @@ type InstanceSpec struct {
 	MinecraftVersion string
 	// JarRelpath is the server JAR path relative to WorkingDir (StartServer
 	// carries it; the API ships the JAR via hydrate, ARCHITECTURE.md Section 7.3).
+	// In LaunchModeForgeArgsfile it is the Forge installer JAR used for the
+	// supervised install step.
 	JarRelpath string
+	// LaunchMode selects the launch command shape (JAR vs Forge args file). The
+	// zero value is the historical JAR launch (issue #305).
+	LaunchMode LaunchMode
 	// MemoryMB is the JVM heap size in mebibytes; 0 lets the driver pick a
 	// proportionate default.
 	MemoryMB uint32

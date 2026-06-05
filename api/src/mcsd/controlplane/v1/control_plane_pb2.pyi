@@ -49,6 +49,43 @@ EXECUTION_DRIVER_KIND_HOST_PROCESS: ExecutionDriverKind.ValueType  # 1
 EXECUTION_DRIVER_KIND_CONTAINER: ExecutionDriverKind.ValueType  # 2
 Global___ExecutionDriverKind: _TypeAlias = ExecutionDriverKind  # noqa: Y015
 
+class _LaunchMode:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _LaunchModeEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_LaunchMode.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    LAUNCH_MODE_UNSPECIFIED: _LaunchMode.ValueType  # 0
+    """Unspecified is treated as LAUNCH_MODE_JAR (backwards compatibility)."""
+    LAUNCH_MODE_JAR: _LaunchMode.ValueType  # 1
+    """Jar runs `java -jar <jar_relpath> nogui` directly (vanilla, Paper, etc.)."""
+    LAUNCH_MODE_FORGE_ARGSFILE: _LaunchMode.ValueType  # 2
+    """ForgeArgsfile runs the Forge launch via its generated unix args file,
+    discovered under libraries/net/minecraftforge/forge/*/unix_args.txt in the
+    working set. When that args file is absent the working set is uninstalled,
+    so the Worker first runs `java -jar <jar_relpath> --installServer` as a
+    supervised phase of the start, then launches via the now-present args file.
+    """
+
+class LaunchMode(_LaunchMode, metaclass=_LaunchModeEnumTypeWrapper):
+    """LaunchMode selects how the Worker launches a server's process (issue #305).
+    It is additive: a Worker that does not understand a value falls back to the
+    JAR launch its older code already implemented (UNSPECIFIED == JAR).
+    """
+
+LAUNCH_MODE_UNSPECIFIED: LaunchMode.ValueType  # 0
+"""Unspecified is treated as LAUNCH_MODE_JAR (backwards compatibility)."""
+LAUNCH_MODE_JAR: LaunchMode.ValueType  # 1
+"""Jar runs `java -jar <jar_relpath> nogui` directly (vanilla, Paper, etc.)."""
+LAUNCH_MODE_FORGE_ARGSFILE: LaunchMode.ValueType  # 2
+"""ForgeArgsfile runs the Forge launch via its generated unix args file,
+discovered under libraries/net/minecraftforge/forge/*/unix_args.txt in the
+working set. When that args file is absent the working set is uninstalled,
+so the Worker first runs `java -jar <jar_relpath> --installServer` as a
+supervised phase of the start, then launches via the now-present args file.
+"""
+Global___LaunchMode: _TypeAlias = LaunchMode  # noqa: Y015
+
 class _CommandErrorCode:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -514,6 +551,7 @@ class StartServer(_message.Message):
     DRIVER_FIELD_NUMBER: _builtins.int
     JAR_RELPATH_FIELD_NUMBER: _builtins.int
     MINECRAFT_VERSION_FIELD_NUMBER: _builtins.int
+    LAUNCH_MODE_FIELD_NUMBER: _builtins.int
     driver: Global___ExecutionDriverKind.ValueType
     """driver is the execution backend to use; it MUST be one the Worker
     advertised (FR-EXE-3 fixes it per server).
@@ -527,16 +565,25 @@ class StartServer(_message.Message):
     """minecraft_version lets the Worker pick the Java runtime (FR-EXE-5); the API
     does not choose the java binary.
     """
+    launch_mode: Global___LaunchMode.ValueType
+    """launch_mode selects how the Worker launches the server (a vanilla/Paper JAR
+    launch vs a Forge args-file launch with a supervised installer step). It is
+    carried explicitly on the command, never inferred from the working-set
+    contents. LAUNCH_MODE_UNSPECIFIED is treated as LAUNCH_MODE_JAR for
+    backwards compatibility: a Worker launching it behaves exactly as it did
+    before this field existed (a `java -jar <jar> nogui` launch).
+    """
     def __init__(
         self,
         *,
         driver: Global___ExecutionDriverKind.ValueType = ...,
         jar_relpath: _builtins.str = ...,
         minecraft_version: _builtins.str = ...,
+        launch_mode: Global___LaunchMode.ValueType = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["driver", b"driver", "jar_relpath", b"jar_relpath", "minecraft_version", b"minecraft_version"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["driver", b"driver", "jar_relpath", b"jar_relpath", "launch_mode", b"launch_mode", "minecraft_version", b"minecraft_version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

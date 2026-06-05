@@ -37,6 +37,10 @@ type Command struct {
 	Kind string
 	// Driver is the requested execution backend for StartServer.
 	Driver string
+	// LaunchMode is the requested launch shape for StartServer (issue #305). It is
+	// the wire LaunchMode name ("jar" / "forge-argsfile"); empty (an unset field)
+	// is treated as the JAR launch, the historical behavior.
+	LaunchMode string
 	// JarRelpath is the server JAR path for StartServer (relative to the working
 	// set).
 	JarRelpath string

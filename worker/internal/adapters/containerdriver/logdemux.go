@@ -70,6 +70,31 @@ func demuxLogs(r io.Reader, pump *execution.LogPump) {
 	}
 }
 
+// demuxLogsTo reads Docker's multiplexed log stream from r and writes the frame
+// payloads (both stdout and stderr, interleaved in arrival order) to w, stripping
+// the 8-byte frame headers so the result is plain text (issue #305). It is used to
+// persist the Forge install container's output to a working-dir log file an
+// operator can read; it returns when r is exhausted or a frame is corrupt.
+func demuxLogsTo(r io.Reader, w io.Writer) {
+	br := bufio.NewReader(r)
+	header := make([]byte, dockerStreamHeaderLen)
+	for {
+		if _, err := io.ReadFull(br, header); err != nil {
+			return
+		}
+		size := binary.BigEndian.Uint32(header[4:])
+		if size == 0 {
+			continue
+		}
+		if size > maxFrameBytes {
+			return
+		}
+		if _, err := io.CopyN(w, br, int64(size)); err != nil {
+			return
+		}
+	}
+}
+
 // emitFramePayload appends payload to the stream's partial buffer and emits every
 // complete (newline-terminated) line, keeping any trailing partial for the next
 // frame.

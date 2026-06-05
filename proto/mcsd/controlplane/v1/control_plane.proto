@@ -186,6 +186,30 @@ message StartServer {
   // minecraft_version lets the Worker pick the Java runtime (FR-EXE-5); the API
   // does not choose the java binary.
   string minecraft_version = 3;
+
+  // launch_mode selects how the Worker launches the server (a vanilla/Paper JAR
+  // launch vs a Forge args-file launch with a supervised installer step). It is
+  // carried explicitly on the command, never inferred from the working-set
+  // contents. LAUNCH_MODE_UNSPECIFIED is treated as LAUNCH_MODE_JAR for
+  // backwards compatibility: a Worker launching it behaves exactly as it did
+  // before this field existed (a `java -jar <jar> nogui` launch).
+  LaunchMode launch_mode = 4;
+}
+
+// LaunchMode selects how the Worker launches a server's process (issue #305).
+// It is additive: a Worker that does not understand a value falls back to the
+// JAR launch its older code already implemented (UNSPECIFIED == JAR).
+enum LaunchMode {
+  // Unspecified is treated as LAUNCH_MODE_JAR (backwards compatibility).
+  LAUNCH_MODE_UNSPECIFIED = 0;
+  // Jar runs `java -jar <jar_relpath> nogui` directly (vanilla, Paper, etc.).
+  LAUNCH_MODE_JAR = 1;
+  // ForgeArgsfile runs the Forge launch via its generated unix args file,
+  // discovered under libraries/net/minecraftforge/forge/*/unix_args.txt in the
+  // working set. When that args file is absent the working set is uninstalled,
+  // so the Worker first runs `java -jar <jar_relpath> --installServer` as a
+  // supervised phase of the start, then launches via the now-present args file.
+  LAUNCH_MODE_FORGE_ARGSFILE = 2;
 }
 
 // StopServer stops a running server. A graceful stop takes an event-driven

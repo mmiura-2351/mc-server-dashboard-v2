@@ -124,6 +124,78 @@ func TestStartServerCreatesWorkingDirAndStarts(t *testing.T) {
 	}
 }
 
+// An unset launch mode (the default) launches with the historical JAR mode, so
+// the spec carries LaunchModeJar — the byte-for-byte original behavior (#305).
+func TestStartDefaultLaunchModeIsJar(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("StartServer = %+v, want success", res)
+	}
+	d.mu.Lock()
+	got := d.started[0].LaunchMode
+	d.mu.Unlock()
+	if got != execution.LaunchModeJar {
+		t.Fatalf("LaunchMode = %v, want LaunchModeJar", got)
+	}
+}
+
+// An explicit "jar" launch mode is the same JAR launch as the default.
+func TestStartJarLaunchMode(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	cmd := startCmd()
+	cmd.LaunchMode = "jar"
+
+	if res := m.Handle(context.Background(), cmd); !res.Success {
+		t.Fatalf("StartServer = %+v, want success", res)
+	}
+	d.mu.Lock()
+	got := d.started[0].LaunchMode
+	d.mu.Unlock()
+	if got != execution.LaunchModeJar {
+		t.Fatalf("LaunchMode = %v, want LaunchModeJar", got)
+	}
+}
+
+// A "forge-argsfile" launch mode threads LaunchModeForgeArgsfile onto the spec so
+// the driver runs the install-then-launch sequence (#305).
+func TestStartForgeLaunchMode(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	cmd := startCmd()
+	cmd.LaunchMode = "forge-argsfile"
+
+	if res := m.Handle(context.Background(), cmd); !res.Success {
+		t.Fatalf("StartServer = %+v, want success", res)
+	}
+	d.mu.Lock()
+	got := d.started[0].LaunchMode
+	d.mu.Unlock()
+	if got != execution.LaunchModeForgeArgsfile {
+		t.Fatalf("LaunchMode = %v, want LaunchModeForgeArgsfile", got)
+	}
+}
+
+// An unrecognized launch mode is a malformed command: it fails with INTERNAL
+// (an unpinned code, so the #294 contract table is untouched) and never starts
+// the driver (#305).
+func TestStartUnknownLaunchMode(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	cmd := startCmd()
+	cmd.LaunchMode = "bogus"
+
+	res := m.Handle(context.Background(), cmd)
+	if res.Success || res.ErrorCode != session.CommandErrorInternal {
+		t.Fatalf("unknown launch mode = %+v, want INTERNAL failure", res)
+	}
+	if d.startCount() != 0 {
+		t.Fatalf("driver started %d times, want 0 for an unknown launch mode", d.startCount())
+	}
+}
+
 func TestStartTwiceIsInvalidState(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)

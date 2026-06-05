@@ -86,24 +86,28 @@ func New(selector execution.JavaRuntimeSelector, spawn spawnFunc, openControl co
 	}
 }
 
-// Start selects the Java runtime, spawns the server process in its working dir,
-// and returns the running Instance. It emits starting then running; a successful
-// return means the process was spawned.
+// Start selects the Java runtime and launches the server process in its working
+// dir, returning the running Instance. For a Forge args-file launch whose working
+// set is not yet installed it spawns the supervised installer first and returns
+// immediately; a supervisor goroutine runs the install to completion then execs
+// the launch as the SAME instance, so the exit-watcher contract sees one instance
+// throughout (issue #305). It emits starting then running (or crashed if the
+// install fails); a successful return means the install or launch was spawned.
 func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
 	javaPath, err := d.selector.Select(spec.MinecraftVersion)
 	if err != nil {
 		return nil, fmt.Errorf("hostprocess: select java: %w", err)
 	}
 
-	args := javaArgs(spec)
-	proc, err := d.spawn(ctx, javaPath, args, spec.WorkingDir)
+	plan, err := execution.BuildLaunchPlan(spec, spec.WorkingDir, hostPathResolver(spec.WorkingDir))
 	if err != nil {
-		return nil, fmt.Errorf("hostprocess: spawn java: %w", err)
+		return nil, fmt.Errorf("hostprocess: plan launch: %w", err)
 	}
 
 	inst := &instance{
 		spec:        spec,
-		proc:        proc,
+		javaPath:    javaPath,
+		spawn:       d.spawn,
 		openControl: d.openControl,
 		stopTimeout: d.stopTimeout,
 		events:      make(chan execution.StatusEvent, 8),
@@ -111,36 +115,47 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		state:       execution.StateStarting,
 		logPump:     execution.NewLogPump(spec.ServerID, logBufferLines),
 	}
-	// Capture stdout/stderr into the per-instance log pump. The scan goroutines
-	// end at EOF (process exit closes the pipes); supervise waits on logWG before
-	// closing the pump so the consumer's range over Logs() terminates cleanly.
-	inst.logWG.Add(2)
-	go inst.scan(proc.Stdout(), execution.LogStreamStdout)
-	go inst.scan(proc.Stderr(), execution.LogStreamStderr)
-
 	inst.emit(execution.StateStarting, "")
-	inst.set(execution.StateRunning)
-	inst.emit(execution.StateRunning, "")
 
-	go inst.supervise()
+	if plan.NeedsInstall {
+		// Supervised install phase: the installer runs to completion, then the
+		// supervisor re-plans and launches as the SAME instance (issue #305).
+		proc, err := d.spawn(ctx, javaPath, plan.InstallArgs, spec.WorkingDir)
+		if err != nil {
+			return nil, fmt.Errorf("hostprocess: spawn forge installer: %w", err)
+		}
+		inst.setProc(proc)
+		go inst.superviseInstall(proc)
+		return inst, nil
+	}
+
+	proc, err := d.spawn(ctx, javaPath, plan.LaunchArgs, spec.WorkingDir)
+	if err != nil {
+		return nil, fmt.Errorf("hostprocess: spawn java: %w", err)
+	}
+	inst.beginLaunch(proc)
 	return inst, nil
 }
 
-// javaArgs builds the JVM command line for a server. Heap flags are set from
-// MemoryMB when provided; the JAR runs headless (nogui).
-func javaArgs(spec execution.InstanceSpec) []string {
-	var args []string
-	if spec.MemoryMB > 0 {
-		heap := fmt.Sprintf("%dM", spec.MemoryMB)
-		args = append(args, "-Xms"+heap, "-Xmx"+heap)
+// hostPathResolver maps working-set-relative paths onto host-absolute paths under
+// workingDir and checks existence there, for execution.BuildLaunchPlan.
+func hostPathResolver(workingDir string) execution.PathResolver {
+	return execution.PathResolver{
+		Resolve: func(rel string) string { return filepath.Join(workingDir, filepath.FromSlash(rel)) },
+		Exists: func(rel string) bool {
+			_, err := os.Stat(filepath.Join(workingDir, filepath.FromSlash(rel)))
+			return err == nil
+		},
 	}
-	args = append(args, "-jar", filepath.Join(spec.WorkingDir, spec.JarRelpath), "nogui")
-	return args
 }
 
-// instance is one running host process.
+// instance is one running host process. Across a Forge install+launch it owns two
+// processes in succession (installer, then server); proc is the current one,
+// guarded by mu (issue #305).
 type instance struct {
 	spec        execution.InstanceSpec
+	javaPath    string
+	spawn       spawnFunc
 	proc        process
 	openControl controlFunc
 	stopTimeout time.Duration
@@ -154,6 +169,12 @@ type instance struct {
 	// supervise closes the pump only after both have finished.
 	logPump *execution.LogPump
 	logWG   sync.WaitGroup
+
+	// beforeLaunch is a test-only hook fired inside superviseInstall after the
+	// re-plan but immediately before the latch-check-and-spawn critical section, so
+	// a test can drive a Stop into the exact install-exit→launch window the section
+	// must close (issue #306). Nil in production.
+	beforeLaunch func()
 
 	mu       sync.Mutex
 	state    execution.ServerState
@@ -173,6 +194,164 @@ func (i *instance) Status() execution.ServerState {
 	return i.state
 }
 
+// setProc records the instance's current process under the lock (the installer
+// during the install phase, the server after launch; issue #305).
+func (i *instance) setProc(p process) {
+	i.mu.Lock()
+	i.proc = p
+	i.mu.Unlock()
+}
+
+// currentProc returns the instance's current process under the lock.
+func (i *instance) currentProc() process {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.proc
+}
+
+// beginLaunch wires the launch process's log capture, marks the instance running,
+// and starts the exit supervisor. It is the shared tail of a direct launch and a
+// post-install launch, so a Forge install+launch reaches running through the same
+// path as a plain start (issue #305). The caller has already published proc as the
+// current process (setProc), so a Stop racing this tail acts on the live launch.
+func (i *instance) beginLaunch(proc process) {
+	i.setProc(proc)
+	i.beginLaunchTail(proc)
+}
+
+// beginLaunchTail wires log capture, marks the instance running, and starts the
+// exit supervisor for an already-published launch process. superviseInstall calls
+// it after publishing the launch under the latch lock, so the publish and the
+// stopping re-check stay one critical section (issue #306).
+func (i *instance) beginLaunchTail(proc process) {
+	// Capture stdout/stderr into the per-instance log pump. The scan goroutines
+	// end at EOF (process exit closes the pipes); supervise waits on logWG before
+	// closing the pump so the consumer's range over Logs() terminates cleanly.
+	i.logWG.Add(2)
+	go i.scan(proc.Stdout(), execution.LogStreamStdout)
+	go i.scan(proc.Stderr(), execution.LogStreamStderr)
+
+	i.set(execution.StateRunning)
+	i.emit(execution.StateRunning, "")
+
+	go i.supervise()
+}
+
+// superviseInstall runs the supervised Forge installer to completion, then execs
+// the launch as the SAME instance (issue #305). The installer's combined output
+// is written to logs/forge-install.log in the working dir so an operator can read
+// it via the files API. On a non-zero install exit (or a copy error) the instance
+// goes crashed and no launch is spawned; a Stop that terminated the installer
+// reports stopped. On success it re-plans (the args file is now present) and hands
+// off to beginLaunch.
+func (i *instance) superviseInstall(installer process) {
+	copyErr := i.captureInstallOutput(installer)
+	waitErr := installer.Wait()
+
+	i.mu.Lock()
+	stopping := i.stopping
+	i.mu.Unlock()
+
+	if stopping {
+		// A Stop terminated the installer: report stopped and launch nothing.
+		i.finishTerminal(execution.StateStopped, "")
+		return
+	}
+	if waitErr != nil {
+		i.finishTerminal(execution.StateCrashed, installFailDetail("forge install failed", waitErr))
+		return
+	}
+	if copyErr != nil {
+		i.finishTerminal(execution.StateCrashed, installFailDetail("forge install log capture failed", copyErr))
+		return
+	}
+
+	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, hostPathResolver(i.spec.WorkingDir))
+	if err != nil || plan.NeedsInstall {
+		detail := "forge install produced no args file"
+		if err != nil {
+			detail = installFailDetail("forge re-plan after install failed", err)
+		}
+		i.finishTerminal(execution.StateCrashed, detail)
+		return
+	}
+
+	if i.beforeLaunch != nil {
+		i.beforeLaunch()
+	}
+
+	// The latch re-check and the launch handoff are one critical section (issue
+	// #306). The cheap glob/re-plan above ran outside the lock; here the lock is
+	// held across spawn (which is exec.Cmd.Start, cheap) so a Stop racing this
+	// window either wins the lock first — observed below, aborting the launch — or
+	// blocks briefly until the launch process is published and then signals the
+	// live launch. There is no publish-before-start sub-window: spawn starts the
+	// process under the lock, so Stop never sees a published-but-unstarted handle.
+	i.mu.Lock()
+	if i.stopping {
+		// A Stop won the latch after the installer exited but before the launch:
+		// abort the launch entirely and report stopped (issue #306). The installer
+		// has already exited, so there is nothing to terminate; Stop's waitExit is
+		// released by finishTerminal closing i.exited.
+		i.mu.Unlock()
+		i.finishTerminal(execution.StateStopped, "")
+		return
+	}
+	proc, err := i.spawn(context.Background(), i.javaPath, plan.LaunchArgs, i.spec.WorkingDir)
+	if err != nil {
+		i.mu.Unlock()
+		i.finishTerminal(execution.StateCrashed, installFailDetail("forge launch after install failed", err))
+		return
+	}
+	i.proc = proc
+	i.mu.Unlock()
+
+	i.beginLaunchTail(proc)
+}
+
+// captureInstallOutput appends the installer's stdout and stderr to the
+// working-dir install log. The log is operator-readable via the files API; a
+// failure to open it is surfaced so the install is reported crashed rather than
+// silently losing diagnostics.
+func (i *instance) captureInstallOutput(installer process) error {
+	logPath := filepath.Join(i.spec.WorkingDir, filepath.FromSlash(execution.ForgeInstallLogRelpath))
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o750); err != nil {
+		return fmt.Errorf("create install log dir: %w", err)
+	}
+	f, err := os.Create(logPath) //nolint:gosec // logPath is the server's own working dir, not user-controlled.
+	if err != nil {
+		return fmt.Errorf("create install log: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(f, installer.Stdout()) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(f, installer.Stderr()) }()
+	wg.Wait()
+	return nil
+}
+
+// finishTerminal records a terminal state reached during the install phase (no
+// launch happened), emits it, and closes the event/exited channels so the
+// manager's pump and any in-flight Stop wait observe the end (issue #305). The
+// log pump never captured anything in this path, so it is closed directly.
+func (i *instance) finishTerminal(state execution.ServerState, detail string) {
+	i.set(state)
+	i.emit(state, detail)
+	close(i.exited)
+	i.logPump.Close()
+	i.mu.Lock()
+	i.closed = true
+	close(i.events)
+	i.mu.Unlock()
+}
+
+// installFailDetail builds a status detail from a context label and an error.
+func installFailDetail(label string, err error) string {
+	return label + ": " + err.Error()
+}
+
 // Logs streams captured console output (execution.LogSource).
 func (i *instance) Logs() <-chan execution.LogEvent { return i.logPump.Logs() }
 
@@ -190,7 +369,7 @@ func (i *instance) scan(r io.Reader, stream execution.LogStream) {
 // falls back to an up-only sample. The first Sample reports cpu_millis=0 (no
 // prior reading to diff against).
 func (i *instance) Sample(_ context.Context) (execution.MetricsSample, error) {
-	rss, ticks, hz, err := readProcStats(i.proc.Pid())
+	rss, ticks, hz, err := readProcStats(i.currentProc().Pid())
 	if err != nil {
 		return execution.MetricsSample{}, err
 	}
@@ -232,19 +411,27 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	}
 	i.stopping = true
 	i.state = execution.StateStopping
+	// Capture the current process under the same lock that latches stopping, so the
+	// install→launch handoff (which only proceeds when stopping is unset) cannot
+	// race this read: Stop signals whichever process is current, and a concurrent
+	// install supervisor sees stopping set and launches nothing (issue #305).
+	proc := i.proc
 	i.mu.Unlock()
 	i.emit(execution.StateStopping, "")
 
+	// A graceful RCON stop only makes sense for a running server; during the
+	// install phase RCON is not listening, so it falls through to signalling the
+	// installer process directly.
 	if graceful && i.tryRCONStop(ctx) && i.waitExit(ctx, i.stopTimeout) {
 		return nil
 	}
 
-	_ = i.proc.Signal(syscall.SIGTERM)
+	_ = proc.Signal(syscall.SIGTERM)
 	if i.waitExit(ctx, i.stopTimeout) {
 		return nil
 	}
 
-	if err := i.proc.Kill(); err != nil {
+	if err := proc.Kill(); err != nil {
 		return fmt.Errorf("hostprocess: kill: %w", err)
 	}
 	// Confirm the kill actually terminated the process. A process that survives
@@ -333,7 +520,7 @@ func (i *instance) waitExit(ctx context.Context, d time.Duration) bool {
 // a stop was requested, crashed otherwise (FR-SRV-4). It then closes the event
 // and log streams.
 func (i *instance) supervise() {
-	waitErr := i.proc.Wait()
+	waitErr := i.currentProc().Wait()
 
 	i.mu.Lock()
 	stopping := i.stopping
