@@ -81,6 +81,17 @@ type Manager struct {
 	// RestartServer (which carries no driver/version) can relaunch with the same
 	// spec.
 	startCmds map[string]session.Command
+	// orphans remembers instances whose driver Stop failed (could not confirm
+	// termination, issue #211): take() already evicted them from instances, so a
+	// retry stop would otherwise find no tracked instance and return
+	// SERVER_NOT_FOUND, which the API's stop convergence reads as "no live process"
+	// and unassigns — over a process/container that may still be lingering (issue
+	// #251). Keeping the running Instance here lets a retry re-attempt the driver
+	// Stop against the same handle and report success only on confirmed
+	// termination; until then start/hydrate over the id are rejected as they are
+	// for a running server. The instance's status pump clears the record if the
+	// orphan finally exits on its own.
+	orphans map[string]execution.Instance
 
 	// events/logs/metrics are the merged streams the session forwards. Per-instance
 	// pumps fan their events into them (FR-MON-2, FR-MON-3).
@@ -118,6 +129,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		metricsInterval: defaultMetricsInterval,
 		instances:       map[string]execution.Instance{},
 		startCmds:       map[string]session.Command{},
+		orphans:         map[string]execution.Instance{},
 		events:          make(chan session.StatusEvent, 32),
 		logs:            make(chan session.LogEvent, 256),
 		metrics:         make(chan session.MetricsEvent, 32),
@@ -200,10 +212,17 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	}
 	m.mu.Lock()
 	_, running := m.instances[cmd.ServerID]
+	_, orphaned := m.orphans[cmd.ServerID]
 	m.mu.Unlock()
 	if running {
 		return fail(cmd.CommandID, session.CommandErrorInvalidState,
 			"instancemanager: cannot hydrate a running server")
+	}
+	if orphaned {
+		// A failed-stop orphan may still be alive; hydrating would replace the
+		// working set out from under the lingering process (issue #251).
+		return fail(cmd.CommandID, session.CommandErrorInvalidState,
+			"instancemanager: cannot hydrate a server with a failed-stop orphan pending termination")
 	}
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
@@ -266,6 +285,14 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 		return fail(cmd.CommandID, session.CommandErrorInvalidState,
 			"instancemanager: server already running")
 	}
+	if _, orphaned := m.orphans[cmd.ServerID]; orphaned {
+		// A prior stop could not confirm termination: the process/container may
+		// still be lingering. Starting now would double-instance over it; the
+		// reconciler must retry the stop first (issue #251).
+		m.mu.Unlock()
+		return fail(cmd.CommandID, session.CommandErrorInvalidState,
+			"instancemanager: server has a failed-stop orphan pending termination")
+	}
 	m.mu.Unlock()
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
@@ -310,16 +337,48 @@ func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 }
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
-	inst, _, ok := m.take(cmd.ServerID)
+	inst, ok := m.takeStoppable(cmd.ServerID)
 	if !ok {
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 			"instancemanager: server not running")
 	}
-	if err := inst.Stop(ctx, graceful); err != nil {
+	if err := m.attemptStop(ctx, cmd.ServerID, inst, graceful); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: stop: %v", err))
 	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// takeStoppable returns the instance to stop for serverID, draining either a
+// tracked running instance (evicting it via take) or a previously recorded
+// failed-stop orphan (left in place until the retry confirms termination). It
+// reports false only for genuinely unknown ids, so SERVER_NOT_FOUND stays
+// reserved for those (issue #251).
+func (m *Manager) takeStoppable(serverID string) (execution.Instance, bool) {
+	if inst, _, ok := m.take(serverID); ok {
+		return inst, true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inst, ok := m.orphans[serverID]
+	return inst, ok
+}
+
+// attemptStop runs the driver Stop for serverID's instance. On failure it
+// records the instance as a failed-stop orphan so a retry can re-attempt
+// termination against the same handle rather than returning SERVER_NOT_FOUND; on
+// success it forgets any orphan record for the id (issue #251).
+func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool) error {
+	if err := inst.Stop(ctx, graceful); err != nil {
+		m.mu.Lock()
+		m.orphans[serverID] = inst
+		m.mu.Unlock()
+		return err
+	}
+	m.mu.Lock()
+	delete(m.orphans, serverID)
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) session.CommandResult {
@@ -328,7 +387,10 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 			"instancemanager: server not running")
 	}
-	if err := inst.Stop(ctx, true); err != nil {
+	// A restart whose stop cannot confirm termination leaves the same failed-stop
+	// orphan as a plain StopServer would, so the reconciler's retry path can still
+	// terminate it rather than double-instancing over it (issue #251).
+	if err := m.attemptStop(ctx, cmd.ServerID, inst, true); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: restart stop: %v", err))
 	}
@@ -747,11 +809,26 @@ func (m *Manager) take(serverID string) (execution.Instance, session.Command, bo
 // closing done to release the log/metrics pumps for the same instance.
 func (m *Manager) pump(serverID string, inst execution.Instance, done chan struct{}) {
 	defer close(done)
+	// If this instance was recorded as a failed-stop orphan (issue #251) and then
+	// exits on its own, the channel closes here: forget the orphan so a later stop
+	// for the id is a genuinely unknown server, not a lingering retry target.
+	defer m.forgetOrphanIf(serverID, inst)
 	for ev := range inst.Events() {
 		if ev.State == execution.StateCrashed {
 			m.forgetIf(serverID, inst)
 		}
 		m.sendStatus(session.StatusEvent{ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail})
+	}
+}
+
+// forgetOrphanIf removes serverID's failed-stop orphan record only if it is still
+// the given inst, so it does not clear a record belonging to a different instance
+// (issue #251).
+func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.orphans[serverID] == inst {
+		delete(m.orphans, serverID)
 	}
 }
 
