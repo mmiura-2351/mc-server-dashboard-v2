@@ -107,6 +107,9 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 from mc_server_dashboard_api.servers.application.startup_reset import (
     ResetUnverifiableObservedStates,
 )
+from mc_server_dashboard_api.servers.application.warn_missing_ports import (
+    WarnLegacyMissingPorts,
+)
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
@@ -507,10 +510,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 uow=ServersUnitOfWork(create_session_factory(engine)),
                 clock=ServersSystemClock(),
             )
+            # Surface legacy NULL-game_port rows on startup (issue #310): such
+            # rows predate port tracking (#243) and are invisible to port
+            # auto-assignment, so a new server can collide on the host port a
+            # legacy server already binds. The WARN lists them so an operator can
+            # backfill them (DEPLOYMENT.md Section 6). Run from inside the loop's
+            # startup-once section (after the reset) — read-only and failure-
+            # tolerant, so it never gates ticking nor crashes the boot.
+            reconciler_warn_missing_ports = WarnLegacyMissingPorts(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+            )
             reconciler_task = asyncio.create_task(
                 run_reconciler_loop(
                     reconciler,
                     reset=reconciler_reset,
+                    warn_missing_ports=reconciler_warn_missing_ports,
                     tick_seconds=settings.reconciler.interval_seconds,
                 )
             )
