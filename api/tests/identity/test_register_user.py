@@ -60,6 +60,15 @@ class _FakeUserRepository(UserRepository):
     async def usernames_by_id(self, user_ids: list[UserId]) -> dict[UserId, Username]:
         raise NotImplementedError
 
+    async def update(self, user: User) -> None:
+        raise NotImplementedError
+
+    async def delete(self, user_id: UserId) -> None:
+        raise NotImplementedError
+
+    async def count_platform_admins(self) -> int:
+        raise NotImplementedError
+
 
 class _FakeRefreshTokenRepository(RefreshTokenRepository):
     async def add(self, token: RefreshToken) -> None:

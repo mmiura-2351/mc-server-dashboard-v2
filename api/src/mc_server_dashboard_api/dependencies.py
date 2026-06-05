@@ -108,6 +108,9 @@ from mc_server_dashboard_api.identity.adapters.clock import SystemClock
 from mc_server_dashboard_api.identity.adapters.common_passwords import (
     load_common_passwords,
 )
+from mc_server_dashboard_api.identity.adapters.community_ownership import (
+    CommunityBackedOwnership,
+)
 from mc_server_dashboard_api.identity.adapters.login_attempt_store import (
     SqlAlchemyLoginAttemptStore,
 )
@@ -124,10 +127,13 @@ from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUni
 from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
 )
+from mc_server_dashboard_api.identity.application.change_password import ChangePassword
+from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
+from mc_server_dashboard_api.identity.application.update_profile import UpdateProfile
 from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import InvalidAccessTokenError
@@ -430,6 +436,44 @@ def get_register_user(request: Request) -> RegisterUser:
         hasher=_build_password_hasher(settings.auth.password),
         clock=SystemClock(),
         policy=_build_password_policy(settings.auth.password),
+    )
+
+
+def get_change_password(request: Request) -> ChangePassword:
+    """Assemble the :class:`ChangePassword` use case from config-selected adapters."""
+
+    settings = get_settings(request)
+    session_factory = create_session_factory(get_engine(request))
+    return ChangePassword(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        hasher=_build_password_hasher(settings.auth.password),
+        clock=SystemClock(),
+        policy=_build_password_policy(settings.auth.password),
+    )
+
+
+def get_update_profile(request: Request) -> UpdateProfile:
+    """Assemble the :class:`UpdateProfile` use case from config-selected adapters."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UpdateProfile(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        clock=SystemClock(),
+    )
+
+
+def get_delete_account(request: Request) -> DeleteAccount:
+    """Assemble the :class:`DeleteAccount` use case from config-selected adapters.
+
+    Binds the community-ownership seam to the community store so the self-delete
+    guard can refuse a community owner without identity importing community.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteAccount(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        ownership=CommunityBackedOwnership(CommunityUnitOfWork(session_factory)),
+        clock=SystemClock(),
     )
 
 

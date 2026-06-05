@@ -11,6 +11,9 @@ import datetime as dt
 
 from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.clock import Clock
+from mc_server_dashboard_api.identity.domain.community_ownership import (
+    CommunityOwnership,
+)
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.login_attempt_store import (
     Lockout,
@@ -76,6 +79,15 @@ class FakeUserRepository(UserRepository):
     async def usernames_by_id(self, user_ids: list[UserId]) -> dict[UserId, Username]:
         wanted = set(user_ids)
         return {uid: user.username for uid, user in self.by_id.items() if uid in wanted}
+
+    async def update(self, user: User) -> None:
+        self.by_id[user.id] = user
+
+    async def delete(self, user_id: UserId) -> None:
+        self.by_id.pop(user_id, None)
+
+    async def count_platform_admins(self) -> int:
+        return sum(1 for user in self.by_id.values() if user.is_platform_admin)
 
 
 class FakeRefreshTokenRepository(RefreshTokenRepository):
@@ -264,6 +276,16 @@ class FakeLoginAttemptStore(LoginAttemptStore):
 
     async def prune_attempts(self, *, older_than: dt.datetime) -> None:
         self.attempts = [a for a in self.attempts if a[4] >= older_than]
+
+
+class FakeCommunityOwnership(CommunityOwnership):
+    """In-memory :class:`CommunityOwnership`: a set of owner user ids."""
+
+    def __init__(self, owners: set[UserId] | None = None) -> None:
+        self.owners = owners or set()
+
+    async def owns_any_community(self, user_id: UserId) -> bool:
+        return user_id in self.owners
 
 
 def make_brute_force_config(
