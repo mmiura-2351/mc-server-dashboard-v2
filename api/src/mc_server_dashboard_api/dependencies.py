@@ -176,8 +176,12 @@ from mc_server_dashboard_api.servers.adapters.version_validator import (
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
     DeleteBackup,
+    DownloadBackup,
+    GlobalBackupStatistics,
     ListBackups,
     RestoreBackup,
+    ServerBackupStatistics,
+    UploadBackup,
 )
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
@@ -1457,6 +1461,47 @@ def get_delete_backup(
         uow=ServersUnitOfWork(session_factory),
         backup_store=backup_store,
     )
+
+
+def get_download_backup(
+    request: Request,
+    backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+) -> DownloadBackup:
+    """Assemble the :class:`DownloadBackup` use case (backup:read, issue #281)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DownloadBackup(
+        uow=ServersUnitOfWork(session_factory),
+        backup_store=backup_store,
+    )
+
+
+def get_upload_backup(
+    request: Request,
+    backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+) -> UploadBackup:
+    """Assemble the :class:`UploadBackup` use case (backup:create, issue #281)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UploadBackup(
+        uow=ServersUnitOfWork(session_factory),
+        backup_store=backup_store,
+        clock=ServersSystemClock(),
+    )
+
+
+def get_server_backup_statistics(request: Request) -> ServerBackupStatistics:
+    """Assemble the per-server :class:`ServerBackupStatistics` (backup:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ServerBackupStatistics(uow=ServersUnitOfWork(session_factory))
+
+
+def get_global_backup_statistics(request: Request) -> GlobalBackupStatistics:
+    """Assemble the platform-wide :class:`GlobalBackupStatistics` use case (#281)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return GlobalBackupStatistics(uow=ServersUnitOfWork(session_factory))
 
 
 def _to_auth_user(user: User) -> AuthUser:

@@ -23,7 +23,7 @@ def test_source_check_lists_documented_values() -> None:
         if isinstance(c, CheckConstraint)
     }
     assert "ck_backup_source" in checks
-    for value in ("manual", "scheduled", "event"):
+    for value in ("manual", "scheduled", "event", "uploaded"):
         assert value in checks["ck_backup_source"]
 
 

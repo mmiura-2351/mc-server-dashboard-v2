@@ -483,8 +483,8 @@ this row only points at them.
 | `id` | uuid PK | |
 | `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
 | `storage_ref` | text | locator of the archive in `Storage` (opaque to the DB) |
-| `size_bytes` | bigint nullable | recorded archive size |
-| `source` | text | `manual` / `scheduled` / `event` (CHECK enum) |
+| `size_bytes` | bigint nullable | recorded archive size; set at create/upload (issue #281). Legacy rows predating this stay NULL and are reported as "unknown" in statistics — an honest gap, not a wrong total |
+| `source` | text | `manual` / `scheduled` / `event` / `uploaded` (CHECK enum). `uploaded` is an off-host archive brought in via the upload endpoint (issue #281; migration 0013 widened the CHECK) |
 | `created_by` | uuid nullable | the user who triggered the backup; **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
 | `created_at` | timestamptz | |
 
@@ -492,6 +492,14 @@ Constraints: index on `(server_id, created_at)` for listing a server's backups
 newest-first. Deleting a backup row must also delete the archive in `Storage`;
 that two-store cleanup is a use-case concern (orchestrated in `application`), not a
 DB cascade.
+
+Backups are downloadable and uploadable (issue #281): download streams the
+archive in its native `tar.gz` form (no recompression); upload validates the
+archive (it must open as a gzip tar with traversal-safe entries, bounded by the
+shared upload cap) before storing it as a `source = uploaded` row, restorable
+through the normal restore flow. Per-server (`backup:read`) and platform-admin
+statistics endpoints aggregate count / total known bytes / unknown-size count /
+newest+oldest from these rows.
 
 > **Scheduled backups (FR-BAK-3)** need a schedule (cron-like) and execution
 > history. The schedule belongs to the server (it can live in `server.config` as

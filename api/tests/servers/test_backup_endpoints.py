@@ -35,15 +35,20 @@ from mc_server_dashboard_api.dependencies import (
     get_create_backup,
     get_current_user,
     get_delete_backup,
+    get_download_backup,
+    get_global_backup_statistics,
     get_list_backups,
     get_membership_visibility,
     get_permission_checker,
     get_restore_backup,
+    get_server_backup_statistics,
+    get_upload_backup,
 )
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupId,
     BackupSource,
+    BackupStatistics,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
@@ -51,6 +56,8 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupUnsettledError,
+    FileTooLargeError,
+    InvalidBackupArchiveError,
     ServerNotFoundError,
     ServerNotStoppedError,
 )
@@ -116,9 +123,16 @@ def _app(
     list_: _FakeUseCase | None = None,
     restore: _FakeUseCase | None = None,
     delete: _FakeUseCase | None = None,
+    download: _FakeUseCase | None = None,
+    upload: _FakeUseCase | None = None,
+    statistics: _FakeUseCase | None = None,
+    global_statistics: _FakeUseCase | None = None,
+    is_admin: bool = False,
 ) -> object:
     app = create_app()
-    app.dependency_overrides[get_current_user] = lambda: make_user()
+    app.dependency_overrides[get_current_user] = lambda: make_user(
+        is_platform_admin=is_admin
+    )
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member
     )
@@ -131,7 +145,31 @@ def _app(
         app.dependency_overrides[get_restore_backup] = lambda: restore
     if delete is not None:
         app.dependency_overrides[get_delete_backup] = lambda: delete
+    if download is not None:
+        app.dependency_overrides[get_download_backup] = lambda: download
+    if upload is not None:
+        app.dependency_overrides[get_upload_backup] = lambda: upload
+    if statistics is not None:
+        app.dependency_overrides[get_server_backup_statistics] = lambda: statistics
+    if global_statistics is not None:
+        app.dependency_overrides[get_global_backup_statistics] = lambda: (
+            global_statistics
+        )
     return app
+
+
+async def _aiter(data: bytes) -> object:
+    yield data
+
+
+def _stats() -> BackupStatistics:
+    return BackupStatistics(
+        count=2,
+        total_bytes=30,
+        unknown_size_count=1,
+        newest=_NOW,
+        oldest=_NOW,
+    )
 
 
 def _url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> str:
@@ -268,3 +306,144 @@ def test_delete_unknown_backup_is_404() -> None:
     client = next(_client(app))
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 404
+
+
+# --- download (issue #281) -------------------------------------------------
+
+
+def test_member_without_permission_gets_403_on_download() -> None:
+    app = _app(member=True, allow=False, download=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
+    assert resp.status_code == 403
+
+
+def test_download_streams_archive_with_disposition() -> None:
+    use_case = _FakeUseCase(result=_aiter(b"archive-bytes"))
+    app = _app(member=True, allow=True, download=use_case)
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
+    assert resp.status_code == 200
+    assert resp.content == b"archive-bytes"
+    assert resp.headers["content-type"] == "application/gzip"
+    assert "attachment" in resp.headers["content-disposition"]
+    assert ".tar.gz" in resp.headers["content-disposition"]
+
+
+def test_download_unknown_backup_is_404() -> None:
+    use_case = _FakeUseCase(error=BackupNotFoundError("x"))
+    app = _app(member=True, allow=True, download=use_case)
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
+    assert resp.status_code == 404
+
+
+# --- upload (issue #281) ---------------------------------------------------
+
+
+def _multipart() -> dict[str, object]:
+    return {"file": ("backup.tar.gz", b"\x1f\x8bcontent", "application/gzip")}
+
+
+def test_member_without_permission_gets_403_on_upload() -> None:
+    app = _app(member=True, allow=False, upload=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
+    assert resp.status_code == 403
+
+
+def test_upload_returns_201_and_passes_actor() -> None:
+    server = ServerId(uuid.uuid4())
+    use_case = _FakeUseCase(
+        result=Backup(
+            id=BackupId(uuid.uuid4()),
+            server_id=server,
+            storage_ref="ref",
+            size_bytes=9,
+            source=BackupSource.UPLOADED,
+            created_by=uuid.uuid4(),
+            created_at=_NOW,
+        )
+    )
+    app = _app(member=True, allow=True, upload=use_case)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), server.value, "/upload"), files=_multipart())
+    assert resp.status_code == 201
+    assert resp.json()["source"] == "uploaded"
+    assert isinstance(use_case.calls[0]["created_by"], uuid.UUID)
+    assert use_case.calls[0]["content"] == b"\x1f\x8bcontent"
+
+
+def test_upload_invalid_archive_is_422() -> None:
+    use_case = _FakeUseCase(error=InvalidBackupArchiveError("bad"))
+    app = _app(member=True, allow=True, upload=use_case)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
+    assert resp.status_code == 422
+
+
+def test_upload_too_large_is_413() -> None:
+    use_case = _FakeUseCase(error=FileTooLargeError("big"))
+    app = _app(member=True, allow=True, upload=use_case)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
+    assert resp.status_code == 413
+
+
+def test_upload_unknown_server_is_404() -> None:
+    use_case = _FakeUseCase(error=ServerNotFoundError("x"))
+    app = _app(member=True, allow=True, upload=use_case)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
+    assert resp.status_code == 404
+
+
+# --- per-server statistics (issue #281) ------------------------------------
+
+
+def test_member_without_permission_gets_403_on_statistics() -> None:
+    app = _app(member=True, allow=False, statistics=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/statistics"))
+    assert resp.status_code == 403
+
+
+def test_statistics_returns_aggregate() -> None:
+    use_case = _FakeUseCase(result=_stats())
+    app = _app(member=True, allow=True, statistics=use_case)
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/statistics"))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 2
+    assert body["total_bytes"] == 30
+    assert body["unknown_size_count"] == 1
+    assert body["newest"] == _NOW.isoformat()
+
+
+def test_statistics_unknown_server_is_404() -> None:
+    use_case = _FakeUseCase(error=ServerNotFoundError("x"))
+    app = _app(member=True, allow=True, statistics=use_case)
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/statistics"))
+    assert resp.status_code == 404
+
+
+# --- global statistics (platform-admin, issue #281) ------------------------
+
+
+def test_global_statistics_requires_platform_admin() -> None:
+    use_case = _FakeUseCase(result=_stats())
+    app = _app(member=True, allow=True, global_statistics=use_case, is_admin=False)
+    client = next(_client(app))
+    resp = client.get("/backups/statistics")
+    assert resp.status_code == 403
+
+
+def test_global_statistics_admin_returns_aggregate() -> None:
+    use_case = _FakeUseCase(result=_stats())
+    app = _app(member=True, allow=True, global_statistics=use_case, is_admin=True)
+    client = next(_client(app))
+    resp = client.get("/backups/statistics")
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 2

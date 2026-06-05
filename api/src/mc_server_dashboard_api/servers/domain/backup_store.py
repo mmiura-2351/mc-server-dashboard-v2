@@ -16,6 +16,7 @@ layer.
 from __future__ import annotations
 
 import abc
+from collections.abc import AsyncIterator
 
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -52,3 +53,36 @@ class BackupArchiveStore(abc.ABC):
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> None:
         """Remove an archive. Idempotent (a missing archive is a no-op)."""
+
+    @abc.abstractmethod
+    def open(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> AsyncIterator[bytes]:
+        """Open a read stream over an archive in its native format (issue #281).
+
+        Streams the stored bytes verbatim (no recompression) for download. Raises
+        :class:`BackupNotFoundError` for an unknown ref.
+        """
+
+    @abc.abstractmethod
+    async def store(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        stream: AsyncIterator[bytes],
+    ) -> str:
+        """Store an uploaded archive verbatim, returning its ref (issue #281).
+
+        The caller has already validated the archive; this only stores the bytes
+        and returns the new ref (restorable via :meth:`restore`).
+        """
+
+    @abc.abstractmethod
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        """Return an archive's size in bytes (issue #281).
+
+        Raises :class:`BackupNotFoundError` for an unknown ref.
+        """

@@ -28,7 +28,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from mc_server_dashboard_api.core.adapters.database import Base
 
-_BACKUP_SOURCES = ("manual", "scheduled", "event")
+_BACKUP_SOURCES = ("manual", "scheduled", "event", "uploaded")
 
 
 class BackupModel(Base):
@@ -37,7 +37,7 @@ class BackupModel(Base):
     __tablename__ = "backup"
     __table_args__ = (
         CheckConstraint(
-            "source IN ('manual', 'scheduled', 'event')",
+            "source IN ('manual', 'scheduled', 'event', 'uploaded')",
             name="ck_backup_source",
         ),
         # List a server's backups newest-first (DATABASE.md Section 8).

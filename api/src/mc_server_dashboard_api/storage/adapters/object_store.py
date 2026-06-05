@@ -624,6 +624,47 @@ class ObjectStorage(Storage):
         async with self._client_factory() as client:
             await client.delete_object(self._backup_key(community_id, server_id, key))
 
+    def open_backup(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> ByteStream:
+        return self._backup_gen(community_id, server_id, key)
+
+    async def _backup_gen(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> AsyncIterator[bytes]:
+        backup_key = self._backup_key(community_id, server_id, key)
+        async with self._client_factory() as client:
+            if await client.head_object(backup_key) is None:
+                raise NotFoundError(f"backup not found: {key.value}")
+            # Stream the stored archive object verbatim (no recompression): the
+            # object is already a self-contained tar.gz (issue #281).
+            async for chunk in await client.get_object(backup_key):
+                yield chunk
+
+    async def put_backup(
+        self, community_id: CommunityId, server_id: ServerId, stream: ByteStream
+    ) -> BackupKey:
+        # Store the uploaded archive bytes verbatim under a fresh key (the caller
+        # already validated the archive). A single multipart upload makes the new
+        # object appear atomically, so a partial upload never lists as a backup
+        # (issue #281).
+        key = BackupKey(uuid.uuid4().hex)
+        async with self._client_factory() as client:
+            await client.upload_multipart(
+                self._backup_key(community_id, server_id, key), stream
+            )
+        return key
+
+    async def backup_size(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> int:
+        backup_key = self._backup_key(community_id, server_id, key)
+        async with self._client_factory() as client:
+            size = await client.head_object(backup_key)
+        if size is None:
+            raise NotFoundError(f"backup not found: {key.value}")
+        return size
+
     # --- file read / edit on the authoritative copy (Section 3.4) ----------
 
     async def read_file(

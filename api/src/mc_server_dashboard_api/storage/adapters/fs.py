@@ -509,12 +509,63 @@ class FsStorage(Storage):
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> None:
-        archive = (
+        archive = self._backup_path(community_id, server_id, key)
+        await asyncio.to_thread(archive.unlink, missing_ok=True)
+
+    def _backup_path(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> Path:
+        return (
             self._server_root(community_id, server_id)
             / "backups"
             / f"{key.value}.tar.gz"
         )
-        await asyncio.to_thread(archive.unlink, missing_ok=True)
+
+    def open_backup(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> ByteStream:
+        # Stream the stored archive bytes verbatim (no recompression): the file is
+        # already a self-contained tar.gz (issue #281).
+        archive = self._backup_path(community_id, server_id, key)
+        if not archive.is_file():
+            raise NotFoundError(f"backup not found: {key.value}")
+        return _file_stream(archive)
+
+    async def put_backup(
+        self, community_id: CommunityId, server_id: ServerId, stream: ByteStream
+    ) -> BackupKey:
+        # Store the uploaded archive bytes verbatim under a fresh key (the caller
+        # already validated the archive). Stage to a temp file in backups/, then
+        # atomically rename to <key>.tar.gz so a partial upload never appears as a
+        # listable backup (issue #281).
+        backups = self._server_root(community_id, server_id) / "backups"
+        await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
+        key = BackupKey(uuid.uuid4().hex)
+        fd, tmp_name = await asyncio.to_thread(
+            tempfile.mkstemp, dir=str(backups), prefix=".backup.", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                async for chunk in stream:
+                    await asyncio.to_thread(out.write, chunk)
+                await asyncio.to_thread(out.flush)
+                await asyncio.to_thread(os.fsync, out.fileno())
+            await asyncio.to_thread(
+                os.replace, tmp, self._backup_path(community_id, server_id, key)
+            )
+        except BaseException:
+            await asyncio.to_thread(tmp.unlink, missing_ok=True)
+            raise
+        return key
+
+    async def backup_size(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> int:
+        archive = self._backup_path(community_id, server_id, key)
+        if not await asyncio.to_thread(archive.is_file):
+            raise NotFoundError(f"backup not found: {key.value}")
+        return await asyncio.to_thread(lambda: archive.stat().st_size)
 
     # --- file read / edit on the authoritative copy (Section 3.4) ----------
 

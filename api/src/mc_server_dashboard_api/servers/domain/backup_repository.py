@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import abc
 
-from mc_server_dashboard_api.servers.domain.backup import Backup, BackupId
+from mc_server_dashboard_api.servers.domain.backup import (
+    Backup,
+    BackupId,
+    BackupStatistics,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 
@@ -38,3 +42,12 @@ class BackupRepository(abc.ABC):
     @abc.abstractmethod
     async def delete(self, backup_id: BackupId) -> None:
         """Delete the backup row (the archive bytes are removed separately)."""
+
+    @abc.abstractmethod
+    async def global_statistics(self) -> BackupStatistics:
+        """Aggregate backup usage across the whole platform (issue #281).
+
+        The platform-admin variant: count, summed *known* ``size_bytes``, the
+        count of NULL-size (legacy) rows, and the newest/oldest ``created_at``
+        across every server's backups. A single aggregate query, not a row scan.
+        """
