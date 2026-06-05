@@ -29,7 +29,13 @@ def test_execution_backend_values_match_database_check_enum() -> None:
 
 
 def test_server_type_values_match_database_check_enum() -> None:
-    assert {t.value for t in ServerType} == {"vanilla", "paper", "forge"}
+    assert {t.value for t in ServerType} == {
+        "vanilla",
+        "paper",
+        "fabric",
+        "forge",
+        "spigot",
+    }
 
 
 def test_desired_state_values_match_database_check_enum() -> None:

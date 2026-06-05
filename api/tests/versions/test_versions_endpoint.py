@@ -77,7 +77,7 @@ def test_lists_server_types() -> None:
     with client:
         resp = client.get("/versions")
     assert resp.status_code == 200
-    assert resp.json() == {"server_types": ["vanilla", "paper"]}
+    assert resp.json() == {"server_types": ["vanilla", "paper", "fabric"]}
 
 
 def test_lists_versions_for_type() -> None:

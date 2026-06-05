@@ -82,12 +82,18 @@ class ServerName:
 class ServerType(enum.Enum):
     """Supported Minecraft server distributions (DATABASE.md Section 7 CHECK enum).
 
-    The M1 set; new types extend both this enum and the schema CHECK together.
+    The persisted set; new types extend both this enum and the schema CHECK
+    together. Not every member is *resolvable* by the version catalog: ``forge``
+    (needs a worker-side installer step) and ``spigot`` (no official distribution
+    API, BuildTools-only) are accepted by the schema but rejected at create-time by
+    version-validation — spigot with a recommendation to use Paper, a Spigot fork.
     """
 
     VANILLA = "vanilla"
     PAPER = "paper"
+    FABRIC = "fabric"
     FORGE = "forge"
+    SPIGOT = "spigot"
 
 
 class ExecutionBackend(enum.Enum):

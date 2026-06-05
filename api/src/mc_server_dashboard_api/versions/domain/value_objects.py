@@ -8,9 +8,11 @@ JARs are shared across all Communities).
 ``ServerType`` is duplicated here rather than imported from the servers domain:
 the versions domain owns the *catalog* notion of a distribution and must not
 depend on another context (import-linter contract). The two enums share values
-on purpose (``vanilla`` / ``paper``), but ``forge`` is deliberately absent — it
-is listed nowhere and not resolvable at M1 (the issue's documented non-goal;
-create-validation rejects it explicitly).
+on purpose (``vanilla`` / ``paper`` / ``fabric``), but ``forge`` and ``spigot``
+are deliberately absent — they are listed nowhere and not resolvable (forge needs
+a worker-side installer step that does not fit the single-jar working set; spigot
+has no official distribution API, only BuildTools). Create-validation rejects
+both explicitly even though the DB CHECK enum permits the values.
 """
 
 from __future__ import annotations
@@ -20,17 +22,18 @@ from dataclasses import dataclass
 
 
 class ServerType(enum.Enum):
-    """Server distributions the catalog can list/resolve at M1.
+    """Server distributions the catalog can list/resolve.
 
-    Only ``vanilla`` and ``paper`` are resolvable at M1 (the catalog sources are
-    the Mojang version manifest and the PaperMC API). ``forge`` is intentionally
-    not a member: it is not listed and not resolvable, and server create-validation
-    rejects it with an "unsupported at M1" error even though the DB CHECK enum
-    still permits the value.
+    ``vanilla`` (Mojang version manifest), ``paper`` (PaperMC API), and ``fabric``
+    (meta.fabricmc.net) are resolvable. ``forge`` and ``spigot`` are intentionally
+    not members: neither is listed or resolvable here, and server create-validation
+    rejects them even though the DB CHECK enum still permits the values (forge needs
+    a worker-side installer step; spigot has no official distribution API).
     """
 
     VANILLA = "vanilla"
     PAPER = "paper"
+    FABRIC = "fabric"
 
 
 class HashAlgorithm(enum.Enum):
@@ -59,12 +62,15 @@ class JarSource:
 
     ``url`` is the external download URL; ``expected_hash`` is the lowercase-hex
     digest the source published, with ``hash_algorithm`` naming how to verify it.
-    The catalog always returns a hash for its M1 sources (both publish one), so the
-    download path can verify before storing content-addressed (FR-VER-2/3).
+    Vanilla (SHA-1) and Paper (SHA-256) both publish a hash, so the download path
+    verifies before storing content-addressed (FR-VER-2/3). Fabric does not: its
+    meta API generates the server launcher JAR on demand and publishes no digest
+    for it, so both fields are ``None`` and the download is stored unverified
+    (still content-addressed by its own SHA-256 in the pool).
     """
 
     server_type: ServerType
     version: str
     url: str
-    expected_hash: str
-    hash_algorithm: HashAlgorithm
+    expected_hash: str | None
+    hash_algorithm: HashAlgorithm | None

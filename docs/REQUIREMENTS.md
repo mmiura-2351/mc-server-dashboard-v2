@@ -109,8 +109,9 @@ M2 is organized as four pillars, each tracked by an epic:
   SQL. Identity stays global (FR-AUTH-5); every mutation is audited.
 - **Pillar B — server-operation use cases complete end-to-end** (epic #240):
   EULA acceptance flow, port management (free-port discovery and
-  auto-assignment), force stop on the HTTP API, the spigot / forge / fabric
-  server types, and sanitized start-failure categories.
+  auto-assignment), force stop on the HTTP API, additional server types (fabric
+  is added; spigot and forge are documented exclusions — see FR-VER-1), and
+  sanitized start-failure categories.
 - **Pillar C — data and content management** (epic #241): extended file
   operations, server ZIP import/export, backup upload/download (off-host), and
   OP / whitelist player groups synced to the server.
@@ -444,9 +445,23 @@ branch on server state. This policy is shared by 6.10 (File Management) and
 ### 6.12 Version Management
 
 - FR-VER-1: The system lists supported Minecraft versions and server types and
-  resolves the appropriate downloadable JAR.
+  resolves the appropriate downloadable JAR. The catalogued (resolvable) server
+  types are **vanilla** (Mojang version manifest), **paper** (PaperMC API), and
+  **fabric** (meta.fabricmc.net — the generated server launcher JAR). Two types in
+  the persisted CHECK enum are deliberately *not* catalogued and are rejected at
+  create-time:
+  - **spigot** — has no official distribution API (built locally by BuildTools and
+    not redistributable). Create returns a `422 spigot_unsupported` recommending
+    **paper**, a Spigot-compatible fork with an official download API.
+  - **forge** — a Forge server requires running an installer on the worker that
+    produces a libraries tree plus run scripts, which does not fit the single-JAR
+    working-set model; supporting it is a worker-protocol change tracked as a
+    separate follow-up. Create returns a `422 unsupported_server_type`.
 - FR-VER-2: JAR retrieval uses external APIs (official manifests, etc.) behind an
-  adapter with retry and cache fallback.
+  adapter with retry and cache fallback. Vanilla (SHA-1) and Paper (SHA-256)
+  publish a checksum that is verified on download; the Fabric meta API publishes no
+  digest for its generated launcher JAR, so that download is stored unverified but
+  still content-addressed by its own SHA-256.
 - FR-VER-3: Retrieved JARs are persisted through the Storage Port and reused
   across servers.
 

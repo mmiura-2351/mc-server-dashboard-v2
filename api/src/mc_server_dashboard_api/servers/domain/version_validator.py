@@ -20,7 +20,22 @@ from mc_server_dashboard_api.servers.domain.errors import ServerError
 
 
 class UnsupportedServerTypeError(ServerError):
-    """The server type is valid in the schema but not resolvable at M1 (forge)."""
+    """The server type is valid in the schema but not resolvable here (forge).
+
+    Forge needs a worker-side installer step (it produces libraries + run scripts
+    rather than a single launchable JAR), which does not fit the single-jar
+    working-set model, so it is not catalogued; create rejects it as unsupported.
+    """
+
+
+class SpigotUnsupportedError(ServerError):
+    """Spigot is valid in the schema but cannot be distributed (BuildTools-only).
+
+    Spigot has no official distribution API — it is built locally from source by
+    BuildTools and cannot be redistributed — so the catalog does not list/resolve
+    it. The error message recommends Paper (a Spigot-compatible fork with an
+    official download API) so the operator has a clear path forward.
+    """
 
 
 class UnknownVersionError(ServerError):
@@ -45,8 +60,9 @@ class VersionValidator(abc.ABC):
         """Pass if the catalog offers ``version`` for ``server_type``; else raise.
 
         Raises :class:`UnsupportedServerTypeError` for a type the catalog cannot
-        resolve at M1 (forge) and :class:`UnknownVersionError` for an unoffered
-        version. A transient source outage is *not* swallowed: the adapter surfaces
-        it as :class:`CatalogUnavailableError` so create fails loudly (503) rather
-        than admitting an unvalidated version.
+        resolve (forge), :class:`SpigotUnsupportedError` for spigot (no official
+        distribution API; recommends Paper), and :class:`UnknownVersionError` for an
+        unoffered version. A transient source outage is *not* swallowed: the adapter
+        surfaces it as :class:`CatalogUnavailableError` so create fails loudly (503)
+        rather than admitting an unvalidated version.
         """

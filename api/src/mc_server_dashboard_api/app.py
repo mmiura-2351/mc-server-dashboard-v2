@@ -111,6 +111,7 @@ from mc_server_dashboard_api.storage.adapters.object_client import (
 )
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.versions.adapters.composite import CompositeCatalog
+from mc_server_dashboard_api.versions.adapters.fabric import FabricCatalog
 from mc_server_dashboard_api.versions.adapters.http_fetcher import HttpxJsonFetcher
 from mc_server_dashboard_api.versions.adapters.http_jar_fetcher import HttpxJarFetcher
 from mc_server_dashboard_api.versions.adapters.paper import PaperCatalog
@@ -178,11 +179,11 @@ def _build_version_catalog() -> VersionCatalog:
     """Build the process-wide :class:`VersionCatalog` (ARCHITECTURE.md Section 7.3).
 
     One httpx fetcher wrapped in the retry + in-process TTL-cache fallback
-    (FR-VER-2), shared by the vanilla (Mojang) and Paper (PaperMC) catalogs so the
-    last-good manifest cache is process-wide. A jittered, asyncio-backed backoff
-    spaces retries; the cache TTL keeps the catalog serving through a transient
-    source outage. The cache lives for the process lifetime, so this is built once
-    and stored on app state.
+    (FR-VER-2), shared by the vanilla (Mojang), Paper (PaperMC), and Fabric
+    (meta.fabricmc.net) catalogs so the last-good manifest cache is process-wide. A
+    jittered, asyncio-backed backoff spaces retries; the cache TTL keeps the catalog
+    serving through a transient source outage. The cache lives for the process
+    lifetime, so this is built once and stored on app state.
     """
 
     fetcher = RetryCachingFetcher(
@@ -194,6 +195,7 @@ def _build_version_catalog() -> VersionCatalog:
         by_type={
             CatalogServerType.VANILLA: VanillaCatalog(fetcher=fetcher),
             CatalogServerType.PAPER: PaperCatalog(fetcher=fetcher),
+            CatalogServerType.FABRIC: FabricCatalog(fetcher=fetcher),
         }
     )
 
