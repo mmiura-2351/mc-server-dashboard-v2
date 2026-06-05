@@ -58,6 +58,7 @@ type fakeClock struct {
 	mu      sync.Mutex
 	now     time.Time
 	pending []chan time.Time
+	timers  []*fakeTimer
 }
 
 func newFakeClock() *fakeClock {
@@ -78,6 +79,17 @@ func (c *fakeClock) After(time.Duration) <-chan time.Time {
 	return ch
 }
 
+// NewTimer registers a persistent fakeTimer whose channel survives Reset, so
+// tests can model the heartbeat deadline as a single timer that is re-armed (not
+// recreated) on each beat.
+func (c *fakeClock) NewTimer(time.Duration) Timer {
+	t := &fakeTimer{ch: make(chan time.Time, 1), now: c.Now}
+	c.mu.Lock()
+	c.timers = append(c.timers, t)
+	c.mu.Unlock()
+	return t
+}
+
 // fireNext fires the oldest pending timer, returning false if none is pending.
 func (c *fakeClock) fireNext() bool {
 	c.mu.Lock()
@@ -90,6 +102,33 @@ func (c *fakeClock) fireNext() bool {
 	ch <- c.now
 	return true
 }
+
+// firstTimer returns the first registered persistent timer, or nil if the runner
+// has not armed one yet.
+func (c *fakeClock) firstTimer() *fakeTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.timers) == 0 {
+		return nil
+	}
+	return c.timers[0]
+}
+
+// fakeTimer is a persistent, resettable timer. Its channel is created once and
+// reused across Reset, mirroring a real time.Timer reset (the heartbeat seam).
+type fakeTimer struct {
+	ch  chan time.Time
+	now func() time.Time
+}
+
+func (t *fakeTimer) C() <-chan time.Time { return t.ch }
+
+func (t *fakeTimer) Reset(time.Duration) {}
+
+func (t *fakeTimer) Stop() {}
+
+// fire delivers one tick on the timer's channel, mimicking the deadline elapsing.
+func (t *fakeTimer) fire() { t.ch <- t.now() }
 
 // errStreamClosed simulates the server dropping the stream.
 var errStreamClosed = errors.New("fake: stream closed")

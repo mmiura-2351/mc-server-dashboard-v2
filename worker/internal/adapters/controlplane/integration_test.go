@@ -29,6 +29,14 @@ type realClock struct{}
 
 func (realClock) Now() time.Time                         { return time.Now() }
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+func (realClock) NewTimer(d time.Duration) session.Timer { return realTimer{time.NewTimer(d)} }
+
+// realTimer adapts *time.Timer to session.Timer for the integration test's clock.
+type realTimer struct{ t *time.Timer }
+
+func (t realTimer) C() <-chan time.Time   { return t.t.C }
+func (t realTimer) Reset(d time.Duration) { t.t.Reset(d) }
+func (t realTimer) Stop()                 { t.t.Stop() }
 
 // fakeServer is an in-process WorkerService implementing the API side of the
 // stream lifecycle (CONTROL_PLANE.md Section 4) just enough to exercise the
