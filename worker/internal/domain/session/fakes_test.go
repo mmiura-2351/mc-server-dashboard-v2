@@ -117,30 +117,18 @@ func (c *fakeClock) firstTimer() *fakeTimer {
 // fakeTimer is a persistent, resettable timer. Its channel is created once and
 // reused across Reset, mirroring a real time.Timer reset (the heartbeat seam).
 type fakeTimer struct {
-	mu     sync.Mutex
-	ch     chan time.Time
-	resets int
-	now    func() time.Time
+	ch  chan time.Time
+	now func() time.Time
 }
 
 func (t *fakeTimer) C() <-chan time.Time { return t.ch }
 
-func (t *fakeTimer) Reset(time.Duration) {
-	t.mu.Lock()
-	t.resets++
-	t.mu.Unlock()
-}
+func (t *fakeTimer) Reset(time.Duration) {}
 
 func (t *fakeTimer) Stop() {}
 
 // fire delivers one tick on the timer's channel, mimicking the deadline elapsing.
 func (t *fakeTimer) fire() { t.ch <- t.now() }
-
-func (t *fakeTimer) resetCount() int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.resets
-}
 
 // errStreamClosed simulates the server dropping the stream.
 var errStreamClosed = errors.New("fake: stream closed")
