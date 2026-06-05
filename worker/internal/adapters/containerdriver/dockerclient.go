@@ -203,7 +203,17 @@ func (c *EngineClient) Wait(ctx context.Context, id string) (int64, error) {
 // Remove force-deletes a container.
 func (c *EngineClient) Remove(ctx context.Context, id string) error {
 	q := url.Values{"force": {"true"}}
-	return c.do(ctx, http.MethodDelete, "/containers/"+id, q, nil, nil)
+	if err := c.do(ctx, http.MethodDelete, "/containers/"+id, q, nil, nil); err != nil {
+		var status statusError
+		if errors.As(err, &status) && status.code == http.StatusConflict {
+			// Surface a typed conflict so the wait-for-name-free loop treats an
+			// in-flight removal as progress and keeps polling (issue #233); keep the
+			// daemon message for diagnostics.
+			return fmt.Errorf("%w: %v", errRemovalInProgress, err)
+		}
+		return err
+	}
+	return nil
 }
 
 // List returns containers (including stopped) carrying labelKey=labelValue.

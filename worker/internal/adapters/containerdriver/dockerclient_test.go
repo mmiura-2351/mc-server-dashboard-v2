@@ -388,3 +388,35 @@ func TestEngineClientInspectNonNotFoundIsNotTyped(t *testing.T) {
 		t.Fatalf("Inspect err = %v, want a plain error (not errNotFound)", err)
 	}
 }
+
+// A 409 from Remove ("removal already in progress") is surfaced as
+// errRemovalInProgress so the wait-for-name-free loop treats the in-flight
+// removal as progress and keeps polling (issue #233).
+func TestEngineClientRemoveInProgressIsTyped(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"removal of container mcsd-s1 is already in progress"}`))
+	})
+	c := d.client(t)
+
+	if err := c.Remove(context.Background(), "mcsd-s1"); !errors.Is(err, errRemovalInProgress) {
+		t.Fatalf("Remove err = %v, want errRemovalInProgress", err)
+	}
+}
+
+// A non-409 Remove failure is not reported as removal-in-progress.
+func TestEngineClientRemoveNonConflictIsNotTyped(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"boom"}`))
+	})
+	c := d.client(t)
+
+	err := c.Remove(context.Background(), "mcsd-s1")
+	if err == nil {
+		t.Fatal("expected Remove to fail")
+	}
+	if errors.Is(err, errRemovalInProgress) {
+		t.Fatalf("Remove err = %v, want a plain error (not removal-in-progress)", err)
+	}
+}
