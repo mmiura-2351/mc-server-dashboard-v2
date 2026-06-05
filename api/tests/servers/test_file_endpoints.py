@@ -679,6 +679,94 @@ def test_upload_over_cap_body_is_413_before_use_case(
 # --- audit recording -------------------------------------------------------
 
 
+def test_write_success_records_file_write_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, write=_FakeUseCase(), recorder=recorder)
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "level.dat"},
+        json={"content_base64": ""},
+    )
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.FILE_WRITE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert recorder.events[0].target_type == ops.TARGET_FILE
+
+
+def test_write_unsettled_records_denied_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        write=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "f"},
+        json={"content_base64": ""},
+    )
+    assert resp.status_code == 409
+    assert [e.operation for e in recorder.events] == [ops.FILE_WRITE]
+    assert recorder.events[0].outcome is Outcome.DENIED
+
+
+def test_write_validation_failure_is_not_audited() -> None:
+    # 422 (invalid path) raises before the audit record, matching the existing
+    # posture: validation rejects are not audited.
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        write=_FakeUseCase(error=InvalidFilePathError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "../escape"},
+        json={"content_base64": ""},
+    )
+    assert resp.status_code == 422
+    assert recorder.events == []
+
+
+def test_rollback_success_records_file_rollback_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, rollback=_FakeUseCase(), recorder=recorder)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
+        params={"path": "f"},
+        json={"version_id": "v1"},
+    )
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.FILE_ROLLBACK]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert recorder.events[0].target_type == ops.TARGET_FILE
+
+
+def test_rollback_while_running_records_denied_audit() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        rollback=_FakeUseCase(error=ServerNotStoppedError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
+        params={"path": "f"},
+        json={"version_id": "v1"},
+    )
+    assert resp.status_code == 409
+    assert [e.operation for e in recorder.events] == [ops.FILE_ROLLBACK]
+    assert recorder.events[0].outcome is Outcome.DENIED
+
+
 def test_upload_success_records_file_upload_audit() -> None:
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, upload=_FakeUpload(), recorder=recorder)
