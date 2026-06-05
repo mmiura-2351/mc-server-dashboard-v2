@@ -50,6 +50,11 @@ class Server:
     assigned_worker_id: WorkerId | None
     created_at: dt.datetime
     updated_at: dt.datetime
+    # The tracked Minecraft game port (issue #243), assigned at create from the
+    # configured range and unique deployment-wide. ``None`` for legacy/imported
+    # rows that predate port tracking. Defaulted so existing constructions (tests,
+    # other use cases) need not pass it; the create flow sets it explicitly.
+    game_port: int | None = None
 
     def is_at_rest(self) -> bool:
         """Return whether the server is fully stopped for edits/deletion.

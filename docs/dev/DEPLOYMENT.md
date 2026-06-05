@@ -128,7 +128,20 @@ publishes its `server-port` (Minecraft default 25565) from the MC container to
 the host. Players connect to the host on the server's game port. Because these MC
 containers are created at runtime — not declared in `compose.yaml` — the host
 firewall must allow inbound traffic to whichever game ports your servers use.
-Assign distinct `server-port` values per server to avoid host-port collisions.
+
+**Distinct ports are now automatic at create.** The API tracks each server's game
+port (`server.game_port`, DATABASE.md Section 7) and, at create, assigns the
+lowest free in-range port (configurable via `ports.range_start`/`ports.range_end`,
+default `25565..25664`; CONFIGURATION.md Section 5.7), unique deployment-wide, and
+seeds `server-port=<port>` into the new server's `server.properties`. So
+operator-created servers no longer need manual `server-port` editing to avoid
+host-port collisions. An operator may still pass an explicit `game_port` at create
+(rejected 422 out of range, 409 taken); a delete frees the port for reuse.
+
+For an **imported or legacy server** whose row predates port tracking
+(`game_port` is `NULL`), nothing is auto-assigned — set its `server-port` manually
+in `server.properties` (via the files API) and keep distinct values per server, as
+before.
 
 The host interface the **game port** binds to is configurable via
 `driver.container.game_bind_ip` (env `MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP`).

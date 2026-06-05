@@ -26,6 +26,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
     InvalidSnapshotIntervalError,
+    PortAlreadyTakenError,
+    PortOutOfRangeError,
+    PortRangeExhaustedError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -33,7 +36,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
+    WorkingSetSeedFailedError,
 )
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -64,6 +69,7 @@ from tests.storage.helpers import drain, read_tar
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _LATER = dt.datetime(2026, 6, 4, 13, 0, tzinfo=dt.timezone.utc)
+_PORTS = PortRange(start=25565, end=25664)
 
 
 def _server(
@@ -103,6 +109,7 @@ async def test_create_defaults_to_stopped_and_commits() -> None:
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
+        port_range=_PORTS,
     )(
         community_id=community,
         name="survival",
@@ -130,6 +137,7 @@ async def test_create_accepts_java_edition() -> None:
         clock=FakeClock(_NOW),
         version_validator=validator,
         file_store=FakeFileStore(),
+        port_range=_PORTS,
     )(
         community_id=CommunityId(uuid.uuid4()),
         name="survival",
@@ -152,6 +160,7 @@ async def test_create_rejects_non_java_edition() -> None:
             clock=FakeClock(_NOW),
             version_validator=validator,
             file_store=FakeFileStore(),
+            port_range=_PORTS,
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -174,6 +183,7 @@ async def test_create_rejects_unknown_server_type() -> None:
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(),
             file_store=FakeFileStore(),
+            port_range=_PORTS,
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -194,6 +204,7 @@ async def test_create_rejects_unknown_execution_backend() -> None:
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(),
             file_store=FakeFileStore(),
+            port_range=_PORTS,
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -214,6 +225,7 @@ async def test_create_rejects_unsupported_type_forge() -> None:
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(unsupported={"forge"}),
             file_store=FakeFileStore(),
+            port_range=_PORTS,
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -234,6 +246,7 @@ async def test_create_rejects_unknown_version() -> None:
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(offered={"vanilla": {"1.21.1"}}),
             file_store=FakeFileStore(),
+            port_range=_PORTS,
         )(
             community_id=CommunityId(uuid.uuid4()),
             name="s",
@@ -246,9 +259,9 @@ async def test_create_rejects_unknown_version() -> None:
     assert uow.commits == 0
 
 
-async def test_create_with_accept_eula_seeds_eula_file() -> None:
-    # accept_eula=True records consent by seeding eula.txt into the server's
-    # initial working set, so the first start does not crash (issue #198).
+async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
+    # accept_eula=True composes eula.txt with the always-seeded server.properties
+    # (port assignment, #243): both land in the initial working set, in order.
     uow = FakeUnitOfWork()
     file_store = FakeFileStore()
     server = await CreateServer(
@@ -256,6 +269,7 @@ async def test_create_with_accept_eula_seeds_eula_file() -> None:
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=file_store,
+        port_range=_PORTS,
     )(
         community_id=CommunityId(uuid.uuid4()),
         name="survival",
@@ -266,15 +280,19 @@ async def test_create_with_accept_eula_seeds_eula_file() -> None:
         config={},
         accept_eula=True,
     )
-    assert file_store.writes == [("eula.txt", b"eula=true\n")]
+    assert file_store.writes == [
+        ("server.properties", b"server-port=25565\n"),
+        ("eula.txt", b"eula=true\n"),
+    ]
     assert file_store.files["eula.txt"] == b"eula=true\n"
+    assert file_store.files["server.properties"] == b"server-port=25565\n"
     assert uow.commits == 1
     assert uow.servers.by_id[server.id] is server
 
 
-async def test_create_without_accept_eula_seeds_nothing() -> None:
-    # Default (accept_eula omitted): no seeding — today's create behavior, where
-    # the first start crashes and is repairable (issue #198).
+async def test_create_without_accept_eula_still_seeds_properties() -> None:
+    # Default (accept_eula omitted): server.properties is still seeded with the
+    # assigned game port (#243), but no eula.txt (issue #198 unchanged).
     uow = FakeUnitOfWork()
     file_store = FakeFileStore()
     await CreateServer(
@@ -282,6 +300,7 @@ async def test_create_without_accept_eula_seeds_nothing() -> None:
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=file_store,
+        port_range=_PORTS,
     )(
         community_id=CommunityId(uuid.uuid4()),
         name="survival",
@@ -291,8 +310,162 @@ async def test_create_without_accept_eula_seeds_nothing() -> None:
         execution_backend="host_process",
         config={},
     )
-    assert file_store.writes == []
+    assert file_store.writes == [("server.properties", b"server-port=25565\n")]
     assert "eula.txt" not in file_store.files
+
+
+# --- create: game port assignment (#243) -----------------------------------
+
+
+async def test_create_auto_assigns_lowest_free_port() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    # Seed two servers holding the two lowest ports; the next create gets 25567.
+    taken_a = _server(community_id=community, name="a")
+    taken_a.game_port = 25565
+    taken_b = _server(community_id=community, name="b")
+    taken_b.game_port = 25566
+    uow.servers.seed(taken_a)
+    uow.servers.seed(taken_b)
+    file_store = FakeFileStore()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+    )(
+        community_id=community,
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+    assert server.game_port == 25567
+    assert uow.servers.by_id[server.id].game_port == 25567
+    assert file_store.writes == [("server.properties", b"server-port=25567\n")]
+
+
+async def test_create_honors_explicit_free_port() -> None:
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+        game_port=25600,
+    )
+    assert server.game_port == 25600
+
+
+async def test_create_rejects_explicit_taken_port() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    taken = _server(community_id=community, name="a")
+    taken.game_port = 25600
+    uow.servers.seed(taken)
+    with pytest.raises(PortAlreadyTakenError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=_PORTS,
+        )(
+            community_id=community,
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={},
+            game_port=25600,
+        )
+    assert uow.commits == 0
+
+
+async def test_create_rejects_explicit_out_of_range_port() -> None:
+    uow = FakeUnitOfWork()
+    with pytest.raises(PortOutOfRangeError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=_PORTS,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={},
+            game_port=80,
+        )
+    assert uow.commits == 0
+
+
+async def test_create_raises_when_range_exhausted() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    # A one-port range that is already taken leaves nothing to auto-assign.
+    taken = _server(community_id=community, name="a")
+    taken.game_port = 25565
+    uow.servers.seed(taken)
+    with pytest.raises(PortRangeExhaustedError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=PortRange(start=25565, end=25565),
+        )(
+            community_id=community,
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={},
+        )
+    assert uow.commits == 0
+
+
+async def test_create_seed_failure_surfaces_after_commit() -> None:
+    # A storage failure during seeding leaves the committed row in place and raises
+    # the mapped seed-failure error (issue #243 design comment).
+    uow = FakeUnitOfWork()
+    with pytest.raises(WorkingSetSeedFailedError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(fail_write=True),
+            port_range=_PORTS,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={},
+        )
+    # The row committed before seeding; it is left in place (repairable).
+    assert uow.commits == 1
+    assert len(uow.servers.by_id) == 1
 
 
 # --- read / list -----------------------------------------------------------
@@ -684,6 +857,7 @@ async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=file_store,
+        port_range=_PORTS,
     )(
         community_id=community,
         name="survival",
@@ -706,14 +880,18 @@ async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
             StorageServerId(server.id.value),
         )
     )
-    assert read_tar(blob) == {"eula.txt": b"eula=true\n"}
+    # Both seeds compose into the first published working set (#243 + #198).
+    assert read_tar(blob) == {
+        "server.properties": b"server-port=25565\n",
+        "eula.txt": b"eula=true\n",
+    }
 
 
-async def test_create_without_accept_eula_has_no_eula_at_rest(
+async def test_create_without_accept_eula_seeds_properties_at_rest(
     tmp_path: Path,
 ) -> None:
-    # Without the flag, nothing is seeded: reading eula.txt 404s (the working set
-    # is never published), matching today's repairable first-start crash (#198).
+    # Without accept_eula, server.properties is still seeded (port assignment,
+    # #243): it is readable at rest and in the hydrate stream, but eula.txt is not.
     storage = FsStorage(tmp_path)
     file_store = StorageFileStoreAdapter(storage=storage)
     community = CommunityId(uuid.uuid4())
@@ -722,6 +900,7 @@ async def test_create_without_accept_eula_has_no_eula_at_rest(
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=file_store,
+        port_range=_PORTS,
     )(
         community_id=community,
         name="survival",
@@ -732,6 +911,10 @@ async def test_create_without_accept_eula_has_no_eula_at_rest(
         config={},
     )
 
+    at_rest = await file_store.read_file(
+        community_id=community, server_id=server.id, rel_path="server.properties"
+    )
+    assert at_rest == b"server-port=25565\n"
     with pytest.raises(ServerFileNotFoundError):
         await file_store.read_file(
             community_id=community, server_id=server.id, rel_path="eula.txt"

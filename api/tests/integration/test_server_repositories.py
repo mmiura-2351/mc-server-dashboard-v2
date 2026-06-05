@@ -52,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
 )
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import (
@@ -117,6 +118,7 @@ async def test_create_then_read_back(engine: AsyncEngine) -> None:
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
     )
     created = await create(
         community_id=CommunityId(community_id),
@@ -148,6 +150,7 @@ async def test_duplicate_name_in_community_conflicts(engine: AsyncEngine) -> Non
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
     )
     await create(
         community_id=CommunityId(community_id),
@@ -182,6 +185,7 @@ async def test_delete_sweeps_resource_grants(engine: AsyncEngine) -> None:
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
     )
     server = await create(
         community_id=CommunityId(community_id),
@@ -237,6 +241,7 @@ async def test_server_id_isolation_across_communities(engine: AsyncEngine) -> No
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
     )
     server = await create(
         community_id=CommunityId(community_a),

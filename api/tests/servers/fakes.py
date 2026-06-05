@@ -113,9 +113,12 @@ class FakeFileStore(FileStore):
     serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, fail_write: bool = False) -> None:
         self.files: dict[str, bytes] = {}
         self.writes: list[tuple[str, bytes]] = []
+        # When set, write_file raises to exercise the create seed-failure path
+        # (issue #243): the committed row stays, surfaced as a mapped 503.
+        self._fail_write = fail_write
 
     def validate_rel_path(self, rel_path: str) -> None:
         return None
@@ -140,6 +143,8 @@ class FakeFileStore(FileStore):
         rel_path: str,
         content: bytes,
     ) -> None:
+        if self._fail_write:
+            raise RuntimeError("forced storage write failure")
         self.files[rel_path] = content
         self.writes.append((rel_path, content))
 
@@ -198,6 +203,9 @@ class FakeServerRepository(ServerRepository):
 
     async def list_for_community(self, community_id: CommunityId) -> list[Server]:
         return [s for s in self.by_id.values() if s.community_id == community_id]
+
+    async def list_game_ports(self) -> set[int]:
+        return {s.game_port for s in self.by_id.values() if s.game_port is not None}
 
     async def update(self, server: Server) -> None:
         self.by_id[server.id] = server

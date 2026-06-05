@@ -328,14 +328,16 @@ assigned Worker.
 | `server_type` | text | `vanilla` / `paper` / `forge` / … (CHECK enum) |
 | `execution_backend` | text | `host_process` / `container` (CHECK enum) |
 | `config` | jsonb | server configuration blob (properties, JVM args, snapshot-interval override per FR-DATA-7) |
+| `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.7) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
 | `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK at M1** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; cleared by the API on Worker disconnect (FR-WRK-4) |
 | `created_at` / `updated_at` | timestamptz | |
 
-Constraints: `UNIQUE(community_id, name)`. Index on `(assigned_worker_id)` for
-"all servers on Worker X" (used on Worker disconnect, FR-WRK-4).
+Constraints: `UNIQUE(community_id, name)`, `UNIQUE(game_port)` (deployment-wide,
+`NULL`s allowed and non-colliding; issue #243). Index on `(assigned_worker_id)`
+for "all servers on Worker X" (used on Worker disconnect, FR-WRK-4).
 
 **Desired / observed split (FR-SRV-3, FR-SRV-4).** The two state columns are the
 heart of the model. `desired_state` is the **source of truth for intent**, mutated

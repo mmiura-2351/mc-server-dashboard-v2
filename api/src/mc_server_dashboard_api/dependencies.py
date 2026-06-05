@@ -181,6 +181,10 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.application.port_availability import (
+    CheckPort,
+    ListAvailablePorts,
+)
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
 )
@@ -193,6 +197,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.file_store import (
     FileStore as ServersFileStore,
 )
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.versions.adapters.http_jar_fetcher import HttpxJarFetcher
 from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
@@ -790,17 +795,20 @@ def get_create_server(
     """Assemble the :class:`CreateServer` use case (server:create).
 
     Binds the version-validation seam to the global catalog so create rejects an
-    unsupported type / unoffered version before staging the row (FR-VER-1), and the
-    file seam to Storage so create can seed the initial working set (eula.txt on
-    accept_eula, issue #198).
+    unsupported type / unoffered version before staging the row (FR-VER-1), the
+    file seam to Storage so create can seed the initial working set (server.properties
+    + eula.txt, issues #243/#198), and the configured port range for game-port
+    auto-assignment (issue #243).
     """
 
     session_factory = create_session_factory(get_engine(request))
+    ports = get_settings(request).ports
     return CreateServer(
         uow=ServersUnitOfWork(session_factory),
         clock=ServersSystemClock(),
         version_validator=CatalogVersionValidator(catalog=catalog),
         file_store=file_store,
+        port_range=PortRange(start=ports.range_start, end=ports.range_end),
     )
 
 
@@ -836,6 +844,29 @@ def get_delete_server(request: Request) -> DeleteServer:
 
     session_factory = create_session_factory(get_engine(request))
     return DeleteServer(uow=ServersUnitOfWork(session_factory))
+
+
+def _port_range(request: Request) -> PortRange:
+    ports = get_settings(request).ports
+    return PortRange(start=ports.range_start, end=ports.range_end)
+
+
+def get_check_port(request: Request) -> CheckPort:
+    """Assemble the :class:`CheckPort` read use case (issue #243)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return CheckPort(
+        uow=ServersUnitOfWork(session_factory), port_range=_port_range(request)
+    )
+
+
+def get_list_available_ports(request: Request) -> ListAvailablePorts:
+    """Assemble the :class:`ListAvailablePorts` read use case (issue #243)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListAvailablePorts(
+        uow=ServersUnitOfWork(session_factory), port_range=_port_range(request)
+    )
 
 
 def get_fleet_control_plane(request: Request) -> FleetControlPlane:

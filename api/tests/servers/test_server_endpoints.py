@@ -56,11 +56,15 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
     InvalidSnapshotIntervalError,
+    PortAlreadyTakenError,
+    PortOutOfRangeError,
+    PortRangeExhaustedError,
     ServerNotFoundError,
     ServerNotStoppedError,
     UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
@@ -331,6 +335,98 @@ def test_create_catalog_unavailable_is_503() -> None:
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 503
     assert resp.json()["detail"]["reason"] == "catalog_unavailable"
+
+
+def test_create_defaults_game_port_to_none() -> None:
+    # Omitting game_port forwards None so the use case auto-assigns (issue #243).
+    community = uuid.uuid4()
+    use_case = _FakeUseCase(result=_server_entity(community_id=community))
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(f"/communities/{community}/servers", json=_create_body())
+    assert resp.status_code == 201
+    assert use_case.calls[0]["game_port"] is None
+
+
+def test_create_forwards_explicit_game_port() -> None:
+    community = uuid.uuid4()
+    use_case = _FakeUseCase(result=_server_entity(community_id=community))
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/communities/{community}/servers",
+        json={**_create_body(), "game_port": 25570},
+    )
+    assert resp.status_code == 201
+    assert use_case.calls[0]["game_port"] == 25570
+
+
+def test_create_port_out_of_range_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=PortOutOfRangeError("80")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        f"/communities/{uuid.uuid4()}/servers",
+        json={**_create_body(), "game_port": 25570},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "port_out_of_range"
+
+
+def test_create_port_taken_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=PortAlreadyTakenError("25565")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        f"/communities/{uuid.uuid4()}/servers",
+        json={**_create_body(), "game_port": 25565},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "port_taken"
+
+
+def test_create_port_range_exhausted_is_503() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=PortRangeExhaustedError("25565-25664")),
+    )
+    client = next(_client(app))
+    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["reason"] == "port_range_exhausted"
+
+
+def test_create_seed_failed_is_503() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=WorkingSetSeedFailedError("server-id")),
+    )
+    client = next(_client(app))
+    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["reason"] == "seed_failed"
+
+
+def test_create_game_port_out_of_schema_bound_is_422() -> None:
+    # A wildly invalid value (above 65535) fails schema validation before the use
+    # case runs (issue #243).
+    use_case = _FakeUseCase(result=None)
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/communities/{uuid.uuid4()}/servers",
+        json={**_create_body(), "game_port": 70000},
+    )
+    assert resp.status_code == 422
+    assert use_case.calls == []
 
 
 def test_update_backend_immutable_is_409() -> None:

@@ -58,6 +58,43 @@ class ExecutionBackendImmutableError(ServerError):
     """
 
 
+class PortOutOfRangeError(ServerError):
+    """An explicit ``game_port`` at create fell outside the configured range (#243).
+
+    The configurable assignable range is ``ports.range_start..range_end``
+    (CONFIGURATION.md Section 5.6); a port below or above it is rejected before the
+    row is staged. The edge maps this to 422.
+    """
+
+
+class PortAlreadyTakenError(ServerError):
+    """An explicit ``game_port`` at create is already held by another server (#243).
+
+    Game ports are unique deployment-wide; a requested port already assigned is a
+    conflict, distinct from an out-of-range value. The edge maps this to 409.
+    """
+
+
+class PortRangeExhaustedError(ServerError):
+    """Auto-assignment found no free port in the configured range (issue #243).
+
+    Every port in ``ports.range_start..range_end`` is already taken, so create
+    cannot assign one. A transient capacity condition (freeing/deleting a server
+    releases a port), so the edge maps this to 503.
+    """
+
+
+class WorkingSetSeedFailedError(ServerError):
+    """The create-time working-set seeding step hit a storage failure (issue #243).
+
+    The server row has already committed; only the seed write (eula.txt /
+    server.properties) failed. The row is left in place -- a degraded but
+    repairable state, since the operator can write the missing files via the files
+    API -- and the failure is surfaced as a mapped 503 ``seed_failed`` rather than
+    an unmapped 500. The edge logs a WARN at the create route.
+    """
+
+
 class InvalidSnapshotIntervalError(ServerError):
     """A per-server snapshot-interval override was invalid (FR-DATA-7).
 

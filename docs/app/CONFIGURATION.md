@@ -243,7 +243,21 @@ channel there is nothing to re-dispatch.
 | `reconciler.backoff_base_seconds` | `30` | | Base of the per-server exponential backoff after a failed re-dispatch; the wait doubles per consecutive failure. Must be positive. |
 | `reconciler.backoff_max_seconds` | `3600` | | Cap on the per-server backoff wait. Must be positive and `>=` `backoff_base_seconds`. |
 
-### 5.7 Observability
+### 5.7 Game ports
+
+The API tracks each server's Minecraft game port (DATABASE.md Section 7,
+`server.game_port`) and assigns one at create from this range — the lowest free
+in-range port, unique deployment-wide — so two servers never collide on a port
+(issue #243). An operator may instead supply an explicit `game_port` in the
+create request; it is rejected with 422 when out of range and 409 when already
+taken. A delete frees the server's port for reuse.
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `ports.range_start` | `25565` | | Lowest assignable game port (inclusive). Must be `1..65535`. |
+| `ports.range_end` | `25664` | | Highest assignable game port (inclusive). Must be `1..65535` and `>=` `range_start`. |
+
+### 5.8 Observability
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
