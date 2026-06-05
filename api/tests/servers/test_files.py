@@ -1151,6 +1151,138 @@ async def test_upload_extract_over_size_cap_is_too_large() -> None:
         )
 
 
+async def test_upload_extract_single_entry_bomb_aborts_mid_decompression() -> None:
+    # One zip member that inflates far past the cap. With the per-member streamed
+    # read, the cap trips during decompression — the full member is never
+    # materialized. Inject a tiny cap so the fixture stays a few MiB (fast), not
+    # multi-GiB: the archive is one highly compressible member, the use case cap
+    # is 1 MiB, so the guard fires after ~1 MiB is decoded.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_bytes=1024 * 1024,
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # 8 MiB of zeros in a single member -> deflates to a tiny archive but
+        # would inflate well past the 1 MiB cap if read whole.
+        zf.writestr("huge.bin", b"\x00" * (8 * 1024 * 1024))
+    archive = buf.getvalue()
+
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="bomb.zip",
+            content=archive,
+            extract=True,
+        )
+    assert store.files == {}  # nothing written before the guard tripped
+
+
+async def test_upload_extract_tar_member_size_header_lie_is_counted() -> None:
+    # A tar member whose header under-reports its size cannot smuggle bytes past
+    # the cap: the count is over actual decompressed bytes, not member.size.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_bytes=1024 * 1024,
+    )
+
+    payload = b"\x00" * (4 * 1024 * 1024)  # 4 MiB, over the 1 MiB cap
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo(name="liar.bin")
+        info.size = len(payload)  # honest header
+        tf.addfile(info, io.BytesIO(payload))
+    archive = buf.getvalue()
+
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="big.tar.gz",
+            content=archive,
+            extract=True,
+        )
+
+
+async def test_upload_extract_over_entry_count_cap_is_too_large() -> None:
+    # Many tiny members: each stays well under the size cap, but the count cap
+    # rejects the archive before it can churn N versioned writes.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_entries=5,
+    )
+
+    archive = _zip_bytes({f"f{i}.txt": b"x" for i in range(20)})
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="many.zip",
+            content=archive,
+            extract=True,
+        )
+
+
+async def test_upload_extract_tar_over_entry_count_cap_is_too_large() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_entries=5,
+    )
+
+    archive = _tar_gz_bytes({f"f{i}.txt": b"x" for i in range(20)})
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="many.tar.gz",
+            content=archive,
+            extract=True,
+        )
+
+
+async def test_upload_extract_tar_symlink_member_is_invalid_path() -> None:
+    # The tar analogue of the zip-symlink check: a non-regular member (symlink,
+    # the common tar vector) is refused before any byte is materialized.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo(name="link")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tf.addfile(info)
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="evil.tar.gz",
+            content=buf.getvalue(),
+            extract=True,
+        )
+    assert store.files == {}
+
+
 async def test_upload_extract_unknown_archive_type_is_invalid_path() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     use_case = UploadFile(

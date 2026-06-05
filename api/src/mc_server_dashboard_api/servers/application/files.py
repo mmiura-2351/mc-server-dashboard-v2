@@ -38,6 +38,7 @@ import tarfile
 import zipfile
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from typing import IO
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
@@ -80,6 +81,26 @@ MAX_EDIT_BYTES = 4 * 1024 * 1024
 # off pathological memory use. A constant is intentional (no config knob
 # requested); document if it ever needs tuning.
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+
+# The archive-entry-count cap. The cumulative-size cap alone does not bound a
+# member-count bomb: a tiny archive of hundreds of thousands of 1-byte members
+# stays under MAX_UPLOAD_BYTES yet each member is a separate versioned write
+# (an atomic temp+fsync+rename plus a retained version), so an unbounded member
+# count is a DoS amplification independent of total size. 10_000 entries
+# comfortably covers a real mod/datapack/world archive while refusing a
+# pathological count. Exceeding it is reported as :class:`FileTooLargeError`
+# (413) — the same response the size cap uses, since both are "this archive is
+# too costly to extract" rejections and a single response keeps the edge mapping
+# simple. A constant is intentional (no config knob requested); document if it
+# ever needs tuning.
+MAX_ARCHIVE_ENTRIES = 10_000
+
+# How much to pull per chunk when streaming an archive member's decompressed
+# bytes. The cumulative cap is enforced *during* decompression (every chunk is
+# counted before the next is pulled), so a single high-ratio member cannot be
+# fully materialized in memory before the guard trips (the single-entry
+# decompression-bomb defence).
+_DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 
 
 async def _load(
@@ -317,7 +338,9 @@ def _join(dir_path: str, name: str) -> str:
     return f"{base}/{name}" if base else name
 
 
-def _archive_entries(filename: str, content: bytes) -> Iterator[tuple[str, bytes]]:
+def _archive_entries(
+    filename: str, content: bytes, *, max_bytes: int, max_entries: int
+) -> Iterator[tuple[str, bytes]]:
     """Yield ``(entry_path, bytes)`` for a zip / tar.gz upload, validated per entry.
 
     Per-entry defences (FR-FILE-4, the zip-slip class): every member path must be
@@ -327,15 +350,20 @@ def _archive_entries(filename: str, content: bytes) -> Iterator[tuple[str, bytes
     Directory members carry no bytes and are skipped (their files re-create them).
     Raises :class:`InvalidFilePathError` for an unsafe or special member.
 
-    The cumulative extracted size is capped at :data:`MAX_UPLOAD_BYTES` so a
-    decompression bomb cannot blow past the upload budget; raises
-    :class:`FileTooLargeError` when the running total would exceed it.
+    The cumulative extracted size is capped at ``max_bytes`` and the member count
+    at ``max_entries`` (both decompression-bomb guards); raises
+    :class:`FileTooLargeError` when either running total would exceed its cap. The
+    size cap is enforced *during* decompression on both paths (a member is read in
+    chunks, counted as it inflates), so a single high-ratio member cannot be
+    materialized in memory before the guard trips.
     """
 
     if filename.endswith(".zip"):
-        yield from _zip_entries(content)
+        yield from _zip_entries(content, max_bytes=max_bytes, max_entries=max_entries)
     elif filename.endswith((".tar.gz", ".tgz")):
-        yield from _tar_gz_entries(content)
+        yield from _tar_gz_entries(
+            content, max_bytes=max_bytes, max_entries=max_entries
+        )
     else:
         raise InvalidFilePathError(filename)
 
@@ -346,12 +374,39 @@ def _check_entry_path(name: str) -> None:
         raise InvalidFilePathError(name)
 
 
-def _zip_entries(content: bytes) -> Iterator[tuple[str, bytes]]:
+def _read_capped(reader: IO[bytes], total: int, max_bytes: int) -> bytes:
+    """Drain a member stream in chunks, raising once the cumulative cap is crossed.
+
+    ``total`` is the bytes already accounted for across prior members; the running
+    sum is checked after every chunk, so a single member that inflates past the
+    budget aborts mid-decompression rather than being fully materialized first
+    (the single-entry decompression-bomb defence). The compressed member header
+    can lie about its size, so the count is over *actual* decompressed bytes.
+    """
+
+    out = bytearray()
+    while True:
+        chunk = reader.read(_DECOMPRESS_CHUNK_BYTES)
+        if not chunk:
+            return bytes(out)
+        total += len(chunk)
+        if total > max_bytes:
+            raise FileTooLargeError(str(total))
+        out += chunk
+
+
+def _zip_entries(
+    content: bytes, *, max_bytes: int, max_entries: int
+) -> Iterator[tuple[str, bytes]]:
     total = 0
+    count = 0
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         for info in zf.infolist():
             if info.is_dir():
                 continue
+            count += 1
+            if count > max_entries:
+                raise FileTooLargeError(str(count))
             _check_entry_path(info.filename)
             # A zip can encode a symlink in the external-attrs unix mode; refuse
             # any member whose type bits are set to a non-regular type (a symlink,
@@ -360,15 +415,21 @@ def _zip_entries(content: bytes) -> Iterator[tuple[str, bytes]]:
             file_type = (info.external_attr >> 16) & 0o170000
             if file_type not in (0, 0o100000):
                 raise InvalidFilePathError(info.filename)
-            data = zf.read(info)
+            # Stream the member instead of zf.read(info): zf.read decompresses the
+            # whole member into memory before any size check, so one high-ratio
+            # entry could OOM the process before the cap trips. Counting actual
+            # decompressed bytes as they arrive bounds a single-entry bomb too.
+            with zf.open(info) as reader:
+                data = _read_capped(reader, total, max_bytes)
             total += len(data)
-            if total > MAX_UPLOAD_BYTES:
-                raise FileTooLargeError(str(total))
             yield info.filename, data
 
 
-def _tar_gz_entries(content: bytes) -> Iterator[tuple[str, bytes]]:
+def _tar_gz_entries(
+    content: bytes, *, max_bytes: int, max_entries: int
+) -> Iterator[tuple[str, bytes]]:
     total = 0
+    count = 0
     with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tf:
         for member in tf:
             if member.isdir():
@@ -378,11 +439,15 @@ def _tar_gz_entries(content: bytes) -> Iterator[tuple[str, bytes]]:
             if not member.isreg():
                 raise InvalidFilePathError(member.name)
             _check_entry_path(member.name)
-            total += member.size
-            if total > MAX_UPLOAD_BYTES:
-                raise FileTooLargeError(str(total))
+            count += 1
+            if count > max_entries:
+                raise FileTooLargeError(str(count))
             handle = tf.extractfile(member)
-            data = b"" if handle is None else handle.read()
+            # member.size is a header field a hostile archive can under-report, so
+            # count actual decompressed bytes during the read rather than trusting
+            # it; the chunked drain enforces the cap mid-member.
+            data = b"" if handle is None else _read_capped(handle, total, max_bytes)
+            total += len(data)
             yield member.name, data
 
 
@@ -406,6 +471,12 @@ class UploadFile:
 
     uow: UnitOfWork
     file_store: FileStore
+    # The size / entry-count caps are fields (not bare constants) so a test can
+    # inject tiny caps and trip the decompression-bomb guards with a small
+    # archive, rather than building a multi-GiB fixture. Production wiring uses
+    # the defaults.
+    max_bytes: int = MAX_UPLOAD_BYTES
+    max_entries: int = MAX_ARCHIVE_ENTRIES
 
     async def __call__(
         self,
@@ -417,7 +488,7 @@ class UploadFile:
         content: bytes,
         extract: bool,
     ) -> None:
-        if len(content) > MAX_UPLOAD_BYTES:
+        if len(content) > self.max_bytes:
             raise FileTooLargeError(str(len(content)))
         self.file_store.validate_rel_path(dir_path)
         _check_entry_path(filename)
@@ -428,7 +499,17 @@ class UploadFile:
             raise ServerFilesUnsettledError(str(server_id.value))
 
         if extract:
-            for entry_path, data in _archive_entries(filename, content):
+            # Duplicate entry names (two members with the same path) are written
+            # in archive order, so the last occurrence wins — the same last-write
+            # semantics a sequence of plain writes would have. Left as-is (no
+            # de-dup / reject) for M2; an archive with colliding names is
+            # malformed and the resulting authoritative copy is well-defined.
+            for entry_path, data in _archive_entries(
+                filename,
+                content,
+                max_bytes=self.max_bytes,
+                max_entries=self.max_entries,
+            ):
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,
@@ -460,6 +541,11 @@ class DownloadFile:
     async def file_bytes(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> bytes:
+        # A single-file download reads the whole file into memory for M2: the
+        # FileStore read seam returns whole bytes and there is no per-file size
+        # cap on download (a file already on disk may exceed the upload cap, e.g.
+        # a large world region). Streaming / capping the single-file branch is
+        # tracked in issue #265; the directory-zip branch is already bounded.
         await self._require_at_rest(community_id, server_id)
         return await self.file_store.read_file(
             community_id=community_id, server_id=server_id, rel_path=rel_path

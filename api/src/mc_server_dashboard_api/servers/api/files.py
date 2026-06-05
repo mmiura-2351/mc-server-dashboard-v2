@@ -25,6 +25,7 @@ import binascii
 import posixpath
 import uuid
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -54,6 +55,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
 )
 from mc_server_dashboard_api.servers.application.files import (
+    MAX_UPLOAD_BYTES,
     DownloadFile,
     ListDir,
     ListFileVersions,
@@ -82,6 +84,10 @@ from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, Se
 router = APIRouter()
 
 _SERVER_RESOURCE_TYPE = "server"
+
+# How much of the multipart body to pull per chunk while counting it against the
+# upload cap (the bounded-read loop in ``_read_capped_upload``).
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 class FileContentResponse(BaseModel):
@@ -351,7 +357,7 @@ async def upload_file(
     """
 
     filename = file.filename or ""
-    content = await file.read()
+    content = await _read_capped_upload(file)
     try:
         await use_case(
             community_id=CommunityId(community_id),
@@ -416,7 +422,7 @@ async def download_file(
             response: Response = StreamingResponse(
                 stream,
                 media_type="application/zip",
-                headers={"Content-Disposition": f'attachment; filename="{name}.zip"'},
+                headers={"Content-Disposition": _content_disposition(f"{name}.zip")},
             )
         else:
             content = await use_case.file_bytes(
@@ -428,7 +434,7 @@ async def download_file(
             response = Response(
                 content=content,
                 media_type="application/octet-stream",
-                headers={"Content-Disposition": f'attachment; filename="{name}"'},
+                headers={"Content-Disposition": _content_disposition(name)},
             )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
@@ -443,6 +449,50 @@ async def download_file(
         raise _conflict("server_unsettled") from exc
     await _record_file(recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id)
     return response
+
+
+async def _read_capped_upload(file: UploadFile) -> bytes:
+    """Pull the multipart body in chunks, aborting with 413 past the upload cap.
+
+    Starlette spools the multipart part to a temp file as it parses the request,
+    but ``file.read()`` with no argument then pulls the whole part into memory at
+    once. Reading in bounded chunks and checking the running count after each lets
+    an over-cap upload be refused as soon as the count crosses MAX_UPLOAD_BYTES,
+    rather than materializing a body far larger than the cap first (mirroring the
+    streamed byte-counting in ``dataplane/api/transfers.py``). The use case
+    re-checks the cap, so this is the edge's early-out, not the only guard.
+    """
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise _too_large()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _content_disposition(filename: str) -> str:
+    """Build an attachment Content-Disposition header (RFC 6266 / RFC 5987).
+
+    A filename can contain ``"`` (which would break out of the quoted-string and
+    let a crafted name inject extra header parameters) or non-latin-1 characters
+    (which raise ``UnicodeEncodeError`` when Starlette latin-1-encodes the header,
+    500-ing a legitimate Unicode upload). So emit two parameters: an ASCII-only
+    ``filename`` fallback (non-ASCII/quote/backslash/control chars replaced) for
+    legacy clients, plus an RFC 5987 ``filename*`` carrying the UTF-8 percent-
+    encoded original for modern clients, which prefer it.
+    """
+
+    ascii_fallback = "".join(
+        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_" for c in filename
+    )
+    encoded = quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 async def _record_file(
