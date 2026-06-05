@@ -3,7 +3,7 @@
 The deployment-wide game port a server listens on is tracked on the ``server``
 row (``game_port``, DATABASE.md Section 7) and assigned at create from a
 configured inclusive range (``ports.range_start..range_end``,
-CONFIGURATION.md Section 5.6). This module is the standard-library-only policy the
+CONFIGURATION.md Section 5.7). This module is the standard-library-only policy the
 create flow and the availability endpoints share: pick the lowest free port,
 validate an explicit request, and list the next free ports. It owns no I/O -- the
 caller passes the already-taken set (read from the repository) and the range.
