@@ -77,5 +77,5 @@ jobs:
       - name: Lint (golangci-lint)
         run: ./.bin/golangci-lint run
 
-      - name: Test
-        run: go test ./...
+      - name: Test (race detector)
+        run: go test -race ./...
