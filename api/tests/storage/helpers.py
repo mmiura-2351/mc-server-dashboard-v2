@@ -110,6 +110,23 @@ def malicious_tar_with_symlink_escape() -> bytes:
     return buf.getvalue()
 
 
+def bomb_targz(*, decompressed: int = 4096) -> bytes:
+    """A self-contained ``tar.gz`` whose single member inflates to ``decompressed``.
+
+    The compressed bytes are tiny (highly compressible zero fill); the decompressed
+    member is ``decompressed`` bytes, modeling a gzip bomb so a restore-cap test can
+    trip the decompressed-bytes bound with a small fixture (#287).
+    """
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        data = b"\x00" * decompressed
+        info = tarfile.TarInfo(name="world/region.mca")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
 def snapshot_dir(root: Path, community: CommunityId, server: ServerId) -> Path:
     """The directory ``current`` resolves to (the live snapshot), for assertions."""
 

@@ -31,6 +31,17 @@ class NotFoundError(StorageError):
     """
 
 
+class ArchiveTooLargeError(StorageError):
+    """A backup archive's members inflate past the restore decompressed-size cap.
+
+    The compressed archive body is bounded on the way in, but a gzip member can
+    expand ~1000x; restore extraction counts the cumulative DECOMPRESSED bytes and
+    refuses an archive that exceeds the adapter's ``max_restore_bytes`` before it
+    can fill the disk (gzip-bomb defence, issue #287). The bound is over actual
+    bytes read, so a member that under-reports its header size cannot slip past.
+    """
+
+
 class IncompleteTransferError(StorageError):
     """A snapshot commit was attempted without a proven-complete transfer.
 
