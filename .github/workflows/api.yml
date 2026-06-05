@@ -58,6 +58,28 @@ jobs:
       - name: Sync (pinned Python + dev toolchain from uv.lock)
         run: uv sync --locked
 
+      # Fast, non-DB guard against migration numbering collisions between
+      # parallel PRs (issue #284). The pull_request event checks out the merge
+      # ref (actions/checkout's default: PR combined with the target branch),
+      # so this sees PR + current main together and fails the moment main moves
+      # under a stale migration. Limitation: CI does not auto-re-run when main
+      # moves, so the collision is caught at the next push or re-run; merge-time
+      # protection is GitHub's "require branches up to date" setting, which is
+      # out of repo scope. `alembic heads` is the authoritative single-head
+      # check; check_migrations.py adds duplicate revision-id / filename-prefix
+      # detection and is self-tested (--self-test).
+      - name: Migration guard (single head, no number collisions)
+        run: |
+          ../scripts/check_migrations.py --self-test
+          ../scripts/check_migrations.py
+          heads="$(uv run alembic heads --resolve-dependencies)"
+          count="$(printf '%s\n' "$heads" | grep -c .)"
+          if [ "$count" -ne 1 ]; then
+            echo "expected exactly one alembic head, found $count:" >&2
+            printf '%s\n' "$heads" >&2
+            exit 1
+          fi
+
       - name: Lint (ruff)
         run: uv run ruff check .
 
