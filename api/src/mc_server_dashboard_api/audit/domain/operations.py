@@ -22,6 +22,11 @@ AUTH_REFRESH: Final = "auth:refresh"
 # SECURITY.md). Kept a separate code so the family-revocation trail is queryable
 # apart from ordinary refresh activity.
 AUTH_REFRESH_REUSE: Final = "auth:refresh_reuse"
+# Account self-service (FR-AUTH self-service): the authenticated user changing
+# their own password, profile (username/email), or deleting their account.
+AUTH_PASSWORD_CHANGE: Final = "auth:password_change"
+AUTH_PROFILE_UPDATE: Final = "auth:profile_update"
+AUTH_ACCOUNT_DELETE: Final = "auth:account_delete"
 
 # Community provisioning/management (FR-COMM-*).
 COMMUNITY_PROVISION: Final = "community:provision"

@@ -46,6 +46,18 @@ class UserRepository(abc.ABC):
         enriched with usernames without N+1 lookups (issue #78).
         """
 
+    @abc.abstractmethod
+    async def update(self, user: User) -> None:
+        """Persist a mutated user (profile / password change, FR-AUTH self-service)."""
+
+    @abc.abstractmethod
+    async def delete(self, user_id: UserId) -> None:
+        """Delete the user with ``user_id``; cascades remove their dependent rows."""
+
+    @abc.abstractmethod
+    async def count_platform_admins(self) -> int:
+        """Count users with the platform-admin flag (last-admin self-delete guard)."""
+
 
 class RefreshTokenRepository(abc.ABC):
     """Port: persistence for :class:`RefreshToken` session records."""

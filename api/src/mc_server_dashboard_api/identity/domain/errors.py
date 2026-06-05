@@ -50,6 +50,27 @@ class InvalidCredentialsError(IdentityError):
     """
 
 
+class UserNotFoundError(IdentityError):
+    """A user referenced by id was not found (e.g. deleted concurrently)."""
+
+
+class CommunityOwnedError(IdentityError):
+    """Self-deletion refused: the user still owns at least one community.
+
+    A community owner cannot delete their account because doing so would orphan
+    the community (its sole administrator would vanish). The user must transfer
+    ownership or have the community deleted first (FR-COMM-4).
+    """
+
+
+class LastPlatformAdminError(IdentityError):
+    """Self-deletion refused: the user is the last platform administrator.
+
+    The platform must always retain at least one administrator, so the final one
+    cannot delete their own account (FR-AUTH-6).
+    """
+
+
 class InvalidAccessTokenError(IdentityError):
     """An access token failed verification (bad signature, malformed, expired)."""
 

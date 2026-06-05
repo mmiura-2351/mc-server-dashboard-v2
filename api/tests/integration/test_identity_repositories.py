@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import uuid
 from collections.abc import AsyncIterator
 
 import pytest
@@ -21,6 +22,9 @@ from mc_server_dashboard_api.identity.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
+from mc_server_dashboard_api.identity.domain.errors import (
+    UsernameAlreadyExistsError,
+)
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
@@ -287,3 +291,166 @@ async def test_deleting_user_cascades_to_refresh_tokens(
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
         assert await uow.refresh_tokens.get_by_token_hash("hashed-token") is None
+
+
+async def test_update_persists_username_and_email(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+    user = _user(username="alice", email="alice@example.com")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(user)
+        await uow.commit()
+
+    user.username = Username("alice2")
+    user.email = EmailAddress("alice2@example.com")
+    user.updated_at = _NOW + dt.timedelta(hours=1)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.update(user)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        loaded = await uow.users.get_by_id(user.id)
+    assert loaded is not None
+    assert loaded.username == Username("alice2")
+    assert loaded.email == EmailAddress("alice2@example.com")
+    assert loaded.updated_at == _NOW + dt.timedelta(hours=1)
+
+
+async def test_update_to_taken_username_surfaces_translated_error(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    alice = _user(username="alice", email="alice@example.com")
+    bob = _user(username="bob", email="bob@example.com")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(alice)
+        await uow.users.add(bob)
+        await uow.commit()
+
+    # Renaming bob to alice violates the unique username index; the UnitOfWork's
+    # commit must translate the IntegrityError to the domain conflict error.
+    bob.username = Username("alice")
+    with pytest.raises(UsernameAlreadyExistsError):
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            await uow.users.update(bob)
+            await uow.commit()
+
+
+async def test_delete_removes_user_row(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+    user = _user()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(user)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.delete(user.id)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.users.get_by_id(user.id) is None
+
+
+async def test_delete_cascades_to_membership_grant_and_token(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    user = _user()
+    token = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=user.id,
+        token_hash="hashed-token",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(user)
+        await uow.commit()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.add(token)
+        await uow.commit()
+
+    # Seed a community + a membership and a resource_grant for the user directly,
+    # so the delete exercises the ON DELETE CASCADE on user.id for all three
+    # dependents (DATABASE.md Sections 4-6).
+    community_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO community (id, name, created_at, updated_at) "
+                "VALUES (:cid, 'guild', now(), now())"
+            ),
+            {"cid": community_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO membership (id, user_id, community_id, created_at) "
+                "VALUES (:id, :uid, :cid, now())"
+            ),
+            {"id": uuid.uuid4(), "uid": user.id.value, "cid": community_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO resource_grant (id, user_id, community_id, "
+                "resource_type, resource_id, permissions, created_at, updated_at) "
+                "VALUES (:id, :uid, :cid, 'server', :rid, "
+                "ARRAY['server:start'], now(), now())"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "uid": user.id.value,
+                "cid": community_id,
+                "rid": uuid.uuid4(),
+            },
+        )
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.delete(user.id)
+        await uow.commit()
+
+    async with engine.connect() as conn:
+        membership_count = (
+            await conn.execute(
+                text("SELECT count(*) FROM membership WHERE user_id = :uid"),
+                {"uid": user.id.value},
+            )
+        ).scalar_one()
+        grant_count = (
+            await conn.execute(
+                text("SELECT count(*) FROM resource_grant WHERE user_id = :uid"),
+                {"uid": user.id.value},
+            )
+        ).scalar_one()
+    assert membership_count == 0
+    assert grant_count == 0
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.refresh_tokens.get_by_token_hash("hashed-token") is None
+
+
+async def test_count_platform_admins_zero_one_and_many(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.users.count_platform_admins() == 0
+
+    admin1 = _user(username="admin1", email="admin1@example.com")
+    admin1.is_platform_admin = True
+    plain = _user(username="plain", email="plain@example.com")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(admin1)
+        await uow.users.add(plain)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.users.count_platform_admins() == 1
+
+    admin2 = _user(username="admin2", email="admin2@example.com")
+    admin2.is_platform_admin = True
+    admin3 = _user(username="admin3", email="admin3@example.com")
+    admin3.is_platform_admin = True
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(admin2)
+        await uow.users.add(admin3)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.users.count_platform_admins() == 3

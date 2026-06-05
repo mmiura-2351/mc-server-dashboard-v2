@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mc_server_dashboard_api.identity.adapters.integrity import (
+    translate_integrity_error,
+)
 from mc_server_dashboard_api.identity.adapters.models import (
     RefreshTokenModel,
     UserModel,
@@ -95,6 +99,35 @@ class SqlAlchemyUserRepository(UserRepository):
         stmt = select(UserModel.id, UserModel.username).where(UserModel.id.in_(ids))
         rows = (await self._session.execute(stmt)).all()
         return {UserId(row.id): Username(row.username) for row in rows}
+
+    async def update(self, user: User) -> None:
+        stmt = (
+            update(UserModel)
+            .where(UserModel.id == user.id.value)
+            .values(
+                username=user.username.value,
+                email=user.email.value,
+                password_hash=user.password_hash,
+                updated_at=user.updated_at,
+            )
+        )
+        # The Core UPDATE executes eagerly (unlike a staged ORM insert flushed at
+        # commit), so a concurrent rename into a taken username/email raises the
+        # IntegrityError here; translate it to the same domain conflict the
+        # commit-time path raises so the update race is not a raw 500.
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            translate_integrity_error(exc)
+            raise
+
+    async def delete(self, user_id: UserId) -> None:
+        stmt = delete(UserModel).where(UserModel.id == user_id.value)
+        await self._session.execute(stmt)
+
+    async def count_platform_admins(self) -> int:
+        stmt = select(func.count()).where(UserModel.is_platform_admin.is_(True))
+        return (await self._session.execute(stmt)).scalar_one()
 
 
 class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
