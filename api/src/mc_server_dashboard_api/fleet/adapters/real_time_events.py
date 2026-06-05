@@ -16,7 +16,9 @@ pending, further drops do not queue more markers.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections import deque
+from collections.abc import Callable
 
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
@@ -35,21 +37,20 @@ _GAP_EVENT = RealTimeEvent(stream=EventStream.GAP)
 class _Subscription(EventSubscription):
     """One subscriber's bounded buffer; an async iterator over its events.
 
-    Registered with its topic by :meth:`InProcessRealTimeEvents.subscribe` and
-    deregistered by :meth:`aclose` (client disconnect / GC) — deterministically,
-    not via generator finalisation, so a never-iterated subscription that is
-    closed still releases its topic slot (no leak).
+    Registered (with a per-server topic or the firehose set) by the owning
+    :class:`InProcessRealTimeEvents` and deregistered by :meth:`aclose` via the
+    ``deregister`` callback (client disconnect / GC) — deterministically, not via
+    generator finalisation, so a never-iterated subscription that is closed still
+    releases its slot (no leak).
     """
 
     def __init__(
         self,
-        owner: "InProcessRealTimeEvents",
-        server_id: str,
+        deregister: Callable[["_Subscription"], None],
         streams: frozenset[EventStream],
         max_queue: int,
     ) -> None:
-        self._owner = owner
-        self._server_id = server_id
+        self._deregister = deregister
         self._streams = streams
         self._buffer: deque[RealTimeEvent] = deque(maxlen=max_queue)
         self._gap_pending = False
@@ -91,7 +92,7 @@ class _Subscription(EventSubscription):
     async def aclose(self) -> None:
         self._closed = True
         self._ready.set()
-        self._owner._remove(self._server_id, self)
+        self._deregister(self)
 
 
 class InProcessRealTimeEvents(RealTimeEvents):
@@ -100,22 +101,47 @@ class InProcessRealTimeEvents(RealTimeEvents):
     def __init__(self, *, max_queue: int = _DEFAULT_MAX_QUEUE) -> None:
         self._max_queue = max_queue
         self._topics: dict[str, set[_Subscription]] = {}
+        # Firehose subscribers see every server's events (the community stream);
+        # they are not keyed by server, so they live in one flat set.
+        self._firehose: set[_Subscription] = set()
 
     def publish(self, *, server_id: str, event: RealTimeEvent) -> None:
         for sub in self._topics.get(server_id, ()):
             sub.offer(event)
+        if self._firehose:
+            # Tag the event with its server so a firehose consumer can tell the
+            # servers apart; the per-server path leaves server_id None (it is the
+            # topic key). Skip the copy entirely when no firehose is attached.
+            tagged = dataclasses.replace(event, server_id=server_id)
+            for sub in self._firehose:
+                sub.offer(tagged)
 
     def subscribe(
         self, *, server_id: str, streams: frozenset[EventStream]
     ) -> EventSubscription:
-        sub = _Subscription(self, server_id, streams, self._max_queue)
-        self._topics.setdefault(server_id, set()).add(sub)
+        topic = self._topics.setdefault(server_id, set())
+
+        def _deregister(sub: _Subscription) -> None:
+            self._remove(server_id, sub)
+
+        sub = _Subscription(_deregister, streams, self._max_queue)
+        topic.add(sub)
+        return sub
+
+    def subscribe_all(self, *, streams: frozenset[EventStream]) -> EventSubscription:
+        sub = _Subscription(self._firehose.discard, streams, self._max_queue)
+        self._firehose.add(sub)
         return sub
 
     def subscriber_count(self, server_id: str) -> int:
         """Return how many live subscribers ``server_id`` has (test/observability)."""
 
         return len(self._topics.get(server_id, ()))
+
+    def firehose_subscriber_count(self) -> int:
+        """Return how many live firehose subscribers exist (test/observability)."""
+
+        return len(self._firehose)
 
     def _remove(self, server_id: str, sub: _Subscription) -> None:
         topic = self._topics.get(server_id)

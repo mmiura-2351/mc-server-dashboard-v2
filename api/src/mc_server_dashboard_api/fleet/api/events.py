@@ -56,11 +56,13 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId as CommunityUserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    ServerCommunityLookup,
     get_current_user_ws,
     get_membership_visibility,
     get_permission_checker,
     get_read_server,
     get_real_time_events,
+    get_server_community_lookup,
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
@@ -201,6 +203,154 @@ async def server_events(
         pass
     finally:
         await subscription.aclose()
+
+
+@router.websocket("/communities/{community_id}/events")
+async def community_events(
+    websocket: WebSocket,
+    community_id: uuid.UUID,
+    user: Annotated[User | None, Depends(get_current_user_ws)],
+    visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
+    checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
+    lookup: Annotated[ServerCommunityLookup, Depends(get_server_community_lookup)],
+    bus: Annotated[RealTimeEvents, Depends(get_real_time_events)],
+) -> None:
+    """Stream status-change events for every server of one community (#288).
+
+    The community-level analogue of :func:`server_events`: the two-layer gate is
+    applied before accept (and re-applied mid-stream), but at community scope —
+    ``server:read`` with no specific resource, the honest gate for a stream that
+    carries the lifecycle of all the community's servers. Only the STATUS stream
+    is forwarded; log/metrics are per-server detail, not operator notifications.
+
+    Fan-out is a firehose subscription over the relay filtered by community
+    membership of each event's server. The server->community mapping is resolved
+    lazily and cached for the life of the connection, so a hot server is one
+    bounded lookup; servers created after connect are picked up because the
+    firehose carries every server's events.
+
+    Worker online/offline/draining transitions are *not* included: worker state
+    changes never flow through this relay today (the registry mutates in place and
+    publishes nothing), so there is no honest event source to fan out — only
+    server-status fan-out ships here.
+    """
+
+    if user is None:
+        await websocket.close(code=_CLOSE_UNAUTHENTICATED)
+        return
+
+    community = CommunityId(community_id)
+    auth_user = AuthUser(
+        user_id=CommunityUserId(user.id.value),
+        is_platform_admin=user.is_platform_admin,
+    )
+
+    denied = await _authorize_community(
+        auth_user=auth_user,
+        community=community,
+        visibility=visibility,
+        checker=checker,
+    )
+    if denied is not None:
+        await websocket.close(code=denied)
+        return
+
+    await websocket.accept()
+    subscription = bus.subscribe_all(streams=frozenset({EventStream.STATUS}))
+    # Per-connection server->community cache: each server id is looked up at most
+    # once, bounding queries while the firehose may carry many servers' events.
+    membership: dict[str, bool] = {}
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    subscription.__anext__(), timeout=_REAUTHZ_INTERVAL_SECONDS
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                denied = await _authorize_community(
+                    auth_user=auth_user,
+                    community=community,
+                    visibility=visibility,
+                    checker=checker,
+                )
+                if denied is not None:
+                    await websocket.close(code=denied)
+                    return
+                continue
+            # The GAP marker has no server; it is forwarded as-is so the client
+            # still learns it fell behind (best-effort delivery, FR-MON-4).
+            if event.stream is EventStream.GAP:
+                await websocket.send_json(_community_frame(event))
+                continue
+            if await _in_community(
+                event=event,
+                community_id=community_id,
+                lookup=lookup,
+                membership=membership,
+            ):
+                await websocket.send_json(_community_frame(event))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await subscription.aclose()
+
+
+async def _in_community(
+    *,
+    event: RealTimeEvent,
+    community_id: uuid.UUID,
+    lookup: ServerCommunityLookup,
+    membership: dict[str, bool],
+) -> bool:
+    """Return whether ``event``'s server belongs to ``community_id`` (cached)."""
+
+    server_id = event.server_id
+    if server_id is None:
+        return False
+    cached = membership.get(server_id)
+    if cached is None:
+        owner = await lookup(server_id=server_id)
+        cached = owner == community_id
+        membership[server_id] = cached
+    return cached
+
+
+async def _authorize_community(
+    *,
+    auth_user: AuthUser,
+    community: CommunityId,
+    visibility: MembershipVisibility,
+    checker: PermissionChecker,
+) -> int | None:
+    """Run the two-layer gate at community scope; return a close code or ``None``.
+
+    Layer-1 non-membership collapses to ``4404`` (no existence signal); a member
+    lacking community-level ``server:read`` is ``4403``. There is no per-resource
+    server here, so the permission is checked against the community alone.
+    """
+
+    if not await visibility.is_member(
+        user_id=auth_user.user_id, community_id=community
+    ):
+        return _CLOSE_NOT_FOUND
+    resource = ResourceRef(community_id=community)
+    if not await checker.can(user=auth_user, operation=_SERVER_READ, resource=resource):
+        return _CLOSE_FORBIDDEN
+    return None
+
+
+def _community_frame(event: RealTimeEvent) -> dict[str, object]:
+    """Render a community-stream frame: the per-server frame plus ``server_id``.
+
+    ``server_id`` lets the operator route the event to the right server; it is
+    ``None`` on the GAP marker (which is server-agnostic).
+    """
+
+    frame = _frame(event)
+    frame["server_id"] = event.server_id
+    return frame
 
 
 async def _authorize(

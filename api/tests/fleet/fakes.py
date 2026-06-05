@@ -76,6 +76,11 @@ class RecordingRealTimeEvents(RealTimeEvents):
     ) -> EventSubscription:  # pragma: no cover - unused in these tests
         raise NotImplementedError
 
+    def subscribe_all(
+        self, *, streams: frozenset[EventStream]
+    ) -> EventSubscription:  # pragma: no cover - unused in these tests
+        raise NotImplementedError
+
 
 def make_worker(
     *,
