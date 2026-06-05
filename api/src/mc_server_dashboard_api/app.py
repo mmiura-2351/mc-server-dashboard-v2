@@ -177,7 +177,20 @@ def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
     )
 
 
-def _build_version_catalog() -> VersionCatalog:
+# Per-type source-host prefixes for the manual refresh (issue #286). The shared
+# manifest cache is a source-down fallback keyed by URL; a per-type refresh drops
+# the cached last-good entries whose URL starts with that type's source host.
+# Vanilla also fetches per-version detail JSON from a different host, which a
+# host-prefix match does not cover — the per-type refresh targets the type's source
+# manifest (the listing), and an all-types refresh clears the whole cache.
+_CATALOG_SOURCE_PREFIXES: dict[CatalogServerType, str] = {
+    CatalogServerType.VANILLA: "https://launchermeta.mojang.com",
+    CatalogServerType.PAPER: "https://api.papermc.io",
+    CatalogServerType.FABRIC: "https://meta.fabricmc.net",
+}
+
+
+def _build_version_catalog() -> tuple[VersionCatalog, RetryCachingFetcher]:
     """Build the process-wide :class:`VersionCatalog` (ARCHITECTURE.md Section 7.3).
 
     One httpx fetcher wrapped in the retry + in-process TTL-cache fallback
@@ -185,7 +198,8 @@ def _build_version_catalog() -> VersionCatalog:
     (meta.fabricmc.net) catalogs so the last-good manifest cache is process-wide. A
     jittered, asyncio-backed backoff spaces retries; the cache TTL keeps the catalog
     serving through a transient source outage. The cache lives for the process
-    lifetime, so this is built once and stored on app state.
+    lifetime, so this is built once and stored on app state. The fetcher is returned
+    alongside the catalog so the manual-refresh seam (issue #286) can invalidate it.
     """
 
     fetcher = RetryCachingFetcher(
@@ -193,13 +207,14 @@ def _build_version_catalog() -> VersionCatalog:
         sleep=asyncio.sleep,
         jitter=lambda: random.uniform(0.5, 1.5),
     )
-    return CompositeCatalog(
+    catalog = CompositeCatalog(
         by_type={
             CatalogServerType.VANILLA: VanillaCatalog(fetcher=fetcher),
             CatalogServerType.PAPER: PaperCatalog(fetcher=fetcher),
             CatalogServerType.FABRIC: FabricCatalog(fetcher=fetcher),
         }
     )
+    return catalog, fetcher
 
 
 def _validate_control_tls(settings: Settings) -> None:
@@ -261,7 +276,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Build the process-wide version catalog now so its in-process manifest cache
     # is shared across requests (FR-VER-2). No external secret is required, so it
     # cannot fail at boot; it is stored on app state below.
-    version_catalog = _build_version_catalog()
+    version_catalog, version_fetcher = _build_version_catalog()
 
     configure_logging(settings.log.level, settings.log.format)
 
@@ -274,6 +289,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.storage = storage
         app.state.version_catalog = version_catalog
+        # The catalog's manifest-cache invalidator + per-type source prefixes, for
+        # the platform-admin manual refresh (issue #286).
+        app.state.version_cache_invalidator = version_fetcher
+        app.state.version_source_prefixes = _CATALOG_SOURCE_PREFIXES
         # Readiness flag for /readyz (issue #282): the control-plane gRPC server
         # has not started yet; flipped True once start() returns below.
         app.state.grpc_started = False

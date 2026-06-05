@@ -49,6 +49,19 @@ class DirEntry:
     size: int
 
 
+@dataclass(frozen=True)
+class JarPoolStats:
+    """Aggregate stats for the content-addressed JAR pool (issue #286).
+
+    ``count`` is the number of pooled JARs and ``total_bytes`` their combined
+    on-store size. Platform-admin operational visibility only — there is no GC
+    here (that is the reference-counted design of #32 / D4).
+    """
+
+    count: int
+    total_bytes: int
+
+
 class SnapshotHandle(abc.ABC):
     """An opaque handle to an in-flight incoming snapshot transfer.
 
@@ -135,6 +148,15 @@ class JarStore(abc.ABC):
     @abc.abstractmethod
     def open_jar(self, key: JarKey) -> ByteStream:
         """Read a stored JAR. Raises :class:`~.errors.NotFoundError` if absent."""
+
+    @abc.abstractmethod
+    async def jar_pool_stats(self) -> JarPoolStats:
+        """Count + total bytes of the pooled JARs (issue #286).
+
+        A bounded scan of the one content-addressed JAR namespace (Section 3.2) —
+        no per-server scope. Operational visibility for a platform admin; this is
+        not a GC and does not reference-count (that is #32 / D4).
+        """
 
 
 class BackupStore(abc.ABC):

@@ -12,6 +12,15 @@ here so no storage type crosses the seam.
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class PoolStats:
+    """Aggregate stats for the pool: number of JARs and their total bytes (#286)."""
+
+    count: int
+    total_bytes: int
 
 
 class JarPool(abc.ABC):
@@ -27,3 +36,7 @@ class JarPool(abc.ABC):
 
         Idempotent: identical bytes yield the same key and no duplicate.
         """
+
+    @abc.abstractmethod
+    async def stats(self) -> PoolStats:
+        """Count + total bytes of the pooled JARs (operational visibility, #286)."""

@@ -46,6 +46,37 @@ async def test_serves_last_good_cache_when_source_down() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalidate_drops_last_good_fallback() -> None:
+    # The cache is a source-down fallback: invalidating it drops the last-good
+    # payload, so a subsequent source-down fetch fails instead of serving stale.
+    inner = FakeJsonFetcher({_URL: _PAYLOAD})
+    fetcher = RetryCachingFetcher(inner=inner, attempts=1, sleep=_no_sleep)
+    assert await fetcher.get_json(_URL) == _PAYLOAD  # primes the fallback
+    cleared = fetcher.invalidate(lambda url: True)
+    assert cleared == 1
+    inner.fail = True
+    with pytest.raises(CatalogUnavailableError):
+        await fetcher.get_json(_URL)
+
+
+@pytest.mark.asyncio
+async def test_invalidate_predicate_clears_only_matching() -> None:
+    other = "https://other.test/manifest.json"
+    inner = FakeJsonFetcher({_URL: _PAYLOAD, other: {"other": True}})
+    fetcher = RetryCachingFetcher(inner=inner, attempts=1, sleep=_no_sleep)
+    await fetcher.get_json(_URL)
+    await fetcher.get_json(other)
+    cleared = fetcher.invalidate(lambda url: url == _URL)
+    assert cleared == 1
+    # Source down: _URL has no fallback (invalidated) and fails; ``other`` still
+    # serves its last-good payload.
+    inner.fail = True
+    with pytest.raises(CatalogUnavailableError):
+        await fetcher.get_json(_URL)
+    assert await fetcher.get_json(other) == {"other": True}
+
+
+@pytest.mark.asyncio
 async def test_expired_cache_does_not_serve() -> None:
     clock = [0.0]
     inner = FakeJsonFetcher({_URL: _PAYLOAD})

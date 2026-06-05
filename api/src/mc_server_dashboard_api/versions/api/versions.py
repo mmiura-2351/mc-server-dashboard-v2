@@ -1,17 +1,22 @@
-"""HTTP edge for the global version catalog (FR-VER-1).
+"""HTTP edge for the global version catalog (FR-VER-1, issue #286).
 
-Two read-only endpoints:
+Read-only catalog endpoints plus two platform-admin operational windows:
 
 - ``GET /versions`` — the server types the catalog can resolve at M1.
 - ``GET /versions/{server_type}`` — the versions offered for a type.
+- ``POST /versions/refresh[?server_type=]`` — invalidate the in-process manifest
+  cache (all types or one); the cache is a source-down fallback, so this clears
+  the last-good payloads (platform admin).
+- ``GET /versions/jar-pool/stats`` — count + total bytes of the pooled JARs
+  (platform admin).
 
 **Auth choice.** The catalog is *global* — it carries no community/server scope
 (STORAGE.md Section 8.1: JARs are shared platform-wide). There is no
 ``version:*`` permission code in the authorization catalog (Appendix A), and
-adding one would be speculative. So these endpoints require only an authenticated
-user (``get_current_user``), not a community membership/permission check:
-read-only access to a public version listing for any logged-in user is
-proportionate, and avoids inventing a permission with no resource to scope it to.
+adding one would be speculative. So the read-only listing endpoints require only
+an authenticated user (``get_current_user``); the operational windows are gated by
+the cross-cutting platform-admin axis (``require_platform_admin``), the same
+posture as the /workers and admin-user surfaces.
 
 The router is thin: resolve the use cases via DI, run them, serialise, and map
 the catalog's domain errors to HTTP codes here.
@@ -21,22 +26,48 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
+    get_catalog_refresh,
     get_current_user,
+    get_jar_pool_stats,
     get_list_server_types,
     get_list_versions,
+    require_platform_admin,
 )
 from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.versions.application.catalog_refresh import CatalogRefresh
+from mc_server_dashboard_api.versions.application.jar_pool_stats import GetJarPoolStats
 from mc_server_dashboard_api.versions.application.list_versions import (
     ListServerTypes,
     ListVersions,
 )
-from mc_server_dashboard_api.versions.domain.errors import CatalogUnavailableError
+from mc_server_dashboard_api.versions.domain.errors import (
+    CatalogUnavailableError,
+    UnknownServerTypeError,
+)
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 
 router = APIRouter(prefix="/versions")
+
+
+class RefreshResponse(BaseModel):
+    """The catalogs the refresh invalidated (issue #286)."""
+
+    invalidated: list[str]
+
+
+class JarPoolStatsResponse(BaseModel):
+    """Count + total bytes of the pooled JARs (issue #286)."""
+
+    count: int
+    total_bytes: int
 
 
 @router.get("")
@@ -48,6 +79,47 @@ async def list_server_types(
 
     types = await use_case()
     return {"server_types": [t.value for t in types]}
+
+
+@router.post("/refresh")
+async def refresh_catalog(
+    admin: Annotated[User, Depends(require_platform_admin)],
+    use_case: Annotated[CatalogRefresh, Depends(get_catalog_refresh)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    server_type: Annotated[str | None, Query()] = None,
+) -> RefreshResponse:
+    """Invalidate the manifest cache for one type or all of them (platform admin).
+
+    The cache is a source-down fallback, so this drops the last-good payloads (a
+    successful listing GET always refetches from the source anyway). ``server_type``
+    filters to one catalogued type; omitting it refreshes every type. An unknown
+    type is a 404 (mirroring the listing surface).
+    """
+
+    parsed = _parse_server_type(server_type) if server_type is not None else None
+    try:
+        invalidated = await use_case(server_type=parsed)
+    except UnknownServerTypeError as exc:
+        raise _unknown_type() from exc
+    await recorder.record(
+        AuditEvent(
+            operation=ops.VERSION_REFRESH,
+            outcome=Outcome.SUCCESS,
+            actor_id=admin.id.value,
+        )
+    )
+    return RefreshResponse(invalidated=[t.value for t in invalidated])
+
+
+@router.get("/jar-pool/stats")
+async def jar_pool_stats(
+    _admin: Annotated[User, Depends(require_platform_admin)],
+    use_case: Annotated[GetJarPoolStats, Depends(get_jar_pool_stats)],
+) -> JarPoolStatsResponse:
+    """Count + total bytes of the pooled JARs (platform admin, issue #286)."""
+
+    stats = await use_case()
+    return JarPoolStatsResponse(count=stats.count, total_bytes=stats.total_bytes)
 
 
 @router.get("/{server_type}")
@@ -72,10 +144,14 @@ def _parse_server_type(value: str) -> ServerType:
     except ValueError as exc:
         # forge (and any other non-catalogued type) is unsupported at M1: a clean
         # 404 on the catalog surface, distinct from a transient source outage.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"reason": "unknown_server_type"},
-        ) from exc
+        raise _unknown_type() from exc
+
+
+def _unknown_type() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"reason": "unknown_server_type"},
+    )
 
 
 def _service_unavailable() -> HTTPException:

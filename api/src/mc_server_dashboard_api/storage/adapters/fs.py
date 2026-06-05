@@ -52,6 +52,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
 from mc_server_dashboard_api.storage.domain.port import (
     ByteStream,
     DirEntry,
+    JarPoolStats,
     SnapshotHandle,
     Storage,
 )
@@ -447,6 +448,23 @@ class FsStorage(Storage):
         if not path.is_file():
             raise NotFoundError(f"jar not found: {key.sha256}")
         return _file_stream(path)
+
+    async def jar_pool_stats(self) -> JarPoolStats:
+        return await asyncio.to_thread(self._jar_pool_stats)
+
+    def _jar_pool_stats(self) -> JarPoolStats:
+        jars = self._jars_dir()
+        if not jars.is_dir():
+            return JarPoolStats(count=0, total_bytes=0)
+        # One directory of content-addressed ``<sha256>.jar`` files; the temp-stage
+        # files put_jar leaves on failure are named ``.jar.*.tmp`` and excluded.
+        count = 0
+        total = 0
+        for entry in jars.iterdir():
+            if entry.suffix == ".jar" and entry.is_file():
+                count += 1
+                total += entry.stat().st_size
+        return JarPoolStats(count=count, total_bytes=total)
 
     # --- backup archive create / list / restore / delete (Section 3.3) -----
 

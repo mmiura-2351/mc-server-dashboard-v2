@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
 from mc_server_dashboard_api.versions.domain.jar_fetcher import JarFetcher
-from mc_server_dashboard_api.versions.domain.jar_pool import JarPool
+from mc_server_dashboard_api.versions.domain.jar_pool import JarPool, PoolStats
 
 
 class FakeJsonFetcher(JsonFetcher):
@@ -74,3 +74,9 @@ class FakeJarPool(JarPool):
         key = hashlib.sha256(data).hexdigest()
         self.stored[key] = data
         return key
+
+    async def stats(self) -> PoolStats:
+        return PoolStats(
+            count=len(self.stored),
+            total_bytes=sum(len(b) for b in self.stored.values()),
+        )

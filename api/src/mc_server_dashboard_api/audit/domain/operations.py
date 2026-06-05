@@ -87,6 +87,12 @@ FILE_DELETE: Final = "file:delete"
 FILE_MKDIR: Final = "file:mkdir"
 FILE_SEARCH: Final = "file:search"
 
+# Version catalog admin (M2 Epic D5, issue #286): a platform admin manually
+# refreshing the in-process catalog cache. Names the operation, not a permission
+# code -- the admin axis is gated by the platform-admin flag, not a catalog
+# permission. Platform-level (no community/target resource).
+VERSION_REFRESH: Final = "version:refresh"
+
 # Worker drain set/clear (FR-WRK-5).
 WORKER_DRAIN_SET: Final = "worker:drain_set"
 WORKER_DRAIN_CLEAR: Final = "worker:drain_clear"

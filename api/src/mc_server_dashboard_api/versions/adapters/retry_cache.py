@@ -28,6 +28,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from mc_server_dashboard_api.versions.domain.cache import CacheInvalidator
 from mc_server_dashboard_api.versions.domain.errors import CatalogUnavailableError
 from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
 
@@ -39,7 +40,7 @@ class _CacheEntry:
 
 
 @dataclass
-class RetryCachingFetcher(JsonFetcher):
+class RetryCachingFetcher(JsonFetcher, CacheInvalidator):
     """Wrap a :class:`JsonFetcher` with bounded jittered retry + TTL cache fallback.
 
     ``attempts`` is the total number of upstream tries (>= 1). ``base_delay`` and
@@ -82,6 +83,21 @@ class RetryCachingFetcher(JsonFetcher):
         # to CatalogUnavailableError so the edge maps it to a 503 (FR-VER-2).
         assert last_error is not None
         raise CatalogUnavailableError(str(last_error)) from last_error
+
+    def invalidate(self, predicate: Callable[[str], bool]) -> int:
+        """Drop every cached entry whose URL matches ``predicate`` (issue #286).
+
+        The manual-refresh seam. The cache is a source-down fallback (a successful
+        ``get_json`` always refetches and refreshes it), so dropping an entry clears
+        its last-good payload: a subsequent source-down ``get_json`` for that URL
+        then fails fast instead of serving the stale fallback. Returns how many
+        entries were dropped so the refresh can report what it invalidated.
+        """
+
+        to_drop = [url for url in self._cache if predicate(url)]
+        for url in to_drop:
+            del self._cache[url]
+        return len(to_drop)
 
     def _fresh_cache(self, url: str) -> _CacheEntry | None:
         entry = self._cache.get(url)

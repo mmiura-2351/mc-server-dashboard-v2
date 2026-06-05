@@ -242,12 +242,18 @@ from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.versions.adapters.http_jar_fetcher import HttpxJarFetcher
 from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
+from mc_server_dashboard_api.versions.application.catalog_refresh import CatalogRefresh
 from mc_server_dashboard_api.versions.application.ensure_jar import EnsureJar
+from mc_server_dashboard_api.versions.application.jar_pool_stats import GetJarPoolStats
 from mc_server_dashboard_api.versions.application.list_versions import (
     ListServerTypes,
     ListVersions,
 )
+from mc_server_dashboard_api.versions.domain.cache import CacheInvalidator
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
+from mc_server_dashboard_api.versions.domain.value_objects import (
+    ServerType as CatalogServerType,
+)
 
 
 def get_engine(request: Request) -> AsyncEngine:
@@ -315,6 +321,24 @@ def get_ensure_jar(
         fetcher=HttpxJarFetcher(),
         pool=StorageJarPool(jars=get_storage(request)),
     )
+
+
+def get_catalog_refresh(request: Request) -> CatalogRefresh:
+    """Assemble the :class:`CatalogRefresh` use case (manual refresh, issue #286).
+
+    Binds the catalog's manifest-cache invalidator and the per-type source-prefix
+    map the app factory stored on app state; the route is platform-admin gated.
+    """
+
+    invalidator: CacheInvalidator = request.app.state.version_cache_invalidator
+    prefixes: dict[CatalogServerType, str] = request.app.state.version_source_prefixes
+    return CatalogRefresh(invalidator=invalidator, prefixes=prefixes)
+
+
+def get_jar_pool_stats(request: Request) -> GetJarPoolStats:
+    """Assemble the :class:`GetJarPoolStats` use case (JAR-pool stats, issue #286)."""
+
+    return GetJarPoolStats(pool=StorageJarPool(jars=get_storage(request)))
 
 
 # An async lookup of a server's recorded resolved-JAR content key (SHA-256), or

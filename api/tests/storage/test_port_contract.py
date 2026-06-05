@@ -176,6 +176,25 @@ async def test_open_missing_jar_is_not_found(harness: StorageHarness) -> None:
         await drain(harness.storage.open_jar(JarKey("b" * 64)))
 
 
+async def test_jar_pool_stats_empty(harness: StorageHarness) -> None:
+    stats = await harness.storage.jar_pool_stats()
+    assert stats.count == 0
+    assert stats.total_bytes == 0
+
+
+async def test_jar_pool_stats_counts_and_sums(harness: StorageHarness) -> None:
+    a = b"jar-a"
+    b = b"jar-bb"
+    await harness.storage.put_jar(stream_of(a))
+    await harness.storage.put_jar(stream_of(b))
+    # Dedup: storing identical bytes again must not double-count (Section 3.2).
+    await harness.storage.put_jar(stream_of(a))
+
+    stats = await harness.storage.jar_pool_stats()
+    assert stats.count == 2
+    assert stats.total_bytes == len(a) + len(b)
+
+
 # --- backup archive create / list / restore / delete (Section 3.3) ---------
 
 
