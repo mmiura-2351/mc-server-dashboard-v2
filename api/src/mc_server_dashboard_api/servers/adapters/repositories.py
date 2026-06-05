@@ -106,6 +106,11 @@ class SqlAlchemyServerRepository(ServerRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return {port for port in rows if port is not None}
 
+    async def list_ids_missing_game_port(self) -> list[ServerId]:
+        stmt = select(ServerModel.id).where(ServerModel.game_port.is_(None))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [ServerId(row) for row in rows]
+
     async def update(self, server: Server) -> None:
         stmt = (
             update(ServerModel)

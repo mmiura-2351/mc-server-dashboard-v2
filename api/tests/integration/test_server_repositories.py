@@ -258,3 +258,59 @@ async def test_server_id_isolation_across_communities(engine: AsyncEngine) -> No
         await ReadServer(uow=ServersUnitOfWork(factory))(
             community_id=CommunityId(uuid.uuid4()), server_id=server.id
         )
+
+
+async def _insert_legacy_server(
+    engine: AsyncEngine, community_id: uuid.UUID, name: str
+) -> uuid.UUID:
+    """Insert a row with ``game_port = NULL`` (a pre-#243 legacy/imported row)."""
+
+    server_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "execution_backend, config, game_port, desired_state, "
+                "observed_state, created_at, updated_at) VALUES "
+                "(:id, :community_id, :name, 'java', '1.21.1', 'vanilla', "
+                "'host_process', '{}', NULL, 'stopped', 'stopped', now(), now())"
+            ),
+            {"id": server_id, "community_id": community_id, "name": name},
+        )
+    return server_id
+
+
+async def test_list_ids_missing_game_port_finds_only_legacy_rows(
+    engine: AsyncEngine,
+) -> None:
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+    )
+    # A normally-created server carries an auto-assigned port; a legacy row does
+    # not (issue #310).
+    tracked = await create(
+        community_id=CommunityId(community_id),
+        name="tracked",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+    legacy_id = await _insert_legacy_server(engine, community_id, "legacy")
+
+    async with ServersUnitOfWork(factory) as uow:
+        missing = await uow.servers.list_ids_missing_game_port()
+        taken = await uow.servers.list_game_ports()
+
+    # Only the legacy row is reported missing; the tracked row's port is in the
+    # taken set, and the legacy NULL port is excluded from it.
+    assert [s.value for s in missing] == [legacy_id]
+    assert tracked.game_port in taken
