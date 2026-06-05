@@ -68,6 +68,17 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 	}
 	image := env(t, "MCD_E2E_STUB_IMAGE")
 
+	// Reclaim stub containers leaked by previous harness runs that were killed by
+	// a panic or `go test -timeout` before t.Cleanup could run (issue #256). It
+	// runs only here, after both env gates above, so it stays inert in the plain
+	// `go test ./...` pass. Best-effort: a leaked orphan must not block a green
+	// run, so a reaper error is logged, not fatal.
+	reapCtx, reapCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := reapStaleE2EContainers(reapCtx); err != nil {
+		t.Logf("e2e reaper: %v", err)
+	}
+	reapCancel()
+
 	docker, err := containerdriver.NewEngineClient("")
 	if err != nil {
 		t.Fatalf("docker engine client: %v", err)
