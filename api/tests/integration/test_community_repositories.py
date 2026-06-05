@@ -143,6 +143,31 @@ async def test_add_role_round_trips_permissions(engine: AsyncEngine) -> None:
     assert [r.id for r in listed] == [role.id]
 
 
+async def test_get_roles_by_ids_returns_requested_subset(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+    community = _community()
+    role_a = _role(community.id, name="Alpha")
+    role_b = _role(community.id, name="Beta")
+    role_c = _role(community.id, name="Gamma")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.roles.add(role_a)
+        await uow.roles.add(role_b)
+        await uow.roles.add(role_c)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        # A subset including an unknown id: the unknown id is silently skipped.
+        loaded = await uow.roles.get_by_ids(
+            [role_a.id, role_c.id, RoleId(uuid.uuid4())]
+        )
+        # Empty input short-circuits to no rows.
+        empty = await uow.roles.get_by_ids([])
+
+    assert {r.id for r in loaded} == {role_a.id, role_c.id}
+    assert empty == []
+
+
 async def test_membership_round_trip_and_lookup(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     user_id = uuid.uuid4()

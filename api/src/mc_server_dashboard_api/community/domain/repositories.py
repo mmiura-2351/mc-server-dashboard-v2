@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import abc
 import uuid
+from collections.abc import Sequence
 
 from mc_server_dashboard_api.community.domain.entities import (
     Community,
@@ -110,6 +111,15 @@ class RoleRepository(abc.ABC):
     @abc.abstractmethod
     async def get_by_id(self, role_id: RoleId) -> Role | None:
         """Return the role with ``role_id``, or ``None`` if absent."""
+
+    @abc.abstractmethod
+    async def get_by_ids(self, role_ids: Sequence[RoleId]) -> list[Role]:
+        """Return the roles matching ``role_ids`` in one query (unknown ids skipped).
+
+        Batches the authorization hot path's role lookups (issue #321). An empty
+        ``role_ids`` returns ``[]`` without touching the store. Order is
+        unspecified.
+        """
 
     @abc.abstractmethod
     async def list_for_community(self, community_id: CommunityId) -> list[Role]:

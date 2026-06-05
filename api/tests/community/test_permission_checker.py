@@ -217,6 +217,27 @@ async def test_multiple_roles_union_their_permissions() -> None:
     )
 
 
+async def test_roles_are_loaded_in_a_single_batch_query() -> None:
+    # The hot path must not loop get_by_id over each role (issue #321): three
+    # roles resolve through one get_by_ids call, not per-role get_by_id calls.
+    user = _member()
+    community = CommunityId.new()
+    uow = FakeAuthzUnitOfWork()
+    seed_member_with_role(uow, user.user_id, community, {Permission("server:read")})
+    uow.add_role(user.user_id, community, {Permission("server:start")})
+    uow.add_role(user.user_id, community, {Permission("server:stop")})
+    checker = RoleGrantPermissionChecker(uow)
+
+    await checker.can(
+        user=user,
+        operation=Permission("server:start"),
+        resource=ResourceRef(community_id=community),
+    )
+
+    assert uow.roles.get_by_ids_calls == 1
+    assert uow.roles.get_by_id_calls == 0
+
+
 # --- cross-community isolation (FR-AUTHZ-4) ---------------------------------
 
 
