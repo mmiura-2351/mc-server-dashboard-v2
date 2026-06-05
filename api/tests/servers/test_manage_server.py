@@ -80,6 +80,7 @@ def _server(
     desired: DesiredState = DesiredState.STOPPED,
     observed: ObservedState = ObservedState.STOPPED,
     backend: ExecutionBackend = ExecutionBackend.HOST_PROCESS,
+    game_port: int | None = None,
 ) -> Server:
     return Server(
         id=ServerId.new(),
@@ -90,6 +91,7 @@ def _server(
         server_type=ServerType.VANILLA,
         execution_backend=backend,
         config={"motd": "hi"},
+        game_port=game_port,
         desired_state=desired,
         observed_state=observed,
         observed_at=None,
@@ -527,12 +529,29 @@ async def test_list_is_scoped_to_the_community() -> None:
 # --- update ----------------------------------------------------------------
 
 
+def _updater(
+    uow: FakeUnitOfWork,
+    *,
+    file_store: FakeFileStore | None = None,
+    min_interval_seconds: int = 0,
+) -> UpdateServer:
+    """Build an :class:`UpdateServer` with the file seam + port range bound (#311)."""
+
+    return UpdateServer(
+        uow=uow,
+        clock=FakeClock(_LATER),
+        file_store=file_store or FakeFileStore(),
+        port_range=_PORTS,
+        min_interval_seconds=min_interval_seconds,
+    )
+
+
 async def test_update_edits_name_and_config_while_at_rest() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
     uow.servers.seed(server)
-    updated = await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+    updated = await _updater(uow)(
         community_id=community,
         server_id=server.id,
         name="creative",
@@ -549,9 +568,7 @@ async def test_update_accepts_snapshot_interval_override_at_or_above_floor() -> 
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
     uow.servers.seed(server)
-    updated = await UpdateServer(
-        uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300
-    )(
+    updated = await _updater(uow, min_interval_seconds=300)(
         community_id=community,
         server_id=server.id,
         config={"snapshot_interval_seconds": 600},
@@ -566,7 +583,7 @@ async def test_update_rejects_snapshot_interval_override_below_floor() -> None:
     server = _server(community_id=community)
     uow.servers.seed(server)
     with pytest.raises(InvalidSnapshotIntervalError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+        await _updater(uow, min_interval_seconds=300)(
             community_id=community,
             server_id=server.id,
             config={"snapshot_interval_seconds": 60},
@@ -579,7 +596,7 @@ async def test_update_accepts_backup_schedule_override() -> None:
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
     uow.servers.seed(server)
-    updated = await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+    updated = await _updater(uow)(
         community_id=community,
         server_id=server.id,
         config={"backup_interval_hours": 6},
@@ -594,7 +611,7 @@ async def test_update_rejects_invalid_backup_schedule_override() -> None:
     server = _server(community_id=community)
     uow.servers.seed(server)
     with pytest.raises(InvalidBackupScheduleError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+        await _updater(uow)(
             community_id=community,
             server_id=server.id,
             config={"backup_interval_hours": 0},
@@ -608,7 +625,7 @@ async def test_update_rejects_backend_change_as_immutable() -> None:
     server = _server(community_id=community, backend=ExecutionBackend.HOST_PROCESS)
     uow.servers.seed(server)
     with pytest.raises(ExecutionBackendImmutableError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+        await _updater(uow)(
             community_id=community,
             server_id=server.id,
             execution_backend="container",
@@ -621,7 +638,7 @@ async def test_update_allows_same_backend_value() -> None:
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community, backend=ExecutionBackend.HOST_PROCESS)
     uow.servers.seed(server)
-    updated = await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+    updated = await _updater(uow)(
         community_id=community,
         server_id=server.id,
         execution_backend="host_process",
@@ -640,7 +657,7 @@ async def test_update_rejects_while_running() -> None:
     )
     uow.servers.seed(server)
     with pytest.raises(ServerNotStoppedError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+        await _updater(uow)(
             community_id=community,
             server_id=server.id,
             name="creative",
@@ -660,9 +677,7 @@ async def test_update_safe_key_only_succeeds_while_running() -> None:
         observed=ObservedState.RUNNING,
     )
     uow.servers.seed(server)
-    updated = await UpdateServer(
-        uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300
-    )(
+    updated = await _updater(uow, min_interval_seconds=300)(
         community_id=community,
         server_id=server.id,
         config={"motd": "hi", "snapshot_interval_seconds": 600},
@@ -681,7 +696,7 @@ async def test_update_unsafe_key_rejected_while_running() -> None:
     )
     uow.servers.seed(server)
     with pytest.raises(ServerNotStoppedError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+        await _updater(uow)(
             community_id=community,
             server_id=server.id,
             config={"motd": "changed"},
@@ -701,7 +716,7 @@ async def test_update_mixed_safe_and_unsafe_keys_rejected_while_running() -> Non
     )
     uow.servers.seed(server)
     with pytest.raises(ServerNotStoppedError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+        await _updater(uow, min_interval_seconds=300)(
             community_id=community,
             server_id=server.id,
             config={"motd": "changed", "snapshot_interval_seconds": 600},
@@ -722,7 +737,7 @@ async def test_update_below_floor_while_running_validates_before_state() -> None
     )
     uow.servers.seed(server)
     with pytest.raises(InvalidSnapshotIntervalError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+        await _updater(uow, min_interval_seconds=300)(
             community_id=community,
             server_id=server.id,
             config={"motd": "hi", "snapshot_interval_seconds": 60},
@@ -742,7 +757,7 @@ async def test_update_removing_unsafe_key_rejected_while_running() -> None:
     )
     uow.servers.seed(server)
     with pytest.raises(ServerNotStoppedError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+        await _updater(uow, min_interval_seconds=300)(
             community_id=community,
             server_id=server.id,
             config={"snapshot_interval_seconds": 600},
@@ -763,7 +778,7 @@ async def test_update_adding_null_unsafe_key_rejected_while_running() -> None:
     )
     uow.servers.seed(server)
     with pytest.raises(ServerNotStoppedError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+        await _updater(uow, min_interval_seconds=300)(
             community_id=community,
             server_id=server.id,
             config={
@@ -788,7 +803,7 @@ async def test_update_removing_null_unsafe_key_rejected_while_running() -> None:
     server.config = {"motd": "hi", "feature_flag": None}
     uow.servers.seed(server)
     with pytest.raises(ServerNotStoppedError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER), min_interval_seconds=300)(
+        await _updater(uow, min_interval_seconds=300)(
             community_id=community,
             server_id=server.id,
             config={"motd": "hi", "snapshot_interval_seconds": 600},
@@ -803,7 +818,7 @@ async def test_update_rejects_name_clash_in_community() -> None:
     target = _server(community_id=community, name="survival")
     uow.servers.seed(target)
     with pytest.raises(ServerNameAlreadyExistsError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+        await _updater(uow)(
             community_id=community,
             server_id=target.id,
             name="taken",
@@ -815,11 +830,134 @@ async def test_update_other_communitys_server_is_not_found() -> None:
     server = _server(community_id=CommunityId(uuid.uuid4()))
     uow.servers.seed(server)
     with pytest.raises(ServerNotFoundError):
-        await UpdateServer(uow=uow, clock=FakeClock(_LATER))(
+        await _updater(uow)(
             community_id=CommunityId(uuid.uuid4()),
             server_id=server.id,
             name="x",
         )
+
+
+# --- update: game port (#311) ----------------------------------------------
+
+
+async def test_update_game_port_updates_row_and_rewrites_properties() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=25565)
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"motd=hi\nserver-port=25565\n"
+    updated = await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        game_port=25570,
+    )
+    # The DB row and the at-rest server.properties are both moved to the new port.
+    assert updated.game_port == 25570
+    assert uow.servers.by_id[server.id].game_port == 25570
+    assert file_store.files["server.properties"] == b"motd=hi\nserver-port=25570\n"
+    assert uow.commits == 1
+
+
+async def test_update_game_port_creates_properties_when_absent() -> None:
+    # A legacy server with no seeded server.properties (#243) gets one created
+    # with just the port line.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=None)
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    updated = await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        game_port=25570,
+    )
+    assert updated.game_port == 25570
+    assert file_store.files["server.properties"] == b"server-port=25570\n"
+
+
+async def test_update_game_port_rejects_while_running() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        game_port=25565,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    uow.servers.seed(server)
+    with pytest.raises(ServerNotStoppedError):
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            game_port=25570,
+        )
+    assert uow.commits == 0
+
+
+async def test_update_game_port_rejects_taken_port() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    target = _server(community_id=community, name="a", game_port=25565)
+    other = _server(community_id=community, name="b", game_port=25570)
+    uow.servers.seed(target)
+    uow.servers.seed(other)
+    with pytest.raises(PortAlreadyTakenError):
+        await _updater(uow)(
+            community_id=community,
+            server_id=target.id,
+            game_port=25570,
+        )
+    assert uow.commits == 0
+
+
+async def test_update_game_port_rejects_out_of_range() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=25565)
+    uow.servers.seed(server)
+    with pytest.raises(PortOutOfRangeError):
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            game_port=70000,
+        )
+    assert uow.commits == 0
+
+
+async def test_update_to_same_game_port_does_not_rewrite_or_conflict() -> None:
+    # Re-supplying the current port is a no-op for the file (no rewrite) and never
+    # a self-conflict (the own port is excluded from the taken set).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=25565)
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    updated = await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        game_port=25565,
+    )
+    assert updated.game_port == 25565
+    assert file_store.writes == []
+    assert uow.commits == 1
+
+
+async def test_update_game_port_file_failure_aborts_without_commit() -> None:
+    # A storage failure rewriting server.properties surfaces as a seed failure and
+    # leaves the row uncommitted, so the DB and file do not drift (#311).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=25565)
+    uow.servers.seed(server)
+    with pytest.raises(WorkingSetSeedFailedError):
+        await _updater(uow, file_store=FakeFileStore(fail_write=True))(
+            community_id=community,
+            server_id=server.id,
+            game_port=25570,
+        )
+    assert uow.commits == 0
+    assert uow.servers.by_id[server.id].game_port == 25565
 
 
 # --- delete ----------------------------------------------------------------
@@ -942,3 +1080,56 @@ async def test_create_without_accept_eula_seeds_properties_at_rest(
         await file_store.read_file(
             community_id=community, server_id=server.id, rel_path="eula.txt"
         )
+
+
+# --- update game port over real fs Storage (#311) --------------------------
+
+
+async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> None:
+    # End-to-end over real FsStorage: create seeds server.properties on the
+    # assigned port, then a port update rewrites server-port in place so the
+    # at-rest file (and the hydrate stream) carry the new port.
+    storage = FsStorage(tmp_path)
+    file_store = StorageFileStoreAdapter(storage=storage)
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+    )(
+        community_id=community,
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={},
+    )
+    assert server.game_port == 25565
+
+    updated = await UpdateServer(
+        uow=uow,
+        clock=FakeClock(_LATER),
+        file_store=file_store,
+        port_range=_PORTS,
+    )(
+        community_id=community,
+        server_id=server.id,
+        game_port=25570,
+    )
+    assert updated.game_port == 25570
+
+    at_rest = await file_store.read_file(
+        community_id=community, server_id=server.id, rel_path="server.properties"
+    )
+    assert at_rest == b"server-port=25570\n"
+    blob = await drain(
+        storage.open_hydrate_source(
+            StorageCommunityId(community.value),
+            StorageServerId(server.id.value),
+        )
+    )
+    assert read_tar(blob) == {"server.properties": b"server-port=25570\n"}

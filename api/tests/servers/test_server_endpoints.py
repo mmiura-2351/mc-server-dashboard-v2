@@ -502,6 +502,90 @@ def test_update_backup_interval_invalid_is_422() -> None:
     assert resp.json()["detail"]["reason"] == "invalid_backup_schedule"
 
 
+def test_update_forwards_game_port() -> None:
+    # The optional new game port is forwarded to the use case (issue #311).
+    update = _FakeUseCase(result=_server_entity(community_id=uuid.uuid4()))
+    app = _app(member=True, allow=True, update=update)
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"game_port": 25570},
+    )
+    assert resp.status_code == 200
+    assert update.calls[0]["game_port"] == 25570
+
+
+def test_update_omitting_game_port_forwards_none() -> None:
+    update = _FakeUseCase(result=_server_entity(community_id=uuid.uuid4()))
+    app = _app(member=True, allow=True, update=update)
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"name": "creative"},
+    )
+    assert resp.status_code == 200
+    assert update.calls[0]["game_port"] is None
+
+
+def test_update_game_port_out_of_range_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=PortOutOfRangeError("70000")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"game_port": 25570},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "port_out_of_range"
+
+
+def test_update_game_port_taken_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=PortAlreadyTakenError("25570")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"game_port": 25570},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "port_taken"
+
+
+def test_update_game_port_seed_failure_is_503() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=WorkingSetSeedFailedError("server-id")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"game_port": 25570},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["reason"] == "seed_failed"
+
+
+def test_update_game_port_out_of_schema_bound_is_422() -> None:
+    # A wildly invalid port is rejected at parse time (schema-bounded), before the
+    # use case runs.
+    update = _FakeUseCase(result=_server_entity(community_id=uuid.uuid4()))
+    app = _app(member=True, allow=True, update=update)
+    client = next(_client(app))
+    resp = client.patch(
+        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"game_port": 70000},
+    )
+    assert resp.status_code == 422
+    assert update.calls == []
+
+
 def test_delete_while_running_is_409() -> None:
     app = _app(
         member=True,

@@ -118,6 +118,10 @@ class SqlAlchemyServerRepository(ServerRepository):
             .values(
                 name=server.name.value,
                 config=server.config,
+                # Persist the (possibly changed) game port (issue #311); a no-op
+                # write for name/config-only edits that leave it unchanged. The
+                # deployment-wide UNIQUE(game_port) backstops a concurrent racer.
+                game_port=server.game_port,
                 updated_at=server.updated_at,
             )
         )

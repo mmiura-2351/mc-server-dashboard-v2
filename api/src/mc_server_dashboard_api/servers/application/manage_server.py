@@ -30,6 +30,9 @@ from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
+    PortAlreadyTakenError,
+    PortOutOfRangeError,
+    ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -44,6 +47,7 @@ from mc_server_dashboard_api.servers.domain.ports import (
     pick_lowest_free_port,
     validate_explicit_port,
 )
+from mc_server_dashboard_api.servers.domain.server_properties import set_server_port
 from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
     SNAPSHOT_INTERVAL_CONFIG_KEY,
     override_from_config,
@@ -316,7 +320,7 @@ class ListServers:
 
 @dataclass(frozen=True)
 class UpdateServer:
-    """Edit a server's name/config (server:update).
+    """Edit a server's name/config/game port (server:update).
 
     The at-rest gate is split by config semantics (issue #115). A config update
     that touches **only** operationally-safe keys (``_SAFE_CONFIG_KEYS`` — the
@@ -324,17 +328,31 @@ class UpdateServer:
     set) is allowed in any state: the change is a plain config UPDATE the next
     scheduler tick picks up, so it is race-honest without stopping the server. Any
     other config change — touching a working-set key, or adding/removing/modifying
-    an unsafe key — keeps the at-rest requirement, as does a name change.
+    an unsafe key — keeps the at-rest requirement, as does a name change or a game
+    port change.
 
     A per-server snapshot-interval override carried on ``config`` is validated
     against ``min_interval_seconds`` (the thrash floor, CONFIGURATION.md Section
     5.4): a below-floor or non-integer value is rejected (FR-DATA-7), surfaced as
     422 at the edge. Validation runs **before** the state gate, so a below-floor
     override on a running server is a 422, not a 409 (the precedence ruling).
+
+    A **game port** change (issue #311) is at-rest only and validated like create:
+    the new port must be in the configured range (422 out of range) and free
+    deployment-wide (409 taken), the deployment-wide ``UNIQUE(game_port)`` the
+    ultimate backstop (#261). It rewrites ``server-port=<port>`` in the at-rest
+    ``server.properties`` through the file write seam so the DB ``game_port`` and
+    the real bind port stay in sync; a legacy server with no properties file gets
+    one created with just the port line. The range check runs before the state
+    gate (the same 422-before-409 precedence); the file rewrite happens before the
+    DB commit so a storage failure aborts the change rather than leaving the file
+    and row out of step (surfaced as a mapped 503).
     """
 
     uow: UnitOfWork
     clock: Clock
+    file_store: FileStore
+    port_range: PortRange
     min_interval_seconds: int = 0
 
     async def __call__(
@@ -345,6 +363,7 @@ class UpdateServer:
         name: str | None = None,
         config: dict[str, Any] | None = None,
         execution_backend: str | None = None,
+        game_port: int | None = None,
     ) -> Server:
         new_name = None if name is None else ServerName(name)
         if config is not None:
@@ -353,6 +372,10 @@ class UpdateServer:
             # backup schedule (FR-BAK-3) are validated the same way.
             override_from_config(config, floor=self.min_interval_seconds)
             schedule_from_config(config)
+        if game_port is not None and game_port not in self.port_range:
+            # Range is a pure 422 that runs before the state gate (the precedence
+            # ruling), so an out-of-range port on a running server is a 422.
+            raise PortOutOfRangeError(str(game_port))
         async with self.uow:
             server = await self.uow.servers.get_by_id(server_id)
             if server is None or server.community_id != community_id:
@@ -365,12 +388,14 @@ class UpdateServer:
                 raise ExecutionBackendImmutableError(execution_backend)
             # The at-rest gate applies unless this is a safe-keys-only config edit
             # (issue #115): a config update whose changed keys are all in
-            # ``_SAFE_CONFIG_KEYS``, with no name change, may run in any state.
+            # ``_SAFE_CONFIG_KEYS``, with no name change and no port change, may
+            # run in any state.
             changed_keys = (
                 set() if config is None else _changed_config_keys(server.config, config)
             )
             safe_only = (
                 new_name is None
+                and game_port is None
                 and config is not None
                 and changed_keys <= _SAFE_CONFIG_KEYS
             )
@@ -385,10 +410,67 @@ class UpdateServer:
                 server.name = new_name
             if config is not None:
                 server.config = config
+            if game_port is not None and game_port != server.game_port:
+                # Uniqueness check excluding the server's own current port, then
+                # rewrite the at-rest server.properties before committing the row.
+                taken = await self.uow.servers.list_game_ports()
+                if server.game_port is not None:
+                    taken.discard(server.game_port)
+                if game_port in taken:
+                    raise PortAlreadyTakenError(str(game_port))
+                await self._rewrite_server_port(
+                    community_id=community_id,
+                    server_id=server_id,
+                    port=game_port,
+                )
+                server.game_port = game_port
             server.updated_at = self.clock.now()
             await self.uow.servers.update(server)
             await self.uow.commit()
         return server
+
+    async def _rewrite_server_port(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        port: int,
+    ) -> None:
+        """Set ``server-port=<port>`` in the at-rest ``server.properties`` (#311).
+
+        Reads the current file, rewrites its port line (or appends one), and
+        writes it back through the versioned file seam. A legacy server with no
+        properties file is handled by treating the absent file as empty, so a file
+        with just the port line is created. A storage failure is surfaced as
+        :class:`WorkingSetSeedFailedError` (mapped to 503): it is raised before the
+        DB commit, so the row's ``game_port`` is not changed and the file and row
+        do not drift.
+        """
+
+        try:
+            current = await self.file_store.read_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=_PROPERTIES_REL_PATH,
+            )
+        except ServerFileNotFoundError:
+            # Legacy server with no seeded properties (#243): start from empty so
+            # the rewrite produces a file with just the port line.
+            current = b""
+        try:
+            await self.file_store.write_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=_PROPERTIES_REL_PATH,
+                content=set_server_port(current, port),
+            )
+        except Exception as exc:
+            _logger.warning(
+                "rewriting server.properties for a port change failed; "
+                "aborting the port update",
+                extra={"server_id": str(server_id.value)},
+            )
+            raise WorkingSetSeedFailedError(str(server_id.value)) from exc
 
 
 @dataclass(frozen=True)
