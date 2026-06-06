@@ -21,7 +21,11 @@ from mc_server_dashboard_api.identity.adapters.models import (
     RefreshTokenModel,
     UserModel,
 )
-from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
+from mc_server_dashboard_api.identity.domain.entities import (
+    REVOKED_FAMILY,
+    RefreshToken,
+    User,
+)
 from mc_server_dashboard_api.identity.domain.repositories import (
     RefreshTokenRepository,
     UserRepository,
@@ -55,6 +59,7 @@ def _to_refresh_token(row: RefreshTokenModel) -> RefreshToken:
         issued_at=row.issued_at,
         expires_at=row.expires_at,
         revoked_at=row.revoked_at,
+        revoked_reason=row.revoked_reason,
     )
 
 
@@ -188,11 +193,13 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_refresh_token(row) if row is not None else None
 
-    async def revoke(self, token_hash: str, *, revoked_at: dt.datetime) -> None:
+    async def revoke(
+        self, token_hash: str, *, revoked_at: dt.datetime, reason: str
+    ) -> None:
         stmt = (
             update(RefreshTokenModel)
             .where(RefreshTokenModel.token_hash == token_hash)
-            .values(revoked_at=revoked_at)
+            .values(revoked_at=revoked_at, revoked_reason=reason)
         )
         await self._session.execute(stmt)
 
@@ -205,6 +212,6 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
                 RefreshTokenModel.user_id == user_id.value,
                 RefreshTokenModel.revoked_at.is_(None),
             )
-            .values(revoked_at=revoked_at)
+            .values(revoked_at=revoked_at, revoked_reason=REVOKED_FAMILY)
         )
         await self._session.execute(stmt)

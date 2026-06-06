@@ -98,14 +98,23 @@ class RefreshTokenRepository(abc.ABC):
         """Return the token with ``token_hash``, or ``None`` if absent."""
 
     @abc.abstractmethod
-    async def revoke(self, token_hash: str, *, revoked_at: dt.datetime) -> None:
-        """Set ``revoked_at`` on the token with ``token_hash`` (logout / rotation).
+    async def revoke(
+        self, token_hash: str, *, revoked_at: dt.datetime, reason: str
+    ) -> None:
+        """Set ``revoked_at`` / ``revoked_reason`` on the ``token_hash`` row.
 
-        A no-op if no such row exists; callers establish existence first.
+        ``reason`` records *why* (a ``REVOKED_*`` code) so the reuse grace window
+        can grace only ``rotated`` predecessors (issue #369). A no-op if no such
+        row exists; callers establish existence first.
         """
 
     @abc.abstractmethod
     async def revoke_all_for_user(
         self, user_id: UserId, *, revoked_at: dt.datetime
     ) -> None:
-        """Revoke every still-active token of ``user_id`` (reuse-family revoke)."""
+        """Revoke every still-active token of ``user_id`` (family revoke).
+
+        Stamps ``revoked_reason = 'family'`` so none of the revoked tokens is
+        graceable in the reuse window: a family revoke is the theft response (or
+        a password change / deactivate / delete), never a rotation (issue #369).
+        """

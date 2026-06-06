@@ -142,12 +142,11 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
         await refresh(refresh_token=pair.refresh_token)
 
     # That reuse revoked the whole family, including the rotated successor, *at
-    # the current clock time*. Step past the grace window again so re-presenting
-    # the successor is outside its own (just-set) revocation grace and is treated
-    # as theft rather than a concurrent refresh.
-    clock.set(clock.now() + _REUSE_GRACE + dt.timedelta(seconds=1))
-
-    # Reuse triggered a family revoke, so the rotated token is dead too.
+    # the current clock time*. The successor was revoked by a *family* revoke, not
+    # a rotation, so re-presenting it must fail immediately -- no clock step --
+    # even though its revocation is only an instant old: a family-revoked token is
+    # never graced (issue #369). This pins the fix that closes the hole where an
+    # attacker auto-refreshing within the window escaped the family revoke.
     with pytest.raises(InvalidRefreshTokenError):
         await refresh(refresh_token=rotated.refresh_token)
 

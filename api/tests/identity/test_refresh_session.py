@@ -13,7 +13,12 @@ import datetime as dt
 import pytest
 
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
-from mc_server_dashboard_api.identity.domain.entities import RefreshToken
+from mc_server_dashboard_api.identity.domain.entities import (
+    REVOKED_FAMILY,
+    REVOKED_LOGOUT,
+    REVOKED_ROTATED,
+    RefreshToken,
+)
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidRefreshTokenError,
     RefreshTokenReuseError,
@@ -43,7 +48,12 @@ def _seed_token(
     secret: str = "old-secret",
     expires_at: dt.datetime | None = None,
     revoked_at: dt.datetime | None = None,
+    revoked_reason: str | None = None,
 ) -> str:
+    # A revoked seed defaults to ``rotated`` (the graceable cause) unless the test
+    # overrides it; an unrevoked seed has no reason.
+    if revoked_at is not None and revoked_reason is None:
+        revoked_reason = REVOKED_ROTATED
     token_hash = f"hash::{secret}"
     uow.refresh_tokens.seed(
         RefreshToken(
@@ -53,6 +63,7 @@ def _seed_token(
             issued_at=_NOW - dt.timedelta(days=1),
             expires_at=expires_at or (_NOW + _REFRESH_TTL),
             revoked_at=revoked_at,
+            revoked_reason=revoked_reason,
         )
     )
     return token_hash
@@ -67,8 +78,10 @@ async def test_rotation_revokes_old_and_issues_new_pair() -> None:
 
     assert pair.access_token == f"access::{_USER.value}"
     assert pair.refresh_token == "refresh-secret-1"
-    # Old token now revoked; new token persisted and active.
+    # Old token now revoked, stamped as a *rotation* so a re-presentation within
+    # the grace window is graceable (issue #369).
     assert uow.refresh_tokens.by_hash[old_hash].revoked_at == _NOW
+    assert uow.refresh_tokens.by_hash[old_hash].revoked_reason == REVOKED_ROTATED
     new = uow.refresh_tokens.by_hash["hash::refresh-secret-1"]
     assert new.user_id == _USER
     assert new.revoked_at is None
@@ -169,4 +182,53 @@ async def test_reuse_after_rotation_revokes_the_family() -> None:
     assert uow.refresh_tokens.by_hash[reused_hash].revoked_at == _NOW - dt.timedelta(
         minutes=2
     )
+    assert uow.commits == 1
+
+
+async def test_family_revoked_token_within_grace_is_rejected() -> None:
+    # The security fix (issue #369): a token revoked by a *family* revoke (theft
+    # response) must NOT be graced even if the revoke happened a moment ago.
+    # Otherwise an attacker who re-presents a just-family-revoked successor within
+    # the window would get a fresh pair and escape the theft response. Reason is
+    # ``family``, revoked 5 s ago (well inside the 60 s window).
+    uow = FakeUnitOfWork()
+    reused_hash = _seed_token(
+        uow,
+        secret="stolen-successor",
+        revoked_at=_NOW - dt.timedelta(seconds=5),
+        revoked_reason=REVOKED_FAMILY,
+    )
+    clock = FakeClock(_NOW)
+
+    with pytest.raises(RefreshTokenReuseError) as exc_info:
+        await _refresh(uow, clock)(refresh_token="stolen-successor")
+
+    # Stays on the theft path: a DENIED security event attributed to the user, no
+    # fresh pair issued. Re-revoking the already-dead family is a no-op, so the
+    # token keeps its original revocation time.
+    assert exc_info.value.user_id == _USER.value
+    assert isinstance(exc_info.value, InvalidRefreshTokenError)
+    assert "hash::refresh-secret-1" not in uow.refresh_tokens.by_hash
+    assert uow.refresh_tokens.by_hash[reused_hash].revoked_at == _NOW - dt.timedelta(
+        seconds=5
+    )
+    assert uow.commits == 1
+
+
+async def test_logout_revoked_token_within_grace_is_rejected() -> None:
+    # A logout-revoked token is likewise not a rotation, so re-presenting it
+    # within the window does not grace it: logout ended that session deliberately.
+    uow = FakeUnitOfWork()
+    _seed_token(
+        uow,
+        secret="logged-out",
+        revoked_at=_NOW - dt.timedelta(seconds=5),
+        revoked_reason=REVOKED_LOGOUT,
+    )
+    clock = FakeClock(_NOW)
+
+    with pytest.raises(RefreshTokenReuseError):
+        await _refresh(uow, clock)(refresh_token="logged-out")
+
+    assert "hash::refresh-secret-1" not in uow.refresh_tokens.by_hash
     assert uow.commits == 1

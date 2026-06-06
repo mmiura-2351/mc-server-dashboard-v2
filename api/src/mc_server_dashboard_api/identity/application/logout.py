@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.identity.domain.clock import Clock
+from mc_server_dashboard_api.identity.domain.entities import REVOKED_LOGOUT
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 
@@ -28,6 +29,6 @@ class Logout:
         token_hash = self.tokens.hash_refresh_token(refresh_token)
         async with self.uow:
             await self.uow.refresh_tokens.revoke(
-                token_hash, revoked_at=self.clock.now()
+                token_hash, revoked_at=self.clock.now(), reason=REVOKED_LOGOUT
             )
             await self.uow.commit()

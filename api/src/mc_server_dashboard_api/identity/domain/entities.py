@@ -43,12 +43,26 @@ class User:
     active: bool = True
 
 
+# Why a refresh token was revoked (``refresh_token.revoked_reason``). Only a
+# ``ROTATED`` predecessor is eligible for the reuse grace window (issue #369): a
+# re-presented rotated token is a legitimate concurrent refresh / lost-response
+# retry. A ``FAMILY``-revoked token (theft response, password change, deactivate,
+# delete) or a ``LOGOUT``-revoked token must never be graced -- re-presenting it
+# stays on the theft path -- so an attacker cannot escape a family revoke by
+# re-presenting a just-revoked successor within the window.
+REVOKED_ROTATED = "rotated"
+REVOKED_FAMILY = "family"
+REVOKED_LOGOUT = "logout"
+
+
 @dataclass
 class RefreshToken:
     """A persisted refresh-token session (DATABASE.md ``refresh_token``).
 
     The token is stored hashed, never in plaintext. A token is valid iff it is
     unrevoked and unexpired; :meth:`is_active` encodes exactly that rule.
+    ``revoked_reason`` records *why* a revoked token was revoked (one of the
+    ``REVOKED_*`` codes); it is ``None`` exactly when ``revoked_at`` is ``None``.
     """
 
     id: RefreshTokenId
@@ -57,6 +71,7 @@ class RefreshToken:
     issued_at: dt.datetime
     expires_at: dt.datetime
     revoked_at: dt.datetime | None = None
+    revoked_reason: str | None = None
 
     def is_active(self, *, now: dt.datetime) -> bool:
         """Return whether the token is usable at ``now``.
