@@ -51,3 +51,43 @@ export type PlatformPermissionCode =
 
 /** Every permission code the UI may check `can()` against. */
 export type PermissionCode = CommunityPermissionCode | PlatformPermissionCode;
+
+/**
+ * Runtime list of the community-axis codes, the source of truth for editors
+ * that must enumerate codes (e.g. the grant picker filters this by family).
+ * Typed as `CommunityPermissionCode[]`, so dropping or mistyping a code is a
+ * compile error against the union above — no hand-copied list drifts out of
+ * sync.
+ */
+export const COMMUNITY_PERMISSION_CODES: readonly CommunityPermissionCode[] = [
+  "server:create",
+  "server:read",
+  "server:update",
+  "server:delete",
+  "server:start",
+  "server:stop",
+  "server:restart",
+  "server:command",
+  "file:read",
+  "file:edit",
+  "file:history",
+  "file:rollback",
+  "backup:create",
+  "backup:read",
+  "backup:restore",
+  "backup:delete",
+  "backup:schedule",
+  "member:read",
+  "member:add",
+  "member:remove",
+  "role:read",
+  "role:manage",
+  "grant:read",
+  "grant:manage",
+  "group:read",
+  "group:manage",
+  "community:read",
+  "community:update",
+  "community:delete",
+  "audit:read",
+];
