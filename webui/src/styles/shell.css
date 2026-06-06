@@ -1144,6 +1144,36 @@ select.community-switcher {
   color: var(--text-dim);
 }
 
+/* ---------- Community settings — Audit tab (WEBUI_SPEC.md 6.10). ---------- */
+.audit .audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.audit table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.audit table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.audit table.data td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.audit .audit-paging {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 /* Roles tab — permission-matrix editor (issue #462, WEBUI_SPEC.md 6.10 / 2.2). */
 .roles-actions {
   display: flex;
