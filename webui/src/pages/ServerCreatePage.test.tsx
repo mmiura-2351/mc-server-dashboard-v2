@@ -54,6 +54,9 @@ function defaultGet(path: string) {
   if (path.startsWith("/ports/check/")) {
     return Promise.resolve({ port: 25565, in_range: true, available: true });
   }
+  if (path === "/ports/available") {
+    return Promise.resolve({ ports: [25570] });
+  }
   return Promise.reject(new Error(`unexpected GET ${path}`));
 }
 
@@ -137,6 +140,44 @@ describe("Step 1 — type & version", () => {
 });
 
 describe("Step 2 — runtime port check", () => {
+  it("auto-suggests the game port from /ports/available on entering step 2", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
+    await screen.findByDisplayValue("1.21.6");
+    fireEvent.click(screen.getByText(t("serverCreate.next")));
+
+    expect(await screen.findByDisplayValue("25570")).toBeInTheDocument();
+    expect(mockApi.get).toHaveBeenCalledWith("/ports/available");
+  });
+
+  it("does not clobber a user-typed port with the suggestion", async () => {
+    // Block the suggest until after the user types, then let it resolve: the
+    // user's value must win.
+    let resolveAvailable: (v: unknown) => void = () => {};
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === "/ports/available") {
+        return new Promise((resolve) => {
+          resolveAvailable = resolve;
+        });
+      }
+      return defaultGet(path);
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
+    await screen.findByDisplayValue("1.21.6");
+    fireEvent.click(screen.getByText(t("serverCreate.next")));
+
+    const portInput = await screen.findByLabelText(t("serverCreate.portLabel"));
+    fireEvent.change(portInput, { target: { value: "30000" } });
+    resolveAvailable({ ports: [25570] });
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(t("serverCreate.portLabel"))).toHaveValue(
+        30000,
+      ),
+    );
+  });
+
   it("reports an available port on blur", async () => {
     renderPage();
     fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));

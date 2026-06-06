@@ -3,7 +3,6 @@ import { type FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
-import type { components } from "../api/schema";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -15,8 +14,6 @@ import { dashboardPath } from "../routes.ts";
 // (type & version → runtime → config & EULA) plus an "Import ZIP" tab that
 // uploads a prior export. The whole page is gated on `server:create`; the
 // server stays authoritative (any 403/422/409 is surfaced honestly).
-
-type ServerResponse = components["schemas"]["ServerResponse"];
 
 // The catalogued types `GET /versions` can resolve (vanilla/paper/fabric/forge).
 // Spigot is intentionally not catalogued — it is shown as a disabled card with a
@@ -140,6 +137,8 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   const [version, setVersion] = useState("");
   const [backend, setBackend] = useState<Backend>("host_process");
   const [port, setPort] = useState("");
+  // Once the user edits the port, the auto-suggest must never overwrite it.
+  const [portTouched, setPortTouched] = useState(false);
   const [name, setName] = useState("");
   const [props, setProps] = useState<PropOverride[]>([]);
   const [acceptEula, setAcceptEula] = useState(false);
@@ -172,6 +171,31 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 
   const portCheck = usePortCheck(port);
 
+  // On reaching the runtime step, prefill the game port from the next free port
+  // (GET /ports/available, SPEC 6.3) unless the user has already typed one. A
+  // failed suggest leaves the field empty — the user can still type a port.
+  useEffect(() => {
+    if (step !== 2 || portTouched) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await api.get("/ports/available");
+        const next = result.ports?.[0];
+        if (!cancelled && !portTouched && typeof next === "number") {
+          setPort(String(next));
+        }
+      } catch {
+        // Leave the field empty; the user types a port and the on-blur check
+        // still validates it.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [step, portTouched]);
+
   async function onCreate() {
     setSubmitting(true);
     setNameError(undefined);
@@ -199,9 +223,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
           }),
         },
       );
-      navigate(
-        `${dashboardPath(communityId)}/servers/${(server as ServerResponse).id}`,
-      );
+      navigate(`${dashboardPath(communityId)}/servers/${server.id}`);
     } catch (err) {
       if (!handleCreateError(err, showToast, setNameError)) {
         showToast(t("serverCreate.genericError"), "error");
@@ -313,7 +335,10 @@ function NewServerWizard({ communityId }: { communityId: string }) {
               id="port-input"
               type="number"
               value={port}
-              onChange={(e) => setPort(e.target.value)}
+              onChange={(e) => {
+                setPortTouched(true);
+                setPort(e.target.value);
+              }}
               onBlur={() => portCheck.check()}
             />
             <PortFeedback state={portCheck.state} />
@@ -580,9 +605,7 @@ function ImportForm({ communityId }: { communityId: string }) {
         }),
         form,
       );
-      navigate(
-        `${dashboardPath(communityId)}/servers/${(server as ServerResponse).id}`,
-      );
+      navigate(`${dashboardPath(communityId)}/servers/${server.id}`);
     } catch (err) {
       if (!handleImportError(err, showToast, setNameError)) {
         showToast(t("serverCreate.genericError"), "error");
