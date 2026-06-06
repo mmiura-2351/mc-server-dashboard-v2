@@ -17,13 +17,16 @@ staged="$(git diff --cached --name-only --diff-filter=ACMR -z | tr '\0' '\n')"
 
 api_changed=false
 worker_changed=false
+webui_changed=false
 api_staged=()
 worker_staged=()
+webui_staged=()
 while IFS= read -r f; do
 	[ -z "$f" ] && continue
 	case "$f" in
 		api/*) api_changed=true; api_staged+=("$f") ;;
 		worker/*) worker_changed=true; worker_staged+=("$f") ;;
+		webui/*) webui_changed=true; webui_staged+=("$f") ;;
 	esac
 done <<< "$staged"
 
@@ -55,6 +58,13 @@ if $worker_changed; then
 	make worker-format
 	warn_dirty "${worker_staged[@]}"
 	make worker-lint
+fi
+
+if $webui_changed; then
+	echo "pre-commit: webui/ (format + lint)"
+	make webui-format
+	warn_dirty "${webui_staged[@]}"
+	make webui-lint
 fi
 
 if [ "$fail" -ne 0 ]; then

@@ -12,6 +12,7 @@
 .PHONY: all check lint format test docs-check \
 	api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race \
+	webui-lint webui-format webui-test webui-build \
 	proto-lint proto-gen proto-check proto-breaking \
 	bootstrap hooks-install
 
@@ -40,13 +41,13 @@ PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
-check: lint test proto-check docs-check
+check: lint test webui-build proto-check docs-check
 
-lint: api-lint worker-lint proto-lint
+lint: api-lint worker-lint webui-lint proto-lint
 
-format: api-format worker-format
+format: api-format worker-format webui-format
 
-test: api-test worker-test
+test: api-test worker-test webui-test
 
 # docs/ convention gate (docs/README.md Conventions): relative links resolve,
 # no section-mark glyph, no 'v1' versioning term. Pure stdlib python3, no deps.
@@ -100,6 +101,30 @@ worker-test:
 worker-test-race:
 	cd worker && go test -race ./...
 
+# ---------------------------------------------------------------------------
+# webui/ (Node via npm)
+#
+# The webui `check` npm script chains lint + typecheck + test + build, and
+# `build` re-runs `tsc -b` after the standalone typecheck. The granular npm
+# scripts below avoid that double type-check: `webui-lint` covers Biome lint +
+# format-check (biome check) and the standalone typecheck; `webui-build` runs
+# the production build (which type-checks once via `tsc -b`) so type/build
+# breakage is caught by the gate.
+# ---------------------------------------------------------------------------
+
+webui-lint:
+	cd webui && npm run lint
+	cd webui && npm run typecheck
+
+webui-format:
+	cd webui && npm run format
+
+webui-test:
+	cd webui && npm run test
+
+webui-build:
+	cd webui && npm run build
+
 # Install the pinned golangci-lint into worker/.bin if it is missing.
 $(GOLANGCI):
 	cd worker && GOBIN="$$(pwd)/.bin" go install \
@@ -109,6 +134,7 @@ $(GOLANGCI):
 # but syncing up front gives a clear, fast failure if the environment is wrong.
 bootstrap: $(GOLANGCI)
 	cd api && uv sync
+	cd webui && npm ci
 
 # ---------------------------------------------------------------------------
 # Git hooks
