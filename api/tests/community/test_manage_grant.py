@@ -2,10 +2,10 @@
 
 Against the in-memory fakes (TESTING.md Section 4). The authorization gate lives
 in the route dependency, so these verify only the data behaviour: create validates
-the target is a member, the resource type is known, and the permissions are valid
-for that resource type; revoke rejects a grant from another community as not-found
-(cross-community safety, FR-AUTHZ-4). Resource *existence* is not validated —
-servers do not exist yet (shape only, per issue #71).
+the target is a member, the resource type is known, the permissions are valid for
+that resource type, and the resource exists in the community (issue #361); revoke
+rejects a grant from another community as not-found (cross-community safety,
+FR-AUTHZ-4).
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from mc_server_dashboard_api.community.application.manage_grant import (
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Membership
 from mc_server_dashboard_api.community.domain.errors import (
+    GrantResourceNotFoundError,
     GrantTargetNotMemberError,
     InvalidGrantResourceTypeError,
     ResourceGrantNotFoundError,
@@ -60,17 +61,54 @@ async def test_create_grant_persists_a_grant_for_a_member() -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()
     user = UserId(uuid.uuid4())
+    resource_id = uuid.uuid4()
     _seed_member(uow, user, community)
+    uow.add_resource(community, "server", resource_id)
     grant = await CreateGrant(uow=uow, clock=_FakeClock())(
         community_id=community,
         user_id=user,
         resource_type="server",
-        resource_id=uuid.uuid4(),
+        resource_id=resource_id,
         permissions={Permission("server:start"), Permission("server:stop")},
     )
     assert grant.user_id == user
     assert uow.resource_grants.by_id[grant.id].resource_type == "server"
     assert uow.commits == 1
+
+
+async def test_create_grant_rejects_nonexistent_resource() -> None:
+    uow = FakeAuthzUnitOfWork()
+    community = CommunityId.new()
+    user = UserId(uuid.uuid4())
+    _seed_member(uow, user, community)
+    with pytest.raises(GrantResourceNotFoundError):
+        await CreateGrant(uow=uow, clock=_FakeClock())(
+            community_id=community,
+            user_id=user,
+            resource_type="server",
+            resource_id=uuid.uuid4(),
+            permissions={Permission("server:start")},
+        )
+    assert uow.commits == 0
+
+
+async def test_create_grant_rejects_resource_in_another_community() -> None:
+    uow = FakeAuthzUnitOfWork()
+    community = CommunityId.new()
+    other = CommunityId.new()
+    user = UserId(uuid.uuid4())
+    resource_id = uuid.uuid4()
+    _seed_member(uow, user, community)
+    uow.add_resource(other, "server", resource_id)
+    with pytest.raises(GrantResourceNotFoundError):
+        await CreateGrant(uow=uow, clock=_FakeClock())(
+            community_id=community,
+            user_id=user,
+            resource_type="server",
+            resource_id=resource_id,
+            permissions={Permission("server:start")},
+        )
+    assert uow.commits == 0
 
 
 async def test_create_grant_rejects_non_member_target() -> None:

@@ -122,6 +122,18 @@ class GrantTargetNotMemberError(CommunityError):
     """
 
 
+class GrantResourceNotFoundError(CommunityError):
+    """The resource a grant targets does not exist in the community.
+
+    A resource grant attaches permissions to a specific resource (FR-AUTHZ-2).
+    Granting on a ``resource_id`` that names no resource in the community (a
+    fabricated id, or one from another community) raises this rather than
+    persisting a dangling grant that surfaces as a ghost in the grant listing and
+    ``me/permissions`` (issue #361). Reported as not-found at the edge, mirroring
+    the no-existence-signal posture for resources outside the community.
+    """
+
+
 class ResourceGrantNotFoundError(CommunityError):
     """The targeted resource grant does not exist in the community.
 
