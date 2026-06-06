@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+#
+# post-checkout: warn loudly when the PRIMARY checkout is moved off `main`.
+#
+# The primary checkout (repo root, NOT a worktree under .claude/worktrees/) is
+# the live-deployment build source: `docker compose` builds it from compose.yaml
+# + .env at the repo root, so a stray checkout silently changes what the next
+# rebuild deploys (docs/dev/CONTRIBUTING.md Section 3). Agent sessions have moved
+# it off main repeatedly despite prompts (#432), so this is the structural,
+# developer-time signal.
+#
+# post-checkout cannot block, and a checkout can be intentional, so this does NOT
+# auto-restore -- the warning is the guard. It stays silent for worktree
+# checkouts, branch creation in worktrees, and file (path) checkouts, so it does
+# not get in the way of normal agent work.
+#
+# Args (git post-checkout): $1 prev HEAD, $2 new HEAD, $3 flag (1 = branch
+# checkout, 0 = file checkout).
+set -euo pipefail
+
+# Only react to branch checkouts; file/path checkouts ($3 == 0) never move HEAD.
+[ "${3:-0}" = "1" ] || exit 0
+
+toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+# Worktrees live under .claude/worktrees/; their checkouts are expected to leave
+# main and must stay silent. Only the primary checkout is the deploy source.
+case "$toplevel" in
+	*/.claude/worktrees/*) exit 0 ;;
+esac
+
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")"
+[ "$branch" = "main" ] && exit 0
+
+# Loud, unmissable warning (red if stderr is a terminal).
+if [ -t 2 ]; then
+	red=$'\033[1;31m'
+	reset=$'\033[0m'
+else
+	red=""
+	reset=""
+fi
+
+ref="${branch:-detached HEAD ($(git rev-parse --short HEAD 2>/dev/null || echo unknown))}"
+{
+	echo
+	echo "${red}################################################################${reset}"
+	echo "${red}#  WARNING: the PRIMARY checkout is no longer on 'main'.${reset}"
+	echo "${red}#  It is the live-deployment build source (docker compose${reset}"
+	echo "${red}#  builds the repo root); the next rebuild will deploy:${reset}"
+	echo "${red}#    -> ${ref}${reset}"
+	echo "${red}#  Restore it before any rebuild/redeploy:${reset}"
+	echo "${red}#    git checkout main${reset}"
+	echo "${red}################################################################${reset}"
+	echo
+} >&2
