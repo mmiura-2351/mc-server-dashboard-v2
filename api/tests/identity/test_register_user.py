@@ -34,7 +34,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId,
     Username,
 )
-from tests.identity.fakes import FakeLoginAttemptStore
+from tests.identity.fakes import FakeClock, FakeLoginAttemptStore
 
 _VALID_PASSWORD = "Wm7!qz#Lp2vT"
 
@@ -312,6 +312,78 @@ async def test_throttles_registration_over_ip_threshold() -> None:
 
     # Throttled before any user row is created.
     assert users.added == []
+
+
+async def test_throttled_attempt_is_not_recorded() -> None:
+    # Record-after-check: a 429'd attempt must NOT be recorded, so a stream of
+    # rejected attempts cannot keep re-arming the window (issue #370).
+    users = _FakeUserRepository()
+    attempts = FakeLoginAttemptStore()
+    for _ in range(3):
+        await attempts.record_registration(ip="203.0.113.7", at=_NOW)
+    use_case = _register_guarded(
+        users, attempts, registration=_registration_config(ip_threshold=3)
+    )
+
+    with pytest.raises(RegistrationThrottledError):
+        await use_case(
+            username="alice",
+            email="alice@example.com",
+            password=_VALID_PASSWORD,
+            ip="203.0.113.7",
+        )
+
+    # The throttled attempt left the window count untouched: still the 3 seeded.
+    assert await attempts.count_ip_registrations("203.0.113.7", since=_NOW) == 3
+
+
+async def test_throttle_window_expires_and_does_not_rearm() -> None:
+    # Five accepted registrations fill the window (threshold 5); the sixth is
+    # throttled and NOT recorded; once the window slides past the fifth accepted
+    # attempt, registration works again -- the 429 flood never extended the block
+    # (issue #370).
+    users = _FakeUserRepository()
+    attempts = FakeLoginAttemptStore()
+    clock = FakeClock(_NOW)
+    window = dt.timedelta(hours=1)
+    use_case = RegisterUser(
+        uow=_FakeUnitOfWork(users),
+        hasher=_StubHasher(),
+        clock=clock,
+        policy=_policy(),
+        attempts=attempts,
+        registration=_registration_config(ip_threshold=5, ip_window=window),
+    )
+
+    for i in range(5):
+        await use_case(
+            username=f"user{i}",
+            email=f"user{i}@example.com",
+            password=_VALID_PASSWORD,
+            ip="203.0.113.7",
+        )
+    assert await attempts.count_ip_registrations("203.0.113.7", since=_NOW) == 5
+
+    # A flood of rejected attempts while the window is full does not re-arm it.
+    for _ in range(3):
+        with pytest.raises(RegistrationThrottledError):
+            await use_case(
+                username="late",
+                email="late@example.com",
+                password=_VALID_PASSWORD,
+                ip="203.0.113.7",
+            )
+    assert await attempts.count_ip_registrations("203.0.113.7", since=_NOW) == 5
+
+    # Slide the clock just past the window relative to the fifth accepted attempt.
+    clock.set(_NOW + window + dt.timedelta(seconds=1))
+    user = await use_case(
+        username="late",
+        email="late@example.com",
+        password=_VALID_PASSWORD,
+        ip="203.0.113.7",
+    )
+    assert user.username.value == "late"
 
 
 async def test_throttle_is_per_ip_not_global() -> None:
