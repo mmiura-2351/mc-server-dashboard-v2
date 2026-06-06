@@ -5,6 +5,13 @@ mechanism, never build an ad-hoc ``HTTPException(detail=...)`` body. A bare
 ``detail=`` keyword anywhere under ``api/src`` (outside the central module, which
 legitimately sets ``detail`` on the base exception) would reintroduce a second
 error shape, so this test fails on it.
+
+The ``detail=`` keyword is not the only way to reach an ad-hoc body: a positional
+construction such as ``HTTPException(404, "msg")`` sets ``detail`` without naming
+it. So this module also fails on any bare ``HTTPException(`` /
+``StarletteHTTPException(`` *construction* outside the central module — while
+still allowing ``import``, ``except HTTPException`` re-raises, subclassing, and
+type annotations, none of which are followed by a call's opening parenthesis.
 """
 
 from __future__ import annotations
@@ -22,6 +29,12 @@ _ALLOWED = {_SRC / "http_problem.py"}
 # distinguishes it from a ``detail = ...`` local-variable assignment.
 _DETAIL = re.compile(r"\bdetail=(?!=)")
 
+# Matches a bare ``HTTPException(...)`` / ``StarletteHTTPException(...)``
+# construction — the opening parenthesis is what marks a call. ``except
+# HTTPException:``, ``import HTTPException``, ``class Foo(StarletteHTTPException)``,
+# and ``exc: StarletteHTTPException`` are never followed by ``(``, so they pass.
+_CONSTRUCT = re.compile(r"\b(?:Starlette)?HTTPException\(")
+
 
 def test_no_ad_hoc_detail_outside_central_module() -> None:
     offenders: list[str] = []
@@ -36,4 +49,21 @@ def test_no_ad_hoc_detail_outside_central_module() -> None:
     assert not offenders, (
         "Raise errors via mc_server_dashboard_api.http_problem.problem(...), "
         "not an ad-hoc HTTPException(detail=...):\n" + "\n".join(offenders)
+    )
+
+
+def test_no_http_exception_construction_outside_central_module() -> None:
+    offenders: list[str] = []
+    for path in _SRC.rglob("*.py"):
+        if path in _ALLOWED:
+            continue
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if _CONSTRUCT.search(line):
+                offenders.append(f"{path.relative_to(_SRC)}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "Raise errors via mc_server_dashboard_api.http_problem.problem(...), "
+        "not by constructing HTTPException(...) (even positionally):\n"
+        + "\n".join(offenders)
     )
