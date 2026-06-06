@@ -315,6 +315,31 @@ describe("CommunityMembersTab", () => {
     });
   });
 
+  it("surfaces a removal failure with the remove-specific copy", async () => {
+    routeGet({ members: [member({ username: "alice" })], roles: [] });
+    mockApi.delete.mockRejectedValue(new ApiError(500, {}));
+    renderPage();
+    await awaitMembers();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("communitySettings.members.remove"),
+      }),
+    );
+    fireEvent.change(screen.getByPlaceholderText("alice"), {
+      target: { value: "alice" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("communitySettings.members.removeConfirm"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(t("communitySettings.members.removeError")),
+    ).toBeInTheDocument();
+  });
+
   it("hides add/remove/role controls without the matching permissions", async () => {
     // No member:add, member:remove, or role:manage.
     mockCan = (code: string) =>

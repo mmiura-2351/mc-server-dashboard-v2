@@ -1144,6 +1144,32 @@ select.community-switcher {
   color: var(--text-dim);
 }
 
+/* Grants tab — per-server permission grants (issue #463, WEBUI_SPEC.md 6.10). */
+.grants .grants-filter {
+  max-width: 280px;
+  margin-bottom: 12px;
+}
+.grants-codes {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.grants-codes legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.grants-codes .checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
 /* Community settings — Groups tab (issue #464, WEBUI_SPEC.md 6.10). */
 .groups .group-list {
   list-style: none;
