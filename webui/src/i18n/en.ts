@@ -60,4 +60,9 @@ export const en = {
   "demo.confirmServerName": "survival",
   "demo.confirmPrompt": "Type the server name to enable deletion",
   "demo.deleted": "Server deleted.",
+
+  // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
+  "permissions.denied": "You do not have permission to do that.",
+  // Composed with the missing permission code, e.g. "You lack: server:start".
+  "permissions.deniedNamed": "You lack: ",
 } as const;

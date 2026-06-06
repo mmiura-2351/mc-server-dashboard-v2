@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
 import { App } from "./App.tsx";
 import { SessionProvider } from "./auth/SessionProvider.tsx";
+import { ActiveCommunityProvider } from "./permissions/ActiveCommunityProvider.tsx";
 import "./styles/global.css";
 import "./styles/shell.css";
 
@@ -19,7 +20,9 @@ createRoot(rootElement).render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <SessionProvider>
-          <App />
+          <ActiveCommunityProvider>
+            <App />
+          </ActiveCommunityProvider>
         </SessionProvider>
       </BrowserRouter>
     </QueryClientProvider>
