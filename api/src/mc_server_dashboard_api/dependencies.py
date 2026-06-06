@@ -738,6 +738,7 @@ def get_login(request: Request) -> Login:
             delay=brute_force.delay, sleeper=AsyncioSleeper()
         ),
         refresh_ttl=dt.timedelta(seconds=settings.auth.token.refresh_ttl_seconds),
+        registration=build_registration_config(settings.auth.registration),
     )
 
 

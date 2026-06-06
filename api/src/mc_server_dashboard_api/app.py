@@ -36,7 +36,10 @@ from mc_server_dashboard_api.core.adapters.database import (
 from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
 from mc_server_dashboard_api.core.api import health, metrics, readiness
 from mc_server_dashboard_api.dataplane.api import transfers
-from mc_server_dashboard_api.dependencies import build_brute_force_config
+from mc_server_dashboard_api.dependencies import (
+    build_brute_force_config,
+    build_registration_config,
+)
 from mc_server_dashboard_api.fleet.adapters.clock import SystemClock as FleetSystemClock
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
@@ -368,6 +371,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                     brute_force=build_brute_force_config(settings.auth.brute_force),
                     clock=IdentitySystemClock(),
+                    registration=build_registration_config(settings.auth.registration),
                 ),
                 tick_seconds=settings.auth.brute_force.prune_interval_seconds,
             )

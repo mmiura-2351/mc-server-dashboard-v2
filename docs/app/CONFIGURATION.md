@@ -469,6 +469,12 @@ the threshold is lower and the window wider.
 | `auth.registration.ip_threshold` | `5` | Registrations per source IP within the window before further attempts get `429`. Must be at least 1. |
 | `auth.registration.ip_window_seconds` | `3600` | Sliding window for the per-IP registration count. Must be positive. |
 
+The cap counts by source IP, so legitimate registrants sharing one egress IP (a
+NAT or corporate gateway) draw from the same window: the `ip_threshold + 1`-th in a
+window gets `429` even when each is genuine. This matches the login per-IP posture
+(Section 7.2); raise `ip_threshold` or widen who is trusted (Section 7.3) where a
+deployment expects shared egress.
+
 ---
 
 ## 8. Snapshot cadence

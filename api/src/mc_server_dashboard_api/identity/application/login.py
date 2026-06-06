@@ -49,6 +49,7 @@ from mc_server_dashboard_api.identity.domain.login_failure_delay import (
     LoginFailureDelay,
 )
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
+from mc_server_dashboard_api.identity.domain.registration import RegistrationConfig
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.identity.domain.value_objects import Username
@@ -89,6 +90,11 @@ class Login:
     clock: Clock
     failure_delay: LoginFailureDelay
     refresh_ttl: dt.timedelta
+    # Registration per-IP rows (issue #362) share the ``login_attempt`` table; the
+    # on-success prune folds the registration window into its horizon so it does
+    # not evict still-counted registration rows. Optional/default-None so the
+    # historic construction keeps working.
+    registration: RegistrationConfig | None = None
 
     async def __call__(
         self, *, username: str, password: str, ip: str | None = None
@@ -199,5 +205,5 @@ class Login:
         """Drop attempt rows older than the longest sliding window (Section 3)."""
 
         await self.attempts.prune_attempts(
-            older_than=now - prune_horizon(self.brute_force)
+            older_than=now - prune_horizon(self.brute_force, self.registration)
         )

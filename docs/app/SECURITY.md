@@ -121,7 +121,8 @@ Section 7.4, issue #362) reuses the **same** `login_attempt` table and `(ip,
 created_at)` index rather than a parallel mechanism: a registration is recorded as
 a row marked so it is isolated from the login failure counts, and the per-IP cap
 is a `COUNT` over those marked rows within its window. The same prune triggers age
-the rows out.
+the rows out, and they fold the registration window into their horizon (below) so a
+marked row survives its full window rather than being pruned at the login horizon.
 
 Because these are auth-hardening state and not part of the core graph, they are
 specified here rather than in [`DATABASE.md`](DATABASE.md), and they do not
@@ -131,7 +132,10 @@ and the Port seam.
 
 **Cleanup.** `login_attempt` is append-only and grows without bound otherwise, so
 rows older than the longest configured sliding window are pruned through two
-triggers, both using that same bound:
+triggers, both using that same bound. The bound is the longest of the enabled
+counters' windows — the per-username and per-IP login windows (Section 2) and,
+when the open-registration per-IP cap is enabled, its window too — so registration
+rows in the shared table are not pruned before their wider window elapses:
 
 - **On a successful login** — the login use case prunes after clearing the
   lockout. Cheap and bounded, but it only fires for accounts that eventually
