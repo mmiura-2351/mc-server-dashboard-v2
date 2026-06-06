@@ -19,12 +19,16 @@ api/tests/
 worker/
 
 # Node / webui — install from the lockfile inside the image; never copy the host
-# node_modules or a stale local dist.
-webui/node_modules/
-webui/dist/
+# node_modules or a stale local dist. The `**/` form also catches the copies
+# nested under agent worktrees (.claude/, excluded below) and any other subtree.
+**/node_modules/
+**/dist/
 
-# VCS + non-build dirs
-.git/
+# VCS + non-build dirs. `.claude/` holds agent worktrees — each a full repo
+# checkout (nested .git/, node_modules/, ~GB) that must never reach the daemon.
+# `**/.git/` also excludes the gitdir of every nested checkout, not just the root.
+**/.git/
+.claude/
 .github/
 docs/
 scripts/
