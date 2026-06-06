@@ -1,12 +1,9 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App } from "./App.tsx";
-import { SessionProvider } from "./auth/SessionProvider.tsx";
 import { clearAccessToken } from "./auth/tokenStore.ts";
 import { t } from "./i18n/index.ts";
-import { ActiveCommunityProvider } from "./permissions/ActiveCommunityProvider.tsx";
+import { renderApp } from "./test/render.tsx";
 
 // The bootstrap refresh decides signed-in vs signed-out. A 200 token response
 // signs in; a 401 signs out; a pending promise keeps it "bootstrapping".
@@ -55,18 +52,7 @@ function LocationProbe() {
 }
 
 function renderAt(path: string) {
-  render(
-    <QueryClientProvider client={new QueryClient()}>
-      <MemoryRouter initialEntries={[path]}>
-        <SessionProvider>
-          <ActiveCommunityProvider>
-            <LocationProbe />
-            <App />
-          </ActiveCommunityProvider>
-        </SessionProvider>
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  renderApp({ path, extras: <LocationProbe /> });
 }
 
 const fetchMock = vi.fn();

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
-import { ApiError, api } from "../api/client.ts";
+import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { useToast } from "../components/Toast.tsx";
@@ -10,6 +10,7 @@ import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { dashboardPath } from "../routes.ts";
+import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import {
   actionApplies,
   normalizeState,
@@ -153,18 +154,15 @@ function ServerCard({ server, communityId, can }: ServerCardProps) {
       queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
     },
     onError: (error) => {
-      // 403 → the permission glue (toast + capability refetch). 409 → a
-      // lifecycle race: the state changed under us, so give it the "state
-      // changed — refresh" treatment rather than a raw error dump (SPEC 7.4);
-      // the refetch already runs in onSettled. Anything else → a generic toast.
+      // 403 → the permission glue (toast + capability refetch). Everything
+      // else → the shared lifecycle mapping: known non-race 409 reasons get a
+      // specific toast, other 409s the "state changed — refresh" treatment
+      // (SPEC 7.4; the refetch already runs in onSettled), the rest a generic
+      // toast.
       if (onForbidden(error)) {
         return;
       }
-      if (error instanceof ApiError && error.status === 409) {
-        showToast(t("dashboard.stateChanged"), "error");
-        return;
-      }
-      showToast(t("dashboard.actionFailed"), "error");
+      showToast(t(lifecycleErrorMessage(error)), "error");
     },
   });
 

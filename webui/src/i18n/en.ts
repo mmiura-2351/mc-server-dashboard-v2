@@ -172,6 +172,12 @@ export const en = {
   "dashboard.actionFailed": "Could not complete that action. Please try again.",
   // Conflict-flavoured (server_unsettled-style) lifecycle races (SPEC 7.4).
   "dashboard.stateChanged": "State changed — refreshed.",
+  // Sanitized 409 start-failure reasons (issue #225); specific, actionable
+  // causes rather than the generic state-changed toast.
+  "dashboard.lifecycle.portConflict":
+    "Could not start: a port is already in use.",
+  "dashboard.lifecycle.imageMissing":
+    "Could not start: the server image is missing.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Live updates degraded — polling",
 
