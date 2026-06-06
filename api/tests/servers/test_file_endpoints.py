@@ -325,7 +325,7 @@ def test_list_disconnected_worker_is_503() -> None:
         _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
     )
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "worker_unavailable"
+    assert resp.json()["reason"] == "worker_unavailable"
 
 
 def test_list_transitional_server_is_409() -> None:
@@ -339,7 +339,7 @@ def test_list_transitional_server_is_409() -> None:
         _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_unsettled"
+    assert resp.json()["reason"] == "server_unsettled"
 
 
 def test_write_decodes_base64_and_passes_bytes() -> None:
@@ -365,7 +365,7 @@ def test_write_invalid_base64_is_422() -> None:
         json={"content_base64": "not!base64!"},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_base64"
+    assert resp.json()["reason"] == "invalid_base64"
 
 
 # --- error mapping ---------------------------------------------------------
@@ -398,7 +398,7 @@ def test_read_traversal_is_422() -> None:
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "../escape"})
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_path"
+    assert resp.json()["reason"] == "invalid_path"
 
 
 def test_read_transitional_is_409() -> None:
@@ -410,7 +410,7 @@ def test_read_transitional_is_409() -> None:
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_unsettled"
+    assert resp.json()["reason"] == "server_unsettled"
 
 
 def test_read_disconnected_worker_is_503() -> None:
@@ -420,7 +420,7 @@ def test_read_disconnected_worker_is_503() -> None:
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "worker_unavailable"
+    assert resp.json()["reason"] == "worker_unavailable"
 
 
 def test_write_oversized_is_413() -> None:
@@ -434,7 +434,7 @@ def test_write_oversized_is_413() -> None:
         json={"content_base64": ""},
     )
     assert resp.status_code == 413
-    assert resp.json()["detail"]["reason"] == "file_too_large"
+    assert resp.json()["reason"] == "file_too_large"
 
 
 def test_write_traversal_is_422() -> None:
@@ -448,7 +448,7 @@ def test_write_traversal_is_422() -> None:
         json={"content_base64": ""},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_path"
+    assert resp.json()["reason"] == "invalid_path"
 
 
 # --- history / rollback ----------------------------------------------------
@@ -490,7 +490,7 @@ def test_rollback_while_running_is_409() -> None:
         json={"version_id": "v1"},
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_not_stopped"
+    assert resp.json()["reason"] == "server_not_stopped"
 
 
 # --- upload ----------------------------------------------------------------
@@ -547,7 +547,7 @@ def test_upload_traversal_filename_is_422() -> None:
         files={"file": ("f", b"x", "application/octet-stream")},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_path"
+    assert resp.json()["reason"] == "invalid_path"
 
 
 def test_upload_running_is_409() -> None:
@@ -562,7 +562,7 @@ def test_upload_running_is_409() -> None:
         files={"file": ("f", b"x", "application/octet-stream")},
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_unsettled"
+    assert resp.json()["reason"] == "server_unsettled"
 
 
 def test_upload_over_cap_is_413() -> None:
@@ -575,7 +575,7 @@ def test_upload_over_cap_is_413() -> None:
         files={"file": ("f", b"x", "application/octet-stream")},
     )
     assert resp.status_code == 413
-    assert resp.json()["detail"]["reason"] == "file_too_large"
+    assert resp.json()["reason"] == "file_too_large"
 
 
 # --- download --------------------------------------------------------------
@@ -654,7 +654,7 @@ def test_download_running_is_409() -> None:
         _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_unsettled"
+    assert resp.json()["reason"] == "server_unsettled"
 
 
 # --- download Content-Disposition (RFC 6266 / 5987) ------------------------
@@ -712,7 +712,7 @@ def test_upload_over_cap_body_is_413_before_use_case(
         files={"file": ("big.bin", b"x" * 1024, "application/octet-stream")},
     )
     assert resp.status_code == 413
-    assert resp.json()["detail"]["reason"] == "file_too_large"
+    assert resp.json()["reason"] == "file_too_large"
     assert upload.calls == []  # aborted before the use case ran
 
 
@@ -937,7 +937,7 @@ def test_rename_existing_destination_is_409() -> None:
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "destination_exists"
+    assert resp.json()["reason"] == "destination_exists"
 
 
 def test_rename_traversal_is_422() -> None:
@@ -950,7 +950,7 @@ def test_rename_traversal_is_422() -> None:
         json={"from": "a", "to": "../escape"},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_path"
+    assert resp.json()["reason"] == "invalid_path"
 
 
 def test_rename_running_is_409() -> None:
@@ -964,7 +964,7 @@ def test_rename_running_is_409() -> None:
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_unsettled"
+    assert resp.json()["reason"] == "server_unsettled"
 
 
 def test_rename_success_records_audit() -> None:
@@ -1033,7 +1033,7 @@ def test_delete_running_is_409() -> None:
     client = next(_client(app))
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_unsettled"
+    assert resp.json()["reason"] == "server_unsettled"
 
 
 def test_delete_success_records_audit() -> None:
@@ -1091,7 +1091,7 @@ def test_mkdir_running_is_409() -> None:
         _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "p"}
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_unsettled"
+    assert resp.json()["reason"] == "server_unsettled"
 
 
 def test_mkdir_success_records_audit() -> None:
@@ -1154,7 +1154,7 @@ def test_search_running_is_409() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/search"), json={"query": "x"})
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_unsettled"
+    assert resp.json()["reason"] == "server_unsettled"
 
 
 def test_search_success_records_audit() -> None:
@@ -1270,7 +1270,7 @@ def test_write_control_char_path_is_422(tmp_path: object, bad: str) -> None:
         json={"content_base64": ""},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_path"
+    assert resp.json()["reason"] == "invalid_path"
 
 
 def test_write_unicode_path_is_accepted(tmp_path: object) -> None:

@@ -172,7 +172,7 @@ def test_add_member_unknown_user_returns_422() -> None:
         f"/communities/{uuid.uuid4()}/members", json={"user_id": str(uuid.uuid4())}
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "user_not_found"
+    assert resp.json()["reason"] == "user_not_found"
 
 
 def test_add_member_duplicate_returns_409() -> None:
@@ -186,7 +186,7 @@ def test_add_member_duplicate_returns_409() -> None:
         f"/communities/{uuid.uuid4()}/members", json={"user_id": str(uuid.uuid4())}
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "already_member"
+    assert resp.json()["reason"] == "already_member"
 
 
 def test_add_member_invalid_user_id_returns_422() -> None:
@@ -223,7 +223,7 @@ def test_add_member_unknown_username_returns_422_same_shape_as_unknown_id() -> N
         f"/communities/{uuid.uuid4()}/members", json={"username": "ghost"}
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "user_not_found"
+    assert resp.json()["reason"] == "user_not_found"
 
 
 def test_add_member_both_identifiers_returns_422() -> None:
@@ -340,7 +340,7 @@ def test_remove_last_owner_returns_409() -> None:
     client = next(_client(app))
     resp = client.delete(f"/communities/{uuid.uuid4()}/members/{uuid.uuid4()}")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "last_owner"
+    assert resp.json()["reason"] == "last_owner"
 
 
 # --- assign / unassign role -------------------------------------------------
@@ -408,7 +408,7 @@ def test_unassign_last_owner_returns_409() -> None:
         f"/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles/{uuid.uuid4()}"
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "last_owner"
+    assert resp.json()["reason"] == "last_owner"
 
 
 def test_unassign_role_non_member_gets_404() -> None:

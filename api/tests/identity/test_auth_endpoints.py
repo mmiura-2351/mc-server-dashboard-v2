@@ -167,8 +167,14 @@ def test_login_invalid_credentials_returns_401() -> None:
     client = next(_client(login=fake))
     resp = client.post("/auth/login", json={"username": "alice", "password": "bad"})
     assert resp.status_code == 401
+    # RFC 9457 problem+json end-to-end through the real app factory (issue #371):
+    # the content type and type URI are part of the contract, and the 401 still
+    # carries WWW-Authenticate.
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.headers["www-authenticate"] == "Bearer"
     # No detail that distinguishes unknown-user from wrong-password.
-    assert resp.json()["detail"] == "invalid_credentials"
+    assert resp.json()["reason"] == "invalid_credentials"
+    assert resp.json()["type"] == "urn:mcsd:error:invalid_credentials"
 
 
 def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
@@ -206,7 +212,7 @@ def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
     )
 
     assert resp.status_code == 401
-    assert resp.json()["detail"] == "invalid_credentials"
+    assert resp.json()["reason"] == "invalid_credentials"
 
 
 def test_refresh_returns_new_pair() -> None:
@@ -309,4 +315,4 @@ def test_me_with_invalid_token_returns_401() -> None:
     client = next(_client(authenticate=fake))
     resp = client.get("/users/me", headers={"Authorization": "Bearer bad"})
     assert resp.status_code == 401
-    assert resp.json()["detail"] == "invalid_token"
+    assert resp.json()["reason"] == "invalid_token"

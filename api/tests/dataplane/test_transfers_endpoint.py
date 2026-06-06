@@ -359,7 +359,7 @@ def test_snapshot_empty_upload_is_rejected_and_not_published(tmp_path: Path) -> 
             _url(community, server, "snapshot"), content=body, headers=_auth()
         )
     assert resp.status_code == 400
-    assert resp.json()["detail"] == "empty_snapshot"
+    assert resp.json()["reason"] == "empty_snapshot"
 
     async def _read() -> bytes:
         return b"".join(

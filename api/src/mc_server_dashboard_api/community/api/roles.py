@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -54,6 +54,7 @@ from mc_server_dashboard_api.dependencies import (
     get_update_role,
     require_permission,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 
 router = APIRouter()
 
@@ -136,15 +137,9 @@ async def create_role(
             permissions=_parse_permissions(body.permissions),
         )
     except RoleAlreadyExistsError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "name_taken"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "name_taken") from exc
     except InvalidRoleNameError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_name"},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_name") from exc
     except UnknownPermissionError as exc:
         raise _invalid_permission() from exc
     await recorder.record(
@@ -185,20 +180,11 @@ async def update_role(
     except RoleNotFoundError as exc:
         raise _not_found() from exc
     except PresetRoleNotEditableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "preset_role"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "preset_role") from exc
     except RoleAlreadyExistsError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "name_taken"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "name_taken") from exc
     except InvalidRoleNameError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_name"},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_name") from exc
     except UnknownPermissionError as exc:
         raise _invalid_permission() from exc
     await recorder.record(
@@ -232,10 +218,7 @@ async def delete_role(
     except RoleNotFoundError as exc:
         raise _not_found() from exc
     except PresetRoleNotEditableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "preset_role"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "preset_role") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.ROLE_DELETE,
@@ -257,14 +240,11 @@ def _parse_permissions(raw: list[str]) -> set[Permission]:
         raise _invalid_permission() from exc
 
 
-def _invalid_permission() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail={"reason": "invalid_permission"},
-    )
+def _invalid_permission() -> ProblemException:
+    return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_permission")
 
 
-def _not_found() -> HTTPException:
+def _not_found() -> ProblemException:
     # Keep the no-existence-signal posture (Section 6.4): a role outside this
     # community or a community that vanished concurrently both 404.
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")

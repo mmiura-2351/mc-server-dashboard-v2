@@ -191,7 +191,7 @@ def test_create_unknown_kind_is_422() -> None:
         f"/communities/{uuid.uuid4()}/groups", json={"name": "x", "kind": "banned"}
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_group_kind"
+    assert resp.json()["reason"] == "invalid_group_kind"
 
 
 def test_create_duplicate_name_is_409() -> None:
@@ -205,7 +205,7 @@ def test_create_duplicate_name_is_409() -> None:
         f"/communities/{uuid.uuid4()}/groups", json={"name": "admins", "kind": "op"}
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "group_name_exists"
+    assert resp.json()["reason"] == "group_name_exists"
 
 
 def test_read_missing_group_is_404() -> None:

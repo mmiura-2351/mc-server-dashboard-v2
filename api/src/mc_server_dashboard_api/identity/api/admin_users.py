@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from pydantic import BaseModel
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -32,6 +32,7 @@ from mc_server_dashboard_api.dependencies import (
     get_set_user_active,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.application.admin_delete_user import (
     AdminDeleteUser,
 )
@@ -190,11 +191,9 @@ async def _audit(
     )
 
 
-def _conflict(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_409_CONFLICT, detail={"reason": reason}
-    )
+def _conflict(reason: str) -> ProblemException:
+    return problem(status.HTTP_409_CONFLICT, reason)
 
 
-def _not_found() -> HTTPException:
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+def _not_found() -> ProblemException:
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")

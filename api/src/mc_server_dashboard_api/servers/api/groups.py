@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -43,6 +43,7 @@ from mc_server_dashboard_api.dependencies import (
     get_rename_group,
     require_permission,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.application.groups import (
     AddPlayer,
     AttachGroup,
@@ -399,21 +400,15 @@ def _parse_uuid(raw: str) -> uuid.UUID:
         raise _unprocessable("invalid_player") from exc
 
 
-def _unprocessable(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail={"reason": reason},
-    )
+def _unprocessable(reason: str) -> ProblemException:
+    return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, reason)
 
 
-def _conflict(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail={"reason": reason},
-    )
+def _conflict(reason: str) -> ProblemException:
+    return problem(status.HTTP_409_CONFLICT, reason)
 
 
-def _not_found() -> HTTPException:
+def _not_found() -> ProblemException:
     # Keep the no-existence-signal posture (Section 6.4): a group/server outside
     # this community 404s the same as a wholly unknown one.
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")

@@ -140,7 +140,7 @@ def test_deactivate_self_returns_409_self_target() -> None:
     client = next(_client(set_user_active=fake))
     resp = client.post(f"/users/{uuid.uuid4()}/deactivate")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "self_target"
+    assert resp.json()["reason"] == "self_target"
 
 
 def test_deactivate_last_admin_returns_409() -> None:
@@ -148,7 +148,7 @@ def test_deactivate_last_admin_returns_409() -> None:
     client = next(_client(set_user_active=fake))
     resp = client.post(f"/users/{uuid.uuid4()}/deactivate")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "last_platform_admin"
+    assert resp.json()["reason"] == "last_platform_admin"
 
 
 def test_deactivate_unknown_returns_404() -> None:
@@ -195,7 +195,7 @@ def test_delete_self_returns_409_self_target() -> None:
     client = next(_client(admin_delete_user=fake))
     resp = client.delete(f"/users/{uuid.uuid4()}")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "self_target"
+    assert resp.json()["reason"] == "self_target"
 
 
 def test_delete_owner_returns_409() -> None:
@@ -203,7 +203,7 @@ def test_delete_owner_returns_409() -> None:
     client = next(_client(admin_delete_user=fake))
     resp = client.delete(f"/users/{uuid.uuid4()}")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "owns_community"
+    assert resp.json()["reason"] == "owns_community"
 
 
 def test_delete_last_admin_returns_409() -> None:
@@ -211,7 +211,7 @@ def test_delete_last_admin_returns_409() -> None:
     client = next(_client(admin_delete_user=fake))
     resp = client.delete(f"/users/{uuid.uuid4()}")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "last_platform_admin"
+    assert resp.json()["reason"] == "last_platform_admin"
 
 
 def test_delete_requires_platform_admin() -> None:
@@ -246,7 +246,7 @@ def test_revoke_last_admin_returns_409() -> None:
     client = next(_client(set_platform_admin=fake))
     resp = client.put(f"/users/{uuid.uuid4()}/platform-admin", json={"grant": False})
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "last_platform_admin"
+    assert resp.json()["reason"] == "last_platform_admin"
 
 
 def test_set_platform_admin_requires_platform_admin() -> None:

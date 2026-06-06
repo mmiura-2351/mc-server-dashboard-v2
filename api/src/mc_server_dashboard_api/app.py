@@ -52,6 +52,7 @@ from mc_server_dashboard_api.fleet.adapters.real_time_events import (
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
+from mc_server_dashboard_api.http_problem import install_problem_handlers
 from mc_server_dashboard_api.identity.adapters.clock import (
     SystemClock as IdentitySystemClock,
 )
@@ -582,6 +583,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await engine.dispose()
 
     app = FastAPI(title="mc-server-dashboard API", lifespan=lifespan)
+    # Render every error response as RFC 9457 problem+json (issue #371): one body
+    # shape for application errors, framework HTTPExceptions, and 422 validation.
+    install_problem_handlers(app)
     # Middleware is applied outermost-last: adding the metrics middleware after the
     # correlation-id one makes it the outer wrapper, so it times the full request
     # handling and labels by route template (issue #282).

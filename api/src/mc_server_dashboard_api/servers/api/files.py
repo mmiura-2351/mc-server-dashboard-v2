@@ -30,7 +30,6 @@ from urllib.parse import quote
 from fastapi import (
     APIRouter,
     Depends,
-    HTTPException,
     Query,
     Response,
     UploadFile,
@@ -58,6 +57,7 @@ from mc_server_dashboard_api.dependencies import (
     get_write_file,
     require_permission,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.application.files import (
     MAX_UPLOAD_BYTES,
     DeleteFile,
@@ -813,35 +813,23 @@ def _decode(content_base64: str) -> bytes:
         raise _unprocessable("invalid_base64") from exc
 
 
-def _unprocessable(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail={"reason": reason},
-    )
+def _unprocessable(reason: str) -> ProblemException:
+    return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, reason)
 
 
-def _too_large() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-        detail={"reason": "file_too_large"},
-    )
+def _too_large() -> ProblemException:
+    return problem(status.HTTP_413_CONTENT_TOO_LARGE, "file_too_large")
 
 
-def _service_unavailable(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={"reason": reason},
-    )
+def _service_unavailable(reason: str) -> ProblemException:
+    return problem(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
 
 
-def _conflict(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail={"reason": reason},
-    )
+def _conflict(reason: str) -> ProblemException:
+    return problem(status.HTTP_409_CONFLICT, reason)
 
 
-def _not_found() -> HTTPException:
+def _not_found() -> ProblemException:
     # Keep the no-existence-signal posture (Section 6.4): a server/file outside
     # this community 404s the same as a wholly unknown one.
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")

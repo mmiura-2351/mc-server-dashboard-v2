@@ -275,7 +275,7 @@ def test_create_unknown_server_type_is_422() -> None:
     client = next(_client(app))
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_server_type"
+    assert resp.json()["reason"] == "invalid_server_type"
 
 
 def test_create_unknown_backend_is_422() -> None:
@@ -287,7 +287,7 @@ def test_create_unknown_backend_is_422() -> None:
     client = next(_client(app))
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_execution_backend"
+    assert resp.json()["reason"] == "invalid_execution_backend"
 
 
 def test_create_unsupported_type_forge_is_422() -> None:
@@ -299,7 +299,7 @@ def test_create_unsupported_type_forge_is_422() -> None:
     client = next(_client(app))
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "unsupported_server_type"
+    assert resp.json()["reason"] == "unsupported_server_type"
 
 
 def test_create_spigot_is_422_spigot_unsupported() -> None:
@@ -311,7 +311,7 @@ def test_create_spigot_is_422_spigot_unsupported() -> None:
     client = next(_client(app))
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "spigot_unsupported"
+    assert resp.json()["reason"] == "spigot_unsupported"
 
 
 def test_create_unknown_version_is_422() -> None:
@@ -323,7 +323,7 @@ def test_create_unknown_version_is_422() -> None:
     client = next(_client(app))
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "unknown_version"
+    assert resp.json()["reason"] == "unknown_version"
 
 
 def test_create_unsupported_edition_is_422() -> None:
@@ -335,7 +335,7 @@ def test_create_unsupported_edition_is_422() -> None:
     client = next(_client(app))
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "unsupported_edition"
+    assert resp.json()["reason"] == "unsupported_edition"
 
 
 def test_create_catalog_unavailable_is_503() -> None:
@@ -347,7 +347,7 @@ def test_create_catalog_unavailable_is_503() -> None:
     client = next(_client(app))
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "catalog_unavailable"
+    assert resp.json()["reason"] == "catalog_unavailable"
 
 
 def test_create_defaults_game_port_to_none() -> None:
@@ -386,7 +386,7 @@ def test_create_port_out_of_range_is_422() -> None:
         json={**_create_body(), "game_port": 25570},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "port_out_of_range"
+    assert resp.json()["reason"] == "port_out_of_range"
 
 
 def test_create_port_taken_is_409() -> None:
@@ -401,7 +401,7 @@ def test_create_port_taken_is_409() -> None:
         json={**_create_body(), "game_port": 25565},
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "port_taken"
+    assert resp.json()["reason"] == "port_taken"
 
 
 def test_create_port_range_exhausted_is_503() -> None:
@@ -413,7 +413,7 @@ def test_create_port_range_exhausted_is_503() -> None:
     client = next(_client(app))
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "port_range_exhausted"
+    assert resp.json()["reason"] == "port_range_exhausted"
 
 
 def test_create_seed_failed_is_503() -> None:
@@ -425,7 +425,7 @@ def test_create_seed_failed_is_503() -> None:
     client = next(_client(app))
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "seed_failed"
+    assert resp.json()["reason"] == "seed_failed"
 
 
 def test_create_game_port_out_of_schema_bound_is_422() -> None:
@@ -454,7 +454,7 @@ def test_update_backend_immutable_is_409() -> None:
         json={"execution_backend": "container"},
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "execution_backend_immutable"
+    assert resp.json()["reason"] == "execution_backend_immutable"
 
 
 def test_update_while_running_is_409() -> None:
@@ -469,7 +469,7 @@ def test_update_while_running_is_409() -> None:
         json={"name": "creative"},
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_not_stopped"
+    assert resp.json()["reason"] == "server_not_stopped"
 
 
 def test_update_snapshot_interval_below_floor_is_422() -> None:
@@ -484,7 +484,7 @@ def test_update_snapshot_interval_below_floor_is_422() -> None:
         json={"config": {"snapshot_interval_seconds": 60}},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_snapshot_interval"
+    assert resp.json()["reason"] == "invalid_snapshot_interval"
 
 
 def test_update_backup_interval_invalid_is_422() -> None:
@@ -499,7 +499,7 @@ def test_update_backup_interval_invalid_is_422() -> None:
         json={"config": {"backup_interval_hours": 0}},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_backup_schedule"
+    assert resp.json()["reason"] == "invalid_backup_schedule"
 
 
 def test_update_forwards_game_port() -> None:
@@ -539,7 +539,7 @@ def test_update_game_port_out_of_range_is_422() -> None:
         json={"game_port": 25570},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "port_out_of_range"
+    assert resp.json()["reason"] == "port_out_of_range"
 
 
 def test_update_game_port_taken_is_409() -> None:
@@ -554,7 +554,7 @@ def test_update_game_port_taken_is_409() -> None:
         json={"game_port": 25570},
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "port_taken"
+    assert resp.json()["reason"] == "port_taken"
 
 
 def test_update_game_port_seed_failure_is_503() -> None:
@@ -569,7 +569,7 @@ def test_update_game_port_seed_failure_is_503() -> None:
         json={"game_port": 25570},
     )
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "seed_failed"
+    assert resp.json()["reason"] == "seed_failed"
 
 
 def test_update_game_port_out_of_schema_bound_is_422() -> None:
@@ -595,7 +595,7 @@ def test_delete_while_running_is_409() -> None:
     client = next(_client(app))
     resp = client.delete(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_not_stopped"
+    assert resp.json()["reason"] == "server_not_stopped"
 
 
 def test_read_missing_server_is_404() -> None:
@@ -636,7 +636,7 @@ def test_create_over_size_bound_is_422_too_large() -> None:
     body["config"] = {"k": "a" * (MAX_CONFIG_BYTES + 1)}
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "config_too_large"
+    assert resp.json()["reason"] == "config_too_large"
 
 
 def test_create_deeply_nested_config_is_422_invalid_shape() -> None:
@@ -649,7 +649,7 @@ def test_create_deeply_nested_config_is_422_invalid_shape() -> None:
     body["config"] = node
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "config_invalid_shape"
+    assert resp.json()["reason"] == "config_invalid_shape"
 
 
 def test_create_non_object_config_is_422_invalid_shape() -> None:
@@ -659,7 +659,7 @@ def test_create_non_object_config_is_422_invalid_shape() -> None:
     body["config"] = ["not", "an", "object"]
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "config_invalid_shape"
+    assert resp.json()["reason"] == "config_invalid_shape"
 
 
 def test_create_null_config_value_is_422_null_value() -> None:
@@ -669,7 +669,7 @@ def test_create_null_config_value_is_422_null_value() -> None:
     body["config"] = {"motd": None}
     resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "config_null_value"
+    assert resp.json()["reason"] == "config_null_value"
 
 
 def test_update_over_size_bound_is_422_too_large() -> None:
@@ -680,7 +680,7 @@ def test_update_over_size_bound_is_422_too_large() -> None:
         json={"config": {"k": "a" * (MAX_CONFIG_BYTES + 1)}},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "config_too_large"
+    assert resp.json()["reason"] == "config_too_large"
 
 
 def test_update_deeply_nested_config_is_422_invalid_shape() -> None:
@@ -694,7 +694,7 @@ def test_update_deeply_nested_config_is_422_invalid_shape() -> None:
         json={"config": node},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "config_invalid_shape"
+    assert resp.json()["reason"] == "config_invalid_shape"
 
 
 def test_update_non_object_config_is_422_invalid_shape() -> None:
@@ -705,7 +705,7 @@ def test_update_non_object_config_is_422_invalid_shape() -> None:
         json={"config": "not-an-object"},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "config_invalid_shape"
+    assert resp.json()["reason"] == "config_invalid_shape"
 
 
 def test_update_null_config_value_is_422_null_value() -> None:
@@ -716,7 +716,7 @@ def test_update_null_config_value_is_422_null_value() -> None:
         json={"config": {"motd": None}},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "config_null_value"
+    assert resp.json()["reason"] == "config_null_value"
 
 
 def test_update_at_size_bound_is_accepted() -> None:

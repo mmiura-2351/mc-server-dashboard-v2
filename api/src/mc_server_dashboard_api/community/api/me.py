@@ -21,7 +21,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 
 from mc_server_dashboard_api.community.application.read_my_permissions import (
@@ -42,6 +42,7 @@ from mc_server_dashboard_api.dependencies import (
     get_membership_visibility,
     get_read_my_effective_permissions,
 )
+from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.identity.domain.entities import User
 
 router = APIRouter()
@@ -97,6 +98,6 @@ async def read_my_permissions(
         user_id=auth_user.user_id, community_id=community
     ):
         # Layer-1: a non-member gets no existence signal (FR-COMM-3, Section 6.4).
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+        raise problem(status.HTTP_404_NOT_FOUND, "not_found")
     result = await use_case(user=auth_user, community_id=community)
     return EffectivePermissionsResponse.from_result(result)

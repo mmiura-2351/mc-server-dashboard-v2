@@ -20,7 +20,7 @@ import uuid
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -41,6 +41,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
     DeleteBackup,
@@ -545,35 +546,23 @@ async def _record_failure(
     )
 
 
-def _service_unavailable(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={"reason": reason},
-    )
+def _service_unavailable(reason: str) -> ProblemException:
+    return problem(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
 
 
-def _conflict(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail={"reason": reason},
-    )
+def _conflict(reason: str) -> ProblemException:
+    return problem(status.HTTP_409_CONFLICT, reason)
 
 
-def _not_found() -> HTTPException:
+def _not_found() -> ProblemException:
     # Keep the no-existence-signal posture (Section 6.4): a server/backup outside
     # this community 404s the same as a wholly unknown one.
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")
 
 
-def _too_large() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-        detail={"reason": "too_large"},
-    )
+def _too_large() -> ProblemException:
+    return problem(status.HTTP_413_CONTENT_TOO_LARGE, "too_large")
 
 
-def _unprocessable(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail={"reason": reason},
-    )
+def _unprocessable(reason: str) -> ProblemException:
+    return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, reason)

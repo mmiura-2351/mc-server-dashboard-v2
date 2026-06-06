@@ -237,7 +237,7 @@ def test_create_grant_unknown_resource_type_returns_422() -> None:
         f"/communities/{uuid.uuid4()}/grants", json=_create_body(UserId(uuid.uuid4()))
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_resource_type"
+    assert resp.json()["reason"] == "invalid_resource_type"
 
 
 def test_create_grant_invalid_permission_returns_422() -> None:
@@ -251,7 +251,7 @@ def test_create_grant_invalid_permission_returns_422() -> None:
         f"/communities/{uuid.uuid4()}/grants", json=_create_body(UserId(uuid.uuid4()))
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_permission"
+    assert resp.json()["reason"] == "invalid_permission"
 
 
 def test_create_grant_duplicate_returns_409() -> None:
@@ -265,7 +265,7 @@ def test_create_grant_duplicate_returns_409() -> None:
         f"/communities/{uuid.uuid4()}/grants", json=_create_body(UserId(uuid.uuid4()))
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "grant_exists"
+    assert resp.json()["reason"] == "grant_exists"
 
 
 # --- revoke -----------------------------------------------------------------
