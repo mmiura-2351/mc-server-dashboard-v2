@@ -4,22 +4,26 @@ Drives :class:`ReadMyEffectivePermissions` against in-memory fakes (TESTING.md
 Section 4). The use case must read the SAME stores the ``PermissionChecker``
 reads so it cannot drift from enforcement: the community-wide ``permissions`` is
 the union of the member's role permission sets, and ``grants`` mirrors the
-caller's own resource grants. A platform admin gets the full community catalog.
+caller's own resource grants. The platform-admin flag carries no community-scoped
+bypass, so an admin member is computed exactly like any other member.
 """
 
 from __future__ import annotations
 
 import uuid
 
+from mc_server_dashboard_api.community.adapters.permission_checker import (
+    RoleGrantPermissionChecker,
+)
 from mc_server_dashboard_api.community.application.read_my_permissions import (
     EffectivePermissions,
     ReadMyEffectivePermissions,
 )
-from mc_server_dashboard_api.community.domain.permissions import COMMUNITY_PERMISSIONS
 from mc_server_dashboard_api.community.domain.value_objects import (
     AuthUser,
     CommunityId,
     Permission,
+    ResourceRef,
     UserId,
 )
 from tests.community.fakes import FakeAuthzUnitOfWork
@@ -106,14 +110,29 @@ async def test_grant_only_member_sees_grant() -> None:
     assert result.grants[0].permissions == {Permission("server:start")}
 
 
-async def test_platform_admin_gets_full_community_catalog() -> None:
-    user = _member(admin=True)
+async def test_platform_admin_gets_plain_role_union_not_catalog() -> None:
+    # The platform-admin flag carries no community-scoped bypass in enforcement
+    # (RoleGrantPermissionChecker.can only bypasses on the platform-admin axis),
+    # so an admin member is computed exactly like any other member: the union of
+    # their role permission sets, never the full catalog.
+    admin = _member(admin=True)
     community = CommunityId.new()
     uow = FakeAuthzUnitOfWork()
-    # Admin holds no roles; the full catalog comes from the admin bypass.
+    uow.add_role(admin.user_id, community, {Permission("server:read")})
     use_case = ReadMyEffectivePermissions(uow=uow)
 
-    result = await use_case(user=user, community_id=community)
+    result = await use_case(user=admin, community_id=community)
 
-    assert result.permissions == set(COMMUNITY_PERMISSIONS)
+    assert result.permissions == {Permission("server:read")}
     assert result.grants == []
+
+    # No drift from enforcement: a community code the admin does not hold via a
+    # role is reported as absent here AND denied by the checker.
+    assert Permission("server:start") not in result.permissions
+    checker = RoleGrantPermissionChecker(uow)
+    enforced = await checker.can(
+        user=admin,
+        operation=Permission("server:start"),
+        resource=ResourceRef(community_id=community),
+    )
+    assert enforced is False
