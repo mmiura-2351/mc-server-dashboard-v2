@@ -1,13 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { createBrowserRouter, RouterProvider } from "react-router";
+import { BrowserRouter } from "react-router";
 import { App } from "./App.tsx";
 import "./styles/global.css";
+import "./styles/shell.css";
 
 const queryClient = new QueryClient();
-
-const router = createBrowserRouter([{ path: "*", element: <App /> }]);
 
 const rootElement = document.getElementById("root");
 if (rootElement === null) {
@@ -17,7 +16,9 @@ if (rootElement === null) {
 createRoot(rootElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
     </QueryClientProvider>
   </StrictMode>,
 );
