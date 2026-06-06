@@ -149,7 +149,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     queryKey: ["versions"],
     queryFn: () => api.get("/versions"),
   });
-  const catalogTypes = (typesQuery.data?.server_types ?? []) as string[];
+  const catalogTypes = typesQuery.data?.server_types ?? [];
 
   const versionsQuery = useQuery({
     queryKey: ["versions", type],
