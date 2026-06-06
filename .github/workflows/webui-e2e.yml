@@ -19,7 +19,6 @@ on:
     paths:
       - "webui/**"
       - "api/**"
-      - "scripts/run_webui_e2e.sh"
       - "Makefile"
       - ".github/workflows/webui-e2e.yml"
   push:
@@ -27,7 +26,6 @@ on:
     paths:
       - "webui/**"
       - "api/**"
-      - "scripts/run_webui_e2e.sh"
       - "Makefile"
       - ".github/workflows/webui-e2e.yml"
 

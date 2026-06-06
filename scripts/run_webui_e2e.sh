@@ -10,8 +10,9 @@
 #   3. the seeded platform admin (register over HTTP + promote in the DB),
 #   4. `playwright test`, which itself starts the Vite dev server.
 #
-# Everything it starts, it stops on exit. CI uses its own Postgres service and
-# sets MCD_E2E_REUSE_DB=1, so there the only thing this would start is skipped.
+# Everything it starts, it stops on exit. CI does not run this script — it
+# re-implements the same orchestration inline (.github/workflows/webui-e2e.yml);
+# unifying the two is tracked in issue #501.
 
 set -euo pipefail
 

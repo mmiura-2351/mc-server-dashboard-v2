@@ -13,12 +13,12 @@ const API_URL = process.env.MCD_E2E_API_URL ?? "http://127.0.0.1:8000";
 // Admin provisions a community for a freshly-registered owner, and the owner
 // sees it in their UI.
 //
-// Scope note: the admin Communities page is a placeholder on this branch (the
-// admin surface is not wired into App.tsx yet — see the routes in src/App.tsx),
-// so provisioning cannot be driven through the admin UI. We exercise the admin
-// action against the real API (the platform-admin POST /communities) and assert
-// the UI-visible outcome — the owner's shell switcher lists the new community
-// and lands on its dashboard.
+// Scope note: as a first cut we exercise the admin action against the real API
+// (the platform-admin POST /communities) rather than driving the admin
+// Communities page (AdminCommunitiesPage at /admin/communities), and assert the
+// UI-visible outcome — the owner's shell switcher lists the new community and
+// lands on its dashboard. Driving provisioning through the admin UI is tracked
+// in issue #501.
 test("admin provisions a community an owner can see", async ({
   page,
   request,
