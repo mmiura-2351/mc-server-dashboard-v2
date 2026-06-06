@@ -233,6 +233,39 @@ describe("DashboardPage lifecycle actions", () => {
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
   });
 
+  it("surfaces a specific message for a 409 port_conflict start failure", async () => {
+    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "port_conflict" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
+
+    expect(
+      await screen.findByText(t("dashboard.lifecycle.portConflict")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("dashboard.stateChanged")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces a specific message for a 409 image_missing start failure", async () => {
+    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "image_missing" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
+
+    expect(
+      await screen.findByText(t("dashboard.lifecycle.imageMissing")),
+    ).toBeInTheDocument();
+  });
+
   it("falls back to a generic toast for other errors", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
     mockApi.post.mockRejectedValue(
