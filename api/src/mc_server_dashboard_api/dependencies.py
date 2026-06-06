@@ -88,6 +88,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.config import (
     BruteForceSettings,
     PasswordSettings,
+    RegistrationSettings,
     Settings,
     TokenSettings,
 )
@@ -154,6 +155,7 @@ from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import InvalidAccessTokenError
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
+from mc_server_dashboard_api.identity.domain.registration import RegistrationConfig
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
@@ -574,8 +576,25 @@ def _build_password_policy(password: PasswordSettings) -> PasswordPolicy:
     )
 
 
+def build_registration_config(
+    registration: RegistrationSettings,
+) -> RegistrationConfig:
+    """Map the ``auth.registration.*`` knobs to the domain config value."""
+
+    return RegistrationConfig(
+        open=registration.open,
+        ip_limit_enabled=registration.ip_limit_enabled,
+        ip_threshold=registration.ip_threshold,
+        ip_window=dt.timedelta(seconds=registration.ip_window_seconds),
+    )
+
+
 def get_register_user(request: Request) -> RegisterUser:
-    """Assemble the :class:`RegisterUser` use case from config-selected adapters."""
+    """Assemble the :class:`RegisterUser` use case from config-selected adapters.
+
+    Binds the per-IP registration cap to the same ``login_attempt``-backed store
+    FR-AUTH-4's login throttle uses (issue #362).
+    """
 
     settings = get_settings(request)
     session_factory = create_session_factory(get_engine(request))
@@ -584,6 +603,8 @@ def get_register_user(request: Request) -> RegisterUser:
         hasher=_build_password_hasher(settings.auth.password),
         clock=SystemClock(),
         policy=_build_password_policy(settings.auth.password),
+        attempts=SqlAlchemyLoginAttemptStore(session_factory),
+        registration=build_registration_config(settings.auth.registration),
     )
 
 

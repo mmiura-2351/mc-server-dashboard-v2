@@ -244,6 +244,11 @@ class RecordingSleeper(Sleeper):
         self.sleeps.append(duration)
 
 
+# Marker the fake uses to isolate registration rows from login failure counts,
+# mirroring the SqlAlchemy adapter's private discriminator (issue #362).
+_REGISTRATION_REASON = "registration"
+
+
 class FakeLoginAttemptStore(LoginAttemptStore):
     """In-memory :class:`LoginAttemptStore`: a list of attempts + lockout map."""
 
@@ -277,6 +282,18 @@ class FakeLoginAttemptStore(LoginAttemptStore):
             1
             for (_name, attempt_ip, success, _reason, at) in self.attempts
             if attempt_ip == ip and not success and at >= since
+        )
+
+    async def record_registration(self, *, ip: str, at: dt.datetime) -> None:
+        # Registration rows reuse the table with the "registration" marker so they
+        # are isolated from the login failure counts (issue #362).
+        self.attempts.append(("", ip, True, _REGISTRATION_REASON, at))
+
+    async def count_ip_registrations(self, ip: str, *, since: dt.datetime) -> int:
+        return sum(
+            1
+            for (_name, attempt_ip, _success, reason, at) in self.attempts
+            if attempt_ip == ip and reason == _REGISTRATION_REASON and at >= since
         )
 
     async def get_lockout(self, username: str) -> Lockout | None:

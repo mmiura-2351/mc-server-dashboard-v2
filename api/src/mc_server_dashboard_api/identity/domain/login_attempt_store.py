@@ -67,6 +67,20 @@ class LoginAttemptStore(abc.ABC):
         """Count failed attempts from source ``ip`` at or after ``since``."""
 
     @abc.abstractmethod
+    async def record_registration(self, *, ip: str, at: dt.datetime) -> None:
+        """Append one registration attempt from source ``ip`` (issue #362).
+
+        Registration rows reuse the ``login_attempt`` table but are stored as a
+        distinct kind so they never feed the per-username/per-IP *login* failure
+        counts; :meth:`count_ip_registrations` queries them back, and
+        :meth:`prune_attempts` ages them out like any other row.
+        """
+
+    @abc.abstractmethod
+    async def count_ip_registrations(self, ip: str, *, since: dt.datetime) -> int:
+        """Count registration attempts from source ``ip`` at or after ``since``."""
+
+    @abc.abstractmethod
     async def get_lockout(self, username: str) -> Lockout | None:
         """Return the account's lockout record, or ``None`` if it has none."""
 

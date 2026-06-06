@@ -116,6 +116,13 @@ The two tables follow the legacy proven baseline:
   lockout (`locked_until`) and the historic lockout count that drives the
   exponential back-off.
 
+The open-registration per-IP cap ([`CONFIGURATION.md`](CONFIGURATION.md)
+Section 7.4, issue #362) reuses the **same** `login_attempt` table and `(ip,
+created_at)` index rather than a parallel mechanism: a registration is recorded as
+a row marked so it is isolated from the login failure counts, and the per-IP cap
+is a `COUNT` over those marked rows within its window. The same prune triggers age
+the rows out.
+
 Because these are auth-hardening state and not part of the core graph, they are
 specified here rather than in [`DATABASE.md`](DATABASE.md), and they do not
 participate in the core cascade rules. Column-level detail lands with epic #4

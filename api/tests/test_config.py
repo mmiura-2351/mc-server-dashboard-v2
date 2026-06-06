@@ -361,6 +361,41 @@ def test_reconciler_backoff_max_equal_base_is_accepted(
     assert settings.reconciler.backoff_max_seconds == 30
 
 
+def test_registration_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    reg = settings.auth.registration
+    assert reg.open is True
+    assert reg.ip_limit_enabled is True
+    assert reg.ip_threshold == 5
+    assert reg.ip_window_seconds == 3600
+
+
+def test_registration_disabled_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.registration]\nopen = false\nip_threshold = 2\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.auth.registration.open is False
+    assert settings.auth.registration.ip_threshold == 2
+
+
+def test_registration_ip_threshold_must_be_at_least_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[auth.registration]\nip_threshold = 0\n",
+    )
+    with pytest.raises(ValueError):
+        load_settings(config_file=cfg)
+
+
 def test_proxy_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)

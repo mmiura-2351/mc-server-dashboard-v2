@@ -403,6 +403,33 @@ class BruteForceSettings(_Section):
         return self
 
 
+class RegistrationSettings(_Section):
+    """Open-registration abuse controls (CONFIGURATION.md Section 7.4).
+
+    ``POST /users`` is unauthenticated open registration (FR-AUTH-1); these knobs
+    cover the abuse surface that authentication's FR-AUTH-4 hardening does not
+    (issue #362). ``open`` is the master switch: turning it off makes a private,
+    admin-provisioned deployment reject self-registration while the admin surface
+    keeps creating accounts. The per-IP cap reuses FR-AUTH-4's
+    ``login_attempt``-backed sliding window and the same trusted-proxy client-IP
+    resolution. Defaults are consistent with the per-IP *login* throttle
+    (Section 7.2): no proven legacy registration baseline exists, so the login
+    per-IP knobs are the reference (issue #362).
+    """
+
+    open: bool = True
+    ip_limit_enabled: bool = True
+    # Registrations per source IP before throttling. Must be at least 1 (a 0
+    # threshold would block the first attempt), mirroring the brute-force
+    # thresholds.
+    ip_threshold: int = Field(default=5, ge=1)
+    # Sliding window for the per-IP registration count. Must be positive (a 0
+    # window never accumulates, silently disabling the cap). An hour is far wider
+    # than the 5-minute login window: registration is a rare, deliberate action,
+    # so a long window catches a slow flood.
+    ip_window_seconds: int = Field(default=3600, gt=0)
+
+
 class ProxySettings(_Section):
     """Reverse-proxy trust (CONFIGURATION.md Section 7.3).
 
@@ -425,6 +452,7 @@ class AuthSettings(_Section):
     password: PasswordSettings = Field(default_factory=PasswordSettings)
     token: TokenSettings = Field(default_factory=TokenSettings)
     brute_force: BruteForceSettings = Field(default_factory=BruteForceSettings)
+    registration: RegistrationSettings = Field(default_factory=RegistrationSettings)
     proxy: ProxySettings = Field(default_factory=ProxySettings)
 
 

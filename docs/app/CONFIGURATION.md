@@ -450,6 +450,25 @@ trustworthy client IP.
 | `auth.proxy.trust_forwarded_headers` | `false` | Whether to read the forwarded-for header at all. |
 | `auth.proxy.trusted_proxies` | *(empty)* | List of proxy peer IPs/CIDRs; the forwarded header is honored only when the immediate peer is on this list. |
 
+### 7.4 Open-registration abuse controls
+
+`POST /users` is unauthenticated open registration (REQUIREMENTS.md FR-AUTH-1).
+These knobs cover the abuse surface FR-AUTH-4's authentication hardening does not
+(issue #362): a master switch to close self-registration on an admin-provisioned
+deployment, and a per-IP cap that reuses the FR-AUTH-4 per-IP sliding-window
+counter and the Section 7.3 trusted-proxy client-IP resolution (no parallel
+mechanism). The legacy SECURITY.md baseline prescribes no registration limits, so
+the defaults below are taken consistent with the per-IP **login** throttle
+(Section 7.2): registration is a rarer, more deliberate action than a login, so
+the threshold is lower and the window wider.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `auth.registration.open` | `true` | Master switch for self-registration. `false` returns `403` from `POST /users`; admin-created accounts via the admin surface are unaffected. |
+| `auth.registration.ip_limit_enabled` | `true` | Whether the per-IP registration cap is enforced. |
+| `auth.registration.ip_threshold` | `5` | Registrations per source IP within the window before further attempts get `429`. Must be at least 1. |
+| `auth.registration.ip_window_seconds` | `3600` | Sliding window for the per-IP registration count. Must be positive. |
+
 ---
 
 ## 8. Snapshot cadence

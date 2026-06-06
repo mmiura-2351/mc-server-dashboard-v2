@@ -41,6 +41,22 @@ class EmailAlreadyExistsError(IdentityError):
     """Registration hit the email uniqueness constraint."""
 
 
+class RegistrationDisabledError(IdentityError):
+    """Open self-registration is turned off by the operator (issue #362).
+
+    A private deployment provisions accounts through the admin surface only; the
+    edge maps this to 403. Admin-created accounts are unaffected.
+    """
+
+
+class RegistrationThrottledError(IdentityError):
+    """Too many registrations from one source IP within the window (issue #362).
+
+    The per-IP sliding-window cap (reusing FR-AUTH-4's machinery) was crossed; the
+    edge maps this to 429 so a script cannot flood the user table.
+    """
+
+
 class InvalidCredentialsError(IdentityError):
     """Login failed: unknown user or wrong password.
 

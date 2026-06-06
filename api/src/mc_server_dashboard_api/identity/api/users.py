@@ -21,6 +21,7 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
     get_change_password,
+    get_client_ip,
     get_current_user,
     get_delete_account,
     get_register_user,
@@ -39,6 +40,8 @@ from mc_server_dashboard_api.identity.domain.errors import (
     InvalidUsernameError,
     LastPlatformAdminError,
     PasswordPolicyError,
+    RegistrationDisabledError,
+    RegistrationThrottledError,
     UsernameAlreadyExistsError,
     UserNotFoundError,
 )
@@ -79,12 +82,29 @@ class UserResponse(BaseModel):
 async def register_user(
     body: RegisterUserRequest,
     use_case: Annotated[RegisterUser, Depends(get_register_user)],
+    client_ip: Annotated[str | None, Depends(get_client_ip)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> UserResponse:
+    # Open registration is unauthenticated, so it carries two abuse controls
+    # (issue #362): a closed endpoint is 403; a per-IP flood is 429. The per-IP
+    # cap reuses login's trusted-proxy client-IP resolution (``get_client_ip``).
     try:
         user = await use_case(
-            username=body.username, email=body.email, password=body.password
+            username=body.username,
+            email=body.email,
+            password=body.password,
+            ip=client_ip,
         )
+    except RegistrationDisabledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"reason": "registration_disabled"},
+        ) from exc
+    except RegistrationThrottledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"reason": "registration_throttled"},
+        ) from exc
     except (UsernameAlreadyExistsError, EmailAlreadyExistsError) as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
