@@ -231,6 +231,22 @@ describe("ServerDetailPage lifecycle controls", () => {
     );
   });
 
+  it("closes the stop menu on a click outside it", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+    expect(
+      screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(document.body);
+    expect(
+      screen.queryByRole("menuitem", { name: t("serverDetail.stopForce") }),
+    ).not.toBeInTheDocument();
+  });
+
   it("routes a lifecycle 403 through the permission glue", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
     mockApi.post.mockRejectedValue(
@@ -412,9 +428,98 @@ describe("ServerDetailPage settings", () => {
     );
 
     await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
-    expect(JSON.parse(mockApi.patch.mock.calls[0][1].body).config).toEqual({
-      "view-distance": "10",
+    // A freshly typed `10` is parsed with JSON-value semantics → a number.
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    expect(config).toEqual({ "view-distance": 10 });
+    expect(typeof config["view-distance"]).toBe("number");
+  });
+
+  it("preserves an untouched non-string config value when another key is renamed", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        config: { snapshot_interval_seconds: 3600, motd: "hi" },
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    // Rename only the `motd` key; the integer override row is untouched.
+    fireEvent.change(screen.getByDisplayValue("motd"), {
+      target: { value: "greeting" },
     });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    expect(config).toEqual({ snapshot_interval_seconds: 3600, greeting: "hi" });
+    // The untouched integer survives as a number, not "3600".
+    expect(typeof config.snapshot_interval_seconds).toBe("number");
+  });
+
+  it("sends an edited integer config value as a number", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        config: { snapshot_interval_seconds: 3600 },
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(screen.getByDisplayValue("3600"), {
+      target: { value: "7200" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    expect(config).toEqual({ snapshot_interval_seconds: 7200 });
+    expect(typeof config.snapshot_interval_seconds).toBe("number");
+  });
+
+  it("surfaces a 422 invalid_snapshot_interval specifically on save", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    mockApi.patch.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_snapshot_interval" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(
+      await screen.findByText(t("serverDetail.error.invalidSnapshotInterval")),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a 422 invalid_backup_schedule specifically on save", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    mockApi.patch.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_backup_schedule" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(
+      await screen.findByText(t("serverDetail.error.invalidBackupSchedule")),
+    ).toBeInTheDocument();
   });
 
   it("surfaces a 409 server_not_stopped specifically on save", async () => {

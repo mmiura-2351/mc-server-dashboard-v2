@@ -46,6 +46,30 @@ describe("downloadFile", () => {
     expect(clicks[0].download).toBe("survival.zip");
   });
 
+  it("defers revoking the object URL until after the current task", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValue(
+            new Response(new Blob(["zip-bytes"]), { status: 200 }),
+          ),
+      );
+
+      await downloadFile("/communities/c1/servers/s1/export", "survival.zip");
+
+      // The revoke is scheduled, not run synchronously, so the click-initiated
+      // download still has a live object URL.
+      expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+      vi.runAllTimers();
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("throws a typed ApiError carrying the reason on a 409", async () => {
     vi.stubGlobal(
       "fetch",

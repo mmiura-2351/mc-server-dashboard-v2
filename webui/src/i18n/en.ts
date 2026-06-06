@@ -225,6 +225,8 @@ export const en = {
   "serverDetail.settings.configValue": "Value",
   "serverDetail.settings.configAdd": "Add override",
   "serverDetail.settings.configRemove": "Remove",
+  "serverDetail.settings.configHint":
+    "Values are read as JSON: 12 is a number, true a boolean, anything else text.",
   "serverDetail.settings.save": "Save changes",
   "serverDetail.settings.saved": "Settings saved.",
   "serverDetail.settings.atRestHint":
@@ -259,6 +261,10 @@ export const en = {
   "serverDetail.error.portTaken": "That game port is already in use.",
   "serverDetail.error.portOutOfRange":
     "That game port is outside the allowed range.",
+  "serverDetail.error.invalidSnapshotInterval":
+    "snapshot_interval_seconds must be a whole number of seconds at or above the configured floor.",
+  "serverDetail.error.invalidBackupSchedule":
+    "backup_interval_hours must be a whole number of hours of at least 1.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
 
   // Server create wizard (WEBUI_SPEC.md 6.3). One contiguous block to keep

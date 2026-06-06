@@ -46,7 +46,9 @@ export async function downloadFile(
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  // Defer the revoke so the click-initiated download has the object URL when it
+  // actually fetches; revoking synchronously can race the save in some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 /**

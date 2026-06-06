@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
@@ -278,8 +278,23 @@ function StopControl({
   onStop: (force: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  // Close the menu on a click outside it, mirroring the document-listener
+  // pattern in Modal.tsx (listener attached only while open).
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onClick = (event: MouseEvent) => {
+      if (!ref.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, [open]);
   return (
-    <span className="stop-control">
+    <span className="stop-control" ref={ref}>
       <button
         type="button"
         className="btn"
@@ -346,29 +361,58 @@ function Overview({ server }: { server: ServerResponse }) {
 interface ConfigRow {
   key: string;
   value: string;
+  // The original JSON value of this key as loaded from the server, preserved
+  // so an untouched row round-trips its exact type (e.g. an integer
+  // `snapshot_interval_seconds` stays a number) rather than being re-parsed
+  // from its display string. `undefined` for rows the user added.
+  original?: unknown;
+  // Set once the user edits this row's value (or key), so a save reparses the
+  // string instead of reusing `original`.
+  edited?: boolean;
 }
 
 function toRows(config: Record<string, unknown>): ConfigRow[] {
   return Object.entries(config).map(([key, value]) => ({
     key,
-    value: typeof value === "string" ? value : String(value),
+    value: typeof value === "string" ? value : JSON.stringify(value),
+    original: value,
   }));
 }
 
-function fromRows(rows: ConfigRow[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const { key, value } of rows) {
-    const trimmed = key.trim();
-    if (trimmed.length > 0) {
-      out[trimmed] = value;
+// Parse a value-input string with JSON-value semantics: a valid JSON literal
+// (number / boolean / null / object / array) keeps that type, anything else
+// (including a bare word like `hard`) stays a string. So `12` round-trips as a
+// number and the API's non-bool-int cadence keys (snapshot_interval_seconds,
+// backup_interval_hours) are not sent as strings → no spurious 422.
+function parseConfigValue(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function fromRows(rows: ConfigRow[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const row of rows) {
+    const trimmed = row.key.trim();
+    if (trimmed.length === 0) {
+      continue;
     }
+    // An untouched loaded row keeps its original typed value; an edited or new
+    // row is parsed from its display string.
+    out[trimmed] =
+      row.edited !== true && "original" in row
+        ? row.original
+        : parseConfigValue(row.value);
   }
   return out;
 }
 
 // Map a settings save/delete error reason to a specific message; otherwise the
-// generic toast. 422 carries a port reason in `reason` (port_out_of_range), 409
-// the at-rest gate (server_not_stopped) and export the unsettled gate.
+// generic toast. 422 carries a port reason (port_out_of_range) or a cadence
+// reason (invalid_snapshot_interval / invalid_backup_schedule), 409 the at-rest
+// gate (server_not_stopped) and export the unsettled gate.
 function settingsErrorMessage(error: unknown): TranslationKey {
   if (error instanceof ApiError) {
     switch (error.reason) {
@@ -380,6 +424,10 @@ function settingsErrorMessage(error: unknown): TranslationKey {
         return "serverDetail.error.portTaken";
       case "port_out_of_range":
         return "serverDetail.error.portOutOfRange";
+      case "invalid_snapshot_interval":
+        return "serverDetail.error.invalidSnapshotInterval";
+      case "invalid_backup_schedule":
+        return "serverDetail.error.invalidBackupSchedule";
     }
   }
   return "serverDetail.error.generic";
@@ -623,10 +671,15 @@ function ConfigEditor({
   onChange: (rows: ConfigRow[]) => void;
 }) {
   const update = (i: number, patch: Partial<ConfigRow>) =>
-    onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+    onChange(
+      rows.map((r, j) => (j === i ? { ...r, ...patch, edited: true } : r)),
+    );
   return (
     <div className="field config-editor">
       <span>{t("serverDetail.settings.config")}</span>
+      <span className="field-hint">
+        {t("serverDetail.settings.configHint")}
+      </span>
       {rows.map((row, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: positional override rows freely reordered/removed; a key-derived id would collide on duplicate/blank keys.
         <div className="config-row" key={i}>
