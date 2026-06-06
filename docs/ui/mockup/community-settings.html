@@ -144,7 +144,7 @@
     <div class="field">
       <label>Username</label>
       <input type="text" placeholder="exact username of an existing account">
-      <div class="hint">The account must already exist — there are no invitations. (Open question Q4: lookup UX.)</div>
+      <div class="hint">The account must already exist — there are no invitations. Sent as POST …/members {username} (#355).</div>
     </div>
     <div class="field">
       <label>Initial role</label>
@@ -152,7 +152,7 @@
     </div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('add-member-modal')">Cancel</button>
-      <button class="btn primary" onclick="mockToast('POST …/members + role assign'); closeModal('add-member-modal')">Add member</button>
+      <button class="btn primary" onclick="mockToast('POST …/members {username} + role assign'); closeModal('add-member-modal')">Add member</button>
     </div>
   </div>
 </div>

@@ -60,7 +60,8 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 | GET | `/communities` | Communities the caller belongs to (admin: all). |
 | POST | `/communities` `[A]` | Provision a community + initial owner. |
 | GET / PATCH / DELETE | `/communities/{cid}` | Read / rename / delete. |
-| GET / POST | `/communities/{cid}/members` | List (with `username`, `role_names`) / add an existing user. |
+| GET / POST | `/communities/{cid}/members` | List (with `username`, `role_names`) / add an existing user by exactly one of `user_id` or exact `username` (#355). |
+| GET | `/communities/{cid}/me/permissions` | Caller's own effective set: community-wide codes + per-resource grants (#354). Membership-gated only (Layer-1). |
 | DELETE | `/communities/{cid}/members/{uid}` | Remove member (revokes roles & grants). |
 | POST / DELETE | `/communities/{cid}/members/{uid}/roles[/{rid}]` | Assign / unassign a role. |
 | GET / POST | `/communities/{cid}/roles` | List / create custom role (name + permission codes). |
@@ -154,12 +155,11 @@ transfer endpoints — not part of the UI surface.
 | Platform administrator | All communities + platform area | + Admin area: Users, Communities provisioning, Workers, Version catalog/JAR pool, Global audit & backup stats |
 | Unauthenticated | Login / Register only | — |
 
-The API exposes no "my permissions" endpoint. The UI therefore derives
-capabilities client-side from `GET /users/me` (admin flag) + the member's
-roles/grants where readable, **and treats any 403/404 as the authority**
-(FR-AUTHZ-6: server-side enforcement is the truth; client scoping is
-convenience). Where the member cannot read roles, the UI shows actions and
-handles rejection gracefully (see 7.3 and Open question Q3).
+The UI derives capabilities from `GET /users/me` (admin flag) +
+`GET /communities/{cid}/me/permissions` (the caller's effective set, #354),
+**and still treats any 403/404 as the authority** (FR-AUTHZ-6: server-side
+enforcement is the truth; client scoping is convenience). The effective set is
+fetched on community switch and cached for the session (see 7.3).
 
 ## 4. UI feature list
 
@@ -318,9 +318,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Danger zone: delete server (typed confirm), export ZIP.
 
 ### 6.10 Community settings
-- **Members**: table (username, roles as chips); add-member dialog (by
-  username — see Q4 on user lookup); role chips editable inline; remove with
-  confirm (explains grant/role revocation).
+- **Members**: table (username, roles as chips); add-member dialog by exact
+  username (`POST …/members {username}`, #355 — no-match is a 404-style
+  rejection); role chips editable inline; remove with confirm (explains
+  grant/role revocation).
 - **Roles**: list (preset Owner locked); editor = name + permission-matrix
   grouped by family (server/file/backup/member/role/grant/group/community/
   audit) with select-all per family.
@@ -362,11 +363,13 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   shows degraded mode; REST polling fallback for status only.
 
 ### 7.3 Permission-driven rendering
-- Capabilities derived client-side where possible; every denied action is
-  still handled at response time (403 toast "you lack server:start"; 404
-  treated as nonexistence per the no-existence-signal posture).
-- UI never invents authority: buttons may be optimistically shown when
-  capability is unknown, but failures degrade politely.
+- Capabilities come from `GET /communities/{cid}/me/permissions` (#354):
+  fetched on community switch, cached for the session, re-fetched on a 403
+  (the set may have changed since cache). Controls render from
+  `permissions ∪ (matching resource grant)`.
+- Every denied action is still handled at response time (403 toast "you lack
+  server:start"; 404 treated as nonexistence per the no-existence-signal
+  posture). UI never invents authority; failures degrade politely.
 
 ### 7.4 Errors & confirmations
 - API error envelope surfaced via toast + inline field errors (422 detail).
@@ -400,13 +403,11 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - **Q2. Refresh-token storage**: `localStorage` (simple, XSS-exposed) vs
   cookie + API change (httpOnly; needs CSRF posture). Default proposal:
   localStorage for the first cut, revisit before production exposure.
-- **Q3. "My permissions" endpoint**: a tiny
-  `GET /communities/{cid}/me/permissions` would remove all client-side
-  permission guessing (7.3). Confirmed absent from the API surface — filed as
-  issue #354.
-- **Q4. Member-add lookup**: `POST …/members` needs a user id; there is no
-  non-admin user search endpoint (`GET /users` is platform-admin-only).
-  Confirmed gap — filed as issue #355. Mockup assumes exact-username entry.
+- ~~**Q3. "My permissions" endpoint**~~ — **resolved**: filed as #354,
+  implemented as `GET /communities/{cid}/me/permissions` (#357); see 7.3.
+- ~~**Q4. Member-add lookup**~~ — **resolved**: filed as #355, implemented as
+  `POST …/members` accepting exactly one of `user_id` / exact `username`
+  (#359); see 6.10.
 - **Q5. Where does the real UI live**: separate repo per REQUIREMENTS.md, or
   a `webui/` package in this monorepo (mirroring the api/worker/proto
   layout)?
