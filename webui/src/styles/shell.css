@@ -1340,3 +1340,10 @@ select.community-switcher {
 .admin-overview table.data td.num {
   font-variant-numeric: tabular-nums;
 }
+
+/* Admin global Audit page (issue #479, WEBUI_SPEC.md 6.12). Reuses the .audit
+   filter/table/paging styles; the community filter <select> matches the text
+   inputs alongside it. */
+.admin-audit .audit-filters select {
+  min-width: 160px;
+}
