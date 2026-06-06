@@ -1,7 +1,13 @@
 import { useEffect } from "react";
 import { NavLink, Outlet, useNavigate, useParams } from "react-router";
 import { useCurrentUser } from "../auth/useCurrentUser.ts";
-import { type TranslationKey, t } from "../i18n/index.ts";
+import {
+  getLanguage,
+  type Language,
+  setLanguage,
+  type TranslationKey,
+  t,
+} from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { dashboardPath } from "../routes.ts";
 
@@ -111,6 +117,22 @@ function useUrlCommunitySync() {
   }, [cid, communityId, communities, setCommunityId]);
 }
 
+// Top-bar language selector. Switching persists the choice and reloads so the
+// module-level `t()` re-evaluates against the new dictionary (see i18n/index).
+function LanguageSwitcher() {
+  return (
+    <select
+      className="community-switcher lang-switcher"
+      aria-label={t("shell.language")}
+      value={getLanguage()}
+      onChange={(e) => setLanguage(e.target.value as Language)}
+    >
+      <option value="en">{t("shell.language.en")}</option>
+      <option value="ja">{t("shell.language.ja")}</option>
+    </select>
+  );
+}
+
 export function AppShell() {
   const { communityId } = useActiveCommunity();
   // The admin nav group renders only for platform admins (#474). Same shared
@@ -148,6 +170,7 @@ export function AppShell() {
         <header className="topbar">
           <CommunitySwitcher />
           <div className="spacer" />
+          <LanguageSwitcher />
           <NavLink className="user-menu" to="/account">
             <span className="avatar" aria-hidden="true">
               A
