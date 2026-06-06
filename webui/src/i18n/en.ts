@@ -565,6 +565,44 @@ export const en = {
   "communitySettings.members.roleError":
     "Could not update roles. Please try again.",
 
+  // Grants tab (WEBUI_SPEC.md 6.10): per-server permission grants.
+  "communitySettings.grants.heading": "Grants",
+  "communitySettings.grants.loading": "Loading grants…",
+  "communitySettings.grants.loadError": "Could not load grants.",
+  "communitySettings.grants.empty": "No grants yet.",
+  "communitySettings.grants.create": "Grant access…",
+  "communitySettings.grants.colMember": "Member",
+  "communitySettings.grants.colServer": "Server",
+  "communitySettings.grants.colPermissions": "Permissions",
+  "communitySettings.grants.filterLabel": "Filter by member",
+  "communitySettings.grants.filterAll": "All members",
+  "communitySettings.grants.unknownUser": "(unknown user)",
+  "communitySettings.grants.unknownServer": "(unknown server)",
+  "communitySettings.grants.revoke": "Revoke",
+  "communitySettings.grants.revoked": "Grant revoked.",
+  "communitySettings.grants.revokeError":
+    "Could not revoke the grant. Please try again.",
+  "communitySettings.grants.revokeDialogTitle": "Revoke grant",
+  "communitySettings.grants.revokeDialogBody":
+    "This removes the member's per-server permissions on this server. This cannot be undone.",
+  "communitySettings.grants.revokeConfirm": "Revoke grant",
+  "communitySettings.grants.revokePrompt": "Type REVOKE to confirm",
+  "communitySettings.grants.revokeConfirmPhrase": "REVOKE",
+  "communitySettings.grants.createDialogTitle": "Grant per-server access",
+  "communitySettings.grants.createDialogBody":
+    "Grant a member extra permissions on one server, beyond their roles.",
+  "communitySettings.grants.memberLabel": "Member",
+  "communitySettings.grants.memberPlaceholder": "Select a member",
+  "communitySettings.grants.serverLabel": "Server",
+  "communitySettings.grants.serverPlaceholder": "Select a server",
+  "communitySettings.grants.permissionsLabel": "Permissions",
+  "communitySettings.grants.createSubmit": "Create grant",
+  "communitySettings.grants.created": "Grant created.",
+  "communitySettings.grants.createIncomplete":
+    "Pick a member, a server, and at least one permission.",
+  "communitySettings.grants.createError":
+    "Could not create the grant. Please try again.",
+
   // General tab.
   "communitySettings.general.heading": "General",
   "communitySettings.general.nameLabel": "Community name",
