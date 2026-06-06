@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
 
-function renderDialog(onConfirm = vi.fn()) {
+function renderDialog(onConfirm = vi.fn(), onClose = vi.fn()) {
   render(
     <ConfirmDialog
       open={true}
@@ -12,7 +12,7 @@ function renderDialog(onConfirm = vi.fn()) {
       confirmLabel="Delete"
       promptLabel="Type the server name"
       onConfirm={onConfirm}
-      onClose={() => {}}
+      onClose={onClose}
     />,
   );
   return {
@@ -49,5 +49,14 @@ describe("ConfirmDialog", () => {
     fireEvent.click(confirmButton);
 
     expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onClose when Escape is pressed without tabbing into the dialog", () => {
+    const onClose = vi.fn();
+    renderDialog(vi.fn(), onClose);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

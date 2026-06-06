@@ -34,6 +34,17 @@ describe("Modal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("calls onClose when Escape is pressed without tabbing into the dialog", () => {
+    const onClose = vi.fn();
+    render(
+      <Modal open={true} title="Title" onClose={onClose}>
+        <p>Body</p>
+      </Modal>,
+    );
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("does not call onClose when the dialog body is clicked", () => {
     const onClose = vi.fn();
     render(

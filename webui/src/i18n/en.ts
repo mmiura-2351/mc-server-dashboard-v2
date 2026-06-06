@@ -43,7 +43,6 @@ export const en = {
 
   // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "Cancel",
-  "common.confirm": "Confirm",
   "common.close": "Close",
 
   // Primitives demonstration (placeholder dashboard)

@@ -75,6 +75,7 @@ export function AppShell() {
       </aside>
       <div className="main">
         <header className="topbar">
+          {/* Intentionally inert Phase-1 placeholder; real switching lands later. */}
           <div className="community-switcher">
             {t("nav.community")} <span className="chev">▼</span>
           </div>

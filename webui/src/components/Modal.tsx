@@ -1,9 +1,10 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { t } from "../i18n/index.ts";
 
 // Self-built modal primitive (WEBUI_SPEC.md Section 7.4 / 7.6 — no UI kit).
-// The backdrop is a sibling button behind the dialog so clicking it (or pressing
-// Escape) closes the modal, while clicks inside the dialog never reach it.
+// The backdrop is a sibling button behind the dialog so clicking it closes the
+// modal, while clicks inside the dialog never reach it. Escape is handled via a
+// document-level listener while open, and focus moves into the dialog on mount.
 
 interface ModalProps {
   open: boolean;
@@ -14,6 +15,24 @@ interface ModalProps {
 }
 
 export function Modal({ open, title, onClose, children, footer }: ModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // While open, listen for Escape on the document so it closes regardless of
+  // focus, and move focus into the dialog on mount for accessibility.
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    dialogRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
+
   if (!open) {
     return null;
   }
@@ -28,15 +47,12 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         onClick={onClose}
       />
       <div
+        ref={dialogRef}
         className="card modal"
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            onClose();
-          }
-        }}
+        tabIndex={-1}
       >
         <h2>{title}</h2>
         <div className="modal-body">{children}</div>
