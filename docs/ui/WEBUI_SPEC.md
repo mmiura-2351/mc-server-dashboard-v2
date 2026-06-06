@@ -323,9 +323,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.10 Community settings
 - **Members**: table (username, roles as chips); add-member dialog by exact
-  username (`POST …/members {username}`, #355 — no-match is a 404-style
-  rejection); role chips editable inline; remove with confirm (explains
-  grant/role revocation).
+  username (`POST …/members {username}`, #355 — no-match is a 422
+  `user_not_found` rejection, same as an unknown `user_id`, already-member is
+  409 `already_member`); role chips editable inline; remove with confirm
+  (explains grant/role revocation).
 - **Roles**: list (preset Owner locked); editor = name + permission-matrix
   grouped by family (server/file/backup/member/role/grant/group/community/
   audit) with select-all per family.
@@ -415,4 +416,4 @@ All of the first draft's open questions are now decided:
 | Q2 | Refresh-token storage | **httpOnly cookie from the start** (no localStorage interim). Needs API-side cookie transport — issue #363. | 7.1 |
 | Q3 | "My permissions" endpoint | **Implemented**: filed as #354, landed as `GET /communities/{cid}/me/permissions` (#357). | 3, 7.3 |
 | Q4 | Member-add lookup | **Implemented**: filed as #355, landed as `POST …/members` accepting exactly one of `user_id` / exact `username` (#359). | 6.10 |
-| Q5 | Where the UI lives | **`webui/` in this monorepo**, alongside `api/` / `worker/` / `proto/` (REQUIREMENTS.md Section 1.2 updated). Mockup stays under `docs/ui/mockup/` as a design reference. | 1 |
+| Q5 | Where the UI lives | **`webui/` in this monorepo**, alongside `api/` / `worker/` / `proto/` (REQUIREMENTS.md Section 1.2 updated). Mockup stays under `docs/ui/mockup/` as a design reference. | 1, header |
