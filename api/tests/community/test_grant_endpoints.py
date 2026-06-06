@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.community.domain.entities import ResourceGrant
 from mc_server_dashboard_api.community.domain.errors import (
+    GrantResourceNotFoundError,
     GrantTargetNotMemberError,
     InvalidGrantResourceTypeError,
     ResourceGrantAlreadyExistsError,
@@ -204,6 +205,19 @@ def test_create_grant_non_member_target_gets_404() -> None:
         member=True,
         allow=True,
         create_uc=_FakeUseCase(error=GrantTargetNotMemberError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        f"/communities/{uuid.uuid4()}/grants", json=_create_body(UserId(uuid.uuid4()))
+    )
+    assert resp.status_code == 404
+
+
+def test_create_grant_nonexistent_resource_gets_404() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create_uc=_FakeUseCase(error=GrantResourceNotFoundError("x")),
     )
     client = next(_client(app))
     resp = client.post(

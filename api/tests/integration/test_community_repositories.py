@@ -82,6 +82,26 @@ async def _insert_user(engine: AsyncEngine, user_id: uuid.UUID, username: str) -
         )
 
 
+async def _insert_server(
+    engine: AsyncEngine, server_id: uuid.UUID, community_id: CommunityId
+) -> None:
+    """Insert a minimal ``server`` row directly (the community context does not own
+    server creation), so the resource-existence checker has a real resource."""
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "execution_backend, config, desired_state, observed_state, "
+                "created_at, updated_at) VALUES "
+                "(:id, :cid, :name, 'java', '1.21', 'vanilla', 'docker', "
+                "'{}'::jsonb, 'stopped', 'stopped', now(), now())"
+            ),
+            {"id": server_id, "cid": community_id.value, "name": f"srv-{server_id}"},
+        )
+
+
 def _community(name: str = "guild") -> Community:
     return Community(
         id=CommunityId.new(),
@@ -651,3 +671,37 @@ async def test_delete_grant_by_id_removes_only_that_grant(
     async with SqlAlchemyUnitOfWork(factory) as uow:
         assert await uow.resource_grants.get_by_id(target.id) is None
         assert await uow.resource_grants.get_by_id(survivor.id) is not None
+
+
+async def test_resource_checker_finds_a_server_in_the_community(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    community = _community()
+    server_id = uuid.uuid4()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.commit()
+    await _insert_server(engine, server_id, community.id)
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.resources.exists(community.id, "server", server_id) is True
+
+
+async def test_resource_checker_rejects_unknown_and_cross_community(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    community = _community("guild")
+    other = _community("other")
+    server_id = uuid.uuid4()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.communities.add(other)
+        await uow.commit()
+    await _insert_server(engine, server_id, other.id)
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        # Absent id, and a server that exists only in another community, both miss.
+        assert await uow.resources.exists(community.id, "server", uuid.uuid4()) is False
+        assert await uow.resources.exists(community.id, "server", server_id) is False

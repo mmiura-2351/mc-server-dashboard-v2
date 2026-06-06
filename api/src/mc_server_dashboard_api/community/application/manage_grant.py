@@ -9,10 +9,11 @@ assume an authorized member and only do the data work.
 - :class:`CreateGrant` grants a permission set to a member on a specific resource
   (FR-AUTHZ-2). It validates that the target user is a *member* of the community,
   that ``resource_type`` is a known M1 type (``server``; the CHECK-constrained enum,
-  DATABASE.md Section 6), and that every permission is valid for that resource type
-  (server / file / backup families). Resource *existence* is not validated: servers
-  do not exist yet, so this validates shape only (per issue #71). A duplicate
-  ``(user, resource_type, resource_id)`` surfaces as
+  DATABASE.md Section 6), that every permission is valid for that resource type
+  (server / file / backup families), and that the resource *exists* in the
+  community — a fabricated ``resource_id`` is rejected with
+  :class:`GrantResourceNotFoundError` rather than persisted as a ghost grant
+  (issue #361). A duplicate ``(user, resource_type, resource_id)`` surfaces as
   :class:`ResourceGrantAlreadyExistsError` (the unique constraint, translated by
   the UnitOfWork).
 - :class:`RevokeGrant` deletes a grant by id, scoped to this community so a caller
@@ -28,6 +29,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import ResourceGrant
 from mc_server_dashboard_api.community.domain.errors import (
+    GrantResourceNotFoundError,
     GrantTargetNotMemberError,
     InvalidGrantResourceTypeError,
     ResourceGrantNotFoundError,
@@ -100,6 +102,10 @@ class CreateGrant:
             )
             if membership is None:
                 raise GrantTargetNotMemberError(str(user_id.value))
+            if not await self.uow.resources.exists(
+                community_id, resource_type, resource_id
+            ):
+                raise GrantResourceNotFoundError(str(resource_id))
             await self.uow.resource_grants.add(grant)
             await self.uow.commit()
         return grant

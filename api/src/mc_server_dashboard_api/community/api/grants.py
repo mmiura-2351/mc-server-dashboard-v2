@@ -31,6 +31,7 @@ from mc_server_dashboard_api.community.application.manage_grant import (
 )
 from mc_server_dashboard_api.community.domain.entities import ResourceGrant
 from mc_server_dashboard_api.community.domain.errors import (
+    GrantResourceNotFoundError,
     GrantTargetNotMemberError,
     InvalidGrantResourceTypeError,
     InvalidPermissionError,
@@ -123,6 +124,10 @@ async def create_grant(
     except GrantTargetNotMemberError as exc:
         # No existence signal about who is or is not a member (Section 6.4): a
         # non-member target is reported as a 404, not a distinct 422.
+        raise _not_found() from exc
+    except GrantResourceNotFoundError as exc:
+        # A grant on a resource that does not exist in the community is rejected as
+        # not-found (issue #361), the same no-existence-signal posture.
         raise _not_found() from exc
     except InvalidGrantResourceTypeError as exc:
         raise HTTPException(
