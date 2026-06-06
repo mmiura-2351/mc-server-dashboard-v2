@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client.ts";
 import type { components } from "../api/schema";
+import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
-import { humanizeBytes } from "./ServerBackupsTab.tsx";
 
 // Platform admin Overview (WEBUI_SPEC.md 6.12): worker count by status, total
 // servers running, global backup stats, jar-pool stats. All four read from the
@@ -13,7 +13,8 @@ type WorkerResponse = components["schemas"]["WorkerResponse"];
 
 // The pill class mirrors the workers mockup: online → running (green),
 // draining → starting (amber), anything else (offline) → crashed (red).
-function statusPill(status: string): string {
+// Shared with the Workers fleet page (#477) so the mapping lives in one place.
+export function statusPill(status: string): string {
   if (status === "online") {
     return "running";
   }
@@ -25,7 +26,8 @@ function statusPill(status: string): string {
 
 // Compact heartbeat age, e.g. "2s ago" / "4m ago" / "3h ago". A negative or
 // missing delta falls back to seconds so the cell always renders.
-function heartbeatAge(iso: string): string {
+// Shared with the Workers fleet page (#477).
+export function heartbeatAge(iso: string): string {
   const seconds = Math.max(
     0,
     Math.round((Date.now() - Date.parse(iso)) / 1000),

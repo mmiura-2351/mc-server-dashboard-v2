@@ -8,8 +8,8 @@ import { useState } from "react";
 import { api } from "../api/client.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
-import { humanizeBytes } from "./ServerBackupsTab.tsx";
 
 // Platform admin Versions page (WEBUI_SPEC.md 6.12): per-type catalog freshness,
 // refresh (all or one type), and the shared JAR pool stats + GC. The catalog
@@ -81,8 +81,13 @@ function Catalog({ types }: { types: string[] }) {
       ),
     onSuccess: (_data, serverType) => {
       // The catalog cache is invalidated server-side; drop the local copies so the
-      // next read refetches.
-      void queryClient.invalidateQueries({ queryKey: ["versions"] });
+      // next read refetches. Scope to the catalog keys (`["versions","types"]` and
+      // the per-type `["versions", <type>]`) so the JAR-pool stats key
+      // (`["versions","jar-pool","stats"]`) is left to GC's own invalidation.
+      void queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === "versions" && query.queryKey[1] !== "jar-pool",
+      });
       showToast(
         serverType === null
           ? t("admin.versions.refreshedAll")
@@ -244,7 +249,7 @@ function JarPool() {
         body={t("admin.versions.gcDialog.body")}
         confirmPhrase="GC"
         confirmLabel={t("admin.versions.gcDialog.confirm")}
-        promptLabel={t("admin.versions.gcDialog.confirm")}
+        promptLabel={t("admin.versions.gcDialog.promptLabel")}
         onConfirm={() => {
           setConfirmOpen(false);
           gc.mutate();
