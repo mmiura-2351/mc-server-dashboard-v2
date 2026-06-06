@@ -804,6 +804,68 @@ export const en = {
   "admin.overview.fleetHeartbeat": "Heartbeat",
   "admin.overview.fleetEmpty": "No workers registered.",
 
+  // Admin Users page (WEBUI_SPEC.md 6.12) — user lifecycle, admin flag,
+  // create-user dialog. One contiguous block (#475).
+  "admin.users.subtitle": "Platform-wide user administration",
+  "admin.users.loading": "Loading users…",
+  "admin.users.loadError": "Could not load users.",
+  "admin.users.empty": "No users.",
+  "admin.users.count": "accounts",
+  "admin.users.colUsername": "Username",
+  "admin.users.colEmail": "Email",
+  "admin.users.colStatus": "Status",
+  "admin.users.colAdmin": "Admin",
+  "admin.users.colCreated": "Created",
+  "admin.users.you": "you",
+  "admin.users.statusActive": "active",
+  "admin.users.statusDeactivated": "deactivated",
+  "admin.users.adminYes": "admin",
+  "admin.users.adminNo": "—",
+  "admin.users.prev": "‹ prev",
+  "admin.users.next": "next ›",
+  "admin.users.range": "{from}–{to} of {total}",
+  "admin.users.deactivate": "Deactivate",
+  "admin.users.reactivate": "Reactivate",
+  "admin.users.makeAdmin": "Make admin",
+  "admin.users.revokeAdmin": "Revoke admin",
+  "admin.users.delete": "Delete",
+  "admin.users.deactivated": "User deactivated.",
+  "admin.users.reactivated": "User reactivated.",
+  "admin.users.adminGranted": "Platform admin granted.",
+  "admin.users.adminRevoked": "Platform admin revoked.",
+  "admin.users.deleted": "User deleted.",
+  // The API allows self-revoke of your own admin flag (only the last active
+  // admin is protected); confirm before the operator locks themselves out.
+  "admin.users.selfRevokeTitle": "Revoke your own admin?",
+  "admin.users.selfRevokeBody":
+    "You are about to revoke your own platform-admin access. You will lose access to the admin area immediately.",
+  "admin.users.selfRevokeConfirm": "Revoke my admin",
+  "admin.users.deleteTitle": "Delete user",
+  "admin.users.deleteBody":
+    "This permanently deletes the account. Type the username to confirm.",
+  "admin.users.deletePrompt": "Username",
+  "admin.users.deleteConfirm": "Delete user",
+  // Conflict reasons the lifecycle routes return (admin_users.py).
+  "admin.users.error.self_target":
+    "You cannot do that to your own account here — use the account page.",
+  "admin.users.error.last_platform_admin":
+    "Cannot remove the last active platform admin.",
+  "admin.users.error.owns_community":
+    "This user owns a community and cannot be deleted.",
+  "admin.users.error.not_found": "That user no longer exists.",
+  "admin.users.error.generic": "The action could not be completed.",
+  // Create-user dialog (POST /admin/users).
+  "admin.users.create": "Create user",
+  "admin.users.createTitle": "Create user",
+  "admin.users.createSubmit": "Create",
+  "admin.users.createSubmitting": "Creating…",
+  "admin.users.created": "User created.",
+  "admin.users.usernameLabel": "Username",
+  "admin.users.emailLabel": "Email",
+  "admin.users.passwordLabel": "Password",
+  "admin.users.passwordHint":
+    "At least 12 characters, mixing cases, digits, and symbols.",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".

@@ -6,6 +6,7 @@ import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
 import { AccountPage } from "./pages/AccountPage.tsx";
 import { AdminOverviewPage } from "./pages/AdminOverviewPage.tsx";
+import { AdminUsersPage } from "./pages/AdminUsersPage.tsx";
 import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
@@ -145,10 +146,7 @@ export function App() {
 
           <Route element={<RequireAdmin />}>
             <Route path="/admin" element={<AdminOverviewPage />} />
-            <Route
-              path="/admin/users"
-              element={<PlaceholderPage titleKey="page.adminUsers" />}
-            />
+            <Route path="/admin/users" element={<AdminUsersPage />} />
             <Route
               path="/admin/communities"
               element={<PlaceholderPage titleKey="page.adminCommunities" />}
