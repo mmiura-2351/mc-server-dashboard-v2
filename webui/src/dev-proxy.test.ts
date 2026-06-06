@@ -15,6 +15,10 @@ describe("isSpaNavigation", () => {
     expect(isSpaNavigation({ accept: "application/json" })).toBe(false);
   });
 
+  it("treats a wildcard Accept (the browser fetch default) as an API request", () => {
+    expect(isSpaNavigation({ accept: "*/*" })).toBe(false);
+  });
+
   it("treats a WebSocket upgrade as an API request even if it accepts HTML", () => {
     expect(isSpaNavigation({ accept: "text/html", upgrade: "websocket" })).toBe(
       false,
