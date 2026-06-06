@@ -7,6 +7,8 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { dashboardPath } from "../routes.ts";
 import { CommunityGeneralTab } from "./CommunityGeneralTab.tsx";
+import { CommunityGrantsTab } from "./CommunityGrantsTab.tsx";
+import { CommunityGroupsTab } from "./CommunityGroupsTab.tsx";
 import { CommunityMembersTab } from "./CommunityMembersTab.tsx";
 import { CommunityRolesTab } from "./CommunityRolesTab.tsx";
 import { PlaceholderPage } from "./PlaceholderPage.tsx";
@@ -118,6 +120,18 @@ function TabContent({
     case "roles":
       return can("role:read") ? (
         <CommunityRolesTab communityId={communityId} can={can} />
+      ) : (
+        <p className="field-error">{t("permissions.denied")}</p>
+      );
+    case "grants":
+      return can("grant:read") ? (
+        <CommunityGrantsTab communityId={communityId} can={can} />
+      ) : (
+        <p className="field-error">{t("permissions.denied")}</p>
+      );
+    case "groups":
+      return can("group:read") ? (
+        <CommunityGroupsTab communityId={communityId} can={can} />
       ) : (
         <p className="field-error">{t("permissions.denied")}</p>
       );

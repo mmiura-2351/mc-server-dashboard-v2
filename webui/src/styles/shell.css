@@ -1187,3 +1187,91 @@ select.community-switcher {
   font-size: 13px;
   color: var(--text-dim);
 }
+
+/* Grants tab — per-server permission grants (issue #463, WEBUI_SPEC.md 6.10). */
+.grants .grants-filter {
+  max-width: 280px;
+  margin-bottom: 12px;
+}
+.grants-codes {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.grants-codes legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.grants-codes .checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+/* Community settings — Groups tab (issue #464, WEBUI_SPEC.md 6.10). */
+.groups .group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.groups .group-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+.groups .group-name {
+  font-weight: 600;
+}
+.groups .group-members {
+  margin-left: auto;
+}
+.groups .group-detail {
+  margin: 8px 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.groups .player-list,
+.groups .server-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.groups .player-row,
+.groups .server-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.groups .player-name,
+.groups .server-name {
+  font-weight: 600;
+}
+.groups .player-uuid {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+  margin-right: auto;
+}
+.groups .server-row .server-name {
+  margin-right: auto;
+}
+.groups .group-add-player {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}

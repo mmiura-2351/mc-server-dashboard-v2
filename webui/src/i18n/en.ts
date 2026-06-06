@@ -562,6 +562,8 @@ export const en = {
   "communitySettings.members.removePrompt":
     "Type the username to enable removal",
   "communitySettings.members.removed": "Member removed.",
+  "communitySettings.members.removeError":
+    "Could not remove the member. Please try again.",
   "communitySettings.members.roleError":
     "Could not update roles. Please try again.",
 
@@ -640,6 +642,44 @@ export const en = {
   "communitySettings.roles.code.community:delete": "Delete",
   "communitySettings.roles.code.audit:read": "Read",
 
+  // Grants tab (WEBUI_SPEC.md 6.10): per-server permission grants.
+  "communitySettings.grants.heading": "Grants",
+  "communitySettings.grants.loading": "Loading grants…",
+  "communitySettings.grants.loadError": "Could not load grants.",
+  "communitySettings.grants.empty": "No grants yet.",
+  "communitySettings.grants.create": "Grant access…",
+  "communitySettings.grants.colMember": "Member",
+  "communitySettings.grants.colServer": "Server",
+  "communitySettings.grants.colPermissions": "Permissions",
+  "communitySettings.grants.filterLabel": "Filter by member",
+  "communitySettings.grants.filterAll": "All members",
+  "communitySettings.grants.unknownUser": "(unknown user)",
+  "communitySettings.grants.unknownServer": "(unknown server)",
+  "communitySettings.grants.revoke": "Revoke",
+  "communitySettings.grants.revoked": "Grant revoked.",
+  "communitySettings.grants.revokeError":
+    "Could not revoke the grant. Please try again.",
+  "communitySettings.grants.revokeDialogTitle": "Revoke grant",
+  "communitySettings.grants.revokeDialogBody":
+    "This removes the member's per-server permissions on this server. This cannot be undone.",
+  "communitySettings.grants.revokeConfirm": "Revoke grant",
+  "communitySettings.grants.revokePrompt": "Type REVOKE to confirm",
+  "communitySettings.grants.revokeConfirmPhrase": "REVOKE",
+  "communitySettings.grants.createDialogTitle": "Grant per-server access",
+  "communitySettings.grants.createDialogBody":
+    "Grant a member extra permissions on one server, beyond their roles.",
+  "communitySettings.grants.memberLabel": "Member",
+  "communitySettings.grants.memberPlaceholder": "Select a member",
+  "communitySettings.grants.serverLabel": "Server",
+  "communitySettings.grants.serverPlaceholder": "Select a server",
+  "communitySettings.grants.permissionsLabel": "Permissions",
+  "communitySettings.grants.createSubmit": "Create grant",
+  "communitySettings.grants.created": "Grant created.",
+  "communitySettings.grants.createIncomplete":
+    "Pick a member, a server, and at least one permission.",
+  "communitySettings.grants.createError":
+    "Could not create the grant. Please try again.",
+
   // General tab.
   "communitySettings.general.heading": "General",
   "communitySettings.general.nameLabel": "Community name",
@@ -663,6 +703,61 @@ export const en = {
   "communitySettings.general.deleted": "Community deleted.",
   "communitySettings.general.deleteError":
     "Could not delete the community. Please try again.",
+
+  // Community settings — Groups tab (WEBUI_SPEC.md 6.10, issue #464)
+  "communitySettings.groups.heading": "Player groups",
+  "communitySettings.groups.loading": "Loading groups…",
+  "communitySettings.groups.loadError": "Could not load groups.",
+  "communitySettings.groups.empty": "No groups yet.",
+  "communitySettings.groups.create": "New group…",
+  "communitySettings.groups.kind.op": "op",
+  "communitySettings.groups.kind.whitelist": "whitelist",
+  "communitySettings.groups.memberCount": "players",
+  "communitySettings.groups.expand": "Manage",
+  "communitySettings.groups.collapse": "Close",
+  "communitySettings.groups.rename": "Rename…",
+  "communitySettings.groups.delete": "Delete",
+  "communitySettings.groups.error": "Something went wrong. Please try again.",
+  "communitySettings.groups.createDialogTitle": "New group",
+  "communitySettings.groups.nameLabel": "Group name",
+  "communitySettings.groups.namePlaceholder": "group name",
+  "communitySettings.groups.kindLabel": "Kind",
+  "communitySettings.groups.createSubmit": "Create group",
+  "communitySettings.groups.nameEmpty": "Enter a group name.",
+  "communitySettings.groups.created": "Group created.",
+  "communitySettings.groups.renameDialogTitle": "Rename group",
+  "communitySettings.groups.renameSubmit": "Save name",
+  "communitySettings.groups.renamed": "Group renamed.",
+  "communitySettings.groups.deleteDialogTitle": "Delete group",
+  "communitySettings.groups.deleteDialogBody":
+    "Deleting this group removes it from every server it is attached to. This cannot be undone.",
+  "communitySettings.groups.deleteConfirm": "Delete group",
+  "communitySettings.groups.deletePrompt": "Type the group name to confirm.",
+  "communitySettings.groups.deleted": "Group deleted.",
+  "communitySettings.groups.playersHeading": "Players",
+  "communitySettings.groups.playersEmpty": "No players in this group yet.",
+  "communitySettings.groups.removePlayer": "Remove",
+  "communitySettings.groups.playerRemoved": "Player removed.",
+  "communitySettings.groups.addPlayer": "Add player",
+  "communitySettings.groups.uuidLabel": "UUID",
+  "communitySettings.groups.uuidPlaceholder": "player UUID",
+  "communitySettings.groups.usernameLabel": "Username",
+  "communitySettings.groups.usernamePlaceholder": "username",
+  "communitySettings.groups.playerFieldsEmpty": "Enter a UUID and username.",
+  "communitySettings.groups.playerAdded": "Player added.",
+  "communitySettings.groups.serversHeading": "Attached servers",
+  "communitySettings.groups.serversLoading": "Loading servers…",
+  "communitySettings.groups.serversLoadError": "Could not load servers.",
+  "communitySettings.groups.serversEmpty":
+    "This group is not attached to any server yet.",
+  "communitySettings.groups.detach": "Detach",
+  "communitySettings.groups.detached": "Server detached.",
+  "communitySettings.groups.attachHeading": "Attach a server",
+  "communitySettings.groups.attachEmpty":
+    "Every community server is already attached.",
+  "communitySettings.groups.attach": "Attach",
+  "communitySettings.groups.attached": "Server attached.",
+  "communitySettings.groups.unknownServer": "(unknown server)",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
