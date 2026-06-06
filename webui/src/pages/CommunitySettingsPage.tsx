@@ -6,6 +6,7 @@ import { apiPath } from "../api/path.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { dashboardPath } from "../routes.ts";
+import { CommunityAuditTab } from "./CommunityAuditTab.tsx";
 import { CommunityGeneralTab } from "./CommunityGeneralTab.tsx";
 import { CommunityMembersTab } from "./CommunityMembersTab.tsx";
 import { PlaceholderPage } from "./PlaceholderPage.tsx";
@@ -114,11 +115,13 @@ function TabContent({
       ) : (
         <p className="field-error">{t("permissions.denied")}</p>
       );
+    case "audit":
+      return <CommunityAuditTab communityId={communityId} can={can} />;
     case "general":
       return <CommunityGeneralTab community={community} can={can} />;
     default:
-      // Roles / Grants / Groups / Audit arrive with their sibling issues; each
-      // replaces this case with one import + one branch (#462–#465).
+      // Roles / Grants / Groups arrive with their sibling issues; each
+      // replaces this case with one import + one branch (#462–#464).
       return <PlaceholderPage titleKey={TAB_LABEL[tab]} />;
   }
 }

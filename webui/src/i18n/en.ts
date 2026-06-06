@@ -565,6 +565,27 @@ export const en = {
   "communitySettings.members.roleError":
     "Could not update roles. Please try again.",
 
+  // Audit tab (WEBUI_SPEC.md 6.10).
+  "communitySettings.audit.heading": "Audit log",
+  "communitySettings.audit.loading": "Loading audit log…",
+  "communitySettings.audit.loadError": "Could not load the audit log.",
+  "communitySettings.audit.empty": "No matching audit entries.",
+  "communitySettings.audit.filterOperation": "Operation",
+  "communitySettings.audit.filterOperationPlaceholder": "e.g. server:start",
+  "communitySettings.audit.filterActor": "Actor ID",
+  "communitySettings.audit.filterActorPlaceholder": "user id",
+  "communitySettings.audit.filterSince": "Since",
+  "communitySettings.audit.filterUntil": "Until",
+  "communitySettings.audit.apply": "Apply filters",
+  "communitySettings.audit.colTime": "Time",
+  "communitySettings.audit.colActor": "Actor",
+  "communitySettings.audit.colOperation": "Operation",
+  "communitySettings.audit.colOutcome": "Outcome",
+  "communitySettings.audit.colTarget": "Target",
+  "communitySettings.audit.systemActor": "(system)",
+  "communitySettings.audit.prev": "Previous",
+  "communitySettings.audit.next": "Next",
+
   // General tab.
   "communitySettings.general.heading": "General",
   "communitySettings.general.nameLabel": "Community name",
