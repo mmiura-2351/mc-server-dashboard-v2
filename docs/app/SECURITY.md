@@ -56,6 +56,27 @@ Policy is pure, deterministic domain logic: it depends on no persistent state an
 sits in the domain layer, callable from the registration and password-change use
 cases.
 
+### Reason codes
+
+A rejected password yields a `422` problem+json response carrying a stable,
+machine-readable `reason` (the RFC 9457 body shape and the `reason` extension
+member are defined in [`AUTH_API.md`](AUTH_API.md) Section 2). The policy
+evaluates the rules in order and reports the **first** rule that fails, so only
+one `reason` is returned per request. These codes are emitted by the three
+endpoints that run the policy — registration (`POST /users`), self-service
+password change (`PUT /users/me/password`), and admin user creation
+(`POST /admin/users`):
+
+| `reason` | Trigger |
+|---|---|
+| `too_short` | Fewer than `min_length` characters. |
+| `too_long` | More than `max_length` characters (the DoS-guard upper bound). |
+| `too_long_for_bcrypt` | More than 72 UTF-8 bytes when `auth.password.hash=bcrypt` (bcrypt ignores bytes past 72); never raised under argon2. |
+| `insufficient_complexity` | Fewer than 3 of {upper, lower, digit, symbol} **and** fewer than 16 characters (`require_complexity`). |
+| `common_password` | On the common-password blocklist (`check_common_list`), matched case-insensitively. |
+| `contains_user_info` | Contains the username or the email local-part (`forbid_user_info`), matched case-insensitively. |
+| `simple_pattern` | Contains 4+ repeated characters or a 4+-long sequential run (`forbid_simple_patterns`). |
+
 ---
 
 ## 2. Brute-force protection
