@@ -7,12 +7,17 @@ import { t } from "../i18n/index.ts";
 import { LoginPage } from "./LoginPage.tsx";
 
 function PathProbe() {
-  return <span data-testid="path">{useLocation().pathname}</span>;
+  const { pathname, search } = useLocation();
+  return <span data-testid="path">{`${pathname}${search}`}</span>;
 }
 
-function renderLogin() {
+function renderLogin(fromState?: {
+  from: { pathname: string; search: string };
+}) {
   render(
-    <MemoryRouter initialEntries={["/login"]}>
+    <MemoryRouter
+      initialEntries={[{ pathname: "/login", state: fromState ?? null }]}
+    >
       <SessionProvider>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
@@ -101,5 +106,30 @@ describe("LoginPage", () => {
       expect(screen.getByTestId("path").textContent).toBe("/"),
     );
     expect(getAccessToken()).toBe("issued");
+  });
+
+  it("returns to the stashed deep link (path + query) after login", async () => {
+    bootstrapSignedOut();
+    renderLogin({
+      from: { pathname: "/communities/demo/servers/s1", search: "?tab=logs" },
+    });
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          access_token: "issued",
+          refresh_token: "ignored",
+          token_type: "bearer",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await submitCredentials();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("path").textContent).toBe(
+        "/communities/demo/servers/s1?tab=logs",
+      ),
+    );
   });
 });

@@ -12,3 +12,17 @@ export const LANDING_PATH = "/";
 export function dashboardPath(communityId: string): string {
   return `/communities/${communityId}`;
 }
+
+// The location RequireAuth stashes in router state when it bounces a signed-out
+// deep link to /login (#424). Resolve it to a same-app path; ignore anything
+// that isn't the router Location we set, so a stale or externally-crafted state
+// can never redirect off-app — it just falls back to LANDING_PATH.
+export function postLoginPath(from: unknown): string {
+  if (from !== null && typeof from === "object" && "pathname" in from) {
+    const { pathname, search } = from as { pathname: unknown; search: unknown };
+    if (typeof pathname === "string" && pathname.startsWith("/")) {
+      return `${pathname}${typeof search === "string" ? search : ""}`;
+    }
+  }
+  return LANDING_PATH;
+}

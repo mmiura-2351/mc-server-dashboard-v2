@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.tsx";
 import { SessionProvider } from "./auth/SessionProvider.tsx";
@@ -44,12 +44,20 @@ function signedInWith(communities: Array<{ id: string; name: string }>) {
   });
 }
 
+// Surfaces the live URL so the deep-link redirect can be asserted without
+// depending on a guarded page's content (DashboardPage is owned elsewhere).
+function LocationProbe() {
+  const { pathname, search } = useLocation();
+  return <span data-testid="url">{`${pathname}${search}`}</span>;
+}
+
 function renderAt(path: string) {
   render(
     <QueryClientProvider client={new QueryClient()}>
       <MemoryRouter initialEntries={[path]}>
         <SessionProvider>
           <ActiveCommunityProvider>
+            <LocationProbe />
             <App />
           </ActiveCommunityProvider>
         </SessionProvider>
@@ -146,6 +154,46 @@ describe("App route guards", () => {
     expect(
       screen.queryByRole("button", { name: t("login.submit") }),
     ).not.toBeInTheDocument();
+  });
+
+  it("returns to the requested deep link (path + query) after login", async () => {
+    // Bootstrap signed-out, but let /auth/login succeed and the community list
+    // resolve so the shell can render the originally requested route.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/auth/refresh") {
+        return Promise.resolve(new Response("", { status: 401 }));
+      }
+      if (url === "/communities") {
+        return Promise.resolve(jsonResponse([{ id: "demo", name: "Demo" }]));
+      }
+      if (url.endsWith("/me/permissions")) {
+        return Promise.resolve(jsonResponse({}));
+      }
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderAt("/communities/demo/servers/s1?tab=logs");
+
+    // Bounced to /login with the deep link stashed in router state.
+    const button = await screen.findByRole("button", {
+      name: t("login.submit"),
+    });
+    expect(screen.getByTestId("url").textContent).toBe("/login");
+
+    fireEvent.change(screen.getByLabelText(t("auth.fieldUsername")), {
+      target: { value: "alice" },
+    });
+    fireEvent.change(screen.getByLabelText(t("auth.fieldPassword")), {
+      target: { value: "a-password" },
+    });
+    fireEvent.click(button);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("url").textContent).toBe(
+        "/communities/demo/servers/s1?tab=logs",
+      ),
+    );
   });
 
   it("renders the login page for signed-out users without shell chrome", async () => {
