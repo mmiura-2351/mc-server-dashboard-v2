@@ -20,6 +20,15 @@
 GOLANGCI_VERSION := v2.12.2
 GOLANGCI := worker/.bin/golangci-lint
 
+# Per-worktree golangci-lint analysis cache. The default shared cache
+# (~/.cache/golangci-lint) outlives the agent worktrees under .claude/worktrees/
+# and retains findings keyed to since-deleted sibling paths, failing a later
+# pre-push in an unrelated worktree with phantom issues (#375). Scoping the cache
+# to this worktree's git dir -- unique per worktree, never tracked, swept with
+# the worktree -- removes the cross-worktree contamination structurally. CI
+# runners are fresh, so this is a no-op there.
+GOLANGCI_LINT_CACHE := $(shell git rev-parse --absolute-git-dir)/golangci-lint-cache
+
 # protoc code-generation plugins. Pinned + documented (proto/README.md,
 # docs/dev/DEPENDENCIES.md). The Go plugins install into the same gitignored
 # worker/.bin; the Python generators come from the api/ dev group (uv).
@@ -75,7 +84,7 @@ worker-lint: $(GOLANGCI)
 		exit 1; \
 	fi
 	cd worker && go vet ./...
-	cd worker && ./.bin/golangci-lint run
+	cd worker && GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ./.bin/golangci-lint run
 
 worker-format:
 	cd worker && gofmt -w .
