@@ -95,6 +95,16 @@ function isAuthPath(path: string): boolean {
   return path.startsWith("/auth/");
 }
 
+/**
+ * Whether the response declares a JSON content-type the API uses: regular
+ * `application/json` or RFC 9457 `application/problem+json` (AUTH_API.md 2).
+ * Anything else (an HTML proxy/LB error page) is treated as non-JSON.
+ */
+function isJsonContentType(response: Response): boolean {
+  const contentType = response.headers.get("content-type") ?? "";
+  return /\bapplication\/(problem\+)?json\b/i.test(contentType);
+}
+
 async function rawRequest(
   method: string,
   path: string,
@@ -136,10 +146,30 @@ async function request<P extends keyof paths, M extends string>(
     // denied access. The #410 guards must not misread it as session expiry.
   }
 
+  // Only trust the body as JSON when the server says so. A non-JSON body — an
+  // HTML 502/504 from the dev proxy or an LB error page — must surface as a
+  // typed ApiError carrying the status, never as a raw SyntaxError leaking to
+  // the caller.
   const text = await response.text();
-  const body: unknown = text.length > 0 ? JSON.parse(text) : undefined;
+  const jsonBody = isJsonContentType(response);
+  let body: unknown;
+  if (jsonBody && text.length > 0) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      // A JSON content-type whose body is unparseable: fall through to the
+      // failure paths below with a body-less ApiError rather than throwing raw.
+    }
+  }
+
   if (!response.ok) {
     throw new ApiError(response.status, body);
+  }
+
+  // Success path stays strict: a 2xx that should carry JSON but did not (wrong
+  // content-type or unparseable) is a typed failure, not a SyntaxError.
+  if (text.length > 0 && body === undefined) {
+    throw new ApiError(response.status, undefined);
   }
   return body as JsonResponse<Op<P, M>>;
 }
