@@ -12,3 +12,22 @@ export const LANDING_PATH = "/";
 export function dashboardPath(communityId: string): string {
   return `/communities/${communityId}`;
 }
+
+// The location RequireAuth stashes in router state when it bounces a signed-out
+// deep link to /login (#424). Resolve it to a same-app path; ignore anything
+// that isn't the router Location we set, so a stale or externally-crafted state
+// can never redirect off-app — it just falls back to LANDING_PATH.
+export function postLoginPath(from: unknown): string {
+  if (from !== null && typeof from === "object" && "pathname" in from) {
+    const { pathname, search } = from as { pathname: unknown; search: unknown };
+    // Accept only a single leading "/" followed by a non-"/"/non-"\" char (or
+    // the bare root). Rejecting "//" and "/\" closes a protocol-relative
+    // open-redirect: a path like "//evil.com" would otherwise resolve
+    // off-origin once navigate() runs (#424). The hash fragment is deliberately
+    // not preserved — issue scope is path + query only.
+    if (typeof pathname === "string" && /^\/(?![/\\])/.test(pathname)) {
+      return `${pathname}${typeof search === "string" ? search : ""}`;
+    }
+  }
+  return LANDING_PATH;
+}

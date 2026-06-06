@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Navigate, Route, Routes } from "react-router";
+import { Navigate, Route, Routes, useLocation } from "react-router";
 import { useSession } from "./auth/SessionProvider.tsx";
 import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
@@ -9,7 +9,7 @@ import { LoginPage } from "./pages/LoginPage.tsx";
 import { PlaceholderPage } from "./pages/PlaceholderPage.tsx";
 import { RegisterPage } from "./pages/RegisterPage.tsx";
 import { useActiveCommunity } from "./permissions/ActiveCommunityProvider.tsx";
-import { dashboardPath, LANDING_PATH } from "./routes.ts";
+import { dashboardPath, postLoginPath } from "./routes.ts";
 import { AppShell } from "./shell/AppShell.tsx";
 
 // Neutral loading state shown while the session bootstraps (cookie refresh in
@@ -27,24 +27,29 @@ function SessionLoading() {
 // signed-out users go to /login (WEBUI_SPEC.md 7.1).
 function RequireAuth({ children }: { children: ReactNode }) {
   const { status } = useSession();
+  const location = useLocation();
   if (status === "bootstrapping") {
     return <SessionLoading />;
   }
   if (status === "signed-out") {
-    return <Navigate to="/login" replace />;
+    // Carry the attempted location so login can return the user there (#424).
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
   return <>{children}</>;
 }
 
 // Auth routes are for signed-out users: while bootstrapping show the loading
-// state, signed-in users are redirected to the dashboard.
+// state, signed-in users are redirected away. When a deep link was stashed in
+// router state (#424), honour it here too so a sign-in completing under this
+// guard lands on the requested route rather than racing LANDING_PATH.
 function RequireAnon({ children }: { children: ReactNode }) {
   const { status } = useSession();
+  const from = (useLocation().state as { from?: unknown } | null)?.from;
   if (status === "bootstrapping") {
     return <SessionLoading />;
   }
   if (status === "signed-in") {
-    return <Navigate to={LANDING_PATH} replace />;
+    return <Navigate to={postLoginPath(from)} replace />;
   }
   return <>{children}</>;
 }
