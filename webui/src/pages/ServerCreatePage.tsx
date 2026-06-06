@@ -528,9 +528,7 @@ function usePortCheck(port: string) {
     }
     setState({ kind: "checking" });
     try {
-      const result = (await api.get(
-        apiPath("/ports/check/{port}", { port }),
-      )) as { in_range?: boolean; available?: boolean };
+      const result = await api.get(apiPath("/ports/check/{port}", { port }));
       if (result.in_range === false) {
         setState({ kind: "out_of_range" });
       } else if (result.available === true) {
