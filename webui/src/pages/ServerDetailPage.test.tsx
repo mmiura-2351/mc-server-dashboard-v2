@@ -332,6 +332,18 @@ describe("ServerDetailPage export", () => {
 });
 
 describe("ServerDetailPage settings", () => {
+  // Install the mock socket so the events client stays "connected" and never
+  // fires onDown -> invalidate, which would refetch the detail query and
+  // consume the port-check mockResolvedValueOnce out from under the test.
+  let restoreWs: () => void;
+
+  beforeEach(() => {
+    restoreWs = installMockWebSocket();
+  });
+  afterEach(() => {
+    restoreWs();
+  });
+
   function openSettings() {
     fireEvent.click(
       screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
