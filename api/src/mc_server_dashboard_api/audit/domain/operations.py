@@ -33,6 +33,7 @@ AUTH_ACCOUNT_DELETE: Final = "auth:account_delete"
 # the admin axis is gated by the platform-admin flag, not a catalog permission --
 # but follow the same ``<resource>:<action>`` shape; the actor is the admin and
 # the target is the affected user.
+USER_CREATE: Final = "user:create"
 USER_DEACTIVATE: Final = "user:deactivate"
 USER_REACTIVATE: Final = "user:reactivate"
 USER_DELETE: Final = "user:delete"
