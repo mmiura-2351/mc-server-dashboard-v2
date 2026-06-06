@@ -318,6 +318,26 @@ def test_admin_create_weak_password_returns_422_no_echo() -> None:
     assert weak not in resp.text
 
 
+def test_admin_create_overlong_password_422_no_echo() -> None:
+    # Structural validation (FastAPI ``string_too_long``, max_length=1024) fails
+    # before the use case runs; the central handler must scrub the submitted
+    # value so the plaintext password never reaches the response body (#393).
+    # The domain-policy no-echo path is covered above; this pins the structural
+    # FastAPI-level 422 that previously leaked via ``errors[].input``.
+    fake = _Fake(result=make_user())
+    client = next(_client(admin_create_user=fake))
+    overlong = "Aa1!" + "x" * 1025
+    resp = client.post(
+        "/admin/users",
+        json={"username": "bob", "email": "bob@example.com", "password": overlong},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert overlong not in resp.text
+    # The structural failure short-circuits before the use case.
+    assert fake.calls == []
+
+
 def test_admin_create_duplicate_username_returns_409() -> None:
     fake = _Fake(error=UsernameAlreadyExistsError("bob"))
     client = next(_client(admin_create_user=fake))
