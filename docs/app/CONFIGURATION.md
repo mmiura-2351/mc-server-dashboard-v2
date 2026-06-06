@@ -468,13 +468,17 @@ the threshold is lower and the window wider.
 |---|---|---|
 | `auth.registration.open` | `true` | Master switch for self-registration. `false` returns `403` from the unauthenticated `POST /users`; a platform admin can still provision accounts via `POST /admin/users` (issue #368), which is exempt from this switch and the per-IP cap below. |
 | `auth.registration.ip_limit_enabled` | `true` | Whether the per-IP registration cap is enforced. |
-| `auth.registration.ip_threshold` | `5` | Registrations per source IP within the window before further attempts get `429`. Must be at least 1. |
+| `auth.registration.ip_threshold` | `5` | Accepted registrations per source IP within the window before further attempts get `429`. Must be at least 1. |
 | `auth.registration.ip_window_seconds` | `3600` | Sliding window for the per-IP registration count. Must be positive. |
 
 The cap counts by source IP, so legitimate registrants sharing one egress IP (a
-NAT or corporate gateway) draw from the same window: the `ip_threshold + 1`-th in a
-window gets `429` even when each is genuine. This matches the login per-IP posture
-(Section 7.2); raise `ip_threshold` or widen who is trusted (Section 7.3) where a
+NAT or corporate gateway) draw from the same window: once `ip_threshold` attempts
+from that IP are accepted within the window, the next is `429`'d even when each is
+genuine. Only attempts that pass the gate count toward the window; a throttled
+(`429`) attempt is **not** recorded, so a stream of rejected retries does not
+re-arm the window. The block lifts once the `ip_threshold`-th accepted attempt
+ages out of the window — `ip_window_seconds` after it, not after the last `429`
+(issue #370). Raise `ip_threshold` or widen who is trusted (Section 7.3) where a
 deployment expects shared egress.
 
 ---
