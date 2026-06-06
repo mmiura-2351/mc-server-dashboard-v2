@@ -85,7 +85,7 @@ export function CommunityMembersTab({
       if (onForbidden(error)) {
         return;
       }
-      showToast(t("communitySettings.members.roleError"), "error");
+      showToast(t("communitySettings.members.removeError"), "error");
     },
   });
 
