@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 
 from mc_server_dashboard_api.dependencies import (
     get_check_port,
@@ -41,15 +42,29 @@ router = APIRouter(prefix="/ports")
 _MAX_COUNT = 100
 
 
+class PortCheckResponse(BaseModel):
+    """Availability of a single game port (issue #243)."""
+
+    port: int
+    in_range: bool
+    available: bool
+
+
+class AvailablePortsResponse(BaseModel):
+    """The next free in-range game ports, ascending (issue #243)."""
+
+    ports: list[int]
+
+
 @router.get("/check/{port}")
 async def check_port(
     port: int,
     _user: Annotated[User, Depends(get_current_user)],
     use_case: Annotated[CheckPort, Depends(get_check_port)],
-) -> dict[str, object]:
+) -> PortCheckResponse:
     """Report whether ``port`` is in range and currently free (issue #243)."""
 
-    return await use_case(port=port)
+    return PortCheckResponse.model_validate(await use_case(port=port))
 
 
 @router.get("/available")
@@ -57,7 +72,7 @@ async def available_ports(
     _user: Annotated[User, Depends(get_current_user)],
     use_case: Annotated[ListAvailablePorts, Depends(get_list_available_ports)],
     count: Annotated[int, Query(ge=1, le=_MAX_COUNT)] = 1,
-) -> dict[str, list[int]]:
+) -> AvailablePortsResponse:
     """Return the next ``count`` free in-range ports (issue #243)."""
 
-    return {"ports": await use_case(count=count)}
+    return AvailablePortsResponse(ports=await use_case(count=count))
