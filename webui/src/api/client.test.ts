@@ -9,6 +9,13 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+function htmlResponse(status: number, body: string): Response {
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/html" },
+  });
+}
+
 const fetchMock = vi.fn();
 
 beforeEach(() => {
@@ -48,6 +55,44 @@ describe("ApiError", () => {
 
     expect(error).toBeInstanceOf(ApiError);
     expect(error.reason).toBeUndefined();
+  });
+
+  it("still parses a problem+json error body for the reason", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ reason: "rate_limited" }), {
+        status: 429,
+        headers: { "content-type": "application/problem+json" },
+      }),
+    );
+
+    const error = await api.get("/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(429);
+    expect(error.reason).toBe("rate_limited");
+  });
+
+  it("synthesizes a typed error from an HTML 502 body, not a SyntaxError", async () => {
+    fetchMock.mockResolvedValue(
+      htmlResponse(502, "<html><body>502 Bad Gateway</body></html>"),
+    );
+
+    const error = await api.get("/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(502);
+    expect(error.reason).toBeUndefined();
+  });
+
+  it("fails typed on a non-JSON 2xx body instead of throwing a SyntaxError", async () => {
+    fetchMock.mockResolvedValue(
+      htmlResponse(200, "<html><body>not json</body></html>"),
+    );
+
+    const error = await api.get("/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(200);
   });
 });
 

@@ -122,4 +122,9 @@ export const en = {
   "account.error.last_platform_admin":
     "You are the last platform admin and cannot delete your account.",
   "account.error.generic": "Something went wrong. Please try again.",
+
+  // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
+  "permissions.denied": "You do not have permission to do that.",
+  // Composed with the missing permission code, e.g. "You lack: server:start".
+  "permissions.deniedNamed": "You lack: ",
 } as const;
