@@ -837,6 +837,39 @@ export const en = {
   "admin.versions.gcDoneAcross": " across ",
   "admin.versions.gcDoneJars": " JARs.",
   "admin.versions.gcError": "Garbage collection failed.",
+  // Communities (WEBUI_SPEC.md 6.12) — #476
+  "admin.communities.subtitle":
+    "Provisioning is admin-only; self-service creation is not supported.",
+  "admin.communities.loading": "Loading communities…",
+  "admin.communities.loadError": "Could not load communities.",
+  "admin.communities.empty": "No communities yet.",
+  "admin.communities.colName": "Name",
+  "admin.communities.colId": "ID",
+  "admin.communities.provision": "Provision community",
+  "admin.communities.provisionSubmit": "Provision",
+  "admin.communities.dialogTitle": "Provision community",
+  "admin.communities.nameLabel": "Community name",
+  "admin.communities.namePlaceholder": "e.g. Winter Server 2026",
+  "admin.communities.ownerLabel": "Initial owner",
+  "admin.communities.ownerPlaceholder": "Select an existing account…",
+  "admin.communities.ownerHint":
+    "The owner gets the preset Owner role (all community permissions).",
+  "admin.communities.usersLoadError": "Could not load the user list.",
+  // Truncation hint composed around the loaded/total counts, e.g.
+  // "Showing the first 100 of 150 users." The owner picker requests the API
+  // max page (100); when more accounts exist the later ones are omitted.
+  "admin.communities.usersTruncatedPrefix": "Showing the first ",
+  "admin.communities.usersTruncatedMid": " of ",
+  "admin.communities.usersTruncatedSuffix": " users.",
+  "admin.communities.provisioned": "Community provisioned.",
+  "admin.communities.errNameRequired": "Enter a community name.",
+  "admin.communities.errOwnerRequired": "Select an initial owner.",
+  "admin.communities.errNameTaken":
+    "A community with that name already exists.",
+  "admin.communities.errInvalidName": "That community name is not valid.",
+  "admin.communities.errOwnerNotFound": "That owner account no longer exists.",
+  "admin.communities.errGeneric": "Could not provision the community.",
+
   // Workers fleet page (WEBUI_SPEC.md 6.12) — #477
   "admin.workers.subtitle":
     "Workers self-register over the control plane; drain to relocate servers before maintenance.",
@@ -867,6 +900,13 @@ export const en = {
   "admin.workers.undrainError": "Could not undrain the worker.",
   "admin.workers.notice":
     "Draining stops new placements on the worker; running servers are stopped with a final snapshot and can be restarted elsewhere. Offline workers reappear automatically when they reconnect.",
+
+  // Admin global Audit page (WEBUI_SPEC.md 6.12). The filter row, table and
+  // paging strings are shared with the community Audit tab
+  // (communitySettings.audit.*); only the community filter and column are new.
+  "admin.audit.filterCommunity": "Community",
+  "admin.audit.filterCommunityAll": "All communities",
+  "admin.audit.colCommunity": "Community",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",

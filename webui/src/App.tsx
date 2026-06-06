@@ -5,6 +5,8 @@ import { useCurrentUser } from "./auth/useCurrentUser.ts";
 import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
 import { AccountPage } from "./pages/AccountPage.tsx";
+import { AdminAuditPage } from "./pages/AdminAuditPage.tsx";
+import { AdminCommunitiesPage } from "./pages/AdminCommunitiesPage.tsx";
 import { AdminOverviewPage } from "./pages/AdminOverviewPage.tsx";
 import { AdminVersionsPage } from "./pages/AdminVersionsPage.tsx";
 import { AdminWorkersPage } from "./pages/AdminWorkersPage.tsx";
@@ -153,14 +155,11 @@ export function App() {
             />
             <Route
               path="/admin/communities"
-              element={<PlaceholderPage titleKey="page.adminCommunities" />}
+              element={<AdminCommunitiesPage />}
             />
             <Route path="/admin/workers" element={<AdminWorkersPage />} />
             <Route path="/admin/versions" element={<AdminVersionsPage />} />
-            <Route
-              path="/admin/audit"
-              element={<PlaceholderPage titleKey="page.adminAudit" />}
-            />
+            <Route path="/admin/audit" element={<AdminAuditPage />} />
           </Route>
         </Route>
 
