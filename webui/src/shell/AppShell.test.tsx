@@ -1,7 +1,8 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
-import { t } from "../i18n/index.ts";
+import { initLanguage, t } from "../i18n/index.ts";
+import { ja } from "../i18n/ja.ts";
 import { renderApp } from "../test/render.tsx";
 
 function jsonResponse(body: unknown): Response {
@@ -105,6 +106,49 @@ describe("AppShell community switcher", () => {
       expect((switcher as HTMLSelectElement).value).toBe("beta"),
     );
     expect(dashboardLink()).toHaveAttribute("href", "/communities/beta");
+  });
+
+  it("renders chrome in Japanese when the language override is ja", async () => {
+    localStorage.setItem("mcsd.lang", "ja");
+    initLanguage();
+    signedInWith([ALPHA, BETA]);
+
+    renderAt("/");
+
+    // The language selector and the account link render the ja dictionary.
+    expect(
+      await screen.findByRole("combobox", { name: ja["shell.language"] }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: ja["shell.account"] }),
+    ).toBeInTheDocument();
+
+    localStorage.clear();
+    initLanguage();
+  });
+
+  it("switching the language persists the choice and reloads", async () => {
+    signedInWith([ALPHA, BETA]);
+
+    renderAt("/");
+
+    const langSwitcher = (await screen.findByRole("combobox", {
+      name: t("shell.language"),
+    })) as HTMLSelectElement;
+
+    const reload = vi.fn();
+    vi.spyOn(window, "location", "get").mockReturnValue({
+      ...window.location,
+      reload,
+    } as Location);
+
+    fireEvent.change(langSwitcher, { target: { value: "ja" } });
+
+    expect(localStorage.getItem("mcsd.lang")).toBe("ja");
+    expect(reload).toHaveBeenCalledOnce();
+
+    localStorage.clear();
+    initLanguage();
   });
 
   it("shows the no-communities state when the caller has none", async () => {

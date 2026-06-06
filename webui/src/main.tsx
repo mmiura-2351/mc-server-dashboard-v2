@@ -4,9 +4,12 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
 import { App } from "./App.tsx";
 import { SessionProvider } from "./auth/SessionProvider.tsx";
+import { initLanguage } from "./i18n/index.ts";
 import { ActiveCommunityProvider } from "./permissions/ActiveCommunityProvider.tsx";
 import "./styles/global.css";
 import "./styles/shell.css";
+
+initLanguage();
 
 const queryClient = new QueryClient();
 
