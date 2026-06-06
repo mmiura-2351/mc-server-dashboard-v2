@@ -148,19 +148,6 @@ describe("ServerDetailPage scaffold + header", () => {
       await screen.findByText(t("serverDetail.loadError")),
     ).toBeInTheDocument();
   });
-
-  it("renders an unbuilt tab as a placeholder", async () => {
-    mockApi.get.mockResolvedValue(server());
-    renderPage();
-
-    await screen.findByText("survival");
-    fireEvent.click(
-      screen.getByRole("tab", { name: t("serverDetail.tab.backups") }),
-    );
-    expect(
-      screen.getByText(t("serverDetail.tabPlaceholder")),
-    ).toBeInTheDocument();
-  });
 });
 
 describe("ServerDetailPage lifecycle controls", () => {

@@ -887,6 +887,66 @@ select.community-switcher {
   padding: 8px 10px;
 }
 
+/* ---------- Server detail — Backups tab (WEBUI_SPEC.md 6.7) ---------- */
+.backups-stats {
+  margin-bottom: 14px;
+}
+.backups-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.backups-schedule {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.backups-schedule .field-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.backups-schedule input {
+  width: 60px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+}
+.backups-table {
+  padding: 0;
+}
+.backups-table table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.backups-table table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.backups-table table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.backups-table table.data td.num {
+  font: var(--font-mono);
+}
+.backups-table .row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 /* ---------- Server detail Files tab (WEBUI_SPEC.md 6.6) ---------- */
 .files .notice {
   border-radius: var(--radius-sm);
@@ -1050,4 +1110,36 @@ select.community-switcher {
   font-family: var(--font-mono);
   font-size: 12px;
   word-break: break-all;
+}
+
+/* Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8). */
+.players .card + .card {
+  margin-top: 12px;
+}
+.players .group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.players .group-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+.players .group-name {
+  font-weight: 600;
+}
+.players .group-members {
+  margin-left: auto;
+}
+.badge.kind.op {
+  color: var(--accent);
+  border-color: rgba(77, 159, 255, 0.3);
+}
+.badge.kind.whitelist {
+  color: var(--text-dim);
 }

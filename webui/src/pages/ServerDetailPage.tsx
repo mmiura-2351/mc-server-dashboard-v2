@@ -18,7 +18,9 @@ import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { dashboardPath } from "../routes.ts";
 import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
+import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
 import { serverKey } from "./serverKey.ts";
 import {
   actionApplies,
@@ -136,15 +138,19 @@ function Loaded({
       {tab === "files" && (
         <ServerFilesTab server={server} communityId={communityId} can={can} />
       )}
+      {tab === "backups" && (
+        <ServerBackupsTab server={server} communityId={communityId} can={can} />
+      )}
+      {tab === "players" && (
+        <ServerPlayersTab
+          communityId={communityId}
+          serverId={server.id}
+          can={can}
+        />
+      )}
       {tab === "settings" && (
         <Settings server={server} communityId={communityId} can={can} />
       )}
-      {tab !== "overview" &&
-        tab !== "console" &&
-        tab !== "files" &&
-        tab !== "settings" && (
-          <p className="sub">{t("serverDetail.tabPlaceholder")}</p>
-        )}
     </>
   );
 }
