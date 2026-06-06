@@ -21,12 +21,20 @@ import {
   useState,
 } from "react";
 import { api } from "../api/client.ts";
+import type { components } from "../api/schema";
 import { useSession } from "../auth/SessionProvider.tsx";
+
+type Community = components["schemas"]["CommunityResponse"];
 
 interface ActiveCommunityValue {
   /** The active community id, or null when none is selected / available. */
   communityId: string | null;
   setCommunityId: (id: string | null) => void;
+  /**
+   * The caller's communities, or undefined while still loading. Shared with the
+   * top-bar switcher so it reuses the same query instead of re-fetching.
+   */
+  communities: Community[] | undefined;
 }
 
 const ActiveCommunityContext = createContext<ActiveCommunityValue | null>(null);
@@ -73,8 +81,8 @@ export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
   }, [signedIn]);
 
   const value = useMemo<ActiveCommunityValue>(
-    () => ({ communityId: selected, setCommunityId }),
-    [selected, setCommunityId],
+    () => ({ communityId: selected, setCommunityId, communities }),
+    [selected, setCommunityId, communities],
   );
 
   return (

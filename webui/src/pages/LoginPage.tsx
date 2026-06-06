@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { useSession } from "../auth/SessionProvider.tsx";
 import { t } from "../i18n/index.ts";
-import { DASHBOARD_PATH } from "../routes.ts";
+import { LANDING_PATH } from "../routes.ts";
 
 // Login page (WEBUI_SPEC.md 6.1). Posts credentials to /auth/login; the API
 // returns the token pair and sets the refresh cookie. We adopt the access token
@@ -27,7 +27,7 @@ export function LoginPage() {
         body: JSON.stringify({ username, password }),
       });
       signIn(tokens.access_token);
-      navigate(DASHBOARD_PATH, { replace: true });
+      navigate(LANDING_PATH, { replace: true });
     } catch (err) {
       // 401 is the only credential outcome; everything else is a generic fault.
       setError(
