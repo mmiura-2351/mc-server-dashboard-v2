@@ -1340,6 +1340,12 @@ select.community-switcher {
 .admin-overview table.data td.num {
   font-variant-numeric: tabular-nums;
 }
+/* Admin Communities (WEBUI_SPEC.md 6.12) — #476 */
+.admin-communities table.data td.mono {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--text-dim);
+}
 
 /* ---------- Admin users table (WEBUI_SPEC.md 6.12, issue #475) ---------- */
 .admin-users table.data {
