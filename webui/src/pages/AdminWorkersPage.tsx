@@ -5,10 +5,9 @@ import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
-import { humanizeBytes } from "../format.ts";
+import { heartbeatAge, humanizeBytes, statusPill } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
-import { heartbeatAge, statusPill } from "./AdminOverviewPage.tsx";
 
 // Platform admin Workers page (WEBUI_SPEC.md 6.12): the full fleet table with a
 // per-worker drain/undrain toggle. Drain is `PUT /workers/{id}/drain` and
