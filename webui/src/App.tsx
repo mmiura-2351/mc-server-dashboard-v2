@@ -4,6 +4,7 @@ import { useSession } from "./auth/SessionProvider.tsx";
 import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
 import { AccountPage } from "./pages/AccountPage.tsx";
+import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { PlaceholderPage } from "./pages/PlaceholderPage.tsx";
@@ -114,7 +115,7 @@ export function App() {
           />
           <Route
             path="/communities/:cid/settings"
-            element={<PlaceholderPage titleKey="page.communitySettings" />}
+            element={<CommunitySettingsPage />}
           />
           <Route path="/account" element={<AccountPage />} />
 

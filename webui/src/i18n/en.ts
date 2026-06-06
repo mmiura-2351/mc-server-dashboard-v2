@@ -516,6 +516,79 @@ export const en = {
     "That archive is not a valid server export.",
   "serverCreate.import.tooLarge": "That archive is too large to import.",
 
+  // Community settings (WEBUI_SPEC.md 6.10) — one contiguous block to minimise
+  // merge conflicts with the sibling Roles/Grants/Groups/Audit tab PRs.
+  "communitySettings.loading": "Loading…",
+  "communitySettings.loadError":
+    "Could not load this community. Try refreshing.",
+  "communitySettings.breadcrumb": "Dashboard",
+  "communitySettings.tab.members": "Members",
+  "communitySettings.tab.roles": "Roles",
+  "communitySettings.tab.grants": "Grants",
+  "communitySettings.tab.groups": "Groups",
+  "communitySettings.tab.audit": "Audit log",
+  "communitySettings.tab.general": "General",
+
+  // Members tab.
+  "communitySettings.members.heading": "Members",
+  "communitySettings.members.loading": "Loading members…",
+  "communitySettings.members.loadError": "Could not load members.",
+  "communitySettings.members.empty": "No members yet.",
+  "communitySettings.members.colUsername": "Username",
+  "communitySettings.members.colRoles": "Roles",
+  "communitySettings.members.unknownUser": "(unknown user)",
+  "communitySettings.members.add": "Add member…",
+  "communitySettings.members.remove": "Remove",
+  "communitySettings.members.unassignRole": "Remove role",
+  "communitySettings.members.assignRole": "Assign role",
+  "communitySettings.members.noRolesLeft": "All roles assigned.",
+  "communitySettings.members.addDialogTitle": "Add a member",
+  "communitySettings.members.addDialogBody":
+    "Add an existing user to this community by their exact username.",
+  "communitySettings.members.usernameLabel": "Username",
+  "communitySettings.members.usernamePlaceholder": "username",
+  "communitySettings.members.addSubmit": "Add member",
+  "communitySettings.members.addEmpty": "Enter a username.",
+  "communitySettings.members.errUserNotFound": "No user with that username.",
+  "communitySettings.members.errAlreadyMember":
+    "That user is already a member of this community.",
+  "communitySettings.members.errGeneric":
+    "Could not add the member. Please try again.",
+  "communitySettings.members.added": "Member added.",
+  "communitySettings.members.removeDialogTitle": "Remove member",
+  "communitySettings.members.removeDialogBody":
+    "Removing this member revokes all their roles and per-server grants in this community. This cannot be undone.",
+  "communitySettings.members.removeConfirm": "Remove member",
+  "communitySettings.members.removePrompt":
+    "Type the username to enable removal",
+  "communitySettings.members.removed": "Member removed.",
+  "communitySettings.members.roleError":
+    "Could not update roles. Please try again.",
+
+  // General tab.
+  "communitySettings.general.heading": "General",
+  "communitySettings.general.nameLabel": "Community name",
+  "communitySettings.general.save": "Save name",
+  "communitySettings.general.saved": "Community renamed.",
+  "communitySettings.general.nameTaken": "That name is already taken.",
+  "communitySettings.general.invalidName": "That name is not allowed.",
+  "communitySettings.general.saveError":
+    "Could not rename the community. Please try again.",
+  "communitySettings.general.dangerHeading": "Danger zone",
+  "communitySettings.general.deleteTitle": "Delete community",
+  "communitySettings.general.deleteDesc":
+    "Deletes all servers, backups, roles and memberships of this community.",
+  "communitySettings.general.deleteButton": "Delete…",
+  "communitySettings.general.deleteDialogTitle": "Delete community",
+  "communitySettings.general.deleteDialogBody":
+    "This permanently deletes the community and everything in it. This cannot be undone.",
+  "communitySettings.general.deleteConfirm": "Delete community",
+  "communitySettings.general.deletePrompt":
+    "Type the community name to enable deletion",
+  "communitySettings.general.deleted": "Community deleted.",
+  "communitySettings.general.deleteError":
+    "Could not delete the community. Please try again.",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
