@@ -41,6 +41,44 @@ export const en = {
   "auth.toRegister": "No account? Register",
   "auth.toLogin": "Have an account? Sign in",
 
+  // Login / register pages and route guards (issue #410). Kept as one
+  // contiguous block to minimize merge conflicts with sibling i18n PRs.
+  "auth.loading": "Loading…",
+  "auth.fieldUsername": "Username",
+  "auth.fieldEmail": "Email",
+  "auth.fieldPassword": "Password",
+  "login.usernamePlaceholder": "username",
+  "login.passwordPlaceholder": "••••••••",
+  "login.submit": "Sign in",
+  "login.submitting": "Signing in…",
+  "login.invalidCredentials": "Invalid username or password.",
+  "login.genericError": "Could not sign in. Please try again.",
+  "register.usernamePlaceholder": "username",
+  "register.emailPlaceholder": "you@example.com",
+  "register.passwordPlaceholder": "min. 12 characters",
+  "register.confirmPassword": "Confirm password",
+  "register.passwordHint":
+    "At least 12 characters. Must not contain your username or email. Common passwords are rejected.",
+  "register.submit": "Create account",
+  "register.submitting": "Creating account…",
+  "register.success": "Account created. Please sign in.",
+  "register.genericError": "Could not create your account. Please try again.",
+  "register.errPasswordMismatch": "Passwords do not match.",
+  // Server-authoritative reason codes (AUTH_API.md 2; users.py register).
+  "register.reason.too_short": "Password is too short.",
+  "register.reason.too_long_for_bcrypt": "Password is too long.",
+  "register.reason.insufficient_complexity":
+    "Password is not complex enough; use a longer or more varied password.",
+  "register.reason.common_password": "Password is too common.",
+  "register.reason.contains_user_info":
+    "Password must not contain your username or email.",
+  "register.reason.simple_pattern":
+    "Password is too simple or a common pattern.",
+  "register.reason.username_taken": "That username is already taken.",
+  "register.reason.email_taken": "That email is already registered.",
+  "register.reason.invalid_username": "That username is not allowed.",
+  "register.reason.invalid_email": "Enter a valid email address.",
+
   // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "Cancel",
   "common.close": "Close",
