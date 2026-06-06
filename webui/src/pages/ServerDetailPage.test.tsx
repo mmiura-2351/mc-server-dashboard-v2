@@ -241,6 +241,22 @@ describe("ServerDetailPage lifecycle controls", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("closes the stop menu on Escape", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+    expect(
+      screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
+    ).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(
+      screen.queryByRole("menuitem", { name: t("serverDetail.stopForce") }),
+    ).not.toBeInTheDocument();
+  });
+
   it("routes a lifecycle 403 through the permission glue", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
     mockApi.post.mockRejectedValue(

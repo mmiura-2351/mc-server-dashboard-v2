@@ -411,7 +411,7 @@ describe("ServerFilesTab permission gating", () => {
     );
     renderPage();
     await openFiles();
-    await screen.findByText("📄 x");
+    await screen.findByText("x");
 
     fireEvent.click(screen.getByRole("button", { name: t("files.delete") }));
     fireEvent.change(screen.getByPlaceholderText("x"), {
@@ -584,6 +584,46 @@ describe("ServerFilesTab history + rollback", () => {
     expect(JSON.parse((init as { body: string }).body)).toEqual({
       version_id: "v1",
     });
+  });
+
+  it("Escape closes only the rollback confirm, leaving the history drawer open", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "a b.txt", versions: ["v1"] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a b.txt",
+          content_base64: encodeUtf8Base64("hi\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a b\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+    await screen.findByText("v1");
+
+    // Open the stacked rollback confirm on top of the history drawer.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.history.rollback") }),
+    );
+    expect(
+      screen.getByRole("button", { name: t("files.rollback.confirm") }),
+    ).toBeInTheDocument();
+
+    // One Escape closes only the topmost (confirm); the history drawer stays.
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(
+      screen.queryByRole("button", { name: t("files.rollback.confirm") }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(t("files.history.hint"))).toBeInTheDocument();
   });
 
   it("hides the History button without file:history", async () => {
