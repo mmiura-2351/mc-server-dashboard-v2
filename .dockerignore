@@ -1,0 +1,34 @@
+# Root build context for the api image (build context moved to repo root so the
+# Dockerfile's webui stage can reach webui/; see compose.yaml + api/Dockerfile).
+# Keep the context small and reproducible: deps resolve from uv.lock /
+# package-lock.json, so local venvs, node_modules, build outputs, and tool caches
+# must not leak in.
+
+# Python (api/ + worker/)
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.ruff_cache/
+**/.mypy_cache/
+**/.pytest_cache/
+**/.import_linter_cache/
+**/.coverage
+**/htmlcov/
+**/*.egg-info/
+api/tests/
+worker/
+
+# Node / webui — install from the lockfile inside the image; never copy the host
+# node_modules or a stale local dist.
+webui/node_modules/
+webui/dist/
+
+# VCS + non-build dirs
+.git/
+.github/
+docs/
+scripts/
+proto/
+
+# This file
+.dockerignore

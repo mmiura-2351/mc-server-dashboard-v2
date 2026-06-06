@@ -280,6 +280,20 @@ class PortsSettings(_Section):
         return self
 
 
+class WebuiSettings(_Section):
+    """Built Web UI static-serving (CONFIGURATION.md Section 5.10, WEBUI_SPEC 7.7).
+
+    ``dist_dir`` points at the built SPA directory (``webui/dist``). When set, the
+    API mounts it as same-origin static files with an SPA fallback, so deep links
+    and reloads resolve to ``index.html`` while API routes keep precedence. When
+    unset (the default), nothing is mounted — dev (Vite proxy) and tests are
+    unaffected. The path must be an existing directory containing an
+    ``index.html`` when set; otherwise startup fails fast (Section 3).
+    """
+
+    dist_dir: str | None = None
+
+
 class PasswordSettings(_Section):
     """Password hashing + policy (CONFIGURATION.md Sections 5.3 and 7.1).
 
@@ -494,6 +508,7 @@ class Settings(BaseSettings):
     reconciler: ReconcilerSettings = Field(default_factory=ReconcilerSettings)
     jar_gc: JarGcSettings = Field(default_factory=JarGcSettings)
     ports: PortsSettings = Field(default_factory=PortsSettings)
+    webui: WebuiSettings = Field(default_factory=WebuiSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
 
     @classmethod
@@ -540,6 +555,7 @@ class Settings(BaseSettings):
             "backup": self.backup.model_dump(),
             "reconciler": self.reconciler.model_dump(),
             "ports": self.ports.model_dump(),
+            "webui": self.webui.model_dump(),
             "auth": auth,
         }
 
