@@ -9,6 +9,7 @@ import { AdminAuditPage } from "./pages/AdminAuditPage.tsx";
 import { AdminCommunitiesPage } from "./pages/AdminCommunitiesPage.tsx";
 import { AdminOverviewPage } from "./pages/AdminOverviewPage.tsx";
 import { AdminUsersPage } from "./pages/AdminUsersPage.tsx";
+import { AdminVersionsPage } from "./pages/AdminVersionsPage.tsx";
 import { AdminWorkersPage } from "./pages/AdminWorkersPage.tsx";
 import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
@@ -155,10 +156,7 @@ export function App() {
               element={<AdminCommunitiesPage />}
             />
             <Route path="/admin/workers" element={<AdminWorkersPage />} />
-            <Route
-              path="/admin/versions"
-              element={<PlaceholderPage titleKey="page.adminVersions" />}
-            />
+            <Route path="/admin/versions" element={<AdminVersionsPage />} />
             <Route path="/admin/audit" element={<AdminAuditPage />} />
           </Route>
         </Route>

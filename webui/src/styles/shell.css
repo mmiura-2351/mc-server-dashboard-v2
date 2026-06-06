@@ -1389,6 +1389,49 @@ select.community-switcher {
   min-width: 160px;
 }
 
+/* Admin Versions page (#478): catalog table + JAR pool card. */
+.admin-versions .page-head h2 {
+  margin: 0;
+}
+.admin-versions .table-card {
+  padding: 0;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.admin-versions table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.admin-versions table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-versions table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-versions table.data td.num {
+  font-variant-numeric: tabular-nums;
+}
+.admin-versions table.data .row-actions {
+  text-align: right;
+}
+.admin-versions .jar-pool {
+  max-width: 360px;
+}
+.admin-versions .jar-pool-actions {
+  margin-top: 12px;
+}
+.admin-versions .jar-pool .hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
 /* ---------- Admin Workers fleet page (WEBUI_SPEC.md 6.12) — #477 ---------- */
 .admin-workers table.data {
   width: 100%;
