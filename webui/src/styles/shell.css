@@ -587,26 +587,81 @@ select.community-switcher {
   flex-shrink: 0;
 }
 
-/* ---------- Server create wizard (WEBUI_SPEC.md 6.3) ---------- */
+/* ---------- Server detail (WEBUI_SPEC.md 6.4 / 6.9) ---------- */
+.breadcrumbs {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.detail-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.pill.settling {
+  font-size: 11px;
+}
 .tabs {
   display: flex;
   gap: 4px;
-  margin-bottom: 14px;
   border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 16px;
 }
-.tabs .tab {
-  font: inherit;
+.tab {
   background: none;
-  border: 0;
+  border: none;
   border-bottom: 2px solid transparent;
   color: var(--text-dim);
   padding: 8px 12px;
+  font-size: 13px;
   cursor: pointer;
 }
-.tabs .tab.active {
+.tab.active {
   color: var(--text);
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--accent, var(--green));
 }
+.stop-control {
+  position: relative;
+  display: inline-flex;
+}
+.stop-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface, #1b1f27);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 4px;
+  z-index: 10;
+}
+.settings .form-card {
+  max-width: 640px;
+  margin-bottom: 14px;
+}
+.settings .form-row {
+  display: flex;
+  gap: 12px;
+}
+.settings .form-row .field {
+  flex: 1;
+}
+.settings .field-hint,
+.settings .field-hint.ok {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.settings .field-hint.ok {
+  color: var(--green);
+}
+.settings .field-error {
+  color: var(--red);
+  font-size: 12px;
+}
+/* ---------- Server create wizard (WEBUI_SPEC.md 6.3) ---------- */
 .wizard-steps {
   display: flex;
   gap: 8px;
@@ -673,10 +728,41 @@ select.community-switcher {
 .field .hint.warn {
   color: var(--amber);
 }
-.prop-row {
+.prop-row,
+.config-editor .config-row {
   display: flex;
   gap: 8px;
   margin-bottom: 6px;
+}
+.config-editor .config-row input {
+  flex: 1;
+}
+.settings .danger-zone {
+  max-width: 640px;
+}
+.settings .danger-zone .row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 12px;
+}
+.settings .danger-zone .row .desc {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.settings .danger-zone .row .btn {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  font-size: 13px;
+}
+.kv dt {
+  color: var(--text-dim);
 }
 .prop-row input {
   font: inherit;

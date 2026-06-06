@@ -181,6 +181,92 @@ export const en = {
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Live updates degraded — polling",
 
+  // Server detail page (WEBUI_SPEC.md 6.4 / 6.9). One contiguous block to keep
+  // merge conflicts with sibling i18n PRs minimal.
+  "serverDetail.loading": "Loading server…",
+  "serverDetail.loadError": "Could not load this server. Try refreshing.",
+  "serverDetail.breadcrumb": "Servers",
+  // Overview header.
+  "serverDetail.converging": "settling…",
+  "serverDetail.desired": "desired",
+  "serverDetail.observed": "observed",
+  "serverDetail.noWorker": "no worker assigned",
+  "serverDetail.noPort": "no port",
+  // Tabs (WEBUI_SPEC.md 6.4–6.9). Built tabs: Overview, Settings; the rest are
+  // placeholders pending later phases.
+  "serverDetail.tab.overview": "Overview",
+  "serverDetail.tab.console": "Console",
+  "serverDetail.tab.files": "Files",
+  "serverDetail.tab.backups": "Backups",
+  "serverDetail.tab.players": "Players",
+  "serverDetail.tab.settings": "Settings",
+  "serverDetail.tabPlaceholder": "Coming in a later phase.",
+  // Overview placeholder slots for the live WS streams (issue #440).
+  "serverDetail.metricsPlaceholder":
+    "Live metrics (CPU / memory / players) arrive with the per-server stream.",
+  "serverDetail.logTailPlaceholder":
+    "Live log tail arrives with the per-server stream.",
+  // Lifecycle controls.
+  "serverDetail.start": "Start",
+  "serverDetail.stop": "Stop",
+  "serverDetail.stopGraceful": "Stop (graceful)",
+  "serverDetail.stopForce": "Force stop",
+  "serverDetail.restart": "Restart",
+  "serverDetail.export": "Export",
+  "serverDetail.delete": "Delete",
+  // Settings tab (WEBUI_SPEC.md 6.9).
+  "serverDetail.settings.general": "General",
+  "serverDetail.settings.name": "Server name",
+  "serverDetail.settings.gamePort": "Game port",
+  "serverDetail.settings.executionBackend": "Execution backend",
+  "serverDetail.settings.executionBackendHint": "Immutable after creation.",
+  "serverDetail.settings.config": "Config overrides",
+  "serverDetail.settings.configKey": "Key",
+  "serverDetail.settings.configValue": "Value",
+  "serverDetail.settings.configAdd": "Add override",
+  "serverDetail.settings.configRemove": "Remove",
+  "serverDetail.settings.configHint":
+    "Values are read as JSON: 12 is a number, true a boolean, anything else text.",
+  "serverDetail.settings.save": "Save changes",
+  "serverDetail.settings.saved": "Settings saved.",
+  "serverDetail.settings.atRestHint":
+    "Name, game port and config changes need the server stopped.",
+  // On-blur game-port availability check (GET /ports/check/{port}).
+  "serverDetail.port.available": "✓ available",
+  "serverDetail.port.current": "✓ available (current)",
+  "serverDetail.port.taken": "Port is already in use.",
+  "serverDetail.port.outOfRange": "Port is outside the allowed range.",
+  "serverDetail.port.checkError": "Could not check port availability.",
+  // Danger zone.
+  "serverDetail.danger.heading": "Danger zone",
+  "serverDetail.danger.exportTitle": "Export server",
+  "serverDetail.danger.exportDesc":
+    "Download the full working set as a ZIP archive.",
+  "serverDetail.danger.exportButton": "Export ZIP",
+  "serverDetail.danger.deleteTitle": "Delete server",
+  "serverDetail.danger.deleteDesc":
+    "Permanently removes the server, its data and backups.",
+  "serverDetail.danger.deleteButton": "Delete…",
+  "serverDetail.delete.dialogTitle": "Delete server",
+  "serverDetail.delete.dialogBody":
+    "This permanently deletes the server, its data and backups. This cannot be undone. Type the server name to confirm.",
+  "serverDetail.delete.confirm": "Delete server",
+  "serverDetail.delete.prompt": "Type the server name to enable deletion",
+  // Outcomes (toasts). 409/422 reasons surfaced specifically; otherwise generic.
+  "serverDetail.exportStarted": "Export download started.",
+  "serverDetail.deleted": "Server deleted.",
+  "serverDetail.error.notStopped": "Stop the server before making this change.",
+  "serverDetail.error.unsettled":
+    "The server must be stopped before exporting.",
+  "serverDetail.error.portTaken": "That game port is already in use.",
+  "serverDetail.error.portOutOfRange":
+    "That game port is outside the allowed range.",
+  "serverDetail.error.invalidSnapshotInterval":
+    "snapshot_interval_seconds must be a whole number of seconds at or above the configured floor.",
+  "serverDetail.error.invalidBackupSchedule":
+    "backup_interval_hours must be a whole number of hours of at least 1.",
+  "serverDetail.error.generic": "Something went wrong. Please try again.",
+
   // Server create wizard (WEBUI_SPEC.md 6.3). One contiguous block to keep
   // merge conflicts with sibling i18n PRs minimal.
   "serverCreate.subtitle": "Provision a new Minecraft server.",

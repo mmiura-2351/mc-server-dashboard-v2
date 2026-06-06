@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   actionApplies,
+  atRest,
   isTransitional,
   normalizeState,
   type ObservedState,
@@ -82,5 +83,22 @@ describe("actionApplies", () => {
       expect(actionApplies(action, "stopping")).toBe(false);
       expect(actionApplies(action, "restarting")).toBe(false);
     }
+  });
+});
+
+describe("atRest", () => {
+  // Export / delete / settings edits need the server at rest (the API answers
+  // 409 server_unsettled / server_not_stopped otherwise, SPEC 6.9).
+  it("is true for the settled states", () => {
+    expect(atRest("stopped")).toBe(true);
+    expect(atRest("crashed")).toBe(true);
+    expect(atRest("unknown")).toBe(true);
+  });
+
+  it("is false while running or transitional", () => {
+    expect(atRest("running")).toBe(false);
+    expect(atRest("starting")).toBe(false);
+    expect(atRest("stopping")).toBe(false);
+    expect(atRest("restarting")).toBe(false);
   });
 });
