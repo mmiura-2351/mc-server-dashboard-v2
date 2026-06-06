@@ -318,6 +318,8 @@ export const en = {
     "Restoring overwrites the server's data and requires the server to be stopped.",
   "backups.restoreDialog.blockedHint":
     "Stop the server, then reopen this dialog to confirm the restore.",
+  "backups.restoreDialog.blockedNoStop":
+    "Ask an operator to stop the server, then reopen this dialog to confirm the restore.",
   "backups.restoreDialog.stop": "Stop server",
   "backups.restoreDialog.stopping": "Stopping the server…",
   "backups.restoreDialog.body":

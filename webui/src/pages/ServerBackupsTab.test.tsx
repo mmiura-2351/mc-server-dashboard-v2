@@ -315,6 +315,24 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     );
   });
 
+  it("hides the stop button without server:stop and explains instead", async () => {
+    // The one-click stop hits the lifecycle stop endpoint (server:stop); without
+    // it the user must ask an operator to stop the server.
+    mockCan = (code) => code !== "server:stop";
+    routeGet({ srv: { observed_state: "running" } });
+    await openBackups();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.restore") }),
+    );
+    expect(
+      screen.getByText(t("backups.restoreDialog.blockedNoStop")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: t("backups.restoreDialog.stop") }),
+    ).not.toBeInTheDocument();
+  });
+
   it("surfaces a 409 server_not_stopped specifically on restore", async () => {
     routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     mockApi.post.mockRejectedValue(
@@ -377,6 +395,22 @@ describe("ServerBackupsTab schedule field", () => {
     const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
     expect(config).toEqual({ motd: "hi" });
   });
+
+  it("shows the field read-only without server:update", async () => {
+    // The PATCH is gated on server:update; a backup:schedule-only user must not
+    // get a dead Save control.
+    mockCan = (code) => code !== "server:update";
+    routeGet({ srv: { config: { backup_interval_hours: 12 } } });
+    await openBackups();
+
+    const input = (await screen.findByLabelText(
+      t("backups.schedule.label"),
+    )) as HTMLInputElement;
+    expect(input).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: t("backups.schedule.save") }),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("ServerBackupsTab permission gating", () => {
@@ -432,7 +466,7 @@ describe("ServerBackupsTab permission gating", () => {
       await screen.findByRole("button", { name: t("backups.create") }),
     );
     expect(
-      await screen.findByText(t("permissions.deniedNamed") + "backup:create"),
+      await screen.findByText(`${t("permissions.deniedNamed")}backup:create`),
     ).toBeInTheDocument();
   });
 });

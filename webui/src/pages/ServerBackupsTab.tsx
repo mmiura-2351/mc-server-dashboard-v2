@@ -97,6 +97,13 @@ export function ServerBackupsTab({
   const canRestore = can("backup:restore", { serverId });
   const canDelete = can("backup:delete", { serverId });
   const canSchedule = can("backup:schedule", { serverId });
+  // The schedule is saved through the shared server PATCH, which the API gates on
+  // server:update. Without it a backup:schedule-only user can edit the field but
+  // the Save would 403, so the field is shown read-only.
+  const canUpdate = can("server:update", { serverId });
+  // The restore dialog's one-click stop hits the lifecycle stop endpoint, gated
+  // on server:stop. Without it the user must ask an operator to stop the server.
+  const canStop = can("server:stop", { serverId });
 
   const stopped = normalizeState(server.observed_state) === "stopped";
 
@@ -279,6 +286,7 @@ export function ServerBackupsTab({
           <ScheduleField
             server={server}
             communityId={communityId}
+            canEdit={canUpdate}
             onError={onError}
           />
         )}
@@ -355,6 +363,7 @@ export function ServerBackupsTab({
           server={server}
           communityId={communityId}
           stopped={stopped}
+          canStop={canStop}
           onDone={refresh}
           onClose={() => setRestoreTarget(null)}
         />
@@ -402,10 +411,12 @@ function Stat({
 function ScheduleField({
   server,
   communityId,
+  canEdit,
   onError,
 }: {
   server: ServerResponse;
   communityId: string;
+  canEdit: boolean;
   onError: (error: unknown) => void;
 }) {
   const { showToast } = useToast();
@@ -460,18 +471,21 @@ function ScheduleField({
           min={1}
           aria-label={t("backups.schedule.label")}
           value={hours}
+          disabled={!canEdit}
           onChange={(e) => setHours(e.target.value)}
         />
         {t("backups.schedule.unit")}
       </span>
-      <button
-        type="button"
-        className="btn sm"
-        disabled={save.isPending}
-        onClick={() => save.mutate()}
-      >
-        {t("backups.schedule.save")}
-      </button>
+      {canEdit && (
+        <button
+          type="button"
+          className="btn sm"
+          disabled={save.isPending}
+          onClick={() => save.mutate()}
+        >
+          {t("backups.schedule.save")}
+        </button>
+      )}
     </span>
   );
 }
@@ -486,6 +500,7 @@ function RestoreDialog({
   server,
   communityId,
   stopped,
+  canStop,
   onDone,
   onClose,
 }: {
@@ -493,6 +508,7 @@ function RestoreDialog({
   server: ServerResponse;
   communityId: string;
   stopped: boolean;
+  canStop: boolean;
   onDone: () => void;
   onClose: () => void;
 }) {
@@ -579,14 +595,16 @@ function RestoreDialog({
               {t("backups.restoreDialog.confirm")}
             </button>
           ) : (
-            <button
-              type="button"
-              className="btn"
-              disabled={stop.isPending}
-              onClick={() => stop.mutate()}
-            >
-              {t("backups.restoreDialog.stop")}
-            </button>
+            canStop && (
+              <button
+                type="button"
+                className="btn"
+                disabled={stop.isPending}
+                onClick={() => stop.mutate()}
+              >
+                {t("backups.restoreDialog.stop")}
+              </button>
+            )
           )}
         </>
       }
@@ -607,7 +625,13 @@ function RestoreDialog({
       ) : (
         <>
           <p>{t("backups.restoreDialog.blocked")}</p>
-          <p className="sub">{t("backups.restoreDialog.blockedHint")}</p>
+          <p className="sub">
+            {t(
+              canStop
+                ? "backups.restoreDialog.blockedHint"
+                : "backups.restoreDialog.blockedNoStop",
+            )}
+          </p>
         </>
       )}
     </Modal>
