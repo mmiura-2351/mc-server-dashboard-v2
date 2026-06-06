@@ -1376,6 +1376,13 @@ select.community-switcher {
   margin-top: 12px;
 }
 
+/* Admin global Audit page (issue #479, WEBUI_SPEC.md 6.12). Reuses the .audit
+   filter/table/paging styles; the community filter <select> matches the text
+   inputs alongside it. */
+.admin-audit .audit-filters select {
+  min-width: 160px;
+}
+
 /* ---------- Admin Workers fleet page (WEBUI_SPEC.md 6.12) — #477 ---------- */
 .admin-workers table.data {
   width: 100%;

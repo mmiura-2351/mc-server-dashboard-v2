@@ -896,6 +896,13 @@ export const en = {
   "admin.users.passwordHint":
     "At least 12 characters, mixing cases, digits, and symbols.",
 
+  // Admin global Audit page (WEBUI_SPEC.md 6.12). The filter row, table and
+  // paging strings are shared with the community Audit tab
+  // (communitySettings.audit.*); only the community filter and column are new.
+  "admin.audit.filterCommunity": "Community",
+  "admin.audit.filterCommunityAll": "All communities",
+  "admin.audit.colCommunity": "Community",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
