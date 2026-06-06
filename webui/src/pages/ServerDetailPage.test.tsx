@@ -1,0 +1,502 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../api/client.ts";
+import { setAccessToken } from "../auth/tokenStore.ts";
+import { ToastProvider } from "../components/Toast.tsx";
+import { t } from "../i18n/index.ts";
+import type { Can } from "../permissions/useCan.ts";
+import { ServerDetailPage } from "./ServerDetailPage.tsx";
+
+const CID = "c1";
+const SID = "s1";
+
+const mockApi = vi.hoisted(() => ({
+  get: vi.fn(),
+  post: vi.fn(),
+  patch: vi.fn(),
+  delete: vi.fn(),
+}));
+
+vi.mock("../api/client.ts", async () => {
+  const actual =
+    await vi.importActual<typeof import("../api/client.ts")>(
+      "../api/client.ts",
+    );
+  return { ...actual, api: mockApi };
+});
+
+const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
+vi.mock("../api/download.ts", () => mockDownload);
+
+let mockCan: Can = () => true;
+vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
+  useActiveCommunity: () => ({
+    communityId: CID,
+    setCommunityId: vi.fn(),
+    communities: [{ id: CID, name: "Sakura" }],
+  }),
+}));
+vi.mock("../permissions/useCan.ts", () => ({ useCan: () => mockCan }));
+
+const navigateMock = vi.hoisted(() => vi.fn());
+vi.mock("react-router", async () => {
+  const actual =
+    await vi.importActual<typeof import("react-router")>("react-router");
+  return { ...actual, useNavigate: () => navigateMock };
+});
+
+function server(overrides: Record<string, unknown> = {}) {
+  return {
+    id: SID,
+    community_id: CID,
+    name: "survival",
+    server_type: "paper",
+    mc_edition: "java",
+    mc_version: "1.21.6",
+    execution_backend: "container",
+    game_port: 25565,
+    desired_state: "running",
+    observed_state: "running",
+    observed_at: null,
+    assigned_worker_id: "worker-a",
+    config: {},
+    ...overrides,
+  };
+}
+
+function renderPage() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <MemoryRouter initialEntries={[`/communities/${CID}/servers/${SID}`]}>
+      <QueryClientProvider client={queryClient}>
+        <ToastProvider>
+          <Routes>
+            <Route
+              path="/communities/:cid/servers/:sid"
+              element={<ServerDetailPage />}
+            />
+          </Routes>
+        </ToastProvider>
+      </QueryClientProvider>
+    </MemoryRouter>,
+  );
+}
+
+beforeEach(() => {
+  setAccessToken("tok-1");
+  mockApi.get.mockReset();
+  mockApi.post.mockReset();
+  mockApi.patch.mockReset();
+  mockApi.delete.mockReset();
+  mockDownload.downloadFile.mockReset();
+  navigateMock.mockReset();
+  mockCan = () => true;
+});
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("ServerDetailPage scaffold + header", () => {
+  it("renders the header with name, state pill, worker, port and tabs", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+
+    expect(await screen.findByText("survival")).toBeInTheDocument();
+    // The state pill carries the observed-state label with the pill class.
+    const pill = screen
+      .getAllByText(t("dashboard.state.running"))
+      .find((el) => el.className.includes("pill"));
+    expect(pill).toBeDefined();
+    expect(screen.getByText("worker-a")).toBeInTheDocument();
+    expect(screen.getByText(":25565")).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: t("serverDetail.tab.overview") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the converging hint when desired ≠ observed", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ desired_state: "running", observed_state: "starting" }),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByText(t("serverDetail.converging")),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a load error", async () => {
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    renderPage();
+
+    expect(
+      await screen.findByText(t("serverDetail.loadError")),
+    ).toBeInTheDocument();
+  });
+
+  it("renders an unbuilt tab as a placeholder", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.files") }),
+    );
+    expect(
+      screen.getByText(t("serverDetail.tabPlaceholder")),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("ServerDetailPage lifecycle controls", () => {
+  it("gates controls by state machine: running shows stop + restart, hides start", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(screen.getByRole("button", { name: /Stop/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("serverDetail.restart") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: t("serverDetail.start") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows start (only) on a stopped server", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.getByRole("button", { name: t("serverDetail.start") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Stop/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides a control the caller may not perform", async () => {
+    mockCan = (code) => code !== "server:restart";
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.queryByRole("button", { name: t("serverDetail.restart") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("force-stops via the dropdown with ?force=true", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    mockApi.post.mockResolvedValue(server({ observed_state: "stopping" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
+    );
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/communities/${CID}/servers/${SID}/stop?force=true`,
+      ),
+    );
+  });
+
+  it("graceful-stops via the dropdown without the force flag", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    mockApi.post.mockResolvedValue(server({ observed_state: "stopping" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("serverDetail.stopGraceful") }),
+    );
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/communities/${CID}/servers/${SID}/stop`,
+      ),
+    );
+  });
+
+  it("routes a lifecycle 403 through the permission glue", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    mockApi.post.mockRejectedValue(
+      new ApiError(403, { reason: "server:restart" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    // restart is permitted by the resolver but the server denies at run-time.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.restart") }),
+    );
+
+    expect(
+      await screen.findByText(t("permissions.deniedNamed") + "server:restart"),
+    ).toBeInTheDocument();
+  });
+
+  it("gives a lifecycle 409 the state-changed treatment", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_unsettled" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.restart") }),
+    );
+
+    expect(
+      await screen.findByText(t("dashboard.stateChanged")),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("ServerDetailPage export", () => {
+  it("downloads the export ZIP through the authenticated helper", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    mockDownload.downloadFile.mockResolvedValue(undefined);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.export") }),
+    );
+
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledWith(
+        `/communities/${CID}/servers/${SID}/export`,
+        "survival.zip",
+      ),
+    );
+  });
+
+  it("disables export while the server is running", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.getByRole("button", { name: t("serverDetail.export") }),
+    ).toBeDisabled();
+  });
+
+  it("hides export when the caller lacks file:read", async () => {
+    mockCan = (code) => code !== "file:read";
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.queryByRole("button", { name: t("serverDetail.export") }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("ServerDetailPage settings", () => {
+  function openSettings() {
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    );
+  }
+
+  it("renders name, port, read-only backend and config rows from the server", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ config: { "max-players": "20", difficulty: "hard" } }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect(screen.getByDisplayValue("survival")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("25565")).toBeInTheDocument();
+    const backend = screen.getByDisplayValue("container");
+    expect(backend).toBeDisabled();
+    expect(screen.getByDisplayValue("max-players")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("hard")).toBeInTheDocument();
+  });
+
+  it("checks port availability on blur and shows the taken hint", async () => {
+    mockApi.get.mockResolvedValueOnce(server({ observed_state: "stopped" }));
+    mockApi.get.mockResolvedValueOnce({
+      port: 25570,
+      in_range: true,
+      available: false,
+    });
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    const portInput = screen.getByDisplayValue("25565");
+    fireEvent.change(portInput, { target: { value: "25570" } });
+    fireEvent.blur(portInput);
+
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith("/ports/check/25570"),
+    );
+    expect(
+      await screen.findByText(t("serverDetail.port.taken")),
+    ).toBeInTheDocument();
+  });
+
+  it("saves name + port + config round-trip via PATCH", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", config: { motd: "hi" } }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(screen.getByDisplayValue("survival"), {
+      target: { value: "renamed" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const [path, init] = mockApi.patch.mock.calls[0];
+    expect(path).toBe(`/communities/${CID}/servers/${SID}`);
+    expect(JSON.parse(init.body)).toEqual({
+      name: "renamed",
+      game_port: 25565,
+      config: { motd: "hi" },
+    });
+  });
+
+  it("adds and removes config rows", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", config: {} }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("serverDetail.settings.configAdd"),
+      }),
+    );
+    const keyInputs = screen.getAllByLabelText(
+      t("serverDetail.settings.configKey"),
+    );
+    fireEvent.change(keyInputs[keyInputs.length - 1], {
+      target: { value: "view-distance" },
+    });
+    const valueInputs = screen.getAllByLabelText(
+      t("serverDetail.settings.configValue"),
+    );
+    fireEvent.change(valueInputs[valueInputs.length - 1], {
+      target: { value: "10" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    expect(JSON.parse(mockApi.patch.mock.calls[0][1].body).config).toEqual({
+      "view-distance": "10",
+    });
+  });
+
+  it("surfaces a 409 server_not_stopped specifically on save", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    mockApi.patch.mockRejectedValue(
+      new ApiError(409, { reason: "server_not_stopped" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(
+      await screen.findByText(t("serverDetail.error.notStopped")),
+    ).toBeInTheDocument();
+  });
+
+  it("disables the save button without server:update", async () => {
+    mockCan = (code) => code !== "server:update";
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    expect(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    ).toBeDisabled();
+  });
+});
+
+describe("ServerDetailPage delete (typed confirm)", () => {
+  it("deletes after typed confirm and navigates to the dashboard", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    mockApi.delete.mockResolvedValue(undefined);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("serverDetail.danger.deleteButton"),
+      }),
+    );
+
+    const confirm = screen.getByRole("button", {
+      name: t("serverDetail.delete.confirm"),
+    });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(screen.getByPlaceholderText("survival"), {
+      target: { value: "survival" },
+    });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+
+    await waitFor(() =>
+      expect(mockApi.delete).toHaveBeenCalledWith(
+        `/communities/${CID}/servers/${SID}`,
+      ),
+    );
+    await waitFor(() =>
+      expect(navigateMock).toHaveBeenCalledWith(`/communities/${CID}`),
+    );
+  });
+
+  it("hides the delete control without server:delete", async () => {
+    mockCan = (code) => code !== "server:delete";
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    );
+    expect(
+      screen.queryByRole("button", {
+        name: t("serverDetail.danger.deleteButton"),
+      }),
+    ).not.toBeInTheDocument();
+  });
+});

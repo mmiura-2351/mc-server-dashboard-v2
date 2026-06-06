@@ -8,6 +8,7 @@ import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { PlaceholderPage } from "./pages/PlaceholderPage.tsx";
 import { RegisterPage } from "./pages/RegisterPage.tsx";
+import { ServerDetailPage } from "./pages/ServerDetailPage.tsx";
 import { useActiveCommunity } from "./permissions/ActiveCommunityProvider.tsx";
 import { dashboardPath, postLoginPath } from "./routes.ts";
 import { AppShell } from "./shell/AppShell.tsx";
@@ -108,7 +109,7 @@ export function App() {
           />
           <Route
             path="/communities/:cid/servers/:sid"
-            element={<PlaceholderPage titleKey="page.serverDetail" />}
+            element={<ServerDetailPage />}
           />
           <Route
             path="/communities/:cid/settings"

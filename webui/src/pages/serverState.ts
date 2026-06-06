@@ -41,6 +41,16 @@ export function isTransitional(state: ObservedState): boolean {
   return state === "starting" || state === "stopping" || state === "restarting";
 }
 
+/**
+ * Whether the server is settled at rest — neither running nor transitional.
+ * Export, delete and the at-rest settings edits (name/game-port/non-cadence
+ * config) gate on this; the API otherwise answers 409 server_unsettled /
+ * server_not_stopped (WEBUI_SPEC.md 6.9).
+ */
+export function atRest(state: ObservedState): boolean {
+  return state === "stopped" || state === "crashed" || state === "unknown";
+}
+
 interface PillSpec {
   /** Pill modifier class (running=green, transition=amber, …). */
   className: string;
