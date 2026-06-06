@@ -20,15 +20,16 @@ type PathsWith<M extends string> = {
   [P in keyof paths]: paths[P] extends Record<M, unknown> ? P : never;
 }[keyof paths];
 
+/** Successful (2xx) status codes openapi-typescript emits as literal keys. */
+type SuccessStatus = 200 | 201 | 202 | 203 | 204 | 205 | 206;
+
 /** The typed JSON response body for a successful (2xx) operation, if any. */
-type JsonResponse<Op> = Op extends {
-  responses: infer R;
-}
-  ? R extends Record<number, { content: { "application/json": infer B } }>
-    ? B
-    : R extends Record<number, { content?: never }>
-      ? undefined
-      : unknown
+type JsonResponse<Op> = Op extends { responses: infer R }
+  ? R[Extract<keyof R, SuccessStatus>] extends infer Success
+    ? Success extends { content: { "application/json": infer B } }
+      ? B
+      : undefined
+    : unknown
   : unknown;
 
 /** The operation object for a given path + method. */
@@ -55,7 +56,7 @@ async function request<P extends keyof paths, M extends string>(
     ...init,
     method: method.toUpperCase(),
     headers: {
-      "content-type": "application/json",
+      ...(init?.body != null ? { "content-type": "application/json" } : {}),
       ...init?.headers,
     },
   });
