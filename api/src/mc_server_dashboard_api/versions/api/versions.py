@@ -62,6 +62,18 @@ from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 router = APIRouter(prefix="/versions")
 
 
+class ServerTypesResponse(BaseModel):
+    """The server types the catalog can resolve at M1 (issue #286)."""
+
+    server_types: list[str]
+
+
+class VersionsResponse(BaseModel):
+    """The versions offered for a server type (issue #286)."""
+
+    versions: list[str]
+
+
 class RefreshResponse(BaseModel):
     """The catalogs the refresh invalidated (issue #286)."""
 
@@ -87,11 +99,11 @@ class JarPoolGcResponse(BaseModel):
 async def list_server_types(
     _user: Annotated[User, Depends(get_current_user)],
     use_case: Annotated[ListServerTypes, Depends(get_list_server_types)],
-) -> dict[str, list[str]]:
+) -> ServerTypesResponse:
     """List the server types the catalog can resolve at M1."""
 
     types = await use_case()
-    return {"server_types": [t.value for t in types]}
+    return ServerTypesResponse(server_types=[t.value for t in types])
 
 
 @router.post("/refresh")
@@ -168,7 +180,7 @@ async def list_versions(
     server_type: str,
     _user: Annotated[User, Depends(get_current_user)],
     use_case: Annotated[ListVersions, Depends(get_list_versions)],
-) -> dict[str, list[str]]:
+) -> VersionsResponse:
     """List the versions offered for ``server_type``."""
 
     parsed = _parse_server_type(server_type)
@@ -176,7 +188,7 @@ async def list_versions(
         versions = await use_case(server_type=parsed)
     except CatalogUnavailableError as exc:
         raise _service_unavailable() from exc
-    return {"versions": [v.version for v in versions]}
+    return VersionsResponse(versions=[v.version for v in versions])
 
 
 def _parse_server_type(value: str) -> ServerType:
