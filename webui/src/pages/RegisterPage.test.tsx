@@ -71,6 +71,76 @@ describe("RegisterPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("maps a structural 422 validation_error to inline field errors", async () => {
+    // Empty username/email with a long-enough password passes localValidate and
+    // submits, where Pydantic's min_length=1 rejects it as a structural
+    // validation_error carrying the per-field errors list (#410, #395 shape:
+    // loc/msg/type, input/ctx scrubbed).
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          reason: "validation_error",
+          status: 422,
+          errors: [
+            {
+              loc: ["body", "username"],
+              msg: "String should have at least 1 character",
+              type: "string_too_short",
+            },
+            {
+              loc: ["body", "email"],
+              msg: "value is not a valid email address",
+              type: "value_error",
+            },
+          ],
+        }),
+        {
+          status: 422,
+          headers: { "content-type": "application/problem+json" },
+        },
+      ),
+    );
+    renderRegister();
+    fillValid();
+    submit();
+
+    expect(
+      await screen.findByText("String should have at least 1 character"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("value is not a valid email address"),
+    ).toBeInTheDocument();
+  });
+
+  it("falls back to the generic toast for an unmappable structural 422", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          reason: "validation_error",
+          status: 422,
+          errors: [
+            {
+              loc: ["body"],
+              msg: "Input should be a valid dictionary",
+              type: "model_type",
+            },
+          ],
+        }),
+        {
+          status: 422,
+          headers: { "content-type": "application/problem+json" },
+        },
+      ),
+    );
+    renderRegister();
+    fillValid();
+    submit();
+
+    expect(
+      await screen.findByText(t("register.genericError")),
+    ).toBeInTheDocument();
+  });
+
   it("surfaces a username-taken conflict against the username field", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ reason: "username_taken", status: 409 }), {

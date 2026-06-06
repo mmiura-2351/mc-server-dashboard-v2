@@ -66,7 +66,6 @@ export const en = {
   "register.errPasswordMismatch": "Passwords do not match.",
   // Server-authoritative reason codes (AUTH_API.md 2; users.py register).
   "register.reason.too_short": "Password is too short.",
-  "register.reason.too_long": "Password is too long.",
   "register.reason.too_long_for_bcrypt": "Password is too long.",
   "register.reason.insufficient_complexity":
     "Password is not complex enough; use a longer or more varied password.",

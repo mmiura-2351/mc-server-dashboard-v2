@@ -23,7 +23,6 @@ interface FieldErrors {
 // register endpoint emits are enumerated in users.py (register_user).
 const REASON_KEY: Record<string, TranslationKey> = {
   too_short: "register.reason.too_short",
-  too_long: "register.reason.too_long",
   too_long_for_bcrypt: "register.reason.too_long_for_bcrypt",
   insufficient_complexity: "register.reason.insufficient_complexity",
   common_password: "register.reason.common_password",
@@ -43,6 +42,49 @@ function fieldForReason(reason: string): keyof FieldErrors {
     return "email";
   }
   return "password";
+}
+
+// A structural FastAPI/Pydantic 422 (reason "validation_error") carries a
+// per-field `errors` list (AUTH_API.md 2; entry shape `loc`/`msg`/`type` after
+// the #393/#395 scrub of `input`/`ctx`). The reachable path: an empty
+// username/email with a long-enough password clears localValidate, so Pydantic
+// `min_length=1` rejects it server-side (#410). Map each entry to its form
+// field by the `loc` tail (`["body", "<field>"]`) and use the validator `msg`
+// verbatim. Returns the inline errors, or null when no entry maps to a known
+// field — the caller then falls back to the generic toast.
+interface ValidationEntry {
+  loc: unknown[];
+  msg: string;
+}
+
+function fieldErrorsFromValidation(body: unknown): FieldErrors | null {
+  if (typeof body !== "object" || body === null || !("errors" in body)) {
+    return null;
+  }
+  const { errors } = body as { errors: unknown };
+  if (!Array.isArray(errors)) {
+    return null;
+  }
+  const known: Record<string, keyof FieldErrors> = {
+    username: "username",
+    email: "email",
+    password: "password",
+  };
+  const mapped: FieldErrors = {};
+  for (const entry of errors as ValidationEntry[]) {
+    const field = entry.loc?.[entry.loc.length - 1];
+    if (
+      typeof field === "string" &&
+      field in known &&
+      typeof entry.msg === "string"
+    ) {
+      const key = known[field];
+      if (mapped[key] === undefined) {
+        mapped[key] = entry.msg;
+      }
+    }
+  }
+  return Object.keys(mapped).length > 0 ? mapped : null;
 }
 
 // Client-side mirror of the FR-AUTH-4 hints; the server remains authoritative.
@@ -99,6 +141,14 @@ export function RegisterPage() {
           setErrors({ [fieldForReason(err.reason)]: t(messageKey) });
           setSubmitting(false);
           return;
+        }
+        if (err.reason === "validation_error") {
+          const fieldErrors = fieldErrorsFromValidation(err.body);
+          if (fieldErrors !== null) {
+            setErrors(fieldErrors);
+            setSubmitting(false);
+            return;
+          }
         }
       }
       // Registration closed / throttled / anything unmapped: generic toast.
