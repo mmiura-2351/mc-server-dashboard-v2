@@ -14,6 +14,9 @@ CORS (Section 7.7).
 
 - Node — the version is pinned in [`.nvmrc`](.nvmrc) (`nvm use`); see `engines`
   in [`package.json`](package.json).
+- npm — pinned via `engines.npm` (enforced by `engine-strict=true` in
+  [`.npmrc`](.npmrc)) and matched in CI, so `package-lock.json` regenerates
+  deterministically. Run `npm install -g npm@<engines.npm>` if your npm differs.
 
 ## Setup
 
