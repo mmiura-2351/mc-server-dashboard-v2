@@ -358,6 +358,13 @@ select.community-switcher {
     transparent 8px
   );
 }
+.pill.live-degraded {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--pill-transition-fg);
+  border-color: var(--pill-transition-border);
+  background: var(--pill-transition-bg);
+}
 .pill.blink::before {
   animation: pill-blink 1.1s ease-in-out infinite;
 }

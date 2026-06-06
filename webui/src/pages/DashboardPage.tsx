@@ -16,15 +16,10 @@ import {
   type ObservedState,
   statePill,
 } from "./serverState.ts";
+import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type LifecycleAction = "start" | "stop" | "restart";
-
-// The community-scoped server list (WEBUI_SPEC.md 6.2). REST-only here; live WS
-// updates land in the events issue, so there is no polling loop.
-function serversKey(communityId: string) {
-  return ["communities", communityId, "servers"] as const;
-}
 
 export function DashboardPage() {
   const { communityId } = useActiveCommunity();
@@ -41,7 +36,13 @@ export function DashboardPage() {
   return <Loaded communityId={communityId} />;
 }
 
-function DashboardChrome({ children }: { children: ReactNode }) {
+function DashboardChrome({
+  children,
+  degraded = false,
+}: {
+  children: ReactNode;
+  degraded?: boolean;
+}) {
   return (
     <>
       <div className="page-head">
@@ -49,6 +50,11 @@ function DashboardChrome({ children }: { children: ReactNode }) {
           <h1>{t("page.dashboard")}</h1>
           <div className="sub">{t("dashboard.subtitle")}</div>
         </div>
+        {degraded && (
+          <span className="pill live-degraded" role="status">
+            {t("dashboard.liveDegraded")}
+          </span>
+        )}
       </div>
       {children}
     </>
@@ -57,6 +63,7 @@ function DashboardChrome({ children }: { children: ReactNode }) {
 
 function Loaded({ communityId }: { communityId: string }) {
   const can = useCan();
+  const degraded = useCommunityEvents(communityId);
   const query = useQuery({
     queryKey: serversKey(communityId),
     queryFn: () =>
@@ -85,14 +92,14 @@ function Loaded({ communityId }: { communityId: string }) {
   const servers = query.data;
   if (servers.length === 0) {
     return (
-      <DashboardChrome>
+      <DashboardChrome degraded={degraded}>
         <EmptyState communityId={communityId} />
       </DashboardChrome>
     );
   }
 
   return (
-    <DashboardChrome>
+    <DashboardChrome degraded={degraded}>
       <div className="grid cols-2">
         {servers.map((server) => (
           <ServerCard

@@ -13,8 +13,32 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
+// Listeners notified whenever the token is set to a new value (login + the
+// rotation on refresh, WEBUI_SPEC.md 7.1). The WS layer subscribes to reconnect
+// with the fresh token on rotation (reconnect-on-rotate) without reaching into
+// the session core. A plain Set keeps this dependency-free and one-directional.
+const rotationListeners = new Set<() => void>();
+
+/**
+ * Subscribe to access-token rotations. The callback fires after the token is
+ * replaced with a different value (not on a no-op re-set, and not on clear).
+ * Returns an unsubscribe function.
+ */
+export function onAccessTokenRotation(listener: () => void): () => void {
+  rotationListeners.add(listener);
+  return () => {
+    rotationListeners.delete(listener);
+  };
+}
+
 export function setAccessToken(token: string): void {
+  const rotated = accessToken !== null && accessToken !== token;
   accessToken = token;
+  if (rotated) {
+    for (const listener of rotationListeners) {
+      listener();
+    }
+  }
 }
 
 export function clearAccessToken(): void {
