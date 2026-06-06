@@ -427,6 +427,220 @@ describe("ServerFilesTab permission gating", () => {
   });
 });
 
+describe("ServerFilesTab search", () => {
+  it("posts a {query, by, max_results} body and opens a hit in the viewer", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      // After clicking a hit, the browser re-lists the hit's parent directory.
+      if (path.includes("path=world") && path.includes("list=")) {
+        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+      }
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "world/level.dat", versions: [] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "world/level.dat",
+          content_base64: encodeUtf8Base64("seed=42\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([]));
+      }
+      return Promise.resolve(server());
+    });
+    mockApi.post.mockResolvedValue({
+      paths: ["world/level.dat"],
+      truncated: false,
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    fireEvent.change(screen.getByLabelText(t("files.search.label")), {
+      target: { value: "level" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.search.submit") }),
+    );
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    const [searchUrl, searchInit] = mockApi.post.mock.calls[0];
+    expect(searchUrl).toBe(`${FILES_BASE}/search`);
+    expect(JSON.parse((searchInit as { body: string }).body)).toEqual({
+      query: "level",
+      by: "name",
+      max_results: 100,
+    });
+
+    // The hit is clickable and opens it in the viewer.
+    fireEvent.click(await screen.findByText("/world/level.dat"));
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith(
+        `${FILES_BASE}?path=world%2Flevel.dat`,
+      ),
+    );
+  });
+
+  it("searches by content and encodes a path with a space/ampersand hit", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    mockApi.post.mockResolvedValue({
+      paths: ["config/a b & c.yml"],
+      truncated: false,
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    fireEvent.click(screen.getByLabelText(t("files.search.byContent")));
+    fireEvent.change(screen.getByLabelText(t("files.search.label")), {
+      target: { value: "token" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.search.submit") }),
+    );
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    expect(JSON.parse(mockApi.post.mock.calls[0][1].body).by).toBe("content");
+
+    // The encoded hit drives a content GET whose ?path= is fully URL-encoded.
+    fireEvent.click(await screen.findByText("/config/a b & c.yml"));
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith(
+        `${FILES_BASE}?path=${encodeURIComponent("config/a b & c.yml")}`,
+      ),
+    );
+  });
+});
+
+describe("ServerFilesTab history + rollback", () => {
+  it("lists retained versions from files/history with an encoded path", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "a b.txt", versions: ["v1", "v2"] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a b.txt",
+          content_base64: encodeUtf8Base64("hi\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a b\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+
+    expect(await screen.findByText("v1")).toBeInTheDocument();
+    expect(screen.getByText("v2")).toBeInTheDocument();
+    expect(screen.getByText(t("files.history.hint"))).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith(
+        `${FILES_BASE}/history?path=a%20b.txt`,
+      ),
+    );
+  });
+
+  it("rolls back to a version after confirm with {version_id} body and an encoded path", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "a b.txt", versions: ["v1"] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a b.txt",
+          content_base64: encodeUtf8Base64("hi\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a b\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+    await screen.findByText("v1");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.history.rollback") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.rollback.confirm") }),
+    );
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    const [url, init] = mockApi.post.mock.calls[0];
+    expect(url).toBe(`${FILES_BASE}/rollback?path=a%20b.txt`);
+    expect(JSON.parse((init as { body: string }).body)).toEqual({
+      version_id: "v1",
+    });
+  });
+
+  it("hides the History button without file:history", async () => {
+    mockCan = (code) => code !== "file:history";
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a.txt",
+          content_base64: encodeUtf8Base64("hi\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    expect(
+      screen.queryByRole("button", { name: t("files.history") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("omits the rollback button without file:rollback", async () => {
+    mockCan = (code) => code !== "file:rollback";
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "a.txt", versions: ["v1"] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a.txt",
+          content_base64: encodeUtf8Base64("hi\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+    await screen.findByText("v1");
+
+    expect(
+      screen.queryByRole("button", { name: t("files.history.rollback") }),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("ServerFilesTab running notice", () => {
   it("shows the live-working-set notice when the server is running", async () => {
     routeGet({

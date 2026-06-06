@@ -10,16 +10,20 @@
  * the authenticated helper in api/download.ts).
  *
  * Permission gating mirrors the API route gates (servers/api/files.py):
- * `file:read` browses/views/downloads, `file:edit` writes/uploads/mkdir/rename/
- * deletes. A 403 routes through onForbidden; other errors toast generically.
+ * `file:read` browses/views/downloads/searches, `file:edit` writes/uploads/
+ * mkdir/rename/deletes, `file:history` lists versions, `file:rollback` reverts.
+ * A 403 routes through onForbidden; other errors toast generically.
  *
  * The typed JSON client has no query-param helper, so the file routes' `?path=`
  * / `?list=` / `?extract=` are appended to the interpolated path as a string and
  * cast to the path type at the call site — the same escape hatch the lifecycle
  * controls use for `?force=`.
  *
- * Search box and per-file history/rollback are an explicit follow-up (#450);
- * this slice stops at browse + view/edit + the basic ops.
+ * Search (#451) posts a `{query, by, max_results}` body to `files/search` and
+ * renders the matched paths as buttons that open the hit in the viewer (and
+ * point the browser at its parent directory). The viewer's History drawer reads
+ * `files/history` (a bounded version ring — see the retention hint) and rolls a
+ * file back via `files/rollback`, refreshing both the content and the list.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -44,6 +48,8 @@ type DirListing = components["schemas"]["DirListingResponse"];
 type FileContent = components["schemas"]["FileContentResponse"];
 type DirEntry = components["schemas"]["DirEntryResponse"];
 type ServerResponse = components["schemas"]["ServerResponse"];
+type SearchResult = components["schemas"]["SearchResponse"];
+type FileVersions = components["schemas"]["FileVersionsResponse"];
 
 /** Base `/communities/{cid}/servers/{sid}/files` path for `server`. */
 function filesBase(communityId: string, serverId: string): string {
@@ -56,6 +62,12 @@ function filesBase(communityId: string, serverId: string): string {
 /** Join a directory rel-path and a child name into a POSIX rel-path. */
 function joinPath(dir: string, name: string): string {
   return dir === "" ? name : `${dir}/${name}`;
+}
+
+/** The directory portion of a rel-path ("" for a top-level file). */
+function parentDir(path: string): string {
+  const cut = path.lastIndexOf("/");
+  return cut === -1 ? "" : path.slice(0, cut);
 }
 
 /** Split a rel-path into ordered breadcrumb segments with their cumulative path. */
@@ -125,9 +137,21 @@ export function ServerFilesTab({
     }
   };
 
+  // Point the browser at the hit's parent directory and open it in the viewer.
+  const openHit = (path: string) => {
+    setDir(parentDir(path));
+    setOpenFile(path);
+  };
+
   return (
     <section className="files">
       {running && <div className="notice info">{t("files.runningNotice")}</div>}
+      <SearchBox
+        communityId={communityId}
+        serverId={server.id}
+        onOpen={openHit}
+        onError={onError}
+      />
       <Toolbar
         dir={dir}
         communityId={communityId}
@@ -176,6 +200,7 @@ export function ServerFilesTab({
               communityId={communityId}
               serverId={server.id}
               canEdit={canEdit}
+              can={can}
               running={running}
               onError={onError}
             />
@@ -212,6 +237,111 @@ function Crumbs({
           </button>
         </span>
       ))}
+    </div>
+  );
+}
+
+// ── Search box ───────────────────────────────────────────────────────────────
+
+function SearchBox({
+  communityId,
+  serverId,
+  onOpen,
+  onError,
+}: {
+  communityId: string;
+  serverId: string;
+  onOpen: (path: string) => void;
+  onError: (error: unknown) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [by, setBy] = useState<"name" | "content">("name");
+
+  const search = useMutation({
+    mutationFn: () =>
+      api.post(
+        apiPath(
+          "/communities/{community_id}/servers/{server_id}/files/search",
+          { community_id: communityId, server_id: serverId },
+        ),
+        {
+          body: JSON.stringify({ query: query.trim(), by, max_results: 100 }),
+        },
+      ) as Promise<SearchResult>,
+    onError,
+  });
+
+  const results = search.data;
+
+  return (
+    <div className="files-search">
+      <form
+        className="files-search-row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          search.mutate();
+        }}
+      >
+        <input
+          type="search"
+          className="files-search-input"
+          aria-label={t("files.search.label")}
+          placeholder={t("files.search.placeholder")}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <label className="files-search-by">
+          <input
+            type="radio"
+            name="search-by"
+            checked={by === "name"}
+            onChange={() => setBy("name")}
+          />
+          {t("files.search.byName")}
+        </label>
+        <label className="files-search-by">
+          <input
+            type="radio"
+            name="search-by"
+            checked={by === "content"}
+            onChange={() => setBy("content")}
+          />
+          {t("files.search.byContent")}
+        </label>
+        <button
+          type="submit"
+          className="btn sm"
+          disabled={query.trim().length === 0 || search.isPending}
+        >
+          {t("files.search.submit")}
+        </button>
+      </form>
+      {search.isError && (
+        <p className="field-error">{t("files.search.error")}</p>
+      )}
+      {results !== undefined &&
+        (results.paths.length === 0 ? (
+          <p className="sub">{t("files.search.empty")}</p>
+        ) : (
+          <>
+            {results.truncated && (
+              <p className="field-hint">{t("files.search.truncated")}</p>
+            )}
+            <ul className="files-search-results">
+              {results.paths.map((path) => (
+                <li key={path}>
+                  <button
+                    type="button"
+                    className="files-search-hit"
+                    onClick={() => onOpen(path)}
+                  >
+                    /{path}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        ))}
     </div>
   );
 }
@@ -363,6 +493,7 @@ function Viewer({
   communityId,
   serverId,
   canEdit,
+  can,
   running,
   onError,
 }: {
@@ -370,6 +501,7 @@ function Viewer({
   communityId: string;
   serverId: string;
   canEdit: boolean;
+  can: Can;
   running: boolean;
   onError: (error: unknown) => void;
 }) {
@@ -378,6 +510,9 @@ function Viewer({
   // `null` until the user edits, so an untouched view always reflects the
   // server's content even after a save invalidates and refetches it.
   const [draft, setDraft] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  const canHistory = can("file:history", { serverId });
 
   const contentKey = ["files", "content", communityId, serverId, path];
   const content = useQuery({
@@ -432,6 +567,15 @@ function Viewer({
           >
             {t("files.download")}
           </button>
+          {canHistory && (
+            <button
+              type="button"
+              className="btn sm ghost"
+              onClick={() => setHistoryOpen(true)}
+            >
+              {t("files.history")}
+            </button>
+          )}
           {isText && canEdit && (
             <button
               type="button"
@@ -444,6 +588,20 @@ function Viewer({
           )}
         </span>
       </div>
+      {historyOpen && (
+        <HistoryDrawer
+          path={path}
+          communityId={communityId}
+          serverId={serverId}
+          canRollback={can("file:rollback", { serverId })}
+          onClose={() => setHistoryOpen(false)}
+          onRolledBack={() => {
+            queryClient.invalidateQueries({ queryKey: contentKey });
+            setDraft(null);
+          }}
+          onError={onError}
+        />
+      )}
       {isText ? (
         <>
           {running && canEdit && (
@@ -462,6 +620,126 @@ function Viewer({
         <p className="sub">{t("files.binary")}</p>
       )}
     </>
+  );
+}
+
+// ── History drawer + rollback ────────────────────────────────────────────────
+
+function HistoryDrawer({
+  path,
+  communityId,
+  serverId,
+  canRollback,
+  onClose,
+  onRolledBack,
+  onError,
+}: {
+  path: string;
+  communityId: string;
+  serverId: string;
+  canRollback: boolean;
+  onClose: () => void;
+  onRolledBack: () => void;
+  onError: (error: unknown) => void;
+}) {
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState<string | null>(null);
+
+  const historyKey = ["files", "history", communityId, serverId, path];
+  const history = useQuery({
+    queryKey: historyKey,
+    queryFn: () =>
+      api.get(
+        `${filesBase(communityId, serverId)}/history?path=${encodeURIComponent(path)}` as never,
+      ) as Promise<FileVersions>,
+  });
+
+  const rollback = useMutation({
+    mutationFn: (versionId: string) =>
+      api.post(
+        `${filesBase(communityId, serverId)}/rollback?path=${encodeURIComponent(path)}` as never,
+        { body: JSON.stringify({ version_id: versionId }) },
+      ),
+    onSuccess: () => {
+      showToast(t("files.rolledBack"), "success");
+      // The rolled-over current is itself retained, so refresh the list too.
+      queryClient.invalidateQueries({ queryKey: historyKey });
+      onRolledBack();
+      setConfirming(null);
+    },
+    onError: (error) => {
+      setConfirming(null);
+      onError(error);
+    },
+  });
+
+  return (
+    <Modal
+      open
+      title={t("files.history.title")}
+      onClose={onClose}
+      footer={
+        <button type="button" className="btn ghost" onClick={onClose}>
+          {t("files.history.close")}
+        </button>
+      }
+    >
+      <p className="field-hint">{t("files.history.hint")}</p>
+      {history.isPending ? (
+        <p className="sub">{t("files.history.loading")}</p>
+      ) : history.isError ? (
+        <p className="field-error">{t("files.history.error")}</p>
+      ) : history.data.versions.length === 0 ? (
+        <p className="sub">{t("files.history.empty")}</p>
+      ) : (
+        <ul className="files-history-list">
+          {history.data.versions.map((versionId) => (
+            <li key={versionId} className="files-history-row">
+              <span className="files-history-id">{versionId}</span>
+              {canRollback && (
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  onClick={() => setConfirming(versionId)}
+                >
+                  {t("files.history.rollback")}
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {confirming !== null && (
+        <Modal
+          open
+          title={t("files.rollback.dialogTitle")}
+          onClose={() => setConfirming(null)}
+          footer={
+            <>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setConfirming(null)}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                className="btn danger"
+                disabled={rollback.isPending}
+                onClick={() => rollback.mutate(confirming)}
+              >
+                {t("files.rollback.confirm")}
+              </button>
+            </>
+          }
+        >
+          <p>{t("files.rollback.dialogBody")}</p>
+          <p className="files-history-id">{confirming}</p>
+        </Modal>
+      )}
+    </Modal>
   );
 }
 

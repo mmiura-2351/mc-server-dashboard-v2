@@ -378,12 +378,37 @@ export const en = {
     "This permanently deletes the selected file or directory. Type its name to confirm.",
   "files.delete.confirm": "Delete permanently",
   "files.delete.prompt": "Type the name to enable deletion",
+  // Search (files/search).
+  "files.search.label": "Search files",
+  "files.search.placeholder": "Search by name…",
+  "files.search.byName": "Name",
+  "files.search.byContent": "Content",
+  "files.search.submit": "Search",
+  "files.search.empty": "No files matched.",
+  "files.search.truncated":
+    "Showing the first results — narrow your search to see more.",
+  "files.search.error": "Search failed. Try again.",
+  // History drawer + rollback (files/history, files/rollback).
+  "files.history": "History",
+  "files.history.title": "Version history",
+  "files.history.loading": "Loading versions…",
+  "files.history.error": "Could not load version history.",
+  "files.history.empty": "No prior versions retained yet.",
+  "files.history.hint":
+    "Only the most recent versions are kept (10 by default); older ones are discarded.",
+  "files.history.rollback": "Roll back",
+  "files.history.close": "Close",
+  "files.rollback.dialogTitle": "Roll back file",
+  "files.rollback.dialogBody":
+    "This replaces the current file with the selected version. The server must be stopped.",
+  "files.rollback.confirm": "Roll back now",
   // Outcomes (toasts).
   "files.saved": "File saved.",
   "files.uploaded": "Upload complete.",
   "files.folderCreated": "Folder created.",
   "files.renamed": "Renamed.",
   "files.deleted": "Deleted.",
+  "files.rolledBack": "Rolled back to the selected version.",
   "files.error.generic": "Something went wrong. Please try again.",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
