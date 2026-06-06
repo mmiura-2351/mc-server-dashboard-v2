@@ -356,6 +356,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ## 7. Cross-cutting concerns
 
 ### 7.1 Auth/session lifecycle
+- The API-side contract these notes consume — endpoint status codes, the
+  body-vs-cookie transport rules, and the refresh reuse grace window the
+  single-flight mutex below guards against — is documented in
+  [`AUTH_API.md`](../app/AUTH_API.md).
 - Access token (short-lived; ~900 s in the live deployment) kept in memory
   only. Refresh token in an **httpOnly cookie** set by the API on login
   (`Secure; SameSite=Strict; Path=/auth`) — never readable by JS; requires the
@@ -386,7 +390,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   the `reason` field — the client switches on `reason`. Request-validation
   failures (422) use `reason: "validation_error"` and carry the per-field list
   in an `errors` extension member. The client branches on exactly this shape;
-  there is no legacy bare-string / `{reason}` fork.
+  there is no legacy bare-string / `{reason}` fork. The auth endpoints' reason
+  codes are enumerated in [`AUTH_API.md`](../app/AUTH_API.md) Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
 - Conflict-flavored errors (e.g. lifecycle races, `server_unsettled`-style
   responses) get a "state changed — refresh" treatment, not a raw error dump.

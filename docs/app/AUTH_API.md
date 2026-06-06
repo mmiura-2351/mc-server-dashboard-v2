@@ -1,0 +1,204 @@
+# Auth API contract
+
+> Status: **Reference** · Audience: contributors to `api/`, Web UI session layer
+>
+> The status-code and transport contract for the `/auth/*` endpoints (login,
+> refresh, logout). It exists so contract changes have a place to land and a
+> reviewer can diff a change against a documented baseline instead of re-deriving
+> it from the router. **Code is the source of truth**
+> (`api/src/mc_server_dashboard_api/identity/api/auth.py`); where this doc and the
+> router disagree, the router wins and this doc is stale.
+>
+> **Scope.** The `/auth/*` endpoints only. Token issuance/verification semantics
+> (FR-AUTH-2) live behind the `TokenService` Port
+> ([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 5.1); the brute-force / lockout
+> behaviour that login participates in is owned by [`SECURITY.md`](SECURITY.md);
+> the tunable token TTLs and cookie knobs are owned by
+> [`CONFIGURATION.md`](CONFIGURATION.md) Section 5.3 and are referenced, not
+> duplicated, here.
+
+## Table of Contents
+
+1. [Endpoints at a glance](#1-endpoints-at-a-glance)
+2. [Error body shape](#2-error-body-shape)
+3. [Token transport: body vs cookie](#3-token-transport-body-vs-cookie)
+4. [Refresh rotation and the reuse grace window](#4-refresh-rotation-and-the-reuse-grace-window)
+5. [CSRF posture](#5-csrf-posture)
+6. [Audit events](#6-audit-events)
+7. [Related documents](#7-related-documents)
+
+## 1. Endpoints at a glance
+
+All three endpoints accept and return JSON. Success and failure status codes:
+
+| Endpoint | Success | Body | Failure |
+|---|---|---|---|
+| `POST /auth/login` | `200` | access + refresh pair + `Set-Cookie` (always) | `401` invalid credentials |
+| `POST /auth/refresh` | `200` | rotated access + refresh pair; `Set-Cookie` only if the request carried the cookie | `401` invalid/expired/revoked token, **or** no token in either transport |
+| `POST /auth/logout` | `204` | empty; clearing `Set-Cookie` only if the request carried the cookie | — (idempotent; see below) |
+
+Notable contract points, each verifiable in the router:
+
+- **`POST /auth/login`** returns the FastAPI default `200` on success with a
+  `{access_token, refresh_token, token_type: "bearer"}` body, and always sets the
+  refresh cookie (it is the entry point that grants it). Both failure modes —
+  unknown user and wrong password — collapse to a single `401` with no detail
+  that distinguishes them (username-enumeration defence,
+  [`SECURITY.md`](SECURITY.md) Section 2).
+- **`POST /auth/refresh`** with an empty / `{}` body **and** no cookie returns
+  `401` *without invoking the use case* — a uniform `401`, not the `422` a missing
+  required field would otherwise produce (changed in issue #365). An
+  unknown / expired / revoked token also returns `401`; the client cannot tell
+  the cases apart.
+- **`POST /auth/logout`** with no token in either transport returns `204`, not
+  `422` (changed in issue #365). Logout is idempotent: with nothing to revoke it
+  is a clean `204` and emits no enumeration signal. A malformed body (e.g. a
+  present-but-empty `refresh_token`, which violates `min_length=1`) still fails
+  validation with `422`.
+
+The `401` responses carry `WWW-Authenticate: Bearer`.
+
+## 2. Error body shape
+
+Every error response across the HTTP surface is RFC 9457
+`application/problem+json` (issue #371, central module
+`api/src/mc_server_dashboard_api/http_problem.py`). One body shape — the client
+branches on exactly one contract:
+
+```json
+{
+  "type": "urn:mcsd:error:<reason>",
+  "title": "<HTTP status phrase>",
+  "status": 401,
+  "reason": "<reason>"
+}
+```
+
+- `type` is a stable, non-resolvable `urn:mcsd:error:<reason>` URN; the machine
+  code is its terminal segment **and** is surfaced verbatim as the `reason`
+  extension member, so clients switch on `reason` without parsing the URI.
+- A `422` validation failure adds an `errors` extension member (the per-field
+  list) and uses `reason: "validation_error"`.
+
+Reason codes the `/auth/*` endpoints emit:
+
+| Status | `reason` | When |
+|---|---|---|
+| `401` | `invalid_credentials` | login failure, **and** every refresh failure (missing / unknown / expired / revoked / reused token) — the router raises one uniform `401` for all of them, so the reason does not distinguish login from refresh |
+| `422` | `validation_error` | a malformed request body (e.g. login with a blank `username`/`password`, or a present-but-empty `refresh_token`) |
+
+Note the refresh failure path deliberately reuses the `invalid_credentials`
+reason rather than a token-specific code: the contract leaks no signal that would
+distinguish *why* a refresh was rejected.
+
+## 3. Token transport: body vs cookie
+
+The refresh token rides two transports (issue #363): the JSON body that
+worker / CLI clients use, and an httpOnly cookie for the Web UI session
+([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 7.1). The body always carries the
+refresh token even for cookie clients, so the body-based contract is unchanged
+(non-breaking).
+
+**Cookie attributes** (set on login):
+
+```
+Set-Cookie: <name>=<token>; HttpOnly; Secure; SameSite=Strict; Path=/auth; Max-Age=<refresh TTL>
+```
+
+The cookie name (`mcd_refresh` by default) and the `Secure` flag are operator
+knobs (`auth.token.refresh_cookie_name`, `auth.token.refresh_cookie_secure`;
+[`CONFIGURATION.md`](CONFIGURATION.md) Section 5.3). `Max-Age` tracks
+`refresh_ttl_seconds`. `Path=/auth` and `SameSite=Strict` are fixed in the router
+— the security posture, not knobs.
+
+**Precedence and Set-Cookie emission** are two separate rules:
+
+- **Body-token-wins precedence.** On refresh and logout, the body token is used
+  when present; the cookie is a fallback for when the body carries none. If both
+  are present, the body token is used.
+- **Cookie emission follows cookie *presence*, not which token was used**
+  (issue #372). Refresh re-sets (rotates) the cookie, and logout clears it,
+  **only when the request itself carried the cookie**. A body-only request
+  therefore leaves the response headers byte-for-byte unchanged — no rotated or
+  clearing `Set-Cookie` that a non-browser client never asked for. A request that
+  carries *both* a body token and the cookie uses the body token **and** still
+  rotates the cookie the browser sent (otherwise that browser would be left with
+  a stale cookie). Login is the exception: it always sets the cookie, because it
+  is the entry point that grants it.
+
+## 4. Refresh rotation and the reuse grace window
+
+Each successful refresh **rotates**: the presented token is revoked and a fresh
+access + refresh pair is issued in one transaction. Re-presenting an
+already-rotated token is ambiguous — a legitimate concurrent refresh (two SPA
+tabs, or a client retrying a refresh whose response was lost after the server
+committed the rotation), or a replay of a leaked secret. A short **reuse grace
+window** disambiguates (issue #369, `auth.token.refresh_reuse_grace_seconds`,
+default **60s**):
+
+| Presented token | Within grace window | Outside window / any time |
+|---|---|---|
+| rotated predecessor (revoked by rotation) | `200` + fresh pair, **family intact** | `401`, **whole family revoked** + `auth:refresh_reuse` DENIED audit event |
+| family- or logout-revoked token | `401`, whole family revoked + DENIED audit event | same |
+| unknown / expired token | `401` (no family action, not audited) | same |
+
+Only a *rotation*-revoked predecessor is ever graced. A token revoked by a family
+revoke (the theft response, or password change / deactivate / delete) or by
+logout is never graced — re-presenting it stays on the theft path regardless of
+how recent the revocation is. The grace-window predecessor is **not** re-revoked,
+so repeated reuse cannot roll the window forward and keep a leaked token alive.
+
+### Guidance for the Web UI session layer
+
+The httpOnly cookie is attached to refresh requests automatically, so concurrent
+refreshes are easy to trigger. Within the grace window they are safe:
+
+- **Concurrent tab refreshes** and **lost-response retries** within the window
+  each get a fresh, valid pair and leave the family intact — they will not log the
+  user out everywhere.
+- **Beyond the window, serialize.** Two refreshes spaced further apart than
+  `refresh_reuse_grace_seconds` that both present the same predecessor are treated
+  as theft and revoke the whole family. Use a single-flight refresh mutex (one
+  in-flight refresh per session; queued callers await its result) so a tab never
+  replays a long-stale predecessor. This is the single-flight refresh the session
+  lifecycle already mandates ([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 7.1).
+
+## 5. CSRF posture
+
+Baseline: `SameSite=Strict` + `Path=/auth` on the refresh cookie (issues
+#363, #365). `SameSite=Strict` keeps the browser from attaching the cookie to
+cross-site requests; `Path=/auth` confines it to the auth endpoints. Refresh
+returns the rotated tokens in the response body and performs no state change on
+behalf of an ambient session, so it is not a useful CSRF target. The residual
+surface is logout-by-forced-request, whose only effect is to end the victim's own
+session. A stricter posture — require a custom `X-Requested-With` header that
+cross-origin callers cannot set without a CORS preflight — is recorded in the
+router docstring as an optional future upgrade, not built now.
+
+## 6. Audit events
+
+The endpoints record audit events (FR-AUD-1) for forensics, independent of the
+status code returned to the client:
+
+| Endpoint / path | Operation | Outcome | Actor |
+|---|---|---|---|
+| login success | `auth:login` | `SUCCESS` | the authenticated user |
+| login failure | `auth:login` | `DENIED` | none (enumeration defence; the username / IP record lives in the `login_attempt` table) |
+| refresh success | `auth:refresh` | `SUCCESS` | — |
+| refresh reuse (family revoked) | `auth:refresh_reuse` | `DENIED` | the affected user (target: user) |
+| logout (token revoked) | `auth:logout` | `SUCCESS` | — |
+
+A plain unknown / expired refresh token is **not** audited — it is not a
+token-theft signal, so auditing it would be noise.
+
+## 7. Related documents
+
+- [`SECURITY.md`](SECURITY.md) — login's brute-force / lockout behaviour and the
+  username-enumeration posture behind the uniform `401`.
+- [`CONFIGURATION.md`](CONFIGURATION.md) Section 5.3 — token TTLs, the reuse grace
+  window, and the cookie name / `Secure` knobs.
+- [`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 7.1 (auth/session lifecycle) and
+  Section 7.4 (the problem+json error layer) — how the Web UI consumes this
+  contract.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — the `TokenService` Port behind token
+  issuance / verification.
