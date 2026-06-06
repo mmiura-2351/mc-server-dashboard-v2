@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
 import { App } from "./App.tsx";
+import { SessionProvider } from "./auth/SessionProvider.tsx";
 import "./styles/global.css";
 import "./styles/shell.css";
 
@@ -17,7 +18,9 @@ createRoot(rootElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <App />
+        <SessionProvider>
+          <App />
+        </SessionProvider>
       </BrowserRouter>
     </QueryClientProvider>
   </StrictMode>,

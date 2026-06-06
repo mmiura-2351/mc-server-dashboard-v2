@@ -11,8 +11,15 @@
  * phases builds typed call sites on top of the generated `paths` type. It is
  * not a generated runtime — just enough to keep call sites honest against the
  * schema.
+ *
+ * On top of that it carries the session plumbing (WEBUI_SPEC.md 7.1): it
+ * attaches the in-memory access token as a Bearer credential and, on a 401 from
+ * a non-auth endpoint, transparently performs a single-flight refresh and
+ * retries the request once. The refresh itself is owned by the session layer
+ * and registered here, so the client does not depend on it.
  */
 
+import { getAccessToken } from "../auth/tokenStore.ts";
 import type { paths } from "./schema";
 
 /** Paths that declare the given HTTP method in the generated schema. */
@@ -37,14 +44,73 @@ type Op<P extends keyof paths, M extends string> = M extends keyof paths[P]
   ? paths[P][M]
   : never;
 
+/** Shape of an RFC 9457 `application/problem+json` body (AUTH_API.md 2). */
+interface ProblemDetails {
+  reason?: string;
+}
+
+/**
+ * Pull the machine-readable `reason` out of a problem+json body. The UI
+ * branches on exactly this one field (AUTH_API.md 2); anything that is not a
+ * problem+json object yields `undefined`.
+ */
+function readReason(body: unknown): string | undefined {
+  if (typeof body === "object" && body !== null) {
+    const reason = (body as ProblemDetails).reason;
+    if (typeof reason === "string") {
+      return reason;
+    }
+  }
+  return undefined;
+}
+
 export class ApiError extends Error {
+  /** RFC 9457 `reason` extension member, when the body is problem+json. */
+  readonly reason: string | undefined;
+
   constructor(
     readonly status: number,
     readonly body: unknown,
   ) {
     super(`API request failed with status ${status}`);
     this.name = "ApiError";
+    this.reason = readReason(body);
   }
+}
+
+/**
+ * The session layer registers a single-flight refresh here. It resolves true
+ * when the access token was re-established and false on a hard logout, so the
+ * client can decide whether to retry. Kept as an injected hook to avoid a
+ * client -> session import cycle.
+ */
+type Refresher = () => Promise<boolean>;
+let refresher: Refresher | null = null;
+
+export function setRefresher(fn: Refresher): void {
+  refresher = fn;
+}
+
+function isAuthPath(path: string): boolean {
+  return path.startsWith("/auth/");
+}
+
+async function rawRequest(
+  method: string,
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const token = getAccessToken();
+  return fetch(path, {
+    ...init,
+    method,
+    credentials: "same-origin",
+    headers: {
+      ...(init?.body != null ? { "content-type": "application/json" } : {}),
+      ...(token != null ? { authorization: `Bearer ${token}` } : {}),
+      ...init?.headers,
+    },
+  });
 }
 
 async function request<P extends keyof paths, M extends string>(
@@ -52,14 +118,24 @@ async function request<P extends keyof paths, M extends string>(
   path: P,
   init?: RequestInit,
 ): Promise<JsonResponse<Op<P, M>>> {
-  const response = await fetch(path as string, {
-    ...init,
-    method: method.toUpperCase(),
-    headers: {
-      ...(init?.body != null ? { "content-type": "application/json" } : {}),
-      ...init?.headers,
-    },
-  });
+  const httpMethod = method.toUpperCase();
+  const url = path as string;
+
+  let response = await rawRequest(httpMethod, url, init);
+
+  // Transparent refresh: a 401 from a non-auth endpoint means the access token
+  // expired. Run the shared single-flight refresh and retry once. The /auth/*
+  // endpoints surface their own 401s untouched (no refresh on the refresh).
+  if (response.status === 401 && refresher !== null && !isAuthPath(url)) {
+    const refreshed = await refresher();
+    if (refreshed) {
+      response = await rawRequest(httpMethod, url, init);
+    }
+    // A 401 on the retried request (post-refresh) is intentionally surfaced as a
+    // raw ApiError, not a hard logout: the session is valid, this endpoint just
+    // denied access. The #410 guards must not misread it as session expiry.
+  }
+
   const text = await response.text();
   const body: unknown = text.length > 0 ? JSON.parse(text) : undefined;
   if (!response.ok) {
