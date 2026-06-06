@@ -1,0 +1,64 @@
+/* Design tokens ported from docs/ui/mockup/assets/style.css.
+ *
+ * Theme-agnostic tokens (typography, spacing, radii) live on :root.
+ * Theme-specific color tokens live under a [data-theme] selector so a light
+ * theme later is a token swap, not a rewrite (WEBUI_SPEC.md Section 7.5).
+ * Dark is the shipped theme and the default when no data-theme is set.
+ */
+
+:root {
+  /* Typography */
+  --font-mono: "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+  --font-sans:
+    -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-size-base: 14px;
+  --line-height-base: 1.5;
+
+  /* Spacing scale (derived from the mockup's recurring px steps) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  /* Radii */
+  --radius: 8px;
+  --radius-sm: 5px;
+}
+
+/* Dark theme (shipped). Applied by default and when data-theme="dark". */
+:root,
+:root[data-theme="dark"] {
+  --bg: #0e1116;
+  --bg-raised: #151a21;
+  --bg-overlay: #1b212b;
+  --bg-inset: #0a0d11;
+  --border: #2a3240;
+  --border-subtle: #1f2630;
+  --text: #d7dee8;
+  --text-dim: #8b97a8;
+  --text-faint: #5c6878;
+  --accent: #4d9fff;
+  --accent-dim: #2b5e9e;
+
+  /* Status palette (drives the state pills) */
+  --green: #3fcf6e;
+  --amber: #f0b429;
+  --red: #f25555;
+  --purple: #b07aff;
+
+  /* State-pill tints (text / border / background per status) */
+  --pill-running-fg: var(--green);
+  --pill-running-border: rgba(63, 207, 110, 0.35);
+  --pill-running-bg: rgba(63, 207, 110, 0.08);
+  --pill-transition-fg: var(--amber);
+  --pill-transition-border: rgba(240, 180, 41, 0.35);
+  --pill-transition-bg: rgba(240, 180, 41, 0.08);
+  --pill-crashed-fg: var(--red);
+  --pill-crashed-border: rgba(242, 85, 85, 0.4);
+  --pill-crashed-bg: rgba(242, 85, 85, 0.08);
+  --pill-stopped-fg: var(--text-faint);
+  --pill-unknown-fg: var(--purple);
+  --pill-unknown-border: rgba(176, 122, 255, 0.35);
+}
