@@ -1346,3 +1346,50 @@ select.community-switcher {
   font-size: 12px;
   color: var(--text-dim);
 }
+
+/* Admin global Audit page (issue #479, WEBUI_SPEC.md 6.12). Reuses the .audit
+   filter/table/paging styles; the community filter <select> matches the text
+   inputs alongside it. */
+.admin-audit .audit-filters select {
+  min-width: 160px;
+}
+
+/* ---------- Admin Workers fleet page (WEBUI_SPEC.md 6.12) — #477 ---------- */
+.admin-workers table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.admin-workers table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-workers table.data td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-workers table.data td.num {
+  font-variant-numeric: tabular-nums;
+}
+.admin-workers table.data .badge + .badge {
+  margin-left: 4px;
+}
+.admin-workers .row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+.admin-workers .notice {
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-top: 14px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+.admin-workers .notice.info {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: rgba(77, 159, 255, 0.08);
+}

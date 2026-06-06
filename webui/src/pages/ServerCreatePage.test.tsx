@@ -75,12 +75,20 @@ function renderPage() {
   );
 }
 
+// Pick the Paper type and wait for the latest-version preselect effect to
+// commit the version into state — until then Next stays disabled and a click on
+// it is a no-op, which races the rest of the walk under full-suite timing.
+async function pickTypeAndVersion() {
+  fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
+  await waitFor(() =>
+    expect(screen.getByText(t("serverCreate.next"))).toBeEnabled(),
+  );
+}
+
 // Walk steps 1→3 leaving a created-ready form: pick a type, the latest version
 // preselects, advance to runtime then config, and fill the name.
 async function reachConfigStep(name = "survival") {
-  fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
-  // Latest version preselected once the list loads.
-  await screen.findByDisplayValue("1.21.6");
+  await pickTypeAndVersion();
   fireEvent.click(screen.getByText(t("serverCreate.next")));
   fireEvent.click(await screen.findByText(t("serverCreate.next")));
   const nameInput = await screen.findByLabelText(t("serverCreate.nameLabel"));
@@ -134,16 +142,19 @@ describe("Step 1 — type & version", () => {
     await screen.findByText(t("serverCreate.type.paper"));
     expect(screen.getByText(t("serverCreate.next"))).toBeDisabled();
     fireEvent.click(screen.getByText(t("serverCreate.type.paper")));
-    await screen.findByDisplayValue("1.21.6");
-    expect(screen.getByText(t("serverCreate.next"))).toBeEnabled();
+    // Next flips to enabled only once the preselect effect commits the version
+    // into state — anchor on that, not on the select's displayed option (which
+    // shows the first option before the effect runs and races the assertion).
+    await waitFor(() =>
+      expect(screen.getByText(t("serverCreate.next"))).toBeEnabled(),
+    );
   });
 });
 
 describe("Step 2 — runtime port check", () => {
   it("auto-suggests the game port from /ports/available on entering step 2", async () => {
     renderPage();
-    fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
-    await screen.findByDisplayValue("1.21.6");
+    await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
 
     expect(await screen.findByDisplayValue("25570")).toBeInTheDocument();
@@ -163,8 +174,7 @@ describe("Step 2 — runtime port check", () => {
       return defaultGet(path);
     });
     renderPage();
-    fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
-    await screen.findByDisplayValue("1.21.6");
+    await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
 
     const portInput = await screen.findByLabelText(t("serverCreate.portLabel"));
@@ -180,8 +190,7 @@ describe("Step 2 — runtime port check", () => {
 
   it("reports an available port on blur", async () => {
     renderPage();
-    fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
-    await screen.findByDisplayValue("1.21.6");
+    await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
 
     const portInput = await screen.findByLabelText(t("serverCreate.portLabel"));
@@ -201,8 +210,7 @@ describe("Step 2 — runtime port check", () => {
       return defaultGet(path);
     });
     renderPage();
-    fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
-    await screen.findByDisplayValue("1.21.6");
+    await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
 
     const portInput = await screen.findByLabelText(t("serverCreate.portLabel"));
