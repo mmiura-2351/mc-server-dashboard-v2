@@ -1,0 +1,155 @@
+name: webui-e2e
+
+# Playwright E2E over the critical webui flows against a REAL API + Postgres
+# (issue #491). Separate from webui.yml (the fast unit gate) and from e2e.yml
+# (the Go data-plane / container-driver harness): this is the slow,
+# browser-driven path with its own Node + browser + API + Postgres setup and
+# its own path filters, so it lives in its own workflow rather than bolted onto
+# either.
+#
+# The API is booted here (uvicorn against the Postgres service, migrated, with a
+# seeded admin) the same way e2e.yml boots it; the UI is the Vite dev server,
+# which Playwright starts itself (playwright.config.ts) so the dev-server proxy
+# keeps the browser same-origin with the API. No worker runs, so a created
+# server parks unassigned/stopped — the suite asserts creation, not a running
+# state.
+
+on:
+  pull_request:
+    paths:
+      - "webui/**"
+      - "api/**"
+      - "Makefile"
+      - ".github/workflows/webui-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "webui/**"
+      - "api/**"
+      - "Makefile"
+      - ".github/workflows/webui-e2e.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # PostgreSQL service for the real API. Image digest-pinned per
+    # docs/dev/DEPENDENCIES.md, reusing the api.yml-vetted digest.
+    services:
+      postgres:
+        # postgres:17.6-alpine (pushed 2025-10-24, outside the cooldown).
+        image: postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_USER: mcsd
+          POSTGRES_PASSWORD: mcsd
+          POSTGRES_DB: mcsd_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mcsd"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # The API boot config (mirrors e2e.yml). The control plane is off — no
+      # worker, so servers park unassigned/stopped. The per-IP open-registration
+      # cap is disabled: the suite registers several users from the runner's one
+      # IP, which is a deliberate sequence, not a flood (#362).
+      MCD_API_DATABASE__URL: postgresql+asyncpg://mcsd:mcsd@localhost:5432/mcsd_e2e
+      MCD_API_CONTROL__ENABLED: "false"
+      MCD_API_CONTROL__WORKER_CREDENTIAL: webui-e2e-worker-credential
+      MCD_API_AUTH__TOKEN__SIGNING_KEY: webui-e2e-signing-key-0123456789abcdef
+      MCD_API_AUTH__REGISTRATION__IP_LIMIT_ENABLED: "false"
+      MCD_API_STORAGE__BACKEND: fs
+      MCD_API_LOG__FORMAT: text
+      MCD_E2E_API_URL: http://127.0.0.1:8000
+    steps:
+      # Action versions are pinned to a commit SHA per docs/dev/DEPENDENCIES.md
+      # (pinning + 7-day cooldown), reusing the api.yml / webui.yml / worker.yml
+      # vetted pins.
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up uv (caches the uv-managed toolchain)
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: api/uv.lock
+
+      - name: Set up Node (caches npm via the lockfile)
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: webui/.nvmrc
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Pin npm (matches engines.npm so lockfiles stay deterministic)
+        working-directory: webui
+        run: npm install -g npm@11.13.0
+
+      - name: Install webui (reproducible, from lockfile)
+        working-directory: webui
+        run: npm ci
+
+      - name: Sync API (pinned Python + deps from uv.lock)
+        working-directory: api
+        run: uv sync --locked
+
+      # Cache the Playwright browser download, keyed off the pinned Playwright
+      # version so a bump re-downloads. The default browsers path on Linux.
+      - name: Resolve Playwright version
+        id: pw
+        working-directory: webui
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: Install Playwright Chromium (with OS deps)
+        working-directory: webui
+        run: npx playwright install --with-deps chromium
+
+      - name: Migrate the database
+        working-directory: api
+        run: uv run alembic upgrade head
+
+      - name: Boot the API
+        run: |
+          set -euo pipefail
+          export MCD_API_STORAGE__FS__ROOT="$(mktemp -d)"
+          (cd api && uv run uvicorn mc_server_dashboard_api.app:create_app \
+            --factory --host 127.0.0.1 --port 8000 >/tmp/webui-e2e-uvicorn.log 2>&1) &
+          echo "UVICORN_PID=$!" >> "$GITHUB_ENV"
+          ready=
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/healthz 2>/dev/null | grep -q '"ok":true'; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            echo "API did not become ready; uvicorn log:" >&2
+            cat /tmp/webui-e2e-uvicorn.log >&2
+            exit 1
+          fi
+
+      - name: Seed the platform admin
+        run: |
+          set -euo pipefail
+          export MCD_E2E_PROMOTE_CMD="cd '$GITHUB_WORKSPACE/api' && uv run python '$GITHUB_WORKSPACE/webui/e2e/promote_admin.py' e2e-admin"
+          node webui/e2e/seed-admin.mjs
+
+      - name: Run Playwright (starts the Vite dev server itself)
+        working-directory: webui
+        run: npm run e2e
+
+      - name: API log on failure
+        if: failure()
+        run: cat /tmp/webui-e2e-uvicorn.log || true
