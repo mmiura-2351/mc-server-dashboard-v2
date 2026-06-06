@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=24",
+    "npm": "11.13.0"
   },
   "scripts": {
     "dev": "vite",
@@ -14,7 +15,10 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "typecheck": "tsc -b",
-    "check": "npm run lint && npm run typecheck && npm run test && npm run build"
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "openapi:export": "cd ../api && uv run python -m mc_server_dashboard_api.export_openapi ../webui/openapi.json",
+    "openapi:generate": "openapi-typescript ./openapi.json --output ./src/api/schema.ts",
+    "openapi": "npm run openapi:export && npm run openapi:generate"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.0",
@@ -31,8 +35,14 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "jsdom": "^29.1.1",
+    "openapi-typescript": "^7.13.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.16",
     "vitest": "^4.1.8"
+  },
+  "overrides": {
+    "openapi-typescript": {
+      "typescript": "$typescript"
+    }
   }
 }

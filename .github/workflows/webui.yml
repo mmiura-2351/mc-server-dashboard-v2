@@ -36,6 +36,9 @@ jobs:
           cache: npm
           cache-dependency-path: webui/package-lock.json
 
+      - name: Pin npm (matches engines.npm so lockfiles stay deterministic)
+        run: npm install -g npm@11.13.0
+
       - name: Install (reproducible, from lockfile)
         run: npm ci
 
