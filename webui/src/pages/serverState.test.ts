@@ -1,0 +1,86 @@
+import { describe, expect, it } from "vitest";
+import {
+  actionApplies,
+  isTransitional,
+  normalizeState,
+  type ObservedState,
+  statePill,
+} from "./serverState.ts";
+
+describe("normalizeState", () => {
+  it("passes through known states", () => {
+    const known: ObservedState[] = [
+      "starting",
+      "running",
+      "stopping",
+      "stopped",
+      "restarting",
+      "crashed",
+      "unknown",
+    ];
+    for (const state of known) {
+      expect(normalizeState(state)).toBe(state);
+    }
+  });
+
+  it("degrades an unrecognised value to unknown", () => {
+    expect(normalizeState("bogus")).toBe("unknown");
+    expect(normalizeState("")).toBe("unknown");
+  });
+});
+
+describe("statePill", () => {
+  // The full state -> pill-color mapping (WEBUI_SPEC.md 6.2).
+  const cases: Array<[ObservedState, string, boolean]> = [
+    ["running", "running", false],
+    ["starting", "starting", true],
+    ["stopping", "stopping", true],
+    ["restarting", "restarting", true],
+    ["crashed", "crashed", false],
+    ["stopped", "stopped", false],
+    ["unknown", "unknown", false],
+  ];
+
+  it.each(cases)("%s -> .%s (blink=%s)", (state, className, blink) => {
+    const pill = statePill(state);
+    expect(pill.className).toBe(className);
+    expect(pill.blink).toBe(blink);
+    expect(pill.labelKey).toBe(`dashboard.state.${state}`);
+  });
+});
+
+describe("isTransitional", () => {
+  it("is true only for the in-flight transition states", () => {
+    expect(isTransitional("starting")).toBe(true);
+    expect(isTransitional("stopping")).toBe(true);
+    expect(isTransitional("restarting")).toBe(true);
+    expect(isTransitional("running")).toBe(false);
+    expect(isTransitional("stopped")).toBe(false);
+    expect(isTransitional("crashed")).toBe(false);
+    expect(isTransitional("unknown")).toBe(false);
+  });
+});
+
+describe("actionApplies", () => {
+  it("start applies to at-rest / crashed / unknown servers", () => {
+    expect(actionApplies("start", "stopped")).toBe(true);
+    expect(actionApplies("start", "crashed")).toBe(true);
+    expect(actionApplies("start", "unknown")).toBe(true);
+    expect(actionApplies("start", "running")).toBe(false);
+  });
+
+  it("stop / restart apply only to a running server", () => {
+    expect(actionApplies("stop", "running")).toBe(true);
+    expect(actionApplies("restart", "running")).toBe(true);
+    expect(actionApplies("stop", "stopped")).toBe(false);
+    expect(actionApplies("restart", "crashed")).toBe(false);
+  });
+
+  it("nothing applies while transitional", () => {
+    for (const action of ["start", "stop", "restart"] as const) {
+      expect(actionApplies(action, "starting")).toBe(false);
+      expect(actionApplies(action, "stopping")).toBe(false);
+      expect(actionApplies(action, "restarting")).toBe(false);
+    }
+  });
+});
