@@ -141,6 +141,12 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
     with pytest.raises(InvalidRefreshTokenError):
         await refresh(refresh_token=pair.refresh_token)
 
+    # That reuse revoked the whole family, including the rotated successor, *at
+    # the current clock time*. Step past the grace window again so re-presenting
+    # the successor is outside its own (just-set) revocation grace and is treated
+    # as theft rather than a concurrent refresh.
+    clock.set(clock.now() + _REUSE_GRACE + dt.timedelta(seconds=1))
+
     # Reuse triggered a family revoke, so the rotated token is dead too.
     with pytest.raises(InvalidRefreshTokenError):
         await refresh(refresh_token=rotated.refresh_token)
