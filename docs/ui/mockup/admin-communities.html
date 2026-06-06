@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Communities — MC Dashboard</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="admin-communities">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <h1>Communities</h1>
+          <div class="sub">Provisioning is admin-only; self-service creation is not supported.</div>
+        </div>
+        <div class="actions"><button class="btn primary" onclick="openModal('provision-modal')">+ Provision community</button></div>
+      </div>
+
+      <div class="card" style="padding:0">
+        <table class="data">
+          <thead><tr><th>Name</th><th>Members</th><th>Servers</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Sakura SMP</strong></td>
+              <td class="num">4</td>
+              <td class="num">4 (2 running)</td>
+              <td class="row-actions">
+                <a class="btn sm" href="dashboard.html">Open</a>
+                <button class="btn sm danger" onclick="mockToast('Typed-confirm, then DELETE /communities/c-1', 'err')">Delete</button>
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Dev Playground</strong></td>
+              <td class="num">2</td>
+              <td class="num">5 (1 running)</td>
+              <td class="row-actions">
+                <a class="btn sm" href="dashboard.html">Open</a>
+                <button class="btn sm danger" onclick="mockToast('Typed-confirm, then DELETE /communities/c-2', 'err')">Delete</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="provision-modal">
+  <div class="card modal">
+    <h2>Provision community</h2>
+    <div class="field">
+      <label>Community name</label>
+      <input type="text" placeholder="e.g. Winter Server 2026">
+    </div>
+    <div class="field">
+      <label>Initial owner</label>
+      <input type="text" placeholder="username of an existing account">
+      <div class="hint">The owner gets the preset Owner role (all community permissions).</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('provision-modal')">Cancel</button>
+      <button class="btn primary" onclick="mockToast('POST /communities'); closeModal('provision-modal')">Provision</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

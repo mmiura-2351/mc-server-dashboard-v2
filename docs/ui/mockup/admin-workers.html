@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workers — MC Dashboard</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="admin-workers">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <h1>Workers</h1>
+          <div class="sub">Workers self-register over the control plane; drain to relocate servers before maintenance.</div>
+        </div>
+      </div>
+
+      <div class="card" style="padding:0">
+        <table class="data">
+          <thead><tr><th>Worker</th><th>Status</th><th>Version</th><th>Drivers</th><th>Load</th><th>Resources</th><th>Heartbeat</th><th></th></tr></thead>
+          <tbody id="worker-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="notice info" style="margin-top:14px">
+        Draining stops new placements on the worker; running servers are stopped with a final snapshot and can be restarted elsewhere. Offline workers reappear automatically when they reconnect.
+      </div>
+    </main>
+  </div>
+</div>
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const pill = (w) =>
+    w.status === "offline" ? '<span class="pill crashed">offline</span>'
+    : w.draining ? '<span class="pill starting">draining</span>'
+    : '<span class="pill running">online</span>';
+  document.getElementById("worker-rows").innerHTML = MOCK.workers.map((w) => `
+    <tr style="${w.status === "offline" ? "opacity:.6" : ""}">
+      <td class="num"><strong>${w.id}</strong></td>
+      <td>${pill(w)}</td>
+      <td class="num">${w.version}</td>
+      <td>${w.drivers.map((d) => `<span class="badge">${d}</span>`).join(" ")}</td>
+      <td class="num">${w.assigned} / ${w.max}</td>
+      <td class="num">${w.cpu_cores}c · ${w.memory}</td>
+      <td>${w.heartbeat}</td>
+      <td class="row-actions">
+        ${w.draining
+          ? `<button class="btn sm" onclick="mockToast('DELETE /workers/${w.id}/drain')">Undrain</button>`
+          : `<button class="btn sm" onclick="mockToast('PUT /workers/${w.id}/drain — running servers will be stopped and snapshotted', 'err')">Drain</button>`}
+      </td>
+    </tr>`).join("");
+});
+</script>
+</body>
+</html>

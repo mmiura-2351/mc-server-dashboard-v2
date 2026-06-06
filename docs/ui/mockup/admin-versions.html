@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Versions &amp; JARs — MC Dashboard</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="admin-versions">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <h1>Versions &amp; JAR pool</h1>
+          <div class="sub">Version catalog freshness and the shared JAR cache.</div>
+        </div>
+        <div class="actions">
+          <button class="btn" onclick="mockToast('POST /versions/refresh — all catalogs invalidated')">Refresh all catalogs</button>
+        </div>
+      </div>
+
+      <div class="card" style="padding:0;margin-bottom:14px">
+        <table class="data">
+          <thead><tr><th>Server type</th><th>Versions</th><th>Latest</th><th>Refreshed</th><th></th></tr></thead>
+          <tbody id="catalog-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="grid cols-2">
+        <div class="card">
+          <h2>JAR pool</h2>
+          <dl class="kv">
+            <dt>Cached JARs</dt><dd>14</dd>
+            <dt>Total size</dt><dd>1.9 GiB</dd>
+          </dl>
+          <div style="margin-top:12px">
+            <button class="btn" onclick="mockToast('POST /versions/jar-pool/gc → removed 3 jars, reclaimed 412 MiB', 'ok')">Run garbage collection</button>
+          </div>
+          <div class="hint" style="margin-top:8px;color:var(--text-faint)">Removes JARs no longer referenced by any server.</div>
+        </div>
+        <div class="card">
+          <h2>Notes</h2>
+          <ul style="margin:0;padding-left:18px;font-size:13px;color:var(--text-dim)">
+            <li><strong>spigot</strong> is not catalogued — no official distribution API; Paper is the recommended substitute.</li>
+            <li><strong>forge</strong> resolves to the installer JAR; the worker runs the install step on first start.</li>
+            <li>Catalog responses are cached with fallback when upstream APIs are unreachable.</li>
+          </ul>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("catalog-rows").innerHTML =
+    Object.entries(MOCK.versionCatalog).map(([type, c]) => `
+      <tr>
+        <td><span class="badge type">${type}</span></td>
+        <td class="num">${c.count}</td>
+        <td class="num">${c.latest}</td>
+        <td>${c.refreshed}</td>
+        <td class="row-actions">
+          <button class="btn sm" onclick="mockToast('POST /versions/refresh?server_type=${type}')">Refresh</button>
+        </td>
+      </tr>`).join("");
+});
+</script>
+</body>
+</html>

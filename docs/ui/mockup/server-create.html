@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create server — Sakura SMP</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="server-create">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content" style="max-width:860px">
+      <div class="page-head">
+        <div>
+          <div class="breadcrumbs"><a href="dashboard.html">Servers</a> / create</div>
+          <h1>Create server</h1>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <a class="tab active" href="#" onclick="return false">New server</a>
+        <a class="tab" href="#" onclick="mockToast('Import flow: upload a ZIP exported from another instance'); return false">Import ZIP</a>
+      </div>
+
+      <div class="wizard-steps">
+        <div class="step done">1 · Type &amp; version</div>
+        <div class="step active">2 · Runtime</div>
+        <div class="step">3 · Config &amp; EULA</div>
+      </div>
+
+      <!-- Step 1 (shown collapsed as a summary because step 2 is active) -->
+      <div class="card" style="margin-bottom:14px">
+        <h2>Type &amp; version <button class="btn sm ghost" style="float:right" onclick="mockToast('Back to step 1')">edit</button></h2>
+        <div class="type-cards" style="margin-bottom:12px">
+          <div class="type-card"><div class="t-name">Vanilla</div><div class="t-sub">official</div></div>
+          <div class="type-card selected"><div class="t-name">Paper</div><div class="t-sub">performance fork</div></div>
+          <div class="type-card"><div class="t-name">Fabric</div><div class="t-sub">light modding</div></div>
+          <div class="type-card"><div class="t-name">Forge</div><div class="t-sub">heavy modding</div></div>
+          <div class="type-card disabled" title="No official distribution API — use Paper instead">
+            <div class="t-name">Spigot</div><div class="t-sub">use Paper →</div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="field" style="max-width:220px">
+            <label>Minecraft version</label>
+            <select id="version-select"></select>
+            <div class="hint">From the version catalog (GET /versions/paper)</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 2 -->
+      <div class="card" style="margin-bottom:14px">
+        <h2>Runtime</h2>
+        <div class="form-row">
+          <div class="field">
+            <label>Execution backend</label>
+            <select>
+              <option>container (Docker)</option>
+              <option>host_process</option>
+            </select>
+            <div class="hint">Fixed after creation.</div>
+          </div>
+          <div class="field">
+            <label>Game port</label>
+            <input type="number" value="25572">
+            <div class="hint" style="color:var(--green)">✓ port 25572 is available
+              <a href="#" onclick="mockToast('Suggested next free ports: 25572, 25573, 25574'); return false">suggest</a></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 3 -->
+      <div class="card" style="margin-bottom:18px">
+        <h2>Config &amp; EULA</h2>
+        <div class="field" style="max-width:340px">
+          <label>Server name</label>
+          <input type="text" placeholder="e.g. skyblock">
+        </div>
+        <div class="field">
+          <label>server.properties overrides (optional)</label>
+          <textarea rows="4" placeholder="max-players=20&#10;difficulty=hard&#10;view-distance=10"></textarea>
+        </div>
+        <label class="checkbox">
+          <input type="checkbox">
+          <span>I accept the <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer">Minecraft EULA</a>.
+          <span class="hint" style="display:block">You can create the server without accepting, but it will not start until the EULA is accepted.</span></span>
+        </label>
+      </div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <a class="btn" href="dashboard.html">Cancel</a>
+        <button class="btn primary" onclick="mockToast('POST /communities/c-1/servers → redirect to server detail'); setTimeout(()=>location.href='server-detail.html', 900)">Create server</button>
+      </div>
+    </main>
+  </div>
+</div>
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const sel = document.getElementById("version-select");
+  MOCK.versionsByType.paper.forEach((v, i) => {
+    const o = document.createElement("option");
+    o.textContent = v + (i === 0 ? "  (latest)" : "");
+    sel.appendChild(o);
+  });
+});
+</script>
+</body>
+</html>
