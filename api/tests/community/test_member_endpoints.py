@@ -198,6 +198,51 @@ def test_add_member_invalid_user_id_returns_422() -> None:
     assert resp.status_code == 422
 
 
+def test_add_member_by_username_passes_username_to_use_case() -> None:
+    community = CommunityId.new()
+    user = UserId(uuid.uuid4())
+    use_case = _FakeUseCase(result=_membership(community, user))
+    app = _app(member=True, allow=True, add_uc=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/communities/{community.value}/members",
+        json={"username": "alice"},
+    )
+    assert resp.status_code == 201
+    assert use_case.calls[0]["username"] == "alice"
+    assert use_case.calls[0]["user_id"] is None
+
+
+def test_add_member_unknown_username_returns_422_same_shape_as_unknown_id() -> None:
+    # No-match on username is rejected exactly like an unknown user_id (issue #355).
+    app = _app(
+        member=True, allow=True, add_uc=_FakeUseCase(error=MemberUserNotFoundError("x"))
+    )
+    client = next(_client(app))
+    resp = client.post(
+        f"/communities/{uuid.uuid4()}/members", json={"username": "ghost"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "user_not_found"
+
+
+def test_add_member_both_identifiers_returns_422() -> None:
+    app = _app(member=True, allow=True, add_uc=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.post(
+        f"/communities/{uuid.uuid4()}/members",
+        json={"user_id": str(uuid.uuid4()), "username": "alice"},
+    )
+    assert resp.status_code == 422
+
+
+def test_add_member_neither_identifier_returns_422() -> None:
+    app = _app(member=True, allow=True, add_uc=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.post(f"/communities/{uuid.uuid4()}/members", json={})
+    assert resp.status_code == 422
+
+
 # --- list members -----------------------------------------------------------
 
 

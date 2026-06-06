@@ -21,7 +21,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
@@ -64,7 +64,22 @@ router = APIRouter()
 
 
 class AddMemberRequest(BaseModel):
-    user_id: str = Field(min_length=1)
+    """Identify the user to add by *exactly one* of id or exact username.
+
+    ``user_id`` is the original contract; ``username`` (issue #355) lets a
+    community owner who lacks the platform-admin user listing name the account
+    directly. Supplying both or neither is a 422 validation error, so the caller
+    must choose one unambiguous identifier.
+    """
+
+    user_id: str | None = Field(default=None, min_length=1)
+    username: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _exactly_one_identifier(self) -> "AddMemberRequest":
+        if (self.user_id is None) == (self.username is None):
+            raise ValueError("provide exactly one of user_id or username")
+        return self
 
 
 class AssignRoleRequest(BaseModel):
@@ -125,7 +140,8 @@ async def add_member(
     try:
         membership = await use_case(
             community_id=CommunityId(community_id),
-            user_id=_parse_user_id(body.user_id),
+            user_id=_parse_user_id(body.user_id) if body.user_id is not None else None,
+            username=body.username,
         )
     except MemberUserNotFoundError as exc:
         raise HTTPException(

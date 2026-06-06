@@ -42,6 +42,7 @@ from mc_server_dashboard_api.community.domain.entities import ResourceGrant
 from mc_server_dashboard_api.community.domain.errors import (
     LastOwnerRemovalError,
     MembershipAlreadyExistsError,
+    MemberUserNotFoundError,
     RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
@@ -142,6 +143,33 @@ async def test_add_member_duplicate_is_translated_to_conflict(
     await _add_member(engine)(community_id=community.id, user_id=UserId(member_id))
     with pytest.raises(MembershipAlreadyExistsError):
         await _add_member(engine)(community_id=community.id, user_id=UserId(member_id))
+
+
+async def test_add_member_by_username_resolves_case_insensitively(
+    engine: AsyncEngine,
+) -> None:
+    # A non-admin owner adds the member by exact username; resolution is
+    # case-insensitive, mirroring the identity uniqueness key (issue #355).
+    owner_id = uuid.uuid4()
+    member_id = uuid.uuid4()
+    await _insert_user(engine, owner_id, "alice")
+    await _insert_user(engine, member_id, "Bob")
+    community = await _provision(engine)(name="guild", owner_user_id=UserId(owner_id))
+
+    membership = await _add_member(engine)(community_id=community.id, username="bob")
+
+    assert membership.user_id == UserId(member_id)
+
+
+async def test_add_member_by_unknown_username_is_rejected(
+    engine: AsyncEngine,
+) -> None:
+    owner_id = uuid.uuid4()
+    await _insert_user(engine, owner_id, "alice")
+    community = await _provision(engine)(name="guild", owner_user_id=UserId(owner_id))
+
+    with pytest.raises(MemberUserNotFoundError):
+        await _add_member(engine)(community_id=community.id, username="ghost")
 
 
 async def test_remove_member_sweeps_roles_and_grants_atomically(
