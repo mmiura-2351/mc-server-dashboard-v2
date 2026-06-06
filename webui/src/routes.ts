@@ -20,7 +20,12 @@ export function dashboardPath(communityId: string): string {
 export function postLoginPath(from: unknown): string {
   if (from !== null && typeof from === "object" && "pathname" in from) {
     const { pathname, search } = from as { pathname: unknown; search: unknown };
-    if (typeof pathname === "string" && pathname.startsWith("/")) {
+    // Accept only a single leading "/" followed by a non-"/"/non-"\" char (or
+    // the bare root). Rejecting "//" and "/\" closes a protocol-relative
+    // open-redirect: a path like "//evil.com" would otherwise resolve
+    // off-origin once navigate() runs (#424). The hash fragment is deliberately
+    // not preserved — issue scope is path + query only.
+    if (typeof pathname === "string" && /^\/(?![/\\])/.test(pathname)) {
       return `${pathname}${typeof search === "string" ? search : ""}`;
     }
   }
