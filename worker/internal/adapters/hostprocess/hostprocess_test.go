@@ -429,6 +429,49 @@ func TestStopFailsWhenProcessSurvivesKill(t *testing.T) {
 	}
 }
 
+// A stop escalation that hits the survived-SIGKILL failure path while the
+// instance is still starting must not relabel the still-booting process as
+// running. Stop is reachable from starting because readiness gating holds
+// starting through the MC boot (issue #350); the survived-kill reset restores the
+// pre-stop state, so a starting instance stays starting rather than misreporting
+// running to the control plane (issue #352).
+func TestSurvivedKillFromStartingDoesNotReportRunning(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	proc := newFakeProcess()
+	proc.stdout = pr
+	proc.killNoExit = true // the process survives SIGKILL
+	// A long readiness timeout with no Done marker holds the instance in starting.
+	d := newReadinessTestDriver(t, proc, 10*time.Second, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	src, ok := inst.(execution.LogSource)
+	if !ok {
+		t.Fatal("host-process instance should be a LogSource")
+	}
+
+	// Synchronize on a benign boot line to prove the boot window was consumed
+	// without the readiness marker, so the instance is provably still starting.
+	if _, err := io.WriteString(pw,
+		"[12:00:00] [Server thread/INFO]: Starting minecraft server\n"); err != nil {
+		t.Fatalf("write boot line: %v", err)
+	}
+	awaitLogLine(t, src.Logs(), "Starting minecraft server")
+	if got := inst.Status(); got != execution.StateStarting {
+		t.Fatalf("Status = %v before Stop, want starting", got)
+	}
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected Stop to fail when the process survives SIGKILL")
+	}
+	if got := inst.Status(); got != execution.StateStarting {
+		t.Fatalf("Status = %v after survived-kill Stop, want starting (not running)", got)
+	}
+}
+
 // After a Stop that fails because the process survives SIGKILL, a retry Stop must
 // re-run the kill-and-confirm sequence rather than short-circuit on the stopping
 // latch. When the process then dies on the retry kill, the retry returns success

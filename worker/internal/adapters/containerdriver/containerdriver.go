@@ -812,6 +812,13 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 		return nil
 	}
 	i.stopping = true
+	// Capture the pre-stop state before overwriting it with stopping: the
+	// survived-kill failure path (below) restores it rather than hardcoding running,
+	// so a stop escalation that hits the survived-kill error while the instance is
+	// still starting — Stop is reachable from starting since the readiness gating of
+	// issue #350 holds starting through the MC boot — does not relabel a still-booting
+	// container as running and misreport it to the control plane (issue #352).
+	prior := i.state
 	i.state = execution.StateStopping
 	// Capture the current container under the same lock that latches stopping, so
 	// the install→launch handoff (which only proceeds when stopping is unset)
@@ -845,17 +852,19 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	// container did in fact exit. Only the timeout means it survived.
 	if !i.waitExitDone(i.stopTimeout) {
 		// The container survived the kill, so this Stop failed but the container is
-		// still alive. Reset the stopping latch (and the recorded state back to
-		// running, since the container is still alive) so a subsequent Stop re-runs
-		// the full graceful→docker stop→docker kill→confirm sequence instead of
-		// short-circuiting on the entry guard and returning a false success (issue
-		// #253). The reset is confined to this failure path: a successful stop or a
-		// terminal state keeps stopping latched so supervise reports the eventual
-		// exit as stopped and concurrent stops still dedupe. supervise has not run
-		// here (the container has not exited), so clearing stopping is safe.
+		// still alive. Reset the stopping latch (and the recorded state back to its
+		// pre-stop value, since the container is still alive) so a subsequent Stop
+		// re-runs the full graceful→docker stop→docker kill→confirm sequence instead
+		// of short-circuiting on the entry guard and returning a false success (issue
+		// #253). Restoring the prior state rather than hardcoding running keeps a
+		// still-starting instance labelled starting (issue #352). The reset is
+		// confined to this failure path: a successful stop or a terminal state keeps
+		// stopping latched so supervise reports the eventual exit as stopped and
+		// concurrent stops still dedupe. supervise has not run here (the container has
+		// not exited), so clearing stopping is safe.
 		i.mu.Lock()
 		i.stopping = false
-		i.state = execution.StateRunning
+		i.state = prior
 		i.mu.Unlock()
 		return fmt.Errorf("containerdriver: container survived docker kill after %s", i.stopTimeout)
 	}
