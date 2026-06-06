@@ -103,17 +103,34 @@ class MemberView:
 
 @dataclass(frozen=True)
 class AddMember:
-    """Manually add an existing user to a community (FR-MEM-1, member:add)."""
+    """Manually add an existing user to a community (FR-MEM-1, member:add).
+
+    The target is identified by *either* its user id or its exact username
+    (issue #355): a community owner who is not a platform admin cannot list users
+    to obtain an id, so username resolution gives them a reachable path. Both
+    routes funnel into the same :class:`MemberUserNotFoundError` when the user
+    does not exist, so a username that matches nobody is rejected exactly like an
+    unknown id — no existence differential to enumerate against.
+    """
 
     uow: UnitOfWork
     users: UserDirectory
     clock: Clock
 
     async def __call__(
-        self, *, community_id: CommunityId, user_id: UserId
+        self,
+        *,
+        community_id: CommunityId,
+        user_id: UserId | None = None,
+        username: str | None = None,
     ) -> Membership:
-        if not await self.users.exists(user_id):
-            raise MemberUserNotFoundError(str(user_id.value))
+        if username is not None:
+            resolved = await self.users.resolve_username(username)
+            if resolved is None:
+                raise MemberUserNotFoundError(username)
+            user_id = resolved
+        elif user_id is None or not await self.users.exists(user_id):
+            raise MemberUserNotFoundError(str(user_id.value) if user_id else "")
 
         membership = Membership(
             id=MembershipId.new(),

@@ -49,6 +49,9 @@ class _FakeUserDirectory(UserDirectory):
     async def exists(self, user_id: UserId) -> bool:
         return self._known
 
+    async def resolve_username(self, username: str) -> UserId | None:
+        raise NotImplementedError
+
     async def usernames_for(self, user_ids: list[UserId]) -> dict[UserId, str]:
         raise NotImplementedError
 
