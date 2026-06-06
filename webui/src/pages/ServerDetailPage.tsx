@@ -331,8 +331,10 @@ function StopControl({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
-  // Close the menu on a click outside it, mirroring the document-listener
-  // pattern in Modal.tsx (listener attached only while open).
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // Close the menu on a click outside it or on Escape, mirroring the
+  // document-listener pattern in Modal.tsx (listeners attached only while open).
+  // Escape returns focus to the trigger so keyboard users are not stranded.
   useEffect(() => {
     if (!open) {
       return;
@@ -342,16 +344,28 @@ function StopControl({
         setOpen(false);
       }
     };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
     document.addEventListener("click", onClick);
-    return () => document.removeEventListener("click", onClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
   }, [open]);
   return (
     <span className="stop-control" ref={ref}>
       <button
+        ref={triggerRef}
         type="button"
         className="btn"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
         aria-expanded={open}
       >
         {t("serverDetail.stop")} ▾
