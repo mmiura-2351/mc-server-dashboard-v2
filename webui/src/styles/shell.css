@@ -103,6 +103,22 @@
   border-radius: var(--radius-sm);
   padding: 5px 12px;
   font-weight: 600;
+  color: var(--text);
+  font-family: inherit;
+  font-size: inherit;
+}
+select.community-switcher {
+  cursor: pointer;
+}
+.community-switcher.empty {
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.nav-hint {
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text-faint);
 }
 
 .topbar .spacer {

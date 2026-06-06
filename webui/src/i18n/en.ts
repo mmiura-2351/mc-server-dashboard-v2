@@ -6,6 +6,9 @@ export const en = {
   // Shell chrome
   "shell.brand": "MC Dashboard",
   "shell.account": "Account",
+  "shell.switchCommunity": "Switch community",
+  "shell.noCommunity": "No community",
+  "shell.noCommunities": "You are not a member of any community yet.",
 
   // Sidebar navigation (WEBUI_SPEC.md Section 5)
   "nav.community": "Community",

@@ -81,7 +81,7 @@ describe("LoginPage", () => {
     expect(getAccessToken()).toBeNull();
   });
 
-  it("stores the token and lands on the dashboard on success", async () => {
+  it("stores the token and lands on the post-login landing on success", async () => {
     bootstrapSignedOut();
     renderLogin();
 
@@ -98,7 +98,7 @@ describe("LoginPage", () => {
     await submitCredentials();
 
     await waitFor(() =>
-      expect(screen.getByTestId("path")).toHaveTextContent("/communities/demo"),
+      expect(screen.getByTestId("path").textContent).toBe("/"),
     );
     expect(getAccessToken()).toBe("issued");
   });

@@ -1,12 +1,14 @@
-import { NavLink, Outlet } from "react-router";
+import { useEffect } from "react";
+import { NavLink, Outlet, useNavigate, useParams } from "react-router";
 import { type TranslationKey, t } from "../i18n/index.ts";
+import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
+import { dashboardPath } from "../routes.ts";
 
 // Authenticated shell chrome: left nav (community scope + admin group) and a
-// top bar (community switcher + user menu). Routing-only for Phase 1 — the
-// community switcher and user menu are static placeholders (WEBUI_SPEC.md
-// Section 5). A fixed demo community id keeps the nav links resolvable until
-// real community data lands.
-const DEMO_CID = "demo";
+// top bar (community switcher + user menu) (WEBUI_SPEC.md Section 5). The
+// community scope resolves from the active community (#412); the switcher lists
+// the caller's communities and switching navigates to that community's
+// dashboard.
 
 interface NavSpec {
   to: string;
@@ -14,19 +16,16 @@ interface NavSpec {
   labelKey: TranslationKey;
 }
 
-const communityNav: NavSpec[] = [
-  { to: `/communities/${DEMO_CID}`, icon: "▦", labelKey: "nav.dashboard" },
-  {
-    to: `/communities/${DEMO_CID}/servers/new`,
-    icon: "+",
-    labelKey: "nav.createServer",
-  },
-  {
-    to: `/communities/${DEMO_CID}/settings`,
-    icon: "⚙",
-    labelKey: "nav.settings",
-  },
-];
+// Community-scoped nav for the active community. Computed per-render from the
+// active id so switching re-targets every link.
+function communityNav(cid: string): NavSpec[] {
+  const base = dashboardPath(cid);
+  return [
+    { to: base, icon: "▦", labelKey: "nav.dashboard" },
+    { to: `${base}/servers/new`, icon: "+", labelKey: "nav.createServer" },
+    { to: `${base}/settings`, icon: "⚙", labelKey: "nav.settings" },
+  ];
+}
 
 const adminNav: NavSpec[] = [
   { to: "/admin", icon: "◎", labelKey: "nav.adminOverview" },
@@ -52,7 +51,69 @@ function NavItem({ to, icon, labelKey }: NavSpec) {
   );
 }
 
+// Top-bar switcher: lists the caller's communities and switches the active one.
+// While the list is loading it renders a non-interactive placeholder so the bar
+// does not flicker; with no communities it shows a disabled hint.
+function CommunitySwitcher() {
+  const { communityId, setCommunityId, communities } = useActiveCommunity();
+  const navigate = useNavigate();
+
+  if (communities === undefined) {
+    return (
+      <div className="community-switcher" aria-busy="true">
+        {t("auth.loading")}
+      </div>
+    );
+  }
+
+  if (communities.length === 0) {
+    return (
+      <div className="community-switcher empty">{t("shell.noCommunity")}</div>
+    );
+  }
+
+  return (
+    <select
+      className="community-switcher"
+      aria-label={t("shell.switchCommunity")}
+      value={communityId ?? ""}
+      onChange={(e) => {
+        const id = e.target.value;
+        setCommunityId(id);
+        navigate(dashboardPath(id));
+      }}
+    >
+      {communities.map((c) => (
+        <option key={c.id} value={c.id}>
+          {c.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+// Keeps the active community in sync with the URL: deep-linking to a community
+// the caller belongs to selects it (URL wins on load). Switching from the top
+// bar drives the URL the other way (CommunitySwitcher), so this only reacts to
+// cids that actually exist in the caller's list.
+function useUrlCommunitySync() {
+  const { cid } = useParams();
+  const { communityId, setCommunityId, communities } = useActiveCommunity();
+
+  useEffect(() => {
+    if (cid === undefined || cid === communityId || communities === undefined) {
+      return;
+    }
+    if (communities.some((c) => c.id === cid)) {
+      setCommunityId(cid);
+    }
+  }, [cid, communityId, communities, setCommunityId]);
+}
+
 export function AppShell() {
+  const { communityId } = useActiveCommunity();
+  useUrlCommunitySync();
+
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -62,9 +123,13 @@ export function AppShell() {
         </div>
         <nav className="nav-group">
           <div className="nav-label">{t("nav.community")}</div>
-          {communityNav.map((item) => (
-            <NavItem key={item.to} {...item} />
-          ))}
+          {communityId === null ? (
+            <div className="nav-hint">{t("shell.noCommunities")}</div>
+          ) : (
+            communityNav(communityId).map((item) => (
+              <NavItem key={item.to} {...item} />
+            ))
+          )}
         </nav>
         <nav className="nav-group">
           <div className="nav-label">{t("nav.admin")}</div>
@@ -75,10 +140,7 @@ export function AppShell() {
       </aside>
       <div className="main">
         <header className="topbar">
-          {/* Intentionally inert Phase-1 placeholder; real switching lands later. */}
-          <div className="community-switcher">
-            {t("nav.community")} <span className="chev">▼</span>
-          </div>
+          <CommunitySwitcher />
           <div className="spacer" />
           <NavLink className="user-menu" to="/account">
             <span className="avatar" aria-hidden="true">
