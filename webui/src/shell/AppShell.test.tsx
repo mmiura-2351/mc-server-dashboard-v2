@@ -1,12 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App } from "../App.tsx";
-import { SessionProvider } from "../auth/SessionProvider.tsx";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
-import { ActiveCommunityProvider } from "../permissions/ActiveCommunityProvider.tsx";
+import { renderApp } from "../test/render.tsx";
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -45,17 +41,7 @@ function signedInWith(communities: Array<{ id: string; name: string }>) {
 }
 
 function renderAt(path: string) {
-  render(
-    <QueryClientProvider client={new QueryClient()}>
-      <MemoryRouter initialEntries={[path]}>
-        <SessionProvider>
-          <ActiveCommunityProvider>
-            <App />
-          </ActiveCommunityProvider>
-        </SessionProvider>
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  renderApp({ path });
 }
 
 beforeEach(() => {
