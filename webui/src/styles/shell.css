@@ -1347,6 +1347,41 @@ select.community-switcher {
   color: var(--text-dim);
 }
 
+/* ---------- Admin users table (WEBUI_SPEC.md 6.12, issue #475) ---------- */
+.admin-users table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.admin-users table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-users table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-users table.data td.dim {
+  color: var(--text-dim);
+}
+.admin-users table.data td.num {
+  font-variant-numeric: tabular-nums;
+}
+.admin-users .row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.admin-users .users-paging {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
 /* Admin global Audit page (issue #479, WEBUI_SPEC.md 6.12). Reuses the .audit
    filter/table/paging styles; the community filter <select> matches the text
    inputs alongside it. */
