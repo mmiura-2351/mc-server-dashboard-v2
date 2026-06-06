@@ -1,6 +1,7 @@
 /// <reference types="vitest/config" />
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { isSpaNavigation } from "./src/dev-proxy";
 
 // Local API the dev server proxies to. The browser only ever talks to the dev
 // server, so the UI stays same-origin with the API and no CORS is added
@@ -34,7 +35,17 @@ export default defineConfig({
         prefix,
         // ws:true upgrades the WebSocket event streams under /communities
         // (WEBUI_SPEC.md 2.5) through the same proxy entry as the REST paths.
-        { target: API_TARGET, changeOrigin: true, ws: true },
+        {
+          target: API_TARGET,
+          changeOrigin: true,
+          ws: true,
+          // Several prefixes (e.g. /admin, /communities) are also SPA routes.
+          // A hard refresh / direct load of one is a browser navigation:
+          // serve index.html so Vite returns the SPA. API fetches and WS
+          // handshakes fall through to the proxy (return undefined).
+          bypass: (req) =>
+            isSpaNavigation(req.headers) ? "/index.html" : undefined,
+        },
       ]),
     ),
   },
