@@ -21,6 +21,7 @@ from mc_server_dashboard_api.community.domain.entities import (
 from mc_server_dashboard_api.community.domain.repositories import (
     CommunityRepository,
     MembershipRepository,
+    ResourceExistenceChecker,
     ResourceGrantRepository,
     RoleRepository,
 )
@@ -195,6 +196,23 @@ class FakeResourceGrantRepository(ResourceGrantRepository):
         }
 
 
+class FakeResourceExistenceChecker(ResourceExistenceChecker):
+    """In-memory resource-existence check keyed by ``(community, type, id)``.
+
+    Tests seed the resources a grant may target. The default is empty, so a grant
+    on an unseeded resource is rejected (issue #361); seed with
+    :meth:`FakeAuthzUnitOfWork.add_resource`.
+    """
+
+    def __init__(self) -> None:
+        self.existing: set[tuple[CommunityId, str, uuid.UUID]] = set()
+
+    async def exists(
+        self, community_id: CommunityId, resource_type: str, resource_id: uuid.UUID
+    ) -> bool:
+        return (community_id, resource_type, resource_id) in self.existing
+
+
 class FakeAuthzUnitOfWork(UnitOfWork):
     """In-memory :class:`UnitOfWork` sharing its repositories across blocks."""
 
@@ -202,12 +220,14 @@ class FakeAuthzUnitOfWork(UnitOfWork):
     memberships: FakeMembershipRepository
     roles: FakeRoleRepository
     resource_grants: FakeResourceGrantRepository
+    resources: FakeResourceExistenceChecker
 
     def __init__(self) -> None:
         self.communities = FakeCommunityRepository()
         self.memberships = FakeMembershipRepository()
         self.roles = FakeRoleRepository()
         self.resource_grants = FakeResourceGrantRepository()
+        self.resources = FakeResourceExistenceChecker()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeAuthzUnitOfWork":
@@ -249,6 +269,16 @@ class FakeAuthzUnitOfWork(UnitOfWork):
         self.roles.by_id[role.id] = role
         self.memberships.role_ids.setdefault(membership.id, []).append(role.id)
         return role.id
+
+    def add_resource(
+        self,
+        community_id: CommunityId,
+        resource_type: str,
+        resource_id: uuid.UUID,
+    ) -> None:
+        """Mark ``(resource_type, resource_id)`` as existing in ``community_id``."""
+
+        self.resources.existing.add((community_id, resource_type, resource_id))
 
     def add_grant(
         self,

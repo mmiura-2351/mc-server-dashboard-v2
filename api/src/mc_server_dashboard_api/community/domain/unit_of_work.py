@@ -15,6 +15,7 @@ from types import TracebackType
 from mc_server_dashboard_api.community.domain.repositories import (
     CommunityRepository,
     MembershipRepository,
+    ResourceExistenceChecker,
     ResourceGrantRepository,
     RoleRepository,
 )
@@ -27,6 +28,7 @@ class UnitOfWork(abc.ABC):
     memberships: MembershipRepository
     roles: RoleRepository
     resource_grants: ResourceGrantRepository
+    resources: ResourceExistenceChecker
 
     @abc.abstractmethod
     async def __aenter__(self) -> UnitOfWork:

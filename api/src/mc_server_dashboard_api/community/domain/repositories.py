@@ -194,3 +194,22 @@ class ResourceGrantRepository(abc.ABC):
         ``resource_id`` carries no FK, so deleting the resource does not cascade;
         the resource-delete use case calls this in the same transaction.
         """
+
+
+class ResourceExistenceChecker(abc.ABC):
+    """Port: does a grantable resource exist within a community? (issue #361).
+
+    Grant creation validates that ``resource_id`` names a real resource in the
+    community before persisting, so a fabricated id cannot become a ghost grant.
+    ``resource_grant.resource_id`` carries no FK (the resource lives in another
+    context's table), so existence cannot be enforced by the database; this Port is
+    the seam the create use case checks. The concrete adapter queries the owning
+    context's table (M1: ``server``) and is bound on the unit of work's session, so
+    the check runs inside the create transaction.
+    """
+
+    @abc.abstractmethod
+    async def exists(
+        self, community_id: CommunityId, resource_type: str, resource_id: uuid.UUID
+    ) -> bool:
+        """Return whether ``(resource_type, resource_id)`` is in ``community_id``."""
