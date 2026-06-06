@@ -3,43 +3,39 @@
 > Status: Accepted · Date: 2026-06-06
 >
 > Coarse-grained phases for building `webui/` (design: [WEBUI_SPEC.md](WEBUI_SPEC.md),
-> mockup: `docs/ui/mockup/`). Each phase ships independently mergeable work and
-> ends in a state the next phase builds on; fine-grained issues are cut per
-> phase when it starts, not up front.
+> mockup: `docs/ui/mockup/`). **Scope: the Web UI only** — API-side work is
+> tracked by its own issues, never by this roadmap. Each phase ships
+> independently mergeable work and ends in a state the next phase builds on;
+> fine-grained issues are cut per phase when it starts, not up front.
+>
+> External prerequisite (outside this roadmap): the auth/error API contracts
+> the UI codes against are being stabilized API-side (#371, #369, #372, #367);
+> Phase 2 should not start before they settle.
 
-## Phase 0 — API contract stabilization (prerequisite, API-side)
+## Phase 1 — Frontend tech stack & scaffold
 
-Stabilize the contracts the UI will be written against, while breaking changes
-are still cheap (pre-release window):
+Stand up `webui/` at the repo root and the toolchain everything else builds on:
 
-- #371 — standardize the HTTP error body shape (`{reason}` everywhere).
-- #369 — refresh-reuse detection vs. legitimate concurrent SPA refresh
-  (multi-tab / retry-after-timeout must not revoke the family).
-- #372 — Set-Cookie hygiene for body-only clients (rides along with #369).
-- #367 — auth endpoint status-code contract doc (written against the above).
-
-**Done when:** the UI's auth layer and error handling have a single, documented
-contract to target.
-
-## Phase 1 — Scaffold & foundation
-
-`webui/` package at the repo root (React + TypeScript + Vite):
-
-- Tooling: lint/format/typecheck/test wired into the repo's check flow; CI.
-- Generated OpenAPI client from the API schema; dev-server proxy to the API
-  (same-origin posture, issue #363 assumption).
-- Design tokens ported from the mockup CSS (dark theme via custom properties),
-  i18n dictionary skeleton (`t()`), app shell (top bar / sidebar / routing),
-  toast + modal + confirm primitives.
+- **Stack assembly**: Vite + React + TypeScript (strict), React Router,
+  TanStack Query; Node toolchain pinning and package-manager choice;
+  lint/format (Biome or ESLint+Prettier — decide here), Vitest for unit tests.
+- **API client pipeline**: client generated from the API's OpenAPI schema,
+  regeneration wired as a script; dev-server proxy to a local API
+  (same-origin posture per the #363 cookie design).
+- **Repo integration**: `webui/` checks (typecheck/lint/test/build) wired into
+  the repo's check flow and CI.
+- **UI foundation**: design tokens ported from the mockup CSS (dark theme via
+  custom properties), i18n dictionary skeleton (`t()`), app shell (top bar /
+  sidebar / routing), toast + modal + confirm primitives.
 
 **Done when:** `webui/` builds, tests and lints in CI; the shell renders
 against a running API (no features yet).
 
 ## Phase 2 — Auth & session
 
-- Login / register pages; httpOnly-cookie session flow (#363/#365 transport),
-  in-memory access token, single-flight transparent refresh, route guards,
-  hard-logout path.
+- Login / register pages; cookie-based session flow (the httpOnly transport
+  landed API-side), in-memory access token, single-flight transparent
+  refresh, route guards, hard-logout path.
 - Account page (profile, password, memberships, account deletion).
 - Capability loading: `GET /communities/{cid}/me/permissions` fetch-on-switch
   + session cache + re-fetch-on-403 (SPEC 7.3).
@@ -84,9 +80,9 @@ expiry, and the app knows their effective permissions per community.
 
 ## Phase 7 — Platform admin area
 
-- Admin pages: overview, users (lifecycle + admin flag; "create user" depends
-  on #368 if registration-closed deploys are supported), communities
-  provisioning, workers (drain/undrain), versions & JAR pool, global audit.
+- Admin pages: overview, users (lifecycle + admin flag; a "create user" form
+  depends on the API-side #368), communities provisioning, workers
+  (drain/undrain), versions & JAR pool, global audit.
 
 **Done when:** platform operation needs no direct API/SQL access.
 
@@ -94,15 +90,16 @@ expiry, and the app knows their effective permissions per community.
 
 - E2E tests (Playwright) over the critical flows; error/empty/loading-state
   polish; accessibility pass.
-- Serving strategy for production (same-origin behind the reverse proxy),
-  deployment docs (docs/dev/DEPLOYMENT.md), release integration.
+- Production serving setup for the UI (same-origin behind the reverse proxy)
+  and the UI section of the deployment docs; release integration.
 - Optional: Japanese translation of the i18n dictionary.
 
 **Done when:** the UI is deployed alongside the live API and covered by CI/E2E.
 
 ---
 
-Ordering rationale: phases 2–7 are vertical slices in decreasing
-blast-radius-of-change order — auth and live-status plumbing (2–3) shape
-everything after them, while admin pages (7) touch nothing else. Phases 4–7
-can overlap if parallel tracks are wanted; 0→1→2→3 is strictly sequential.
+Ordering rationale: the phases are vertical slices in decreasing
+blast-radius-of-change order — the stack (1) and the auth/live-status plumbing
+(2–3) shape everything after them, while admin pages (7) touch nothing else.
+Phases 4–7 can overlap if parallel tracks are wanted; 1→2→3 is strictly
+sequential.
