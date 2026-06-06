@@ -76,5 +76,10 @@ one origin and no CORS is added anywhere (WEBUI_SPEC.md 7.7). Start a local API
 on its `http_port` (default `8000`), then `npm run dev`; requests under the API
 roots (`/auth`, `/users`, `/admin`, `/communities`, `/workers`, `/versions`,
 `/ports`, `/audit`, `/backups`, plus the ops endpoints) reach the API, and every
-other path falls through to the SPA. Point the proxy elsewhere with
+other path falls through to the SPA. A few of those roots are also SPA routes
+(e.g. `/admin/workers`, `/communities/{id}`); a hard refresh or direct load of
+one is a browser navigation (`Accept: text/html`) and is served the SPA's
+`index.html` instead of being proxied, matching the API's production SPA
+fallback — `fetch` calls and WebSocket handshakes still reach the API. Point the
+proxy elsewhere with
 `VITE_API_PROXY_TARGET` (e.g. `VITE_API_PROXY_TARGET=http://localhost:9000 npm run dev`).
