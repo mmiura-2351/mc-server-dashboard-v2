@@ -18,6 +18,7 @@ import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { dashboardPath } from "../routes.ts";
 import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { serverKey } from "./serverKey.ts";
 import {
   actionApplies,
@@ -132,12 +133,18 @@ function Loaded({
           events={events}
         />
       )}
+      {tab === "backups" && (
+        <ServerBackupsTab server={server} communityId={communityId} can={can} />
+      )}
       {tab === "settings" && (
         <Settings server={server} communityId={communityId} can={can} />
       )}
-      {tab !== "overview" && tab !== "console" && tab !== "settings" && (
-        <p className="sub">{t("serverDetail.tabPlaceholder")}</p>
-      )}
+      {tab !== "overview" &&
+        tab !== "console" &&
+        tab !== "backups" &&
+        tab !== "settings" && (
+          <p className="sub">{t("serverDetail.tabPlaceholder")}</p>
+        )}
     </>
   );
 }

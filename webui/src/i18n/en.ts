@@ -282,6 +282,71 @@ export const en = {
     "backup_interval_hours must be a whole number of hours of at least 1.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
 
+  // Backups tab (WEBUI_SPEC.md 6.7). One contiguous block to keep merge
+  // conflicts with sibling i18n PRs minimal.
+  "backups.loading": "Loading backups…",
+  "backups.loadError": "Could not load backups.",
+  "backups.noRead": "You do not have permission to view backups.",
+  "backups.none": "—",
+  "backups.empty": "No backups yet.",
+  // Stats header.
+  "backups.stat.count": "Backups",
+  "backups.stat.totalSize": "Total size",
+  "backups.stat.newest": "Newest",
+  "backups.stat.oldest": "Oldest",
+  // Table.
+  "backups.col.created": "Created",
+  "backups.col.source": "Source",
+  "backups.col.size": "Size",
+  "backups.col.creator": "By",
+  "backups.unknownSize": "unknown",
+  "backups.unknownCreator": "—",
+  // Actions.
+  "backups.create": "+ Create backup",
+  "backups.upload": "Upload",
+  "backups.download": "Download",
+  "backups.restore": "Restore",
+  "backups.delete": "Delete",
+  // Schedule field (backup_interval_hours on the server config blob).
+  "backups.schedule.label": "Schedule: every",
+  "backups.schedule.unit": "hours",
+  "backups.schedule.save": "Save",
+  "backups.schedule.saved": "Backup schedule saved.",
+  // Restore dialog (stopped-only; two-step stop-then-restore).
+  "backups.restoreDialog.title": "Restore backup",
+  "backups.restoreDialog.blocked":
+    "Restoring overwrites the server's data and requires the server to be stopped.",
+  "backups.restoreDialog.blockedHint":
+    "Stop the server, then reopen this dialog to confirm the restore.",
+  "backups.restoreDialog.stop": "Stop server",
+  "backups.restoreDialog.stopping": "Stopping the server…",
+  "backups.restoreDialog.body":
+    "This overwrites the server's current data with this backup. This cannot be undone.",
+  "backups.restoreDialog.prompt": "Type RESTORE to confirm",
+  "backups.restoreDialog.phrase": "RESTORE",
+  "backups.restoreDialog.confirm": "Restore backup",
+  // Delete dialog (typed confirm).
+  "backups.deleteDialog.title": "Delete backup",
+  "backups.deleteDialog.body":
+    "This permanently deletes the backup archive. This cannot be undone.",
+  "backups.deleteDialog.prompt": "Type DELETE to confirm",
+  "backups.deleteDialog.phrase": "DELETE",
+  "backups.deleteDialog.confirm": "Delete backup",
+  // Outcomes (toasts).
+  "backups.created": "Backup created.",
+  "backups.uploaded": "Backup uploaded.",
+  "backups.deleted": "Backup deleted.",
+  "backups.restored": "Backup restored.",
+  "backups.error.notStopped": "Stop the server before restoring a backup.",
+  "backups.error.unsettled":
+    "The server is settling — try again once it is stopped or running.",
+  "backups.error.invalidArchive": "That file is not a valid backup archive.",
+  "backups.error.workerUnavailable":
+    "No worker is available to take the backup right now.",
+  "backups.error.invalidSchedule":
+    "backup_interval_hours must be a whole number of hours of at least 1.",
+  "backups.error.generic": "Something went wrong. Please try again.",
+
   // Server create wizard (WEBUI_SPEC.md 6.3). One contiguous block to keep
   // merge conflicts with sibling i18n PRs minimal.
   "serverCreate.subtitle": "Provision a new Minecraft server.",

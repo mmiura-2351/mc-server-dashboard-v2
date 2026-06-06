@@ -886,3 +886,63 @@ select.community-switcher {
   border-radius: var(--radius-sm);
   padding: 8px 10px;
 }
+
+/* ---------- Server detail — Backups tab (WEBUI_SPEC.md 6.7) ---------- */
+.backups-stats {
+  margin-bottom: 14px;
+}
+.backups-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.backups-schedule {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.backups-schedule .field-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.backups-schedule input {
+  width: 60px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+}
+.backups-table {
+  padding: 0;
+}
+.backups-table table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.backups-table table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.backups-table table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.backups-table table.data td.num {
+  font: var(--font-mono);
+}
+.backups-table .row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
