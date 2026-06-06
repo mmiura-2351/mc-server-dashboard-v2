@@ -5,6 +5,7 @@ import { useCurrentUser } from "./auth/useCurrentUser.ts";
 import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
 import { AccountPage } from "./pages/AccountPage.tsx";
+import { AdminCommunitiesPage } from "./pages/AdminCommunitiesPage.tsx";
 import { AdminOverviewPage } from "./pages/AdminOverviewPage.tsx";
 import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
@@ -151,7 +152,7 @@ export function App() {
             />
             <Route
               path="/admin/communities"
-              element={<PlaceholderPage titleKey="page.adminCommunities" />}
+              element={<AdminCommunitiesPage />}
             />
             <Route
               path="/admin/workers"

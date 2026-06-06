@@ -803,6 +803,32 @@ export const en = {
   "admin.overview.fleetLoad": "Load",
   "admin.overview.fleetHeartbeat": "Heartbeat",
   "admin.overview.fleetEmpty": "No workers registered.",
+  // Communities (WEBUI_SPEC.md 6.12) — #476
+  "admin.communities.subtitle":
+    "Provisioning is admin-only; self-service creation is not supported.",
+  "admin.communities.loading": "Loading communities…",
+  "admin.communities.loadError": "Could not load communities.",
+  "admin.communities.empty": "No communities yet.",
+  "admin.communities.colName": "Name",
+  "admin.communities.colId": "ID",
+  "admin.communities.provision": "Provision community",
+  "admin.communities.provisionSubmit": "Provision",
+  "admin.communities.dialogTitle": "Provision community",
+  "admin.communities.nameLabel": "Community name",
+  "admin.communities.namePlaceholder": "e.g. Winter Server 2026",
+  "admin.communities.ownerLabel": "Initial owner",
+  "admin.communities.ownerPlaceholder": "Select an existing account…",
+  "admin.communities.ownerHint":
+    "The owner gets the preset Owner role (all community permissions).",
+  "admin.communities.usersLoadError": "Could not load the user list.",
+  "admin.communities.provisioned": "Community provisioned.",
+  "admin.communities.errNameRequired": "Enter a community name.",
+  "admin.communities.errOwnerRequired": "Select an initial owner.",
+  "admin.communities.errNameTaken":
+    "A community with that name already exists.",
+  "admin.communities.errInvalidName": "That community name is not valid.",
+  "admin.communities.errOwnerNotFound": "That owner account no longer exists.",
+  "admin.communities.errGeneric": "Could not provision the community.",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
