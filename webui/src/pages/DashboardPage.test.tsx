@@ -3,12 +3,18 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
+import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
+import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { DashboardPage } from "./DashboardPage.tsx";
 
 const CID = "c1";
+
+// The dashboard mounts the live community-events WS; back it with the mock so
+// jsdom (which has no WebSocket) does not throw on render.
+let restoreWebSocket: () => void;
 
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -71,12 +77,15 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  restoreWebSocket = installMockWebSocket();
+  setAccessToken("tok-1");
   mockApi.get.mockReset();
   mockApi.post.mockReset();
   mockCan = () => true;
 });
 
 afterEach(() => {
+  restoreWebSocket();
   vi.clearAllMocks();
 });
 
@@ -236,6 +245,46 @@ describe("DashboardPage lifecycle actions", () => {
 
     expect(
       await screen.findByText(t("dashboard.actionFailed")),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("DashboardPage live status", () => {
+  it("patches a card's pill from a status event without a refetch", async () => {
+    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(screen.getByText(t("dashboard.state.stopped"))).toBeInTheDocument();
+
+    const socket = MockWebSocket.last();
+    socket.open();
+    socket.message({
+      stream: "status",
+      ts: "t",
+      payload: { state: "running", detail: "" },
+      server_id: "s1",
+    });
+
+    expect(
+      await screen.findByText(t("dashboard.state.running")),
+    ).toBeInTheDocument();
+    // No second list fetch: the cache was patched in place.
+    expect(mockApi.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the live-degraded indicator on WS failure", async () => {
+    mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.queryByText(t("dashboard.liveDegraded")),
+    ).not.toBeInTheDocument();
+
+    MockWebSocket.last().fail();
+    expect(
+      await screen.findByText(t("dashboard.liveDegraded")),
     ).toBeInTheDocument();
   });
 });

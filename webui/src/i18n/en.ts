@@ -172,6 +172,8 @@ export const en = {
   "dashboard.actionFailed": "Could not complete that action. Please try again.",
   // Conflict-flavoured (server_unsettled-style) lifecycle races (SPEC 7.4).
   "dashboard.stateChanged": "State changed — refreshed.",
+  // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
+  "dashboard.liveDegraded": "Live updates degraded — polling",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
