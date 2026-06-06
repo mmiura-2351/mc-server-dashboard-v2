@@ -25,11 +25,14 @@ import {
   refreshSession,
   setHardLogoutHandler,
 } from "./session.ts";
+import { setAccessToken } from "./tokenStore.ts";
 
 export type SessionStatus = "bootstrapping" | "signed-in" | "signed-out";
 
 interface SessionContextValue {
   status: SessionStatus;
+  /** Adopt the access token from a fresh /auth/login and mark signed-in. */
+  signIn: (accessToken: string) => void;
   logout: () => Promise<void>;
 }
 
@@ -66,13 +69,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Login already authenticated against /auth/login and holds the issued access
+  // token; adopt it and flip to signed-in. The refresh cookie is set by that
+  // same response, so a later reload re-bootstraps cleanly.
+  const signIn = useCallback((accessToken: string) => {
+    setAccessToken(accessToken);
+    setStatus("signed-in");
+  }, []);
+
   const logout = useCallback(async () => {
     await logoutSession();
   }, []);
 
   const value = useMemo<SessionContextValue>(
-    () => ({ status, logout }),
-    [status, logout],
+    () => ({ status, signIn, logout }),
+    [status, signIn, logout],
   );
 
   return (
