@@ -184,14 +184,25 @@ async def validation_exception_handler(
     The per-field validation list rides as the ``errors`` extension member so
     clients deal with exactly one error shape. ``jsonable_encoder`` flattens any
     non-JSON values (e.g. ``ValueError`` context) the validators attached.
+
+    Pydantic v2 entries also carry ``input`` (the submitted value) and ``ctx``
+    (which can embed it — a ``value_error``'s ``ctx.error`` wraps the raising
+    exception). For a secret-bearing field these echo the plaintext into a body
+    that clients and proxies routinely log, so both are dropped unconditionally;
+    clients only need ``loc``/``msg``/``type`` for field-level display
+    (WEBUI_SPEC.md Section 7.4, issue #393).
     """
 
     from fastapi.encoders import jsonable_encoder
 
+    scrubbed = [
+        {key: value for key, value in error.items() if key not in ("input", "ctx")}
+        for error in exc.errors()
+    ]
     return problem_response(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
         VALIDATION_REASON,
-        extensions={"errors": jsonable_encoder(exc.errors())},
+        extensions={"errors": jsonable_encoder(scrubbed)},
     )
 
 

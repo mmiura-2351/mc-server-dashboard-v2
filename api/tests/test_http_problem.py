@@ -11,12 +11,17 @@ from __future__ import annotations
 
 from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.http_problem import (
     ProblemException,
     install_problem_handlers,
     problem,
 )
+
+
+class _Secret(BaseModel):
+    password: str = Field(min_length=1, max_length=8)
 
 
 def _client() -> TestClient:
@@ -26,6 +31,10 @@ def _client() -> TestClient:
     @app.get("/bare")
     def bare() -> None:
         raise problem(status.HTTP_404_NOT_FOUND, "not_found")
+
+    @app.post("/secret")
+    def secret(body: _Secret) -> None:  # noqa: ARG001 — body drives a 422
+        return None
 
     @app.get("/with-extensions")
     def with_extensions() -> None:
@@ -102,3 +111,20 @@ def test_request_validation_error_is_problem_json() -> None:
     assert body["reason"] == "validation_error"
     assert body["status"] == 422
     assert isinstance(body["errors"], list) and body["errors"]
+
+
+def test_validation_error_entries_omit_input_and_ctx() -> None:
+    # A structural 422 on a secret-bearing field must not echo the submitted
+    # value: ``input`` (the raw value) and ``ctx`` (can embed it, e.g. a
+    # ``value_error``'s wrapped exception) are dropped from every entry, while
+    # clients keep ``loc``/``msg``/``type`` for field-level display (#393).
+    secret = "supersecretpassword"  # 19 chars > max_length=8
+    resp = _client().post("/secret", json={"password": secret})
+    assert resp.status_code == 422
+    assert secret not in resp.text
+    entry = resp.json()["errors"][0]
+    assert "input" not in entry
+    assert "ctx" not in entry
+    assert entry["loc"] == ["body", "password"]
+    assert entry["type"] == "string_too_long"
+    assert isinstance(entry["msg"], str) and entry["msg"]
