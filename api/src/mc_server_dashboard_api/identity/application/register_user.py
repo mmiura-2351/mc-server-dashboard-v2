@@ -76,27 +76,15 @@ class RegisterUser:
         now = self.clock.now()
         await self._enforce_ip_limit(ip, now=now)
 
-        name = Username(username)
-        address = EmailAddress(email)
-        self.policy.validate(password, username=name, email=address)
-
-        user = User(
-            id=UserId.new(),
-            username=name,
-            email=address,
-            password_hash=self.hasher.hash(password),
-            created_at=now,
-            updated_at=now,
+        return await persist_new_user(
+            uow=self.uow,
+            hasher=self.hasher,
+            policy=self.policy,
+            username=username,
+            email=email,
+            password=password,
+            now=now,
         )
-
-        async with self.uow:
-            if await self.uow.users.get_by_username(name) is not None:
-                raise UsernameAlreadyExistsError(name.value)
-            if await self.uow.users.get_by_email(address) is not None:
-                raise EmailAlreadyExistsError(address.value)
-            await self.uow.users.add(user)
-            await self.uow.commit()
-        return user
 
     async def _enforce_ip_limit(self, ip: str | None, *, now: dt.datetime) -> None:
         """Record the attempt and reject once the per-IP window cap is crossed.
@@ -116,3 +104,46 @@ class RegisterUser:
         )
         if count > self.registration.ip_threshold:
             raise RegistrationThrottledError
+
+
+async def persist_new_user(
+    *,
+    uow: UnitOfWork,
+    hasher: PasswordHasher,
+    policy: PasswordPolicy,
+    username: str,
+    email: str,
+    password: str,
+    now: dt.datetime,
+) -> User:
+    """Validate, build, and atomically persist a new user (no abuse controls).
+
+    The shared core of account creation: structural username/email validation,
+    the password policy (SECURITY.md Section 1), a friendly-error uniqueness
+    pre-check, hashing, and the atomic insert. Both open registration
+    (:class:`RegisterUser`) and the admin creation surface (:class:`AdminCreateUser`)
+    reach the database through this; the gating that differs between them
+    (open-flag, per-IP cap) lives in the callers, not here.
+    """
+
+    name = Username(username)
+    address = EmailAddress(email)
+    policy.validate(password, username=name, email=address)
+
+    user = User(
+        id=UserId.new(),
+        username=name,
+        email=address,
+        password_hash=hasher.hash(password),
+        created_at=now,
+        updated_at=now,
+    )
+
+    async with uow:
+        if await uow.users.get_by_username(name) is not None:
+            raise UsernameAlreadyExistsError(name.value)
+        if await uow.users.get_by_email(address) is not None:
+            raise EmailAlreadyExistsError(address.value)
+        await uow.users.add(user)
+        await uow.commit()
+    return user

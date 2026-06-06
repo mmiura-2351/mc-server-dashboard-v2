@@ -25,11 +25,24 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_session_factory,
 )
 from mc_server_dashboard_api.identity.adapters.clock import SystemClock
+from mc_server_dashboard_api.identity.adapters.login_attempt_store import (
+    SqlAlchemyLoginAttemptStore,
+)
+from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
+    FixedLoginFailureDelay,
+)
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
 )
+from mc_server_dashboard_api.identity.adapters.sleeper import AsyncioSleeper
+from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
+from mc_server_dashboard_api.identity.application.admin_create_user import (
+    AdminCreateUser,
+)
+from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
+from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
@@ -102,11 +115,64 @@ def _register(engine: AsyncEngine) -> RegisterUser:
     )
 
 
+def _admin_create(engine: AsyncEngine) -> AdminCreateUser:
+    return AdminCreateUser(
+        uow=SqlAlchemyUnitOfWork(create_session_factory(engine)),
+        hasher=Argon2PasswordHasher(),
+        clock=SystemClock(),
+        policy=_policy(),
+    )
+
+
+def _login(engine: AsyncEngine) -> Login:
+    clock = SystemClock()
+    factory = create_session_factory(engine)
+    brute_force = BruteForceConfig(
+        enabled=False,
+        username_threshold=5,
+        username_window=dt.timedelta(minutes=15),
+        ip_threshold=20,
+        ip_window=dt.timedelta(minutes=15),
+        lockout_base=dt.timedelta(minutes=1),
+        lockout_max=dt.timedelta(minutes=15),
+        delay=dt.timedelta(0),
+    )
+    return Login(
+        uow=SqlAlchemyUnitOfWork(factory),
+        attempts=SqlAlchemyLoginAttemptStore(factory),
+        brute_force=brute_force,
+        hasher=Argon2PasswordHasher(),
+        dummy_password_hash=Argon2PasswordHasher().hash("dummy"),
+        tokens=JwtTokenService(
+            signing_key="test-signing-key",
+            algorithm="HS256",
+            access_ttl=dt.timedelta(minutes=15),
+            clock=clock,
+        ),
+        clock=clock,
+        failure_delay=FixedLoginFailureDelay(
+            delay=dt.timedelta(0), sleeper=AsyncioSleeper()
+        ),
+        refresh_ttl=dt.timedelta(days=30),
+    )
+
+
 async def test_registers_and_persists(engine: AsyncEngine) -> None:
     user = await _register(engine)(
         username="alice", email="alice@example.com", password=_VALID_PASSWORD
     )
     assert user.password_hash != _VALID_PASSWORD
+
+
+async def test_admin_created_account_can_log_in(engine: AsyncEngine) -> None:
+    # The whole point of the admin creation surface (issue #368): an account it
+    # provisions is a real account the holder can authenticate with.
+    created = await _admin_create(engine)(
+        username="bob", email="bob@example.com", password=_VALID_PASSWORD
+    )
+    result = await _login(engine)(username="bob", password=_VALID_PASSWORD)
+    assert result.user_id == created.id.value
+    assert result.pair.access_token
 
 
 async def test_duplicate_username_case_insensitive_raises(engine: AsyncEngine) -> None:

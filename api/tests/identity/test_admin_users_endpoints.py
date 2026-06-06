@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.dependencies import (
+    get_admin_create_user,
     get_admin_delete_user,
     get_audit_recorder,
     get_current_user,
@@ -28,7 +29,9 @@ from mc_server_dashboard_api.identity.application.list_users import UserPage
 from mc_server_dashboard_api.identity.domain.errors import (
     CommunityOwnedError,
     LastPlatformAdminError,
+    PasswordPolicyError,
     SelfTargetError,
+    UsernameAlreadyExistsError,
     UserNotFoundError,
 )
 from tests.audit.fakes import RecordingAuditRecorder
@@ -60,6 +63,7 @@ _PROVIDERS = {
     "set_user_active": get_set_user_active,
     "admin_delete_user": get_admin_delete_user,
     "set_platform_admin": get_set_platform_admin,
+    "admin_create_user": get_admin_create_user,
     "recorder": get_audit_recorder,
 }
 
@@ -253,3 +257,70 @@ def test_set_platform_admin_requires_platform_admin() -> None:
     client = next(_client(platform_admin=False, set_platform_admin=_Fake()))
     resp = client.put(f"/users/{uuid.uuid4()}/platform-admin", json={"grant": True})
     assert resp.status_code == 403
+
+
+# --- POST /admin/users (admin creation, #368) ------------------------------
+
+_VALID_PASSWORD = "Wm7!qz#Lp2vT"
+
+
+def _create_payload() -> dict[str, str]:
+    return {
+        "username": "bob",
+        "email": "bob@example.com",
+        "password": _VALID_PASSWORD,
+    }
+
+
+def test_admin_create_returns_201_and_user_without_hash_and_audits() -> None:
+    created = make_user(username="bob", email="bob@example.com")
+    recorder = RecordingAuditRecorder()
+    fake = _Fake(result=created)
+    client = next(_client(admin_create_user=fake, recorder=recorder))
+    resp = client.post("/admin/users", json=_create_payload())
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body == {
+        "id": str(created.id.value),
+        "username": "bob",
+        "email": "bob@example.com",
+        "is_platform_admin": False,
+    }
+    assert "password" not in body
+    assert created.password_hash not in resp.text
+    assert fake.calls == [
+        {"username": "bob", "email": "bob@example.com", "password": _VALID_PASSWORD}
+    ]
+    # The admin is the actor; the new user is the target (FR-AUD-1).
+    assert [e.operation for e in recorder.events] == [ops.USER_CREATE]
+    assert recorder.events[0].target_id == created.id.value
+
+
+def test_admin_create_requires_platform_admin() -> None:
+    fake = _Fake(result=make_user())
+    client = next(_client(platform_admin=False, admin_create_user=fake))
+    resp = client.post("/admin/users", json=_create_payload())
+    assert resp.status_code == 403
+    # The use case must not run for a non-admin.
+    assert fake.calls == []
+
+
+def test_admin_create_weak_password_returns_422_no_echo() -> None:
+    fake = _Fake(error=PasswordPolicyError("too_short"))
+    client = next(_client(admin_create_user=fake))
+    weak = "Qz9!secretpw"
+    resp = client.post(
+        "/admin/users",
+        json={"username": "bob", "email": "bob@example.com", "password": weak},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "too_short"
+    assert weak not in resp.text
+
+
+def test_admin_create_duplicate_username_returns_409() -> None:
+    fake = _Fake(error=UsernameAlreadyExistsError("bob"))
+    client = next(_client(admin_create_user=fake))
+    resp = client.post("/admin/users", json=_create_payload())
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "username_taken"

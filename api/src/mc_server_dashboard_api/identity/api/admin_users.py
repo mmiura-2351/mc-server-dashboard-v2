@@ -19,12 +19,13 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.dependencies import (
+    get_admin_create_user,
     get_admin_delete_user,
     get_audit_recorder,
     get_list_users,
@@ -33,6 +34,10 @@ from mc_server_dashboard_api.dependencies import (
     require_platform_admin,
 )
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.identity.api.users import UserResponse
+from mc_server_dashboard_api.identity.application.admin_create_user import (
+    AdminCreateUser,
+)
 from mc_server_dashboard_api.identity.application.admin_delete_user import (
     AdminDeleteUser,
 )
@@ -44,8 +49,13 @@ from mc_server_dashboard_api.identity.application.set_user_active import SetUser
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     CommunityOwnedError,
+    EmailAlreadyExistsError,
+    InvalidEmailError,
+    InvalidUsernameError,
     LastPlatformAdminError,
+    PasswordPolicyError,
     SelfTargetError,
+    UsernameAlreadyExistsError,
     UserNotFoundError,
 )
 from mc_server_dashboard_api.identity.domain.value_objects import UserId
@@ -84,6 +94,44 @@ class UserListResponse(BaseModel):
 
 class PlatformAdminRequest(BaseModel):
     grant: bool
+
+
+class AdminCreateUserRequest(BaseModel):
+    # Same input contract as open registration (username, email, password); the
+    # structural bounds mirror ``RegisterUserRequest`` so the admin path and the
+    # open path validate identically before the password policy runs.
+    username: str = Field(min_length=1)
+    email: str = Field(min_length=1)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+@router.post("/admin/users", status_code=status.HTTP_201_CREATED)
+async def admin_create_user(
+    body: AdminCreateUserRequest,
+    admin: Annotated[User, Depends(require_platform_admin)],
+    use_case: Annotated[AdminCreateUser, Depends(get_admin_create_user)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> UserResponse:
+    # Admin-gated account provisioning (issue #368): exempt from the open-flag and
+    # the per-IP cap that guard the unauthenticated ``POST /users``. Reuses the
+    # registration error -> status mapping so validation and duplicates behave
+    # identically on both paths.
+    try:
+        user = await use_case(
+            username=body.username,
+            email=body.email,
+            password=body.password,
+        )
+    except (UsernameAlreadyExistsError, EmailAlreadyExistsError) as exc:
+        raise problem(status.HTTP_409_CONFLICT, _conflict_reason(exc)) from exc
+    except PasswordPolicyError as exc:
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.reason) from exc
+    except (InvalidUsernameError, InvalidEmailError) as exc:
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, _field_reason(exc)
+        ) from exc
+    await _audit(recorder, ops.USER_CREATE, admin=admin, target=user.id.value)
+    return UserResponse.from_entity(user)
 
 
 @router.get("/users", dependencies=[Depends(require_platform_admin)])
@@ -197,3 +245,17 @@ def _conflict(reason: str) -> ProblemException:
 
 def _not_found() -> ProblemException:
     return problem(status.HTTP_404_NOT_FOUND, "not_found")
+
+
+def _conflict_reason(exc: Exception) -> str:
+    return (
+        "username_taken"
+        if isinstance(exc, UsernameAlreadyExistsError)
+        else "email_taken"
+    )
+
+
+def _field_reason(exc: Exception) -> str:
+    return (
+        "invalid_username" if isinstance(exc, InvalidUsernameError) else "invalid_email"
+    )

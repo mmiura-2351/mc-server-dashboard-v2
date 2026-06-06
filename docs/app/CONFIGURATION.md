@@ -466,7 +466,7 @@ the threshold is lower and the window wider.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `auth.registration.open` | `true` | Master switch for self-registration. `false` returns `403` from `POST /users`; admin-created accounts via the admin surface are unaffected. |
+| `auth.registration.open` | `true` | Master switch for self-registration. `false` returns `403` from the unauthenticated `POST /users`; a platform admin can still provision accounts via `POST /admin/users` (issue #368), which is exempt from this switch and the per-IP cap below. |
 | `auth.registration.ip_limit_enabled` | `true` | Whether the per-IP registration cap is enforced. |
 | `auth.registration.ip_threshold` | `5` | Registrations per source IP within the window before further attempts get `429`. Must be at least 1. |
 | `auth.registration.ip_window_seconds` | `3600` | Sliding window for the per-IP registration count. Must be positive. |

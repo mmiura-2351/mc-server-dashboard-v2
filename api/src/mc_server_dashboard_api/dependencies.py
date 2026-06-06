@@ -133,6 +133,9 @@ from mc_server_dashboard_api.identity.adapters.password_hasher import (
 from mc_server_dashboard_api.identity.adapters.sleeper import AsyncioSleeper
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
+from mc_server_dashboard_api.identity.application.admin_create_user import (
+    AdminCreateUser,
+)
 from mc_server_dashboard_api.identity.application.admin_delete_user import (
     AdminDeleteUser,
 )
@@ -686,6 +689,24 @@ def get_set_platform_admin(request: Request) -> SetPlatformAdmin:
     return SetPlatformAdmin(
         uow=SqlAlchemyUnitOfWork(session_factory),
         clock=SystemClock(),
+    )
+
+
+def get_admin_create_user(request: Request) -> AdminCreateUser:
+    """Assemble the :class:`AdminCreateUser` use case (platform-admin only, #368).
+
+    Reuses the same password policy and hasher as open registration, but carries
+    none of its abuse controls: the admin path is exempt from the open flag and
+    never touches the per-IP registration cap.
+    """
+
+    settings = get_settings(request)
+    session_factory = create_session_factory(get_engine(request))
+    return AdminCreateUser(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        hasher=_build_password_hasher(settings.auth.password),
+        clock=SystemClock(),
+        policy=_build_password_policy(settings.auth.password),
     )
 
 
