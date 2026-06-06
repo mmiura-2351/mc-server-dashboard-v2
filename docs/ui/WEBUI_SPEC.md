@@ -1,15 +1,16 @@
 # Web UI — Feature Inventory, Screen Map, and Spec
 
-> Status: **Draft (for alignment)** · Date: 2026-06-06
+> Status: **Accepted (open questions resolved)** · Date: 2026-06-06
 >
 > This document inventories the v2 API surface as implemented today, derives
-> the full UI feature list from it, and proposes the screen structure and
+> the full UI feature list from it, and specifies the screen structure and
 > per-screen specs for the Web UI milestone. A static mockup (no real API
-> calls) accompanies it under `docs/ui/mockup/`.
+> calls) accompanies it under `docs/ui/mockup/` and is kept as a design
+> reference.
 >
-> REQUIREMENTS.md Section 2.2 places the production Web UI in a separate
-> repository. This spec and the mockup live here temporarily for alignment;
-> where the real implementation lands is an open question (Section 9).
+> The Web UI is built **in this monorepo** under `webui/`, alongside `api/`,
+> `worker/`, and `proto/` (REQUIREMENTS.md Section 1.2). The former open
+> questions are resolved in Section 9.
 
 ## Table of Contents
 
@@ -21,7 +22,7 @@
 6. [Screen specs](#6-screen-specs)
 7. [Cross-cutting concerns](#7-cross-cutting-concerns)
 8. [Out of scope for the first UI cut](#8-out-of-scope-for-the-first-ui-cut)
-9. [Open questions](#9-open-questions)
+9. [Resolved open questions](#9-resolved-open-questions)
 
 ---
 
@@ -32,6 +33,9 @@
 | Visual tone | Dark operations-console style (Grafana/Portainer family). |
 | UI language | English, with all strings behind an i18n dictionary so Japanese can be added later. |
 | Mockup form | Multiple static HTML pages + shared CSS/JS, mock data embedded in JS. No real API calls. |
+| Placement | `webui/` in this monorepo, alongside `api/` / `worker/` / `proto/`. The mockup stays under `docs/ui/mockup/` as a design reference. |
+| Stack | React + TypeScript + Vite (Section 7.6). |
+| Session storage | Refresh token in an httpOnly cookie from the start (Section 7.1); requires API-side cookie support — issue #363. |
 
 ## 2. API surface inventory
 
@@ -351,9 +355,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ## 7. Cross-cutting concerns
 
 ### 7.1 Auth/session lifecycle
-- Access token (short-lived; ~900 s in the live deployment) kept in memory;
-  refresh token persisted (see Q2 for storage choice). Transparent refresh on
-  401 + single-flight refresh mutex; hard logout on refresh failure.
+- Access token (short-lived; ~900 s in the live deployment) kept in memory
+  only. Refresh token in an **httpOnly cookie** set by the API on login
+  (`Secure; SameSite=Strict; Path=/auth`) — never readable by JS; requires the
+  API-side cookie transport (issue #363). Transparent refresh on 401 +
+  single-flight refresh mutex; hard logout on refresh failure. Page reload
+  re-establishes the session via the cookie-based `POST /auth/refresh`.
 - WS connections carry `?token=`; on token rotation, sockets are reconnected
   (or left until the 60 s re-auth closes them — reconnect-on-rotate chosen).
 
@@ -383,11 +390,13 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   addable. Dark theme via CSS custom properties (a light theme later is a
   token swap, not a rewrite).
 
-### 7.6 Tech stack (proposal — for the real implementation, not the mockup)
+### 7.6 Tech stack (decided — for the real implementation, not the mockup)
 - SPA: **React + TypeScript + Vite**, TanStack Query (REST cache +
   invalidation), plain WebSocket wrappers, CSS modules or vanilla-extract —
   no heavy UI kit; the design system stays ours. Generated API client from
-  the OpenAPI schema. *(Alternatives welcome — see Q1.)*
+  the OpenAPI schema.
+- Lives in `webui/` at the repo root, a self-contained npm package mirroring
+  how `api/` and `worker/` are self-contained.
 
 ## 8. Out of scope for the first UI cut
 
@@ -396,18 +405,14 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Mobile-optimized layouts (responsive down to tablet only).
 - Light theme (structure ready, not shipped).
 
-## 9. Open questions
+## 9. Resolved open questions
 
-- **Q1. Stack**: agree on React+TS+Vite (7.6) or prefer something else
-  (Svelte, htmx + server templates, …)?
-- **Q2. Refresh-token storage**: `localStorage` (simple, XSS-exposed) vs
-  cookie + API change (httpOnly; needs CSRF posture). Default proposal:
-  localStorage for the first cut, revisit before production exposure.
-- ~~**Q3. "My permissions" endpoint**~~ — **resolved**: filed as #354,
-  implemented as `GET /communities/{cid}/me/permissions` (#357); see 7.3.
-- ~~**Q4. Member-add lookup**~~ — **resolved**: filed as #355, implemented as
-  `POST …/members` accepting exactly one of `user_id` / exact `username`
-  (#359); see 6.10.
-- **Q5. Where does the real UI live**: separate repo per REQUIREMENTS.md, or
-  a `webui/` package in this monorepo (mirroring the api/worker/proto
-  layout)?
+All of the first draft's open questions are now decided:
+
+| # | Question | Decision | Refs |
+|---|---|---|---|
+| Q1 | Stack | **React + TypeScript + Vite** (TanStack Query, generated OpenAPI client). | 7.6 |
+| Q2 | Refresh-token storage | **httpOnly cookie from the start** (no localStorage interim). Needs API-side cookie transport — issue #363. | 7.1 |
+| Q3 | "My permissions" endpoint | **Implemented**: filed as #354, landed as `GET /communities/{cid}/me/permissions` (#357). | 3, 7.3 |
+| Q4 | Member-add lookup | **Implemented**: filed as #355, landed as `POST …/members` accepting exactly one of `user_id` / exact `username` (#359). | 6.10 |
+| Q5 | Where the UI lives | **`webui/` in this monorepo**, alongside `api/` / `worker/` / `proto/` (REQUIREMENTS.md Section 1.2 updated). Mockup stays under `docs/ui/mockup/` as a design reference. | 1 |
