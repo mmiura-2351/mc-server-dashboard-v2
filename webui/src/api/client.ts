@@ -131,6 +131,9 @@ async function request<P extends keyof paths, M extends string>(
     if (refreshed) {
       response = await rawRequest(httpMethod, url, init);
     }
+    // A 401 on the retried request (post-refresh) is intentionally surfaced as a
+    // raw ApiError, not a hard logout: the session is valid, this endpoint just
+    // denied access. The #410 guards must not misread it as session expiry.
   }
 
   const text = await response.text();

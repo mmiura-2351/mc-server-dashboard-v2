@@ -67,6 +67,15 @@ describe("refreshSession", () => {
     expect(ok).toBe(false);
   });
 
+  it("resolves signed out on a 200 with an invalid JSON body", async () => {
+    fetchMock.mockResolvedValue(new Response("not json", { status: 200 }));
+
+    const ok = await refreshSession();
+
+    expect(ok).toBe(false);
+    expect(getAccessToken()).toBeNull();
+  });
+
   it("is single-flight: N concurrent calls share one refresh", async () => {
     let resolveFetch: (r: Response) => void = () => {};
     fetchMock.mockImplementation(
@@ -97,6 +106,19 @@ describe("refreshSession", () => {
 describe("refreshForRetry", () => {
   it("hard-logs-out when the refresh fails", async () => {
     fetchMock.mockResolvedValue(new Response("", { status: 401 }));
+    const onLogout = vi.fn();
+    setHardLogoutHandler(onLogout);
+    setAccessToken("stale");
+
+    const ok = await refreshForRetry();
+
+    expect(ok).toBe(false);
+    expect(getAccessToken()).toBeNull();
+    expect(onLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it("hard-logs-out on a 200 with an invalid JSON body", async () => {
+    fetchMock.mockResolvedValue(new Response("not json", { status: 200 }));
     const onLogout = vi.fn();
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");

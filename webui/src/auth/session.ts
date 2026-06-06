@@ -53,7 +53,15 @@ async function doRefresh(): Promise<boolean> {
   if (!response.ok) {
     return false;
   }
-  const data = (await response.json()) as TokenResponse;
+  let data: TokenResponse;
+  try {
+    data = (await response.json()) as TokenResponse;
+  } catch {
+    // A 200 with a malformed/empty body yields no usable token; treat it as a
+    // failed refresh so callers hard-log-out instead of rejecting the shared
+    // single-flight promise (which would strand the bootstrap).
+    return false;
+  }
   setAccessToken(data.access_token);
   return true;
 }
