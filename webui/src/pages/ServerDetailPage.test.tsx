@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -7,7 +13,8 @@ import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
-import { ServerDetailPage } from "./ServerDetailPage.tsx";
+import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
+import { ServerDetailPage, sparklinePoints } from "./ServerDetailPage.tsx";
 
 const CID = "c1";
 const SID = "s1";
@@ -603,5 +610,206 @@ describe("ServerDetailPage delete (typed confirm)", () => {
         name: t("serverDetail.danger.deleteButton"),
       }),
     ).not.toBeInTheDocument();
+  });
+});
+
+// ── Overview live streams + Console tab (issue #440) ─────────────────────────
+
+function serverFrame(stream: string, payload: unknown) {
+  return JSON.stringify({ stream, ts: "t", payload });
+}
+
+describe("ServerDetailPage Overview live streams", () => {
+  let restoreWs: () => void;
+
+  beforeEach(() => {
+    restoreWs = installMockWebSocket();
+  });
+  afterEach(() => {
+    restoreWs();
+  });
+
+  it("renders metrics from the stream and the log tail", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("metrics", {
+          cpu_millis: 1500,
+          memory_bytes: 2 * 1024 * 1024,
+          player_count: 4,
+        }),
+      );
+      MockWebSocket.last().message(
+        serverFrame("log", { line: "starting up", stream: "stdout" }),
+      );
+    });
+
+    // CPU 1500 milli-cores → 1.5 cores; players 4; memory 2 MiB.
+    expect(screen.getByText("1.5")).toBeInTheDocument();
+    expect(screen.getByText("4")).toBeInTheDocument();
+    expect(screen.getByText("starting up")).toBeInTheDocument();
+  });
+
+  it("switches to the Console tab via the tail link", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.openConsole") }),
+    );
+    expect(
+      screen.getByRole("checkbox", { name: t("serverDetail.console.follow") }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the degraded indicator when the socket drops", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().fail();
+    });
+    expect(screen.getByText(t("dashboard.liveDegraded"))).toBeInTheDocument();
+  });
+});
+
+describe("ServerDetailPage Console tab", () => {
+  let restoreWs: () => void;
+
+  beforeEach(() => {
+    restoreWs = installMockWebSocket();
+  });
+  afterEach(() => {
+    restoreWs();
+  });
+
+  async function openConsole(overrides: Record<string, unknown> = {}) {
+    mockApi.get.mockResolvedValue(server(overrides));
+    renderPage();
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.console") }),
+    );
+  }
+
+  it("renders the gap marker as a missed-events divider", async () => {
+    await openConsole({ observed_state: "running" });
+    act(() => {
+      MockWebSocket.last().message(serverFrame("gap", {}));
+    });
+    expect(
+      screen.getByText(t("serverDetail.missedEvents")),
+    ).toBeInTheDocument();
+  });
+
+  it("filters the stream by the text filter", async () => {
+    await openConsole({ observed_state: "running" });
+    act(() => {
+      MockWebSocket.last().message(
+        serverFrame("log", { line: "keep me", stream: "stdout" }),
+      );
+      MockWebSocket.last().message(
+        serverFrame("log", { line: "drop this", stream: "stdout" }),
+      );
+    });
+    fireEvent.change(
+      screen.getByPlaceholderText(t("serverDetail.console.filter")),
+      { target: { value: "keep" } },
+    );
+    expect(screen.getByText("keep me")).toBeInTheDocument();
+    expect(screen.queryByText("drop this")).not.toBeInTheDocument();
+  });
+
+  it("clears the stream", async () => {
+    await openConsole({ observed_state: "running" });
+    act(() => {
+      MockWebSocket.last().message(
+        serverFrame("log", { line: "before clear", stream: "stdout" }),
+      );
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.console.clear") }),
+    );
+    expect(screen.queryByText("before clear")).not.toBeInTheDocument();
+  });
+
+  it("disables the RCON input with a hint when not running", async () => {
+    await openConsole({ observed_state: "stopped" });
+    expect(
+      screen.getByPlaceholderText(t("serverDetail.console.notRunning")),
+    ).toBeDisabled();
+    expect(
+      screen.getAllByText(t("serverDetail.console.notRunning")).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("hides the RCON input without server:command", async () => {
+    mockCan = (code) => code !== "server:command";
+    await openConsole({ observed_state: "running" });
+    expect(
+      screen.queryByRole("button", { name: t("serverDetail.console.send") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("sends a command and echoes the command + output distinctly", async () => {
+    mockApi.post.mockResolvedValue({ output: "There are 0 players" });
+    await openConsole({ observed_state: "running" });
+
+    const input = screen.getByPlaceholderText(
+      t("serverDetail.console.commandPlaceholder"),
+    );
+    fireEvent.change(input, { target: { value: "list" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.console.send") }),
+    );
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/communities/${CID}/servers/${SID}/command`,
+        { body: JSON.stringify({ line: "list" }) },
+      ),
+    );
+    expect(await screen.findByText("There are 0 players")).toBeInTheDocument();
+    expect(screen.getByText(/list/)).toBeInTheDocument();
+  });
+
+  it("recalls the last command with ArrowUp", async () => {
+    mockApi.post.mockResolvedValue({ output: "ok" });
+    await openConsole({ observed_state: "running" });
+
+    const input = screen.getByPlaceholderText(
+      t("serverDetail.console.commandPlaceholder"),
+    ) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "say hi" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.value).toBe("say hi");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.value).toBe("");
+  });
+});
+
+describe("sparklinePoints", () => {
+  it("scales a series to the viewbox, inverting y so high reads high", () => {
+    // min=0 max=10 over width 100 / height 20, three samples → x at 0,50,100.
+    // y inverts: value 0 → bottom (20), value 10 → top (0), value 5 → mid (10).
+    expect(sparklinePoints([0, 10, 5], 100, 20)).toBe(
+      "0.0,20.0 50.0,0.0 100.0,10.0",
+    );
+  });
+
+  it("flattens a constant series to the baseline without dividing by zero", () => {
+    expect(sparklinePoints([4, 4, 4], 100, 20)).toBe(
+      "0.0,20.0 50.0,20.0 100.0,20.0",
+    );
   });
 });

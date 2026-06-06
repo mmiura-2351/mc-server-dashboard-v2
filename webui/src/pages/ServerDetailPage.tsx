@@ -1,5 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
@@ -12,6 +18,7 @@ import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { dashboardPath } from "../routes.ts";
 import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import { serverKey } from "./serverKey.ts";
 import {
   actionApplies,
   atRest,
@@ -19,13 +26,17 @@ import {
   statePill,
 } from "./serverState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
+import {
+  type LogEntry,
+  type MetricsSample,
+  type ServerEventsState,
+  TAIL_LINES,
+  useServerEvents,
+} from "./useServerEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
-/** Query key for a single server's detail (cid + sid scoped). */
-export function serverKey(communityId: string, serverId: string) {
-  return ["server", communityId, serverId] as const;
-}
+export { serverKey };
 
 const TABS = [
   "overview",
@@ -63,6 +74,8 @@ function Loaded({
 }) {
   const can = useCan();
   const [tab, setTab] = useState<Tab>("overview");
+  // One WS per open detail page, shared by all tabs (WEBUI_SPEC.md 7.2).
+  const events = useServerEvents(communityId, serverId);
   const query = useQuery({
     queryKey: serverKey(communityId, serverId),
     queryFn: () =>
@@ -84,7 +97,12 @@ function Loaded({
   const server = query.data;
   return (
     <>
-      <Header server={server} communityId={communityId} can={can} />
+      <Header
+        server={server}
+        communityId={communityId}
+        can={can}
+        degraded={events.degraded}
+      />
       <div className="tabs" role="tablist">
         {TABS.map((name) => (
           <button
@@ -99,11 +117,25 @@ function Loaded({
           </button>
         ))}
       </div>
-      {tab === "overview" && <Overview server={server} />}
+      {tab === "overview" && (
+        <Overview
+          server={server}
+          events={events}
+          onOpenConsole={() => setTab("console")}
+        />
+      )}
+      {tab === "console" && (
+        <Console
+          server={server}
+          communityId={communityId}
+          can={can}
+          events={events}
+        />
+      )}
       {tab === "settings" && (
         <Settings server={server} communityId={communityId} can={can} />
       )}
-      {tab !== "overview" && tab !== "settings" && (
+      {tab !== "overview" && tab !== "console" && tab !== "settings" && (
         <p className="sub">{t("serverDetail.tabPlaceholder")}</p>
       )}
     </>
@@ -116,10 +148,12 @@ function Header({
   server,
   communityId,
   can,
+  degraded,
 }: {
   server: ServerResponse;
   communityId: string;
   can: Can;
+  degraded: boolean;
 }) {
   const state = normalizeState(server.observed_state);
   const pill = statePill(state);
@@ -147,6 +181,11 @@ function Header({
           {drifting && (
             <span className="pill settling blink" role="status">
               {t("serverDetail.converging")}
+            </span>
+          )}
+          {degraded && (
+            <span className="pill live-degraded" role="status">
+              {t("dashboard.liveDegraded")}
             </span>
           )}
         </h1>
@@ -336,15 +375,37 @@ function StopControl({
   );
 }
 
-function Overview({ server }: { server: ServerResponse }) {
+function Overview({
+  server,
+  events,
+  onOpenConsole,
+}: {
+  server: ServerResponse;
+  events: ServerEventsState;
+  onOpenConsole: () => void;
+}) {
+  // Last ~200 lines of the live stream; local RCON echoes are console-only, so
+  // the tail shows only real server output / gap markers (WEBUI_SPEC.md 6.4).
+  const tail = events.logs
+    .filter((e) => e.kind === "line" || e.kind === "gap")
+    .slice(-TAIL_LINES);
   return (
     <section>
-      {/* Live metrics + log tail arrive with the per-server WS stream (#440). */}
-      <div className="card metrics-placeholder" aria-hidden="true">
-        <p className="sub">{t("serverDetail.metricsPlaceholder")}</p>
-      </div>
-      <div className="card log-placeholder" aria-hidden="true">
-        <p className="sub">{t("serverDetail.logTailPlaceholder")}</p>
+      <MetricsStrip samples={events.metrics} />
+      <div className="card log-tail">
+        <div className="log-tail-head">
+          <span className="log-tail-title">
+            {t("serverDetail.logTailHeading")}
+          </span>
+          <button type="button" className="btn sm" onClick={onOpenConsole}>
+            {t("serverDetail.openConsole")}
+          </button>
+        </div>
+        {tail.length === 0 ? (
+          <p className="sub">{t("serverDetail.logTailEmpty")}</p>
+        ) : (
+          <LogView entries={tail} follow={true} />
+        )}
       </div>
       <dl className="kv card">
         <dt>{t("serverDetail.observed")}</dt>
@@ -352,6 +413,308 @@ function Overview({ server }: { server: ServerResponse }) {
         <dt>{t("serverDetail.desired")}</dt>
         <dd>{server.desired_state}</dd>
       </dl>
+    </section>
+  );
+}
+
+// ── Metrics strip (WEBUI_SPEC.md 6.4) ───────────────────────────────────────
+
+function MetricsStrip({ samples }: { samples: MetricsSample[] }) {
+  const latest = samples.at(-1);
+  return (
+    <div className="card metrics-strip">
+      <Sparkline
+        labelKey="serverDetail.metric.cpu"
+        values={samples.map((s) => s.cpuMillis)}
+        // CPU in milli-cores → cores, one decimal.
+        current={latest ? `${(latest.cpuMillis / 1000).toFixed(1)}` : null}
+        unitKey="serverDetail.metric.cores"
+      />
+      <Sparkline
+        labelKey="serverDetail.metric.memory"
+        values={samples.map((s) => s.memoryBytes)}
+        current={latest ? formatMiB(latest.memoryBytes) : null}
+        unitKey="serverDetail.metric.mib"
+      />
+      <Sparkline
+        labelKey="serverDetail.metric.players"
+        values={samples.map((s) => s.playerCount)}
+        current={latest ? String(latest.playerCount) : null}
+        unitKey={null}
+      />
+    </div>
+  );
+}
+
+function formatMiB(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(0);
+}
+
+// A self-drawn sparkline: an inline-SVG polyline over the sample window, scaled
+// to its own min/max so the shape reads even for a flat-but-nonzero series. No
+// charting dependency (WEBUI_SPEC.md 6.4: self-drawn, client-side only).
+function Sparkline({
+  labelKey,
+  values,
+  current,
+  unitKey,
+}: {
+  labelKey: TranslationKey;
+  values: number[];
+  current: string | null;
+  unitKey: TranslationKey | null;
+}) {
+  const width = 120;
+  const height = 28;
+  return (
+    <div className="metric">
+      <div className="metric-label">{t(labelKey)}</div>
+      <div className="metric-value">
+        {current ?? "—"}
+        {current !== null && unitKey !== null && (
+          <span className="metric-unit"> {t(unitKey)}</span>
+        )}
+      </div>
+      <svg
+        className="sparkline"
+        width={width}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={t(labelKey)}
+      >
+        {values.length >= 2 && (
+          <polyline
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            points={sparklinePoints(values, width, height)}
+          />
+        )}
+      </svg>
+    </div>
+  );
+}
+
+/** Map a value series to a polyline `points` string spanning the viewbox. */
+export function sparklinePoints(
+  values: number[],
+  width: number,
+  height: number,
+): string {
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const step = width / (values.length - 1);
+  return values
+    .map((v, i) => {
+      const x = i * step;
+      // Invert y: SVG origin is top-left, so a higher value sits higher up.
+      const y = height - ((v - min) / span) * height;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+}
+
+// ── Shared log view + Console tab (WEBUI_SPEC.md 6.5) ────────────────────────
+
+// The log stream renderer shared by the Overview tail and the Console. Each
+// entry is color-keyed by source (stdout/stderr) or echo kind (command/output);
+// a gap entry renders the inline "missed events" divider (WEBUI_SPEC.md 7.2).
+// In follow mode it auto-scrolls to the newest line on each update.
+function LogView({
+  entries,
+  follow,
+}: {
+  entries: LogEntry[];
+  follow: boolean;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  // Re-scroll to the newest line whenever the entries change while following.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `entries` drives the auto-scroll; re-run on every append.
+  useLayoutEffect(() => {
+    if (follow && ref.current !== null) {
+      ref.current.scrollTop = ref.current.scrollHeight;
+    }
+  }, [follow, entries]);
+  return (
+    <div className="log-view" ref={ref}>
+      {entries.map((entry) =>
+        entry.kind === "gap" ? (
+          <div key={entry.id} className="log-gap">
+            {t("serverDetail.missedEvents")}
+          </div>
+        ) : (
+          <div key={entry.id} className={`log-line ${entry.kind}`}>
+            {entry.kind === "command" ? "> " : ""}
+            {entry.line}
+          </div>
+        ),
+      )}
+    </div>
+  );
+}
+
+function Console({
+  server,
+  communityId,
+  can,
+  events,
+}: {
+  server: ServerResponse;
+  communityId: string;
+  can: Can;
+  events: ServerEventsState;
+}) {
+  const onForbidden = useOnForbidden();
+  const [follow, setFollow] = useState(true);
+  const [filter, setFilter] = useState("");
+  // Clear hides everything up to (and including) this entry id; -1 hides none.
+  // Keyed by stable id, not position, so the bounded-buffer trim cannot shift it.
+  const [clearedThrough, setClearedThrough] = useState(-1);
+  const [command, setCommand] = useState("");
+  // Local command history for ↑/↓; -1 means "not browsing history".
+  const history = useRef<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+
+  const running = normalizeState(server.observed_state) === "running";
+  const canCommand = can("server:command", { serverId: server.id });
+
+  const send = useMutation({
+    mutationFn: (line: string) =>
+      api.post(
+        apiPath("/communities/{community_id}/servers/{server_id}/command", {
+          community_id: communityId,
+          server_id: server.id,
+        }),
+        { body: JSON.stringify({ line }) },
+      ),
+    onSuccess: (data, line) => {
+      const output = (data as { output: string }).output;
+      events.appendLocal([
+        { kind: "command", line },
+        ...(output.length > 0
+          ? [{ kind: "output" as const, line: output }]
+          : []),
+      ]);
+    },
+    onError: (error, line) => {
+      if (onForbidden(error)) {
+        return;
+      }
+      events.appendLocal([
+        { kind: "command", line },
+        { kind: "output", line: t("serverDetail.commandFailed") },
+      ]);
+    },
+  });
+
+  const submit = () => {
+    const line = command.trim();
+    if (line.length === 0) {
+      return;
+    }
+    history.current = [...history.current, line];
+    setHistoryIndex(-1);
+    setCommand("");
+    send.mutate(line);
+  };
+
+  // ↑/↓ browse the local history; at the bottom (index -1) the input is blank.
+  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    const items = history.current;
+    if (event.key === "ArrowUp" && items.length > 0) {
+      event.preventDefault();
+      const next =
+        historyIndex === -1 ? items.length - 1 : Math.max(0, historyIndex - 1);
+      setHistoryIndex(next);
+      setCommand(items[next]);
+    } else if (event.key === "ArrowDown" && historyIndex !== -1) {
+      event.preventDefault();
+      const next = historyIndex + 1;
+      if (next >= items.length) {
+        setHistoryIndex(-1);
+        setCommand("");
+      } else {
+        setHistoryIndex(next);
+        setCommand(items[next]);
+      }
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    }
+  };
+
+  const needle = filter.trim().toLowerCase();
+  const visible = events.logs.filter((entry) => {
+    if (entry.id <= clearedThrough) {
+      return false;
+    }
+    if (needle.length === 0 || entry.kind === "gap") {
+      return true;
+    }
+    return entry.line.toLowerCase().includes(needle);
+  });
+
+  return (
+    <section className="console">
+      <div className="console-toolbar">
+        <label className="console-follow">
+          <input
+            type="checkbox"
+            checked={follow}
+            onChange={(e) => setFollow(e.target.checked)}
+          />
+          {t("serverDetail.console.follow")}
+        </label>
+        <input
+          type="text"
+          className="console-filter"
+          placeholder={t("serverDetail.console.filter")}
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
+        <button
+          type="button"
+          className="btn sm"
+          onClick={() =>
+            setClearedThrough(events.logs.at(-1)?.id ?? clearedThrough)
+          }
+        >
+          {t("serverDetail.console.clear")}
+        </button>
+      </div>
+      <div className="card console-stream">
+        <LogView entries={visible} follow={follow} />
+      </div>
+      {canCommand && (
+        <div className="console-input">
+          <input
+            type="text"
+            value={command}
+            disabled={!running || send.isPending}
+            placeholder={
+              running
+                ? t("serverDetail.console.commandPlaceholder")
+                : t("serverDetail.console.notRunning")
+            }
+            onChange={(e) => setCommand(e.target.value)}
+            onKeyDown={onKeyDown}
+          />
+          <button
+            type="button"
+            className="btn primary"
+            disabled={!running || send.isPending || command.trim().length === 0}
+            onClick={submit}
+          >
+            {t("serverDetail.console.send")}
+          </button>
+        </div>
+      )}
+      {canCommand && !running && (
+        <p className="field-hint">{t("serverDetail.console.notRunning")}</p>
+      )}
     </section>
   );
 }
