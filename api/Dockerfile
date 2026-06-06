@@ -1,14 +1,40 @@
 # api/ container image (issue #189). Multi-stage:
-#   1. builder — resolve the locked dependency set with uv into a venv.
-#   2. runtime — a slim python with that venv + the application source, run as a
-#      non-root user.
+#   1. webui  — build the React SPA (webui/dist) with the pinned Node + npm.
+#   2. builder — resolve the locked dependency set with uv into a venv.
+#   3. runtime — a slim python with that venv, the application source, and the
+#      built SPA, run as a non-root user.
 #
 # The same image serves the app (default CMD) and runs Alembic migrations (the
 # compose `migrate` service overrides the command). Tags are pinned, no `latest`
 # (docs/dev/DEPENDENCIES.md Section 1).
+#
+# Build context is the repo ROOT (see compose.yaml) so the webui stage can reach
+# `webui/` while the python stages copy from `api/`.
 
 # uv binary, copied from the official image (pinned tag).
 FROM ghcr.io/astral-sh/uv:0.9.7 AS uv
+
+# ---------------------------------------------------------------------------
+# Webui: build the SPA into /webui/dist. Node major matches webui/.nvmrc (24);
+# npm is pinned to webui/package.json engines (11.13.0).
+# ---------------------------------------------------------------------------
+FROM node:24-slim AS webui
+
+WORKDIR /webui
+
+# Pin npm to the repo's engine version before installing, so the lockfile is
+# resolved by the same npm everywhere (docs/dev/DEPENDENCIES.md).
+RUN npm install -g npm@11.13.0
+
+# Install deps first (no app source) so this layer caches across source-only
+# changes. `npm ci` requires package.json + package-lock.json.
+COPY webui/package.json webui/package-lock.json ./
+RUN npm ci
+
+# Build the SPA. The OpenAPI client (src/api/schema.ts) is checked in, so the
+# build does not regenerate it; `npm run build` runs `tsc -b && vite build`.
+COPY webui/ ./
+RUN npm run build
 
 # ---------------------------------------------------------------------------
 # Builder: install the locked dependencies into /app/.venv.
@@ -27,16 +53,16 @@ WORKDIR /app
 
 # Resolve third-party dependencies first (no project source) so this layer caches
 # across source-only changes. --no-dev drops the test/lint toolchain.
-COPY pyproject.toml uv.lock ./
+COPY api/pyproject.toml api/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Add the project source (and the packages hatchling ships) and install it into
 # the same venv.
-COPY src ./src
+COPY api/src ./src
 RUN uv sync --frozen --no-dev
 
 # ---------------------------------------------------------------------------
-# Runtime: slim python + the built venv + the app, as a non-root user.
+# Runtime: slim python + the built venv + the app + the built SPA, as non-root.
 # ---------------------------------------------------------------------------
 FROM python:3.13-slim AS runtime
 
@@ -48,9 +74,14 @@ WORKDIR /app
 # The venv from the builder and the code Alembic + the app need at runtime.
 # alembic.ini's prepend_sys_path makes `src` importable for migrations.
 COPY --from=builder /app/.venv /app/.venv
-COPY src ./src
-COPY migrations ./migrations
-COPY alembic.ini ./alembic.ini
+COPY api/src ./src
+COPY api/migrations ./migrations
+COPY api/alembic.ini ./alembic.ini
+
+# The built SPA, served same-origin via MCD_API_WEBUI__DIST_DIR (compose sets it
+# to this path). Static read-only assets are fine for the non-root app to read
+# (WEBUI_SPEC 7.7, issue #490).
+COPY --from=webui /webui/dist /app/webui/dist
 
 # Put the venv first on PATH so `uvicorn` / `alembic` resolve to it.
 ENV PATH="/app/.venv/bin:$PATH" \

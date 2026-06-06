@@ -29,7 +29,11 @@ services:
       retries: 10
 
   migrate:
-    build: ./api
+    # Build context is the repo root so the api image's webui stage can reach
+    # webui/ (issue #490); the Dockerfile copies the python app from api/.
+    build:
+      context: .
+      dockerfile: api/Dockerfile
     image: mcsd-api:dev
     restart: "no"
     command: ["alembic", "upgrade", "head"]
@@ -40,13 +44,20 @@ services:
         condition: service_healthy
 
   api:
-    build: ./api
+    # Build context is the repo root so the webui stage can reach webui/
+    # (issue #490); the Dockerfile copies the python app from api/.
+    build:
+      context: .
+      dockerfile: api/Dockerfile
     image: mcsd-api:dev
     restart: unless-stopped
     environment:
       MCD_API_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       MCD_API_AUTH__TOKEN__SIGNING_KEY: ${MCD_API_AUTH__TOKEN__SIGNING_KEY}
       MCD_API_CONTROL__WORKER_CREDENTIAL: ${MCD_API_CONTROL__WORKER_CREDENTIAL}
+      # Serve the built SPA from the api origin (no reverse proxy, no CORS): the
+      # image builds webui/dist into this path (WEBUI_SPEC 7.7, issue #490).
+      MCD_API_WEBUI__DIST_DIR: /app/webui/dist
       # Plaintext gRPC control listener on the private compose network. Cross-host
       # workers require real TLS instead (see docs/dev/DEPLOYMENT.md).
       MCD_API_CONTROL__TLS__INSECURE: "true"

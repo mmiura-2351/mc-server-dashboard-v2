@@ -277,6 +277,18 @@ taken. A delete frees the server's port for reuse.
 | `log.level` | `info` | | Log verbosity. |
 | `log.format` | `json` | | Structured-log format; `json` keeps logs machine-parseable (REQUIREMENTS.md NFR-OBS-1). |
 
+### 5.10 Web UI serving
+
+The API can serve the built browser UI (`webui/dist`) from its own origin with an
+SPA fallback — no reverse proxy, no CORS, no separate service (WEBUI_SPEC 7.7,
+issues #386 and #490). The compose `api` image builds the SPA and sets this to
+`/app/webui/dist`; in development the key is left unset (Vite serves the UI and
+proxies the API).
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `webui.dist_dir` | *unset* | | Directory of the built SPA to serve at `/`. When set, the API mounts it after every router (so API routes and WS endpoints take precedence) and falls back to `index.html` for unmatched paths so deep links/reloads resolve. Must be an existing directory containing `index.html`; otherwise startup fails fast. When unset, nothing is mounted. |
+
 ---
 
 ## 6. Worker configuration

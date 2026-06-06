@@ -114,6 +114,9 @@ select.community-switcher {
   color: var(--text-faint);
   font-weight: 400;
 }
+.lang-switcher {
+  margin-right: 12px;
+}
 
 .nav-hint {
   padding: 7px 10px;
