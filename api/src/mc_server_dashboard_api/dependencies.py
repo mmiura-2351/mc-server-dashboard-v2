@@ -69,6 +69,9 @@ from mc_server_dashboard_api.community.application.manage_role import (
 from mc_server_dashboard_api.community.application.provision_community import (
     ProvisionCommunity,
 )
+from mc_server_dashboard_api.community.application.read_my_permissions import (
+    ReadMyEffectivePermissions,
+)
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -900,6 +903,13 @@ def get_list_my_communities(request: Request) -> ListMyCommunities:
 
     session_factory = create_session_factory(get_engine(request))
     return ListMyCommunities(uow=CommunityUnitOfWork(session_factory))
+
+
+def get_read_my_effective_permissions(request: Request) -> ReadMyEffectivePermissions:
+    """Assemble the :class:`ReadMyEffectivePermissions` use case (issue #354)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ReadMyEffectivePermissions(uow=CommunityUnitOfWork(session_factory))
 
 
 def get_add_member(request: Request) -> AddMember:
