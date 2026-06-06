@@ -327,6 +327,14 @@ class TokenSettings(_Section):
     signing_key: str | None = None
     access_ttl_seconds: int = Field(default=900, gt=0)
     refresh_ttl_seconds: int = Field(default=1209600, gt=0)
+    # Refresh-token httpOnly-cookie transport for the Web UI session (issue #363).
+    # The cookie name and the Secure flag are operator-configurable; the cookie's
+    # Max-Age tracks ``refresh_ttl_seconds`` and its Path/SameSite are fixed in the
+    # auth router (SameSite=Strict; Path=/auth). ``refresh_cookie_secure`` defaults
+    # to True (HTTPS only); turn it off for plain-HTTP localhost dev so the browser
+    # stores the cookie.
+    refresh_cookie_name: str = Field(default="mcd_refresh", min_length=1)
+    refresh_cookie_secure: bool = True
 
     @model_validator(mode="after")
     def _enforce_hs256_key_length(self) -> TokenSettings:
