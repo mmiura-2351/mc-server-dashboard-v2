@@ -226,6 +226,23 @@
         "title": "AuditRecordResponse",
         "type": "object"
       },
+      "AvailablePortsResponse": {
+        "description": "The next free in-range game ports, ascending (issue #243).",
+        "properties": {
+          "ports": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Ports",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ports"
+        ],
+        "title": "AvailablePortsResponse",
+        "type": "object"
+      },
       "BackupListResponse": {
         "properties": {
           "backups": {
@@ -1032,6 +1049,30 @@
           "username"
         ],
         "title": "PlayerResponse",
+        "type": "object"
+      },
+      "PortCheckResponse": {
+        "description": "Availability of a single game port (issue #243).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "in_range": {
+            "title": "In Range",
+            "type": "boolean"
+          },
+          "port": {
+            "title": "Port",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "port",
+          "in_range",
+          "available"
+        ],
+        "title": "PortCheckResponse",
         "type": "object"
       },
       "ProvisionCommunityRequest": {
@@ -5636,14 +5677,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "items": {
-                      "type": "integer"
-                    },
-                    "type": "array"
-                  },
-                  "title": "Response Available Ports Ports Available Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/AvailablePortsResponse"
                 }
               }
             },
@@ -5688,9 +5722,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Check Port Ports Check  Port  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PortCheckResponse"
                 }
               }
             },

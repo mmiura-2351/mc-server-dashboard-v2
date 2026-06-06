@@ -901,9 +901,9 @@ function Settings({
       return;
     }
     try {
-      const result = (await api.get(
+      const result = await api.get(
         apiPath("/ports/check/{port}", { port: String(parsed) }),
-      )) as { in_range?: boolean; available?: boolean };
+      );
       if (result.in_range === false) {
         setPortHint("serverDetail.port.outOfRange");
       } else if (result.available === false) {

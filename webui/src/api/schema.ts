@@ -1491,6 +1491,14 @@ export interface components {
             /** Target Type */
             target_type: string | null;
         };
+        /**
+         * AvailablePortsResponse
+         * @description The next free in-range game ports, ascending (issue #243).
+         */
+        AvailablePortsResponse: {
+            /** Ports */
+            ports: number[];
+        };
         /** BackupListResponse */
         BackupListResponse: {
             /** Backups */
@@ -1815,6 +1823,18 @@ export interface components {
             username: string;
             /** Uuid */
             uuid: string;
+        };
+        /**
+         * PortCheckResponse
+         * @description Availability of a single game port (issue #243).
+         */
+        PortCheckResponse: {
+            /** Available */
+            available: boolean;
+            /** In Range */
+            in_range: boolean;
+            /** Port */
+            port: number;
         };
         /** ProvisionCommunityRequest */
         ProvisionCommunityRequest: {
@@ -4332,9 +4352,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: number[];
-                    };
+                    "application/json": components["schemas"]["AvailablePortsResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4365,9 +4383,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["PortCheckResponse"];
                 };
             };
             /** @description Validation Error */
