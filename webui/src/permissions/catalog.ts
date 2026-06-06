@@ -7,41 +7,75 @@
  * so `can()` can be typed against every code the UI may check.
  *
  * Codes are typed as a string-literal union rather than bare `string` so a
- * typo in a `can()` call fails typecheck.
+ * typo in a `can()` call fails typecheck. The community-axis codes additionally
+ * have a runtime listing grouped by their 9 families
+ * (`COMMUNITY_PERMISSION_FAMILIES`) so the role/grant editor can build its
+ * matrix from one source of truth — the union type is derived from that listing
+ * so the two cannot drift.
  */
+
+/**
+ * Community-axis codes grouped by family, in the order the role matrix renders
+ * them (WEBUI_SPEC.md 2.2 — the 9 families, 30 codes). This is the single
+ * source of truth: the `CommunityPermissionCode` union is derived from it.
+ */
+export const COMMUNITY_PERMISSION_FAMILIES = [
+  {
+    family: "server",
+    codes: [
+      "server:create",
+      "server:read",
+      "server:update",
+      "server:delete",
+      "server:start",
+      "server:stop",
+      "server:restart",
+      "server:command",
+    ],
+  },
+  {
+    family: "file",
+    codes: ["file:read", "file:edit", "file:history", "file:rollback"],
+  },
+  {
+    family: "backup",
+    codes: [
+      "backup:create",
+      "backup:read",
+      "backup:restore",
+      "backup:delete",
+      "backup:schedule",
+    ],
+  },
+  {
+    family: "member",
+    codes: ["member:read", "member:add", "member:remove"],
+  },
+  {
+    family: "role",
+    codes: ["role:read", "role:manage"],
+  },
+  {
+    family: "grant",
+    codes: ["grant:read", "grant:manage"],
+  },
+  {
+    family: "group",
+    codes: ["group:read", "group:manage"],
+  },
+  {
+    family: "community",
+    codes: ["community:read", "community:update", "community:delete"],
+  },
+  {
+    family: "audit",
+    codes: ["audit:read"],
+  },
+] as const;
 
 /** Community-axis codes (30) — the role/grant editor's source of truth. */
 export type CommunityPermissionCode =
-  | "server:create"
-  | "server:read"
-  | "server:update"
-  | "server:delete"
-  | "server:start"
-  | "server:stop"
-  | "server:restart"
-  | "server:command"
-  | "file:read"
-  | "file:edit"
-  | "file:history"
-  | "file:rollback"
-  | "backup:create"
-  | "backup:read"
-  | "backup:restore"
-  | "backup:delete"
-  | "backup:schedule"
-  | "member:read"
-  | "member:add"
-  | "member:remove"
-  | "role:read"
-  | "role:manage"
-  | "grant:read"
-  | "grant:manage"
-  | "group:read"
-  | "group:manage"
-  | "community:read"
-  | "community:update"
-  | "community:delete"
-  | "audit:read";
+  (typeof COMMUNITY_PERMISSION_FAMILIES)[number]["codes"][number];
 
 /** Platform-axis codes (flag-driven, not assignable to roles). */
 export type PlatformPermissionCode =

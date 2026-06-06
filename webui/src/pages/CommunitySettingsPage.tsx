@@ -10,6 +10,7 @@ import { CommunityGeneralTab } from "./CommunityGeneralTab.tsx";
 import { CommunityGrantsTab } from "./CommunityGrantsTab.tsx";
 import { CommunityGroupsTab } from "./CommunityGroupsTab.tsx";
 import { CommunityMembersTab } from "./CommunityMembersTab.tsx";
+import { CommunityRolesTab } from "./CommunityRolesTab.tsx";
 import { PlaceholderPage } from "./PlaceholderPage.tsx";
 
 // Tab order mirrors the mockup (docs/ui/mockup/community-settings.html). Members
@@ -113,6 +114,12 @@ function TabContent({
     case "members":
       return can("member:read") ? (
         <CommunityMembersTab communityId={communityId} can={can} />
+      ) : (
+        <p className="field-error">{t("permissions.denied")}</p>
+      );
+    case "roles":
+      return can("role:read") ? (
+        <CommunityRolesTab communityId={communityId} can={can} />
       ) : (
         <p className="field-error">{t("permissions.denied")}</p>
       );
