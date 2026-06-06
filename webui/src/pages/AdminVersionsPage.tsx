@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client.ts";
+import { apiPath } from "../api/path.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
@@ -17,10 +18,6 @@ import { t } from "../i18n/index.ts";
 // names and GET /versions/{type} only the ordered version list (newest-first per
 // the adapters) — so this renders version count + latest, not an invented
 // "refreshed at" column (#478).
-
-// GET /versions/{server_type} returns the ordered version list; the generated
-// schema types the body loosely as a string-keyed map, so name the real shape.
-type VersionList = { versions: string[] };
 
 export function AdminVersionsPage() {
   const typesQuery = useQuery({
@@ -66,9 +63,7 @@ function Catalog({ types }: { types: string[] }) {
     queries: types.map((type) => ({
       queryKey: ["versions", type],
       queryFn: () =>
-        api.get(
-          `/versions/${encodeURIComponent(type)}` as never,
-        ) as Promise<VersionList>,
+        api.get(apiPath("/versions/{server_type}", { server_type: type })),
     })),
   });
 
