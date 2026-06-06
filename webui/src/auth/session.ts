@@ -118,3 +118,14 @@ export function hardLogout(): void {
   clearAccessToken();
   onHardLogout?.();
 }
+
+/**
+ * Reset this module's state for tests. The injected hard-logout handler and the
+ * in-flight refresh are module-level singletons that otherwise survive across
+ * test cases/files; a leftover handler bound to an unmounted render makes a
+ * later logout navigate a stale router. Tests call this per case to isolate.
+ */
+export function resetForTesting(): void {
+  onHardLogout = null;
+  inFlightRefresh = null;
+}
