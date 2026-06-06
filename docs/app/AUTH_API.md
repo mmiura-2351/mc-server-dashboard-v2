@@ -186,7 +186,7 @@ status code returned to the client:
 | login failure | `auth:login` | `DENIED` | none (enumeration defence; the username / IP record lives in the `login_attempt` table) |
 | refresh success | `auth:refresh` | `SUCCESS` | — |
 | refresh reuse (family revoked) | `auth:refresh_reuse` | `DENIED` | the affected user (target: user) |
-| logout (token revoked) | `auth:logout` | `SUCCESS` | — |
+| logout (token presented) | `auth:logout` | `SUCCESS` | — |
 
 A plain unknown / expired refresh token is **not** audited — it is not a
 token-theft signal, so auditing it would be noise.
