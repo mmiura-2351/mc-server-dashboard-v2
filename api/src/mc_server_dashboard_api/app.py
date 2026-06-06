@@ -143,6 +143,7 @@ from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.value_objects import (
     ServerType as CatalogServerType,
 )
+from mc_server_dashboard_api.webui import mount_webui
 
 # Optional TOML config file location, overridable per deployment.
 _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
@@ -614,4 +615,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(transfers.router)
     app.include_router(versions_api.router)
     app.include_router(audit.router)
+    # Serve the built Web UI from the same origin when a dist dir is configured
+    # (WEBUI_SPEC 7.7, issue #490). Mounted last so every router and WebSocket
+    # endpoint above takes strict precedence; the SPA fallback covers only paths
+    # no route matched. Unset (dev + tests) → no mount.
+    if settings.webui.dist_dir is not None:
+        mount_webui(app, settings.webui.dist_dir)
     return app

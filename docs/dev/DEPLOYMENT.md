@@ -91,6 +91,27 @@ docker compose logs -f api worker
 The API HTTP surface is then on `http://<host>:${API_HTTP_PORT}` (default 8000);
 `GET /healthz` returns the liveness + database-reachability probe.
 
+### How the Web UI ships
+
+The browser UI is served by the `api` container itself — there is **no separate
+UI service and no reverse proxy** (WEBUI_SPEC 7.7, issue #386). The `api` image
+is multi-stage: a Node stage builds the React SPA (`webui/dist`, Node major pinned
+by `webui/.nvmrc`, npm pinned by `webui/package.json` `engines`), and the runtime
+stage copies that build in. `compose.yaml` points the API at it with
+`MCD_API_WEBUI__DIST_DIR=/app/webui/dist`, so the SPA is served on the **same
+origin** as the API at `http://<host>:${API_HTTP_PORT}/`.
+
+API routes and the WebSocket endpoints take strict precedence; every other path
+falls back to the SPA's `index.html`, so client-side routing works on deep links
+and reloads. Same-origin serving is why the API ships **no CORS** and the refresh
+cookie is `SameSite=Strict` — do not add CORS or split the origin (WEBUI_SPEC
+7.7). The build context for the `api` image is therefore the repo **root** (so the
+build can reach `webui/`), not `api/` — see `compose.yaml` and `api/Dockerfile`.
+
+When `MCD_API_WEBUI__DIST_DIR` is unset (the default outside compose), the API
+mounts nothing and serves only the API surface — that is the development posture,
+where Vite serves the UI and proxies the API (WEBUI_SPEC 7.7).
+
 ## 5. First-run bootstrap (create the platform admin)
 
 There is no seeded admin. Register the first user over HTTP, then promote it to
