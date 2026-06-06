@@ -8,9 +8,12 @@ returns 204 (idempotent, no enumeration signal).
 Refresh-token transport (issue #363): alongside the body-based contract that the
 worker/CLI clients use, the refresh token also rides an httpOnly cookie for the
 Web UI session (WEBUI_SPEC.md Section 7.1). Login *sets* the cookie; refresh and
-logout *fall back* to it when the body carries no token, and re-set / clear it.
-The body still carries the refresh token even for cookie clients, so the
-body-based contract is byte-for-byte unchanged (non-breaking).
+logout *fall back* to it when the body carries no token. They re-set / clear the
+cookie only when the request itself carried it, so a body-only request leaves the
+response headers byte-for-byte unchanged — no rotated or clearing Set-Cookie that
+a non-browser client never asked for (issue #372). The body still carries the
+refresh token even for cookie clients, so the body-based contract is unchanged
+(non-breaking).
 
 CSRF posture: the cookie is ``HttpOnly; Secure; SameSite=Strict; Path=/auth`` —
 SameSite=Strict keeps the browser from attaching it to cross-site requests and
@@ -156,9 +159,8 @@ async def refresh(
     # Body wins; fall back to the cookie (its name is config-driven, so read it
     # off the raw request). With neither, return the uniform 401 without invoking
     # the use case (issue #363).
-    refresh_token = body.refresh_token or request.cookies.get(
-        token_cfg.refresh_cookie_name
-    )
+    cookie_token = request.cookies.get(token_cfg.refresh_cookie_name)
+    refresh_token = body.refresh_token or cookie_token
     if refresh_token is None:
         raise _unauthorized()
     # Reuse of an already-rotated token (RefreshTokenReuseError) triggers a family
@@ -184,7 +186,10 @@ async def refresh(
     await recorder.record(
         AuditEvent(operation=ops.AUTH_REFRESH, outcome=Outcome.SUCCESS)
     )
-    _set_refresh_cookie(response, pair.refresh_token, token_cfg)
+    # Rotate the cookie only for clients that carried it, so the body-only
+    # worker/CLI contract stays byte-identical including headers (issue #372).
+    if cookie_token is not None:
+        _set_refresh_cookie(response, pair.refresh_token, token_cfg)
     return TokenResponse.from_pair(pair)
 
 
@@ -198,13 +203,14 @@ async def logout(
 ) -> Response:
     token_cfg = settings.auth.token
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
-    _clear_refresh_cookie(response, token_cfg)
+    # Clear the cookie only for clients that carried it, so the body-only
+    # worker/CLI contract stays byte-identical including headers (issue #372).
+    cookie_token = request.cookies.get(token_cfg.refresh_cookie_name)
+    if cookie_token is not None:
+        _clear_refresh_cookie(response, token_cfg)
     # Body wins; fall back to the cookie. Logout is idempotent: with no token
-    # there is nothing to revoke, but the cookie is still cleared and a clean 204
-    # returned (no enumeration signal).
-    refresh_token = body.refresh_token or request.cookies.get(
-        token_cfg.refresh_cookie_name
-    )
+    # there is nothing to revoke, a clean 204 is returned (no enumeration signal).
+    refresh_token = body.refresh_token or cookie_token
     if refresh_token is None:
         return response
     await use_case(refresh_token=refresh_token)
