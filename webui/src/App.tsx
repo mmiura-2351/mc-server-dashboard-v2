@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router";
+import { Navigate, Outlet, Route, Routes, useLocation } from "react-router";
 import { useSession } from "./auth/SessionProvider.tsx";
+import { useCurrentUser } from "./auth/useCurrentUser.ts";
 import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
 import { AccountPage } from "./pages/AccountPage.tsx";
+import { AdminOverviewPage } from "./pages/AdminOverviewPage.tsx";
 import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
@@ -55,6 +57,28 @@ function RequireAnon({ children }: { children: ReactNode }) {
     return <Navigate to={postLoginPath(from)} replace />;
   }
   return <>{children}</>;
+}
+
+// The platform-admin area (`/admin/*`) is gated on `is_platform_admin` from
+// the shared current-user query (WEBUI_SPEC.md Section 3). Rendered as a layout
+// route wrapping `<Outlet/>` so each admin page (#475–#479) lands behind this
+// guard without touching it. While the user loads we hold on the session
+// loading state; non-admins (and a failed load) get a clean denied notice
+// rather than a redirect — the server still enforces the truth (FR-AUTHZ-6).
+function RequireAdmin() {
+  const { data, isPending } = useCurrentUser();
+  if (isPending) {
+    return <SessionLoading />;
+  }
+  if (data?.is_platform_admin !== true) {
+    return (
+      <div className="page-head" role="alert">
+        <h1>{t("admin.denied.title")}</h1>
+        <div className="sub">{t("admin.denied.body")}</div>
+      </div>
+    );
+  }
+  return <Outlet />;
 }
 
 // The community-agnostic landing (LANDING_PATH): once the active community
@@ -119,30 +143,29 @@ export function App() {
           />
           <Route path="/account" element={<AccountPage />} />
 
-          <Route
-            path="/admin"
-            element={<PlaceholderPage titleKey="page.adminOverview" />}
-          />
-          <Route
-            path="/admin/users"
-            element={<PlaceholderPage titleKey="page.adminUsers" />}
-          />
-          <Route
-            path="/admin/communities"
-            element={<PlaceholderPage titleKey="page.adminCommunities" />}
-          />
-          <Route
-            path="/admin/workers"
-            element={<PlaceholderPage titleKey="page.adminWorkers" />}
-          />
-          <Route
-            path="/admin/versions"
-            element={<PlaceholderPage titleKey="page.adminVersions" />}
-          />
-          <Route
-            path="/admin/audit"
-            element={<PlaceholderPage titleKey="page.adminAudit" />}
-          />
+          <Route element={<RequireAdmin />}>
+            <Route path="/admin" element={<AdminOverviewPage />} />
+            <Route
+              path="/admin/users"
+              element={<PlaceholderPage titleKey="page.adminUsers" />}
+            />
+            <Route
+              path="/admin/communities"
+              element={<PlaceholderPage titleKey="page.adminCommunities" />}
+            />
+            <Route
+              path="/admin/workers"
+              element={<PlaceholderPage titleKey="page.adminWorkers" />}
+            />
+            <Route
+              path="/admin/versions"
+              element={<PlaceholderPage titleKey="page.adminVersions" />}
+            />
+            <Route
+              path="/admin/audit"
+              element={<PlaceholderPage titleKey="page.adminAudit" />}
+            />
+          </Route>
         </Route>
 
         <Route
