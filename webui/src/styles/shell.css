@@ -332,3 +332,61 @@
 .toast.success {
   border-left-color: var(--green);
 }
+
+/* ---------- Account page (WEBUI_SPEC.md 6.11) ---------- */
+.account {
+  max-width: 680px;
+}
+.account .card {
+  margin-bottom: 14px;
+}
+.account .card h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+.account .form-row {
+  display: flex;
+  gap: 12px;
+  max-width: 520px;
+}
+.account .form-row .field {
+  flex: 1;
+}
+.field .field-error {
+  color: var(--red);
+  font-size: 12px;
+}
+.field .field-hint {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.account table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.account table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.account table.data td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.account .danger-zone .row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.account .danger-zone .row .desc {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.account .danger-zone .row .btn {
+  margin-left: auto;
+  flex-shrink: 0;
+}
