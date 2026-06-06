@@ -226,7 +226,7 @@ version catalog refresh, JAR pool stats/GC, global backup statistics.
    #groups     player groups (community-wide)
    #audit      community audit log
    #general    rename / delete
-/account                              Profile / password / sessions / delete
+/account                              Profile / password / delete
 
 /admin                                Platform overview (workers summary, global stats)
 /admin/users                          User management
@@ -411,12 +411,31 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Lives in `webui/` at the repo root, a self-contained npm package mirroring
   how `api/` and `worker/` are self-contained.
 
+### 7.7 Serving & origin
+- **Same-origin by design.** The API ships **no CORS middleware**, on purpose.
+  The refresh cookie is `Secure; SameSite=Strict; Path=/auth` (see 7.1 and
+  [`AUTH_API.md`](../app/AUTH_API.md) Section 5 for the cookie attributes), so a
+  cross-origin SPA cannot authenticate — the browser would not attach the cookie
+  to the refresh request. Every deployment posture below keeps the UI and the API
+  on the same origin; do not add CORS to work around a split origin.
+- **Development.** The Vite dev server proxies the API paths *and* the WebSocket
+  paths to a local API instance, so the browser sees a single origin (the dev
+  server). No CORS is added anywhere (#378 Phase 1).
+- **Production.** The API container serves the built SPA (`webui/dist`) via
+  FastAPI `StaticFiles` with an SPA fallback, on the same origin as the API. No
+  reverse proxy and no new Compose service. API routes (`/auth`, `/communities`,
+  `/users`, the WS paths, etc.) take precedence; every other path falls back to
+  the SPA's `index.html` so client-side routing works on deep links and reloads
+  (#378 Phase 8).
+
 ## 8. Out of scope for the first UI cut
 
 - Metrics history/persistence (only live sparklines from the WS stream).
 - `/metrics` (Prometheus) visualization — operators use Grafana.
 - Mobile-optimized layouts (responsive down to tablet only).
 - Light theme (structure ready, not shipped).
+- Active-session listing / revocation on the account page — the API has no
+  session-enumeration endpoint; the capability is deferred (#387).
 
 ## 9. Resolved open questions
 
