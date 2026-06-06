@@ -87,23 +87,29 @@ class RegisterUser:
         )
 
     async def _enforce_ip_limit(self, ip: str | None, *, now: dt.datetime) -> None:
-        """Record the attempt and reject once the per-IP window cap is crossed.
+        """Reject once the per-IP window cap is reached, then record the attempt.
 
         Skipped when the per-IP cap is disabled or no trustworthy client IP is
         available (the same posture as the login per-IP counter, SECURITY.md
-        Section 4). The attempt is recorded *before* the count so a throttled
-        flood keeps the window populated and the block persists.
+        Section 4). The window is counted *before* the attempt is recorded
+        (record-after-check), so only attempts that pass the gate count toward
+        it: a throttled (429) attempt is never recorded and therefore cannot
+        re-arm the window, which expires once the accepted attempts age out
+        (issue #370). The gate mirrors the login per-IP check (``>=`` the
+        threshold), so the Nth attempt within a window is the first rejected.
+        Recording covers every accepted attempt, including ones that then fail
+        validation or uniqueness, so the cap still bounds real work per IP.
         """
 
         if not self.registration.ip_limit_enabled or ip is None:
             return
         assert self.attempts is not None
-        await self.attempts.record_registration(ip=ip, at=now)
         count = await self.attempts.count_ip_registrations(
             ip, since=now - self.registration.ip_window
         )
-        if count > self.registration.ip_threshold:
+        if count >= self.registration.ip_threshold:
             raise RegistrationThrottledError
+        await self.attempts.record_registration(ip=ip, at=now)
 
 
 async def persist_new_user(
