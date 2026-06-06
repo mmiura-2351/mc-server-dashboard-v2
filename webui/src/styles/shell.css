@@ -1143,3 +1143,47 @@ select.community-switcher {
 .badge.kind.whitelist {
   color: var(--text-dim);
 }
+
+/* Roles tab — permission-matrix editor (issue #462, WEBUI_SPEC.md 6.10 / 2.2). */
+.roles-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.roles-actions .btn + .btn {
+  margin-left: 0;
+}
+.roles-matrix {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 6px;
+}
+.roles-matrix .field-label {
+  grid-column: 1 / -1;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.roles-family {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  margin: 0;
+  padding: 8px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.roles-family legend {
+  font-weight: 600;
+  padding: 0 4px;
+}
+.roles-family legend label,
+.roles-perm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.roles-perm {
+  font-size: 13px;
+  color: var(--text-dim);
+}
