@@ -422,7 +422,7 @@ function Listing({
                 className="file-name"
                 onClick={() => onEnter(entry)}
               >
-                {entry.is_dir ? "📁 " : "📄 "}
+                <span aria-hidden="true">{entry.is_dir ? "📁 " : "📄 "}</span>
                 {entry.name}
               </button>
               <span className="file-actions">

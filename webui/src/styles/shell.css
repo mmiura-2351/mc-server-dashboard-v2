@@ -1143,3 +1143,331 @@ select.community-switcher {
 .badge.kind.whitelist {
   color: var(--text-dim);
 }
+
+/* ---------- Community settings — Audit tab (WEBUI_SPEC.md 6.10). ---------- */
+.audit .audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.audit table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.audit table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.audit table.data td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.audit .audit-paging {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* Roles tab — permission-matrix editor (issue #462, WEBUI_SPEC.md 6.10 / 2.2). */
+.roles-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.roles-actions .btn + .btn {
+  margin-left: 0;
+}
+.roles-matrix {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 6px;
+}
+.roles-matrix .field-label {
+  grid-column: 1 / -1;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.roles-family {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  margin: 0;
+  padding: 8px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.roles-family legend {
+  font-weight: 600;
+  padding: 0 4px;
+}
+.roles-family legend label,
+.roles-perm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.roles-perm {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+/* Grants tab — per-server permission grants (issue #463, WEBUI_SPEC.md 6.10). */
+.grants .grants-filter {
+  max-width: 280px;
+  margin-bottom: 12px;
+}
+.grants-codes {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.grants-codes legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.grants-codes .checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+/* Community settings — Groups tab (issue #464, WEBUI_SPEC.md 6.10). */
+.groups .group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.groups .group-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+.groups .group-name {
+  font-weight: 600;
+}
+.groups .group-members {
+  margin-left: auto;
+}
+.groups .group-detail {
+  margin: 8px 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.groups .player-list,
+.groups .server-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.groups .player-row,
+.groups .server-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.groups .player-name,
+.groups .server-name {
+  font-weight: 600;
+}
+.groups .player-uuid {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+  margin-right: auto;
+}
+.groups .server-row .server-name {
+  margin-right: auto;
+}
+.groups .group-add-player {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ---------- Admin overview metric tiles (WEBUI_SPEC.md 6.12) ---------- */
+.grid.cols-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+@media (max-width: 900px) {
+  .grid.cols-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.admin-overview .metric-tiles {
+  margin-bottom: 14px;
+}
+.metric-tile .label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.metric-tile .value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 4px 0;
+}
+.metric-tile .value .unit {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.metric-tile .hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.admin-overview table.data td.num {
+  font-variant-numeric: tabular-nums;
+}
+/* Admin Communities (WEBUI_SPEC.md 6.12) — #476 */
+.admin-communities table.data td.mono {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ---------- Admin users table (WEBUI_SPEC.md 6.12, issue #475) ---------- */
+.admin-users table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.admin-users table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-users table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-users table.data td.dim {
+  color: var(--text-dim);
+}
+.admin-users table.data td.num {
+  font-variant-numeric: tabular-nums;
+}
+.admin-users .row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.admin-users .users-paging {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* Admin global Audit page (issue #479, WEBUI_SPEC.md 6.12). Reuses the .audit
+   filter/table/paging styles; the community filter <select> matches the text
+   inputs alongside it. */
+.admin-audit .audit-filters select {
+  min-width: 160px;
+}
+
+/* Admin Versions page (#478): catalog table + JAR pool card. */
+.admin-versions .page-head h2 {
+  margin: 0;
+}
+.admin-versions .table-card {
+  padding: 0;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.admin-versions table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.admin-versions table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-versions table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-versions table.data td.num {
+  font-variant-numeric: tabular-nums;
+}
+.admin-versions table.data .row-actions {
+  text-align: right;
+}
+.admin-versions .jar-pool {
+  max-width: 360px;
+}
+.admin-versions .jar-pool-actions {
+  margin-top: 12px;
+}
+.admin-versions .jar-pool .hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* ---------- Admin Workers fleet page (WEBUI_SPEC.md 6.12) — #477 ---------- */
+.admin-workers table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.admin-workers table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-workers table.data td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.admin-workers table.data td.num {
+  font-variant-numeric: tabular-nums;
+}
+.admin-workers table.data .badge + .badge {
+  margin-left: 4px;
+}
+.admin-workers .row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+.admin-workers .notice {
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-top: 14px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+.admin-workers .notice.info {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: rgba(77, 159, 255, 0.08);
+}

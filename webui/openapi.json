@@ -1442,6 +1442,23 @@
         "title": "ServerResponse",
         "type": "object"
       },
+      "ServerTypesResponse": {
+        "description": "The server types the catalog can resolve at M1 (issue #286).",
+        "properties": {
+          "server_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Server Types",
+            "type": "array"
+          }
+        },
+        "required": [
+          "server_types"
+        ],
+        "title": "ServerTypesResponse",
+        "type": "object"
+      },
       "TokenResponse": {
         "description": "An issued access + refresh pair. ``token_type`` is the OAuth2 bearer hint.",
         "properties": {
@@ -1670,6 +1687,23 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VersionsResponse": {
+        "description": "The versions offered for a server type (issue #286).",
+        "properties": {
+          "versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "versions"
+        ],
+        "title": "VersionsResponse",
         "type": "object"
       },
       "WorkerResponse": {
@@ -6145,14 +6179,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "title": "Response List Server Types Versions Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ServerTypesResponse"
                 }
               }
             },
@@ -6287,14 +6314,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "title": "Response List Versions Versions  Server Type  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/VersionsResponse"
                 }
               }
             },

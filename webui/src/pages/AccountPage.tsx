@@ -3,6 +3,7 @@ import { type FormEvent, useState } from "react";
 import { ApiError, api } from "../api/client.ts";
 import type { components } from "../api/schema";
 import { useSession } from "../auth/SessionProvider.tsx";
+import { useCurrentUser } from "../auth/useCurrentUser.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -48,10 +49,7 @@ function knownErrorKey(key: string): key is TranslationKey {
 export function AccountPage() {
   const { showToast } = useToast();
 
-  const userQuery = useQuery({
-    queryKey: ["users", "me"],
-    queryFn: () => api.get("/users/me"),
-  });
+  const userQuery = useCurrentUser();
   const communitiesQuery = useQuery({
     queryKey: ["communities"],
     queryFn: () => api.get("/communities"),

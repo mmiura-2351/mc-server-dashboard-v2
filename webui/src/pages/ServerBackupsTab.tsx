@@ -21,6 +21,7 @@ import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { humanizeBytes } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
@@ -41,21 +42,6 @@ function backupsKey(communityId: string, serverId: string) {
 /** Backups statistics query key. */
 function statsKey(communityId: string, serverId: string) {
   return ["backups", communityId, serverId, "statistics"] as const;
-}
-
-/** Human-readable byte size (binary units), e.g. 1610612736 → "1.5 GiB". */
-export function humanizeBytes(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  const units = ["KiB", "MiB", "GiB", "TiB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(1)} ${units[unit]}`;
 }
 
 // Map a create/upload error reason to a specific message; otherwise generic.

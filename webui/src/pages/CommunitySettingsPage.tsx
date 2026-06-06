@@ -6,13 +6,14 @@ import { apiPath } from "../api/path.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { dashboardPath } from "../routes.ts";
+import { CommunityAuditTab } from "./CommunityAuditTab.tsx";
 import { CommunityGeneralTab } from "./CommunityGeneralTab.tsx";
+import { CommunityGrantsTab } from "./CommunityGrantsTab.tsx";
+import { CommunityGroupsTab } from "./CommunityGroupsTab.tsx";
 import { CommunityMembersTab } from "./CommunityMembersTab.tsx";
-import { PlaceholderPage } from "./PlaceholderPage.tsx";
+import { CommunityRolesTab } from "./CommunityRolesTab.tsx";
 
-// Tab order mirrors the mockup (docs/ui/mockup/community-settings.html). Members
-// and General ship here; Roles/Grants/Groups/Audit render placeholders until
-// their sibling issues (#462–#465) land — each as one import + one case below.
+// Tab order mirrors the mockup (docs/ui/mockup/community-settings.html).
 const TABS = [
   "members",
   "roles",
@@ -114,11 +115,27 @@ function TabContent({
       ) : (
         <p className="field-error">{t("permissions.denied")}</p>
       );
+    case "roles":
+      return can("role:read") ? (
+        <CommunityRolesTab communityId={communityId} can={can} />
+      ) : (
+        <p className="field-error">{t("permissions.denied")}</p>
+      );
+    case "grants":
+      return can("grant:read") ? (
+        <CommunityGrantsTab communityId={communityId} can={can} />
+      ) : (
+        <p className="field-error">{t("permissions.denied")}</p>
+      );
+    case "groups":
+      return can("group:read") ? (
+        <CommunityGroupsTab communityId={communityId} can={can} />
+      ) : (
+        <p className="field-error">{t("permissions.denied")}</p>
+      );
+    case "audit":
+      return <CommunityAuditTab communityId={communityId} can={can} />;
     case "general":
       return <CommunityGeneralTab community={community} can={can} />;
-    default:
-      // Roles / Grants / Groups / Audit arrive with their sibling issues; each
-      // replaces this case with one import + one branch (#462–#465).
-      return <PlaceholderPage titleKey={TAB_LABEL[tab]} />;
   }
 }

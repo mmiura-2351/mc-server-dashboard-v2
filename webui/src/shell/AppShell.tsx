@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { NavLink, Outlet, useNavigate, useParams } from "react-router";
+import { useCurrentUser } from "../auth/useCurrentUser.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { dashboardPath } from "../routes.ts";
@@ -112,6 +113,9 @@ function useUrlCommunitySync() {
 
 export function AppShell() {
   const { communityId } = useActiveCommunity();
+  // The admin nav group renders only for platform admins (#474). Same shared
+  // current-user query the admin-route guard reads, so there is one fetch.
+  const isAdmin = useCurrentUser().data?.is_platform_admin === true;
   useUrlCommunitySync();
 
   return (
@@ -131,12 +135,14 @@ export function AppShell() {
             ))
           )}
         </nav>
-        <nav className="nav-group">
-          <div className="nav-label">{t("nav.admin")}</div>
-          {adminNav.map((item) => (
-            <NavItem key={item.to} {...item} />
-          ))}
-        </nav>
+        {isAdmin && (
+          <nav className="nav-group">
+            <div className="nav-label">{t("nav.admin")}</div>
+            {adminNav.map((item) => (
+              <NavItem key={item.to} {...item} />
+            ))}
+          </nav>
+        )}
       </aside>
       <div className="main">
         <header className="topbar">
