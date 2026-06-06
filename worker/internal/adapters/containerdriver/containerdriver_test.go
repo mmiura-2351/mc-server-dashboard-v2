@@ -828,6 +828,51 @@ func TestGracefulStopFailsWhenContainerSurvivesKill(t *testing.T) {
 	}
 }
 
+// A stop escalation that hits the survived-docker-kill failure path while the
+// instance is still starting must not relabel the still-booting container as
+// running. Stop is reachable from starting because readiness gating holds
+// starting through the MC boot (issue #350); the survived-kill reset restores the
+// pre-stop state, so a starting instance stays starting rather than misreporting
+// running to the control plane (issue #352).
+func TestSurvivedKillFromStartingDoesNotReportRunning(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	docker := newFakeDocker()
+	docker.logBody = pr
+	// Neither docker stop nor docker kill exits the container.
+	docker.stopNoExit = true
+	docker.killNoExit = true
+	// A long readiness timeout with no Done marker holds the instance in starting.
+	d := newReadinessTestDriver(docker, 10*time.Second)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	src, ok := inst.(execution.LogSource)
+	if !ok {
+		t.Fatal("container instance should be a LogSource")
+	}
+
+	// Synchronize on a benign boot frame to prove the boot window was demuxed
+	// without the readiness marker, so the instance is provably still starting.
+	if _, err := pw.Write(frame(dockerStreamStdout,
+		"[12:00:00] [Server thread/INFO]: Starting minecraft server\n")); err != nil {
+		t.Fatalf("write boot frame: %v", err)
+	}
+	awaitLogLine(t, src.Logs(), "Starting minecraft server")
+	if got := inst.Status(); got != execution.StateStarting {
+		t.Fatalf("Status = %v before Stop, want starting", got)
+	}
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected Stop to fail when the container survives docker kill")
+	}
+	if got := inst.Status(); got != execution.StateStarting {
+		t.Fatalf("Status = %v after survived-kill Stop, want starting (not running)", got)
+	}
+}
+
 // After a Stop that fails because the container survives docker kill, a retry
 // Stop must re-run the kill-and-confirm sequence rather than short-circuit on the
 // stopping latch. When the container then dies on the retry kill, the retry
