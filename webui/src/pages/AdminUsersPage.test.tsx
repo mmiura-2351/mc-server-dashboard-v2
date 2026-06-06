@@ -241,6 +241,40 @@ describe("AdminUsersPage", () => {
     });
   });
 
+  it("disables the row actions while a lifecycle mutation is in flight", async () => {
+    // Hold the deactivate request open so the in-flight guard is observable.
+    let resolve: (() => void) | undefined;
+    mockApi.post.mockImplementation(
+      () =>
+        new Promise<undefined>((r) => {
+          resolve = () => r(undefined);
+        }),
+    );
+    renderPage();
+    await screen.findByText("alice");
+
+    const deactivate = screen.getByRole("button", {
+      name: t("admin.users.deactivate"),
+    });
+    fireEvent.click(deactivate);
+
+    // The row's actions disable while the mutation is pending so a second click
+    // can't double-fire.
+    await waitFor(() => {
+      expect(deactivate).toBeDisabled();
+    });
+    expect(
+      screen.getByRole("button", { name: t("admin.users.delete") }),
+    ).toBeDisabled();
+    fireEvent.click(deactivate);
+    expect(mockApi.post).toHaveBeenCalledTimes(1);
+
+    resolve?.();
+    await waitFor(() => {
+      expect(deactivate).not.toBeDisabled();
+    });
+  });
+
   it("surfaces the self_target conflict message on a 409", async () => {
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "self_target" }),
@@ -345,6 +379,34 @@ describe("AdminUsersPage", () => {
 
     expect(
       await screen.findByText(t("register.reason.username_taken")),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a generic inline error when create fails without a mapped reason", async () => {
+    // A 500 / network failure carries no problem reason; the dialog must still
+    // surface feedback rather than sit silent.
+    mockApi.post.mockRejectedValue(new Error("network down"));
+    renderPage();
+    await screen.findByText("alice");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("admin.users.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("admin.users.usernameLabel")), {
+      target: { value: "bob" },
+    });
+    fireEvent.change(screen.getByLabelText(t("admin.users.emailLabel")), {
+      target: { value: "bob@example.com" },
+    });
+    fireEvent.change(screen.getByLabelText(t("admin.users.passwordLabel")), {
+      target: { value: "Sup3rSecret!pw" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("admin.users.createSubmit") }),
+    );
+
+    expect(
+      await screen.findByText(t("admin.users.error.generic")),
     ).toBeInTheDocument();
   });
 });

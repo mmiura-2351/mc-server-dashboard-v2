@@ -60,6 +60,9 @@ interface CreateFieldErrors {
   username?: string;
   email?: string;
   password?: string;
+  // Fallback for an unmapped reason or a non-problem failure (500/network) so
+  // the dialog never sits silent (#475).
+  general?: string;
 }
 
 function createFieldForReason(reason: string): keyof CreateFieldErrors {
@@ -101,6 +104,9 @@ export function AdminUsersPage() {
     null,
   );
   const [selfRevoke, setSelfRevoke] = useState(false);
+  // The user whose lifecycle mutation is in flight; its row's actions are
+  // disabled until it settles so a second click can't double-fire (#475).
+  const [pendingUserId, setPendingUserId] = useState<string | null>(null);
 
   const usersQuery = useQuery({
     queryKey: ["users", "list", offset],
@@ -115,15 +121,22 @@ export function AdminUsersPage() {
   };
 
   const runLifecycle = async (
+    userId: string,
     action: () => Promise<unknown>,
     successKey: TranslationKey,
   ) => {
+    if (pendingUserId !== null) {
+      return;
+    }
+    setPendingUserId(userId);
     try {
       await action();
       showToast(t(successKey), "success");
       invalidate();
     } catch (err) {
       showToast(lifecycleErrorMessage(err), "error");
+    } finally {
+      setPendingUserId(null);
     }
   };
 
@@ -133,6 +146,7 @@ export function AdminUsersPage() {
       { user_id: user.id },
     );
     runLifecycle(
+      user.id,
       () => api.post(path),
       active ? "admin.users.reactivated" : "admin.users.deactivated",
     );
@@ -140,6 +154,7 @@ export function AdminUsersPage() {
 
   const setAdmin = (user: AdminUserResponse, grant: boolean) => {
     runLifecycle(
+      user.id,
       () =>
         api.put(
           apiPath("/users/{user_id}/platform-admin", { user_id: user.id }),
@@ -166,6 +181,7 @@ export function AdminUsersPage() {
     const target = deleteTarget;
     setDeleteTarget(null);
     runLifecycle(
+      target.id,
       () => api.delete(apiPath("/users/{user_id}", { user_id: target.id })),
       "admin.users.deleted",
     );
@@ -224,6 +240,7 @@ export function AdminUsersPage() {
                   key={user.id}
                   user={user}
                   isSelf={user.id === me?.id}
+                  pending={pendingUserId === user.id}
                   onToggleActive={() => setActive(user, !user.active)}
                   onToggleAdmin={() => onToggleAdmin(user)}
                   onDelete={() => setDeleteTarget(user)}
@@ -317,12 +334,14 @@ export function AdminUsersPage() {
 function UserRow({
   user,
   isSelf,
+  pending,
   onToggleActive,
   onToggleAdmin,
   onDelete,
 }: {
   user: AdminUserResponse;
   isSelf: boolean;
+  pending: boolean;
   onToggleActive: () => void;
   onToggleAdmin: () => void;
   onDelete: () => void;
@@ -352,7 +371,12 @@ function UserRow({
       </td>
       <td className="num">{new Date(user.created_at).toLocaleDateString()}</td>
       <td className="row-actions">
-        <button type="button" className="btn sm" onClick={onToggleAdmin}>
+        <button
+          type="button"
+          className="btn sm"
+          disabled={pending}
+          onClick={onToggleAdmin}
+        >
           {user.is_platform_admin
             ? t("admin.users.revokeAdmin")
             : t("admin.users.makeAdmin")}
@@ -361,12 +385,22 @@ function UserRow({
             hide them for your own row (reactivate is unreachable for self). */}
         {isSelf ? null : (
           <>
-            <button type="button" className="btn sm" onClick={onToggleActive}>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={pending}
+              onClick={onToggleActive}
+            >
               {user.active
                 ? t("admin.users.deactivate")
                 : t("admin.users.reactivate")}
             </button>
-            <button type="button" className="btn sm danger" onClick={onDelete}>
+            <button
+              type="button"
+              className="btn sm danger"
+              disabled={pending}
+              onClick={onDelete}
+            >
               {t("admin.users.delete")}
             </button>
           </>
@@ -408,13 +442,17 @@ function CreateUserDialog({
     },
     onError: (err) => {
       // Map a problem `reason` to its inline field; structural 422s are not
-      // reachable here (all three fields are required and non-empty).
+      // reachable here (all three fields are required and non-empty). An
+      // unmapped reason or a non-problem failure (500/network) falls back to a
+      // generic inline error so the dialog never sits silent.
       if (err instanceof ApiError && err.reason !== undefined) {
         const key = CREATE_REASON_KEY[err.reason];
         if (key !== undefined) {
           setErrors({ [createFieldForReason(err.reason)]: t(key) });
+          return;
         }
       }
+      setErrors({ general: t("admin.users.error.generic") });
     },
   });
 
@@ -454,6 +492,11 @@ function CreateUserDialog({
       }
     >
       <form id="admin-create-user" onSubmit={onSubmit} noValidate>
+        {errors.general !== undefined ? (
+          <div className="error" role="alert">
+            {errors.general}
+          </div>
+        ) : null}
         <div className="field">
           <label htmlFor="admin-create-username">
             {t("admin.users.usernameLabel")}
