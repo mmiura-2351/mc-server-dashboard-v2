@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Users — MC Dashboard</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="admin-users">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <h1>Users</h1>
+          <div class="sub">5 accounts · 4 active</div>
+        </div>
+      </div>
+
+      <div class="toolbar-row">
+        <input type="text" placeholder="filter… (client-side)" style="width:240px">
+      </div>
+
+      <div class="card" style="padding:0">
+        <table class="data">
+          <thead><tr><th>Username</th><th>Email</th><th>Status</th><th>Admin</th><th>Created</th><th></th></tr></thead>
+          <tbody id="user-rows"></tbody>
+        </table>
+      </div>
+      <div class="pagination">
+        <button class="btn sm ghost" disabled>‹ prev</button>
+        <span>1–5 of 5</span>
+        <button class="btn sm ghost" disabled>next ›</button>
+      </div>
+    </main>
+  </div>
+</div>
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("user-rows").innerHTML = MOCK.users.map((u) => `
+    <tr style="${u.active ? "" : "opacity:.55"}">
+      <td><strong>${u.username}</strong>${u.id === "u-1" ? ' <span class="badge admin">you</span>' : ""}</td>
+      <td style="color:var(--text-dim)">${u.email}</td>
+      <td>${u.active ? '<span class="pill running" style="font-size:11px">active</span>' : '<span class="pill stopped" style="font-size:11px">deactivated</span>'}</td>
+      <td>${u.is_platform_admin ? '<span class="badge admin">admin</span>' : "—"}</td>
+      <td class="num">${u.created_at}</td>
+      <td class="row-actions">
+        ${u.id === "u-1" ? "" : `
+          <button class="btn sm" onclick="mockToast('${u.is_platform_admin ? "Revoke" : "Grant"} platform admin (PUT /users/${u.id}/platform-admin)')">${u.is_platform_admin ? "Revoke admin" : "Make admin"}</button>
+          <button class="btn sm" onclick="mockToast('POST /users/${u.id}/${u.active ? "deactivate" : "reactivate"}')">${u.active ? "Deactivate" : "Reactivate"}</button>
+          <button class="btn sm danger" onclick="mockToast('Typed-confirm, then DELETE /users/${u.id}', 'err')">Delete</button>`}
+      </td>
+    </tr>`).join("");
+});
+</script>
+</body>
+</html>

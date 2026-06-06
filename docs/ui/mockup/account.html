@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Account — MC Dashboard</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="account">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content" style="max-width:680px">
+      <div class="page-head">
+        <div>
+          <h1>Account</h1>
+          <div class="sub">miura · platform administrator</div>
+        </div>
+        <div class="actions"><button class="btn" onclick="mockToast('POST /auth/logout'); setTimeout(()=>location.href='login.html', 700)">Sign out</button></div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <h2>Profile</h2>
+        <div class="form-row" style="max-width:520px">
+          <div class="field">
+            <label>Username</label>
+            <input type="text" value="miura">
+          </div>
+          <div class="field">
+            <label>Email</label>
+            <input type="email" value="mmiura@example.com">
+          </div>
+        </div>
+        <button class="btn primary" onclick="mockToast('PATCH /users/me')">Save profile</button>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <h2>Password</h2>
+        <div class="field" style="max-width:300px">
+          <label>Current password</label>
+          <input type="password">
+        </div>
+        <div class="form-row" style="max-width:520px">
+          <div class="field">
+            <label>New password</label>
+            <input type="password">
+          </div>
+          <div class="field">
+            <label>Confirm new password</label>
+            <input type="password">
+          </div>
+        </div>
+        <button class="btn primary" onclick="mockToast('PUT /users/me/password')">Change password</button>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <h2>Memberships</h2>
+        <table class="data">
+          <thead><tr><th>Community</th><th>Roles</th></tr></thead>
+          <tbody>
+            <tr><td>Sakura SMP</td><td><span class="chip">Owner</span></td></tr>
+            <tr><td>Dev Playground</td><td><span class="chip">Owner</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card danger-zone">
+        <h2>Danger zone</h2>
+        <div class="row">
+          <div>
+            <strong>Delete account</strong>
+            <div class="desc">Removes your account and all memberships. Communities you own must be transferred or deleted first.</div>
+          </div>
+          <button class="btn danger" onclick="mockToast('Typed-confirm + password, then DELETE /users/me', 'err')">Delete…</button>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

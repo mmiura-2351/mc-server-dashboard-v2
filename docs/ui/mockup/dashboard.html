@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard — Sakura SMP</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="dashboard">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <h1>Servers</h1>
+          <div class="sub">4 servers · 2 running · 1 crashed</div>
+        </div>
+        <div class="actions">
+          <a class="btn" href="server-create.html#import">Import ZIP</a>
+          <a class="btn primary" href="server-create.html">+ Create server</a>
+        </div>
+      </div>
+
+      <div class="grid cols-2">
+
+        <div class="card server-card">
+          <div class="head">
+            <span class="name"><a href="server-detail.html">survival</a></span>
+            <span class="pill running">running</span>
+          </div>
+          <div class="meta">
+            <span class="badge type">paper 1.21.6</span>
+            <span class="badge">container</span>
+            <span class="badge">:25565</span>
+          </div>
+          <div class="stats">
+            <span>players 7/20</span><span>cpu 38%</span><span>mem 3.2 GiB</span><span>worker-a</span>
+          </div>
+          <div class="foot">
+            <button class="btn sm" onclick="mockToast('Stop requested (graceful)')">Stop</button>
+            <button class="btn sm" onclick="mockToast('Restart requested')">Restart</button>
+            <span class="right">up 6h 12m</span>
+          </div>
+        </div>
+
+        <div class="card server-card">
+          <div class="head">
+            <span class="name"><a href="server-detail.html">creative-build</a></span>
+            <span class="pill starting blink" data-live-state="s-2">starting</span>
+          </div>
+          <div class="meta">
+            <span class="badge type">vanilla 1.21.6</span>
+            <span class="badge">host_process</span>
+            <span class="badge">:25566</span>
+          </div>
+          <div class="stats">
+            <span>players —</span><span>cpu 71%</span><span>mem 1.8 GiB</span><span>worker-a</span>
+          </div>
+          <div class="foot">
+            <button class="btn sm" disabled>Stop</button>
+            <button class="btn sm" disabled>Restart</button>
+            <span class="right">starting…</span>
+          </div>
+        </div>
+
+        <div class="card server-card">
+          <div class="head">
+            <span class="name"><a href="server-detail.html">modded-forge</a></span>
+            <span class="pill crashed">crashed</span>
+          </div>
+          <div class="meta">
+            <span class="badge type">forge 1.20.1</span>
+            <span class="badge">container</span>
+            <span class="badge">:25570</span>
+          </div>
+          <div class="stats">
+            <span style="color:var(--red)">boot crash · restart backoff (3/5)</span>
+          </div>
+          <div class="foot">
+            <button class="btn sm success" onclick="mockToast('Start requested')">Start</button>
+            <button class="btn sm" onclick="mockToast('Stop requested — clears desired_state')">Stop</button>
+            <span class="right">crashed 52m ago</span>
+          </div>
+        </div>
+
+        <div class="card server-card">
+          <div class="head">
+            <span class="name"><a href="server-detail.html">minigames</a></span>
+            <span class="pill stopped">stopped</span>
+          </div>
+          <div class="meta">
+            <span class="badge type">fabric 1.21.4</span>
+            <span class="badge">host_process</span>
+            <span class="badge">:25571</span>
+          </div>
+          <div class="stats">
+            <span>last run 2026-06-05 22:40</span>
+          </div>
+          <div class="foot">
+            <button class="btn sm success" onclick="mockToast('Start requested')">Start</button>
+            <span class="right">no worker assigned</span>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+<script>document.addEventListener("DOMContentLoaded", startStatusDemo);</script>
+</body>
+</html>

@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>survival — Sakura SMP</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="dashboard">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content">
+
+      <div class="page-head">
+        <div>
+          <div class="breadcrumbs"><a href="dashboard.html">Servers</a> / survival</div>
+          <h1 style="display:flex;align-items:center;gap:12px">
+            survival <span class="pill running">running</span>
+          </h1>
+          <div class="sub">
+            <span class="badge type">paper 1.21.6</span>
+            <span class="badge">container</span>
+            <span class="badge">:25565</span>
+            <span class="badge">worker-a</span>
+            · up 6h 12m · observed 3s ago
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn" onclick="mockToast('Stop requested (graceful). Hold for force-stop option.')">Stop ▾</button>
+          <button class="btn" onclick="mockToast('Restart requested')">Restart</button>
+          <button class="btn" onclick="mockToast('GET …/export — ZIP download starts')">Export</button>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <a class="tab" data-pane="overview" href="#overview">Overview</a>
+        <a class="tab" data-pane="console" href="#console">Console</a>
+        <a class="tab" data-pane="files" href="#files">Files</a>
+        <a class="tab" data-pane="backups" href="#backups">Backups</a>
+        <a class="tab" data-pane="players" href="#players">Players</a>
+        <a class="tab" data-pane="settings" href="#settings">Settings</a>
+      </div>
+
+      <!-- ============ OVERVIEW ============ -->
+      <section class="tabpane" id="pane-overview">
+        <div class="grid cols-4" style="margin-bottom:14px">
+          <div class="card metric-tile">
+            <div class="label">CPU</div>
+            <div class="value">38<span class="unit">%</span></div>
+            <div class="sparkline" id="spark-cpu"></div>
+          </div>
+          <div class="card metric-tile">
+            <div class="label">Memory</div>
+            <div class="value">3.2<span class="unit">GiB / 6</span></div>
+            <div class="sparkline" id="spark-mem"></div>
+          </div>
+          <div class="card metric-tile">
+            <div class="label">Players</div>
+            <div class="value">7<span class="unit">/ 20</span></div>
+            <div class="sparkline" id="spark-players"></div>
+          </div>
+          <div class="card metric-tile">
+            <div class="label">State</div>
+            <div class="value" style="font-size:15px;color:var(--green)">running</div>
+            <div class="hint" style="font-size:11px;color:var(--text-faint)">desired: running · no drift</div>
+          </div>
+        </div>
+
+        <div class="card" style="padding:0">
+          <div class="console" style="border:none">
+            <div class="toolbar">
+              <strong style="font-size:13px">Log tail</strong>
+              <span class="right" style="margin-left:auto"><a class="tab" data-pane="console" href="#console" style="padding:0;border:none">open console →</a></span>
+            </div>
+            <div class="log-view" id="log-tail" style="height:260px"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ CONSOLE ============ -->
+      <section class="tabpane" id="pane-console">
+        <div class="console">
+          <div class="toolbar">
+            <label class="checkbox" style="font-size:12px"><input type="checkbox" checked onchange="document.getElementById('log-main').dataset.paused = this.checked ? '' : '1'"> follow</label>
+            <input type="text" placeholder="filter…">
+            <button class="btn sm ghost" onclick="document.getElementById('log-main').innerHTML=''">clear</button>
+            <span style="margin-left:auto;font-size:11px;color:var(--text-faint)">streams: status · log · metrics (ws)</span>
+          </div>
+          <div class="log-view" id="log-main" style="height:430px"></div>
+          <div class="cmd-input">
+            <span class="prompt">rcon&gt;</span>
+            <input type="text" id="rcon-input" placeholder="type a command — Enter to send, ↑/↓ history (try: list, tps, save-all)">
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ FILES ============ -->
+      <section class="tabpane" id="pane-files">
+        <div class="notice info">Server is running — file operations go to the live working set on the worker. Some changes need a restart to take effect.</div>
+        <div class="toolbar-row">
+          <input type="text" placeholder="search files… (name or content)" style="width:280px">
+          <div class="right">
+            <button class="btn sm" onclick="mockToast('Upload dialog (optionally extract ZIP)')">Upload</button>
+            <button class="btn sm" onclick="mockToast('New directory')">New folder</button>
+          </div>
+        </div>
+        <div class="file-layout">
+          <div class="card file-tree" id="file-tree"></div>
+          <div class="card editor" style="padding:0">
+            <div class="editor-head" style="padding:10px 12px">
+              <span class="path">/server.properties</span>
+              <span class="badge">v-9f3a21</span>
+              <span style="margin-left:auto;display:flex;gap:6px">
+                <button class="btn sm" onclick="openModal('history-modal')">History</button>
+                <button class="btn sm" onclick="mockToast('GET …/files/download?path=server.properties')">Download</button>
+                <button class="btn sm primary" onclick="mockToast('PUT …/files?path=server.properties — new version retained', )">Save</button>
+              </span>
+            </div>
+            <textarea id="file-editor" spellcheck="false"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ BACKUPS ============ -->
+      <section class="tabpane" id="pane-backups">
+        <div class="grid cols-4" style="margin-bottom:14px">
+          <div class="card metric-tile"><div class="label">Backups</div><div class="value">4</div></div>
+          <div class="card metric-tile"><div class="label">Total size</div><div class="value">1.6<span class="unit">GiB</span></div></div>
+          <div class="card metric-tile"><div class="label">Newest</div><div class="value" style="font-size:15px">today 04:00</div></div>
+          <div class="card metric-tile"><div class="label">Oldest</div><div class="value" style="font-size:15px">Jun 4</div></div>
+        </div>
+        <div class="toolbar-row">
+          <button class="btn primary" onclick="mockToast('save-all → snapshot → archive (server stays up)')">+ Create backup</button>
+          <button class="btn" onclick="mockToast('Upload a backup archive')">Upload</button>
+          <span class="right" style="font-size:12px;color:var(--text-faint)">Schedule: every
+            <input type="number" value="24" style="width:60px;display:inline-block;padding:2px 6px"> hours
+            <button class="btn sm" onclick="mockToast('PATCH …/servers/s-1 {config: {backup_interval_hours: 24}}')">Save</button></span>
+        </div>
+        <div class="card" style="padding:0">
+          <table class="data">
+            <thead><tr><th>Created</th><th>Source</th><th>Size</th><th>By</th><th></th></tr></thead>
+            <tbody id="backup-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============ PLAYERS ============ -->
+      <section class="tabpane" id="pane-players">
+        <div class="toolbar-row">
+          <span style="color:var(--text-dim);font-size:13px">Groups attached to this server. Manage community-wide groups in <a href="community-settings.html#groups">Community settings → Groups</a>.</span>
+          <div class="right"><button class="btn sm" onclick="mockToast('Pick a community group to attach')">+ Attach group</button></div>
+        </div>
+        <div class="grid cols-2">
+          <div class="card">
+            <h2 style="display:flex;gap:8px;align-items:center">Admins <span class="badge kind-op">op</span>
+              <button class="btn sm ghost" style="margin-left:auto" onclick="mockToast('Detach group from this server')">Detach</button></h2>
+            <table class="data">
+              <tbody>
+                <tr><td>miura</td><td class="num" style="color:var(--text-faint)">069a79f4</td></tr>
+                <tr><td>alex_dig</td><td class="num" style="color:var(--text-faint)">ec70bcaf</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="card">
+            <h2 style="display:flex;gap:8px;align-items:center">Regulars <span class="badge kind-whitelist">whitelist</span>
+              <button class="btn sm ghost" style="margin-left:auto" onclick="mockToast('Detach group from this server')">Detach</button></h2>
+            <table class="data">
+              <tbody>
+                <tr><td>steve_99</td><td class="num" style="color:var(--text-faint)">7125ba8b</td></tr>
+                <tr><td>enderchan</td><td class="num" style="color:var(--text-faint)">c06f8906</td></tr>
+                <tr><td>zombie_hunter</td><td class="num" style="color:var(--text-faint)">61699b2e</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ SETTINGS ============ -->
+      <section class="tabpane" id="pane-settings">
+        <div class="card" style="margin-bottom:14px;max-width:640px">
+          <h2>General</h2>
+          <div class="field" style="max-width:320px">
+            <label>Server name</label>
+            <input type="text" value="survival">
+          </div>
+          <div class="form-row" style="max-width:480px">
+            <div class="field">
+              <label>Game port</label>
+              <input type="number" value="25565">
+              <div class="hint" style="color:var(--green)">✓ available (current)</div>
+            </div>
+            <div class="field">
+              <label>Execution backend</label>
+              <input type="text" value="container" disabled>
+              <div class="hint">Immutable after creation.</div>
+            </div>
+          </div>
+          <div class="field">
+            <label>Config overrides</label>
+            <textarea rows="4">max-players=20
+difficulty=hard
+view-distance=10</textarea>
+          </div>
+          <button class="btn primary" onclick="mockToast('PATCH …/servers/s-1')">Save changes</button>
+        </div>
+
+        <dl class="kv card" style="margin-bottom:14px;max-width:640px">
+          <dt>Server id</dt><dd>s-1 (uuid)</dd>
+          <dt>Created</dt><dd>2026-05-12 08:30 by miura</dd>
+          <dt>EULA</dt><dd style="color:var(--green)">accepted</dd>
+          <dt>Desired state</dt><dd>running</dd>
+        </dl>
+
+        <div class="card danger-zone" style="max-width:640px">
+          <h2>Danger zone</h2>
+          <div class="row">
+            <div>
+              <strong>Export server</strong>
+              <div class="desc">Download the full working set as a ZIP archive.</div>
+            </div>
+            <button class="btn" onclick="mockToast('GET …/export')">Export ZIP</button>
+          </div>
+          <div class="row">
+            <div>
+              <strong>Delete server</strong>
+              <div class="desc">Permanently removes the server, its data and backups.</div>
+            </div>
+            <button class="btn danger" onclick="openModal('delete-modal')">Delete…</button>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<!-- file history modal -->
+<div class="modal-backdrop" id="history-modal">
+  <div class="card modal">
+    <h2>History — server.properties</h2>
+    <table class="data">
+      <thead><tr><th>Version</th><th>When</th><th>By</th><th></th></tr></thead>
+      <tbody>
+        <tr><td class="num">v-9f3a21</td><td>2026-06-06 09:41</td><td>miura</td><td><span class="badge">current</span></td></tr>
+        <tr><td class="num">v-8e1c77</td><td>2026-06-04 18:02</td><td>alex_dig</td>
+          <td class="row-actions"><button class="btn sm" onclick="mockToast('POST …/files/rollback {version_id: v-8e1c77}'); closeModal('history-modal')">Rollback</button></td></tr>
+        <tr><td class="num">v-71b0d4</td><td>2026-06-01 11:30</td><td>miura</td>
+          <td class="row-actions"><button class="btn sm" onclick="mockToast('POST …/files/rollback {version_id: v-71b0d4}'); closeModal('history-modal')">Rollback</button></td></tr>
+      </tbody>
+    </table>
+    <div class="modal-foot"><button class="btn" onclick="closeModal('history-modal')">Close</button></div>
+  </div>
+</div>
+
+<!-- delete confirm modal -->
+<div class="modal-backdrop" id="delete-modal">
+  <div class="card modal">
+    <h2 style="color:var(--red)">Delete server</h2>
+    <p style="font-size:13px;color:var(--text-dim)">This permanently deletes <strong>survival</strong>, its world data and all 4 backups. This cannot be undone.</p>
+    <div class="field">
+      <label>Type the server name to confirm</label>
+      <input type="text" placeholder="survival">
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('delete-modal')">Cancel</button>
+      <button class="btn danger" onclick="mockToast('DELETE …/servers/s-1', 'err'); closeModal('delete-modal')">Delete server</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  // metrics sparklines (fake samples from the metrics ws stream)
+  renderSparkline(document.getElementById("spark-cpu"), [22,30,28,35,41,38,33,36,44,38,40,38]);
+  renderSparkline(document.getElementById("spark-mem"), [2.8,2.9,3.0,3.0,3.1,3.1,3.2,3.2,3.1,3.2,3.2,3.2]);
+  renderSparkline(document.getElementById("spark-players"), [4,5,5,6,6,7,7,6,7,7,7,7]);
+
+  startLogStream("log-tail", { interval: 3200 });
+  startLogStream("log-main", { interval: 2600, gapEvery: 18 });
+  initRcon("rcon-input", "log-main");
+
+  document.getElementById("file-editor").value = MOCK.serverProperties;
+
+  // file tree
+  const tree = document.getElementById("file-tree");
+  tree.innerHTML = MOCK.files.map((f) => `
+    <div class="entry ${f.is_dir ? "dir" : ""} ${f.name === "server.properties" ? "active" : ""}"
+         onclick="mockToast('${f.is_dir ? "GET …/files?path=" + f.name + "&list=true" : "GET …/files?path=" + f.name}')">
+      <span>${f.is_dir ? "📁" : "📄"}</span>${f.name}
+      ${f.size != null ? `<span class="size">${(f.size/1024).toFixed(1)}k</span>` : ""}
+    </div>`).join("");
+
+  // backups table
+  document.getElementById("backup-rows").innerHTML = MOCK.backups.map((b) => `
+    <tr>
+      <td>${b.created_at}</td>
+      <td><span class="badge">${b.source}</span></td>
+      <td class="num">${b.size}</td>
+      <td>${b.created_by}</td>
+      <td class="row-actions">
+        <button class="btn sm" onclick="mockToast('GET …/backups/${b.id}/download')">Download</button>
+        <button class="btn sm" onclick="mockToast('Restore requires the server to be stopped — offering stop-then-restore', 'err')">Restore</button>
+        <button class="btn sm danger" onclick="mockToast('DELETE …/backups/${b.id}')">Delete</button>
+      </td>
+    </tr>`).join("");
+});
+</script>
+</body>
+</html>

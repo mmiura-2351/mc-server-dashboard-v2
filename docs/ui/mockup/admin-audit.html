@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Global audit — MC Dashboard</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="admin-audit">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <h1>Global audit log</h1>
+          <div class="sub">All communities · platform operations included</div>
+        </div>
+      </div>
+
+      <div class="toolbar-row">
+        <select style="width:180px"><option>All communities</option><option>Sakura SMP</option><option>Dev Playground</option><option>— platform —</option></select>
+        <select style="width:170px"><option>All operations</option><option>auth:*</option><option>server:*</option><option>worker:manage</option><option>community:provision</option></select>
+        <select style="width:150px"><option>All actors</option><option>miura</option><option>system</option></select>
+        <input type="text" placeholder="since (ISO)" style="width:140px">
+        <input type="text" placeholder="until (ISO)" style="width:140px">
+        <button class="btn sm">Filter</button>
+      </div>
+
+      <div class="card" style="padding:0">
+        <table class="data">
+          <thead><tr><th>Time</th><th>Community</th><th>Operation</th><th>Actor</th><th>Target</th><th>Outcome</th></tr></thead>
+          <tbody id="audit-rows"></tbody>
+        </table>
+      </div>
+      <div class="pagination">
+        <button class="btn sm ghost" disabled>‹ prev</button>
+        <span>1–8 of 1,204</span>
+        <button class="btn sm ghost">next ›</button>
+      </div>
+    </main>
+  </div>
+</div>
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("audit-rows").innerHTML = MOCK.auditRecords.map((a) => `
+    <tr>
+      <td class="num">${a.created_at}</td>
+      <td>${a.operation.startsWith("auth") ? "—" : "Sakura SMP"}</td>
+      <td class="num">${a.operation}</td>
+      <td>${a.actor}</td>
+      <td class="num" style="color:var(--text-dim)">${a.target}</td>
+      <td>${a.outcome === "success"
+        ? '<span class="pill running" style="font-size:11px">success</span>'
+        : '<span class="pill crashed" style="font-size:11px">failure</span>'}</td>
+    </tr>`).join("");
+});
+</script>
+</body>
+</html>
