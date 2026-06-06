@@ -7,6 +7,7 @@ import { t } from "./i18n/index.ts";
 import { AccountPage } from "./pages/AccountPage.tsx";
 import { AdminAuditPage } from "./pages/AdminAuditPage.tsx";
 import { AdminOverviewPage } from "./pages/AdminOverviewPage.tsx";
+import { AdminWorkersPage } from "./pages/AdminWorkersPage.tsx";
 import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
@@ -154,10 +155,7 @@ export function App() {
               path="/admin/communities"
               element={<PlaceholderPage titleKey="page.adminCommunities" />}
             />
-            <Route
-              path="/admin/workers"
-              element={<PlaceholderPage titleKey="page.adminWorkers" />}
-            />
+            <Route path="/admin/workers" element={<AdminWorkersPage />} />
             <Route
               path="/admin/versions"
               element={<PlaceholderPage titleKey="page.adminVersions" />}

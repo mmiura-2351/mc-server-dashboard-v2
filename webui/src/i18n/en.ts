@@ -803,6 +803,36 @@ export const en = {
   "admin.overview.fleetLoad": "Load",
   "admin.overview.fleetHeartbeat": "Heartbeat",
   "admin.overview.fleetEmpty": "No workers registered.",
+  // Workers fleet page (WEBUI_SPEC.md 6.12) — #477
+  "admin.workers.subtitle":
+    "Workers self-register over the control plane; drain to relocate servers before maintenance.",
+  "admin.workers.loading": "Loading workers…",
+  "admin.workers.loadError": "Could not load workers.",
+  "admin.workers.empty": "No workers registered.",
+  "admin.workers.colWorker": "Worker",
+  "admin.workers.colStatus": "Status",
+  "admin.workers.colVersion": "Version",
+  "admin.workers.colDrivers": "Drivers",
+  "admin.workers.colLoad": "Load",
+  "admin.workers.colResources": "Resources",
+  "admin.workers.colHeartbeat": "Heartbeat",
+  "admin.workers.cpuCores": "c",
+  "admin.workers.drain": "Drain",
+  "admin.workers.undrain": "Undrain",
+  "admin.workers.drainDialogTitle": "Drain worker",
+  "admin.workers.drainDialogBody":
+    "Draining stops new placements on this worker and stops its running servers with a final snapshot so they can be restarted elsewhere.",
+  "admin.workers.drainConfirm": "Drain worker",
+  "admin.workers.undrainDialogTitle": "Undrain worker",
+  "admin.workers.undrainDialogBody":
+    "Undraining lets this worker accept new placements again.",
+  "admin.workers.undrainConfirm": "Undrain worker",
+  "admin.workers.drained": "Worker draining.",
+  "admin.workers.undrained": "Worker undrained.",
+  "admin.workers.drainError": "Could not drain the worker.",
+  "admin.workers.undrainError": "Could not undrain the worker.",
+  "admin.workers.notice":
+    "Draining stops new placements on the worker; running servers are stopped with a final snapshot and can be restarted elsewhere. Offline workers reappear automatically when they reconnect.",
 
   // Admin global Audit page (WEBUI_SPEC.md 6.12). The filter row, table and
   // paging strings are shared with the community Audit tab
