@@ -574,6 +574,7 @@ export const en = {
   "communitySettings.audit.filterOperationPlaceholder": "e.g. server:start",
   "communitySettings.audit.filterActor": "Actor ID",
   "communitySettings.audit.filterActorPlaceholder": "user id",
+  "communitySettings.audit.filterActorInvalid": "must be a user id (UUID)",
   "communitySettings.audit.filterSince": "Since",
   "communitySettings.audit.filterUntil": "Until",
   "communitySettings.audit.apply": "Apply filters",

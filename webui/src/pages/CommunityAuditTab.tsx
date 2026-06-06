@@ -35,6 +35,14 @@ export function auditKey(
   return ["communities", communityId, "audit", filters, offset] as const;
 }
 
+// A v1-v5 UUID, the shape the backend's `actor` query param parses.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
+
 // Build the audit-list URL with the applied filters mapped to the exact query
 // params the endpoint declares (operation, actor, since, until, limit, offset —
 // schema.ts list_community_audit_log). Blank filters are omitted. The result is
@@ -54,11 +62,13 @@ function auditUrl(
   if (filters.actor.trim() !== "") {
     params.set("actor", filters.actor.trim());
   }
+  // The datetime-local inputs are naive local wall-clock; the backend compares
+  // against tz-aware UTC, so convert the local instant to a UTC ISO string.
   if (filters.since !== "") {
-    params.set("since", filters.since);
+    params.set("since", new Date(filters.since).toISOString());
   }
   if (filters.until !== "") {
-    params.set("until", filters.until);
+    params.set("until", new Date(filters.until).toISOString());
   }
   params.set("limit", String(PAGE_SIZE));
   params.set("offset", String(offset));
@@ -87,6 +97,7 @@ function Loaded({ communityId }: { communityId: string }) {
   const [filters, setFilters] = useState<AuditFilters>(EMPTY_FILTERS);
   const [draft, setDraft] = useState<AuditFilters>(EMPTY_FILTERS);
   const [offset, setOffset] = useState(0);
+  const [actorError, setActorError] = useState(false);
 
   const query = useQuery({
     queryKey: auditKey(communityId, filters, offset),
@@ -101,6 +112,13 @@ function Loaded({ communityId }: { communityId: string }) {
   }, [query.isError, query.error, onForbidden]);
 
   const apply = () => {
+    // The backend's `actor` param is a UUID; reject free text inline rather
+    // than letting it 422 into the generic load error.
+    if (draft.actor.trim() !== "" && !isUuid(draft.actor.trim())) {
+      setActorError(true);
+      return;
+    }
+    setActorError(false);
     setFilters(draft);
     setOffset(0);
   };
@@ -135,8 +153,16 @@ function Loaded({ communityId }: { communityId: string }) {
             type="text"
             value={draft.actor}
             placeholder={t("communitySettings.audit.filterActorPlaceholder")}
-            onChange={(e) => setDraft((d) => ({ ...d, actor: e.target.value }))}
+            onChange={(e) => {
+              setActorError(false);
+              setDraft((d) => ({ ...d, actor: e.target.value }));
+            }}
           />
+          {actorError ? (
+            <span className="field-error">
+              {t("communitySettings.audit.filterActorInvalid")}
+            </span>
+          ) : null}
         </label>
         <label className="field">
           {t("communitySettings.audit.filterSince")}

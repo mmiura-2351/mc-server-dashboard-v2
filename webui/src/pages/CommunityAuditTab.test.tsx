@@ -172,17 +172,20 @@ describe("CommunityAuditTab", () => {
       screen.getByLabelText(t("communitySettings.audit.filterOperation")),
       { target: { value: "member:add" } },
     );
+    const ACTOR = "11111111-1111-1111-1111-111111111111";
+    const SINCE_LOCAL = "2026-01-01T00:00";
+    const UNTIL_LOCAL = "2026-02-01T00:00";
     fireEvent.change(
       screen.getByLabelText(t("communitySettings.audit.filterActor")),
-      { target: { value: "u9" } },
+      { target: { value: ACTOR } },
     );
     fireEvent.change(
       screen.getByLabelText(t("communitySettings.audit.filterSince")),
-      { target: { value: "2026-01-01T00:00" } },
+      { target: { value: SINCE_LOCAL } },
     );
     fireEvent.change(
       screen.getByLabelText(t("communitySettings.audit.filterUntil")),
-      { target: { value: "2026-02-01T00:00" } },
+      { target: { value: UNTIL_LOCAL } },
     );
     fireEvent.click(
       screen.getByRole("button", {
@@ -193,11 +196,41 @@ describe("CommunityAuditTab", () => {
     await waitFor(() => {
       const url = new URL(auditCalls().at(-1) as string, "http://x");
       expect(url.searchParams.get("operation")).toBe("member:add");
-      expect(url.searchParams.get("actor")).toBe("u9");
-      expect(url.searchParams.get("since")).toBe("2026-01-01T00:00");
-      expect(url.searchParams.get("until")).toBe("2026-02-01T00:00");
+      expect(url.searchParams.get("actor")).toBe(ACTOR);
+      // since/until are sent as UTC instants; derive the expectation via the
+      // same local→UTC conversion so the test is timezone-independent.
+      expect(url.searchParams.get("since")).toBe(
+        new Date(SINCE_LOCAL).toISOString(),
+      );
+      expect(url.searchParams.get("until")).toBe(
+        new Date(UNTIL_LOCAL).toISOString(),
+      );
       expect(url.searchParams.get("offset")).toBe("0");
     });
+  });
+
+  it("rejects a non-UUID actor inline without issuing a request", async () => {
+    routeGet({ records: [record()] });
+    renderPage();
+    await openAuditTab();
+    await screen.findByText("server:start");
+    const before = auditCalls().length;
+
+    fireEvent.change(
+      screen.getByLabelText(t("communitySettings.audit.filterActor")),
+      { target: { value: "not-a-uuid" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("communitySettings.audit.apply"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(t("communitySettings.audit.filterActorInvalid")),
+    ).toBeInTheDocument();
+    // No new audit request carried the bad value.
+    expect(auditCalls().length).toBe(before);
   });
 
   it("pages forward with an increased offset", async () => {
