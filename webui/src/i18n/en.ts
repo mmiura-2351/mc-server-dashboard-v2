@@ -562,6 +562,8 @@ export const en = {
   "communitySettings.members.removePrompt":
     "Type the username to enable removal",
   "communitySettings.members.removed": "Member removed.",
+  "communitySettings.members.removeError":
+    "Could not remove the member. Please try again.",
   "communitySettings.members.roleError":
     "Could not update roles. Please try again.",
 
