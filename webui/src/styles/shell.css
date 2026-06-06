@@ -778,3 +778,111 @@ select.community-switcher {
   gap: 8px;
   margin-top: 14px;
 }
+/* ---------- Server detail live streams (WEBUI_SPEC.md 6.4 / 6.5) ---------- */
+.metrics-strip {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 14px;
+}
+.metrics-strip .metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--accent);
+}
+.metric-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.metric-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+.metric-unit {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.sparkline {
+  display: block;
+}
+.log-tail {
+  margin-bottom: 14px;
+}
+.log-tail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.log-tail-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.log-view {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-y: auto;
+  max-height: 240px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.console-stream .log-view {
+  max-height: 420px;
+}
+.log-line.stdout {
+  color: var(--text);
+}
+.log-line.stderr {
+  color: var(--red);
+}
+.log-line.command {
+  color: var(--accent);
+}
+.log-line.output {
+  color: var(--text-dim);
+}
+.log-gap {
+  color: var(--amber);
+  text-align: center;
+  font-size: 11px;
+  padding: 2px 0;
+}
+.console-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.console-follow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.console-filter {
+  font: inherit;
+  flex: 1;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+.console-input {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.console-input input {
+  font: var(--font-mono);
+  flex: 1;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}

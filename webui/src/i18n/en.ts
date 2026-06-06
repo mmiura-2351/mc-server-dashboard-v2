@@ -201,11 +201,26 @@ export const en = {
   "serverDetail.tab.players": "Players",
   "serverDetail.tab.settings": "Settings",
   "serverDetail.tabPlaceholder": "Coming in a later phase.",
-  // Overview placeholder slots for the live WS streams (issue #440).
-  "serverDetail.metricsPlaceholder":
-    "Live metrics (CPU / memory / players) arrive with the per-server stream.",
-  "serverDetail.logTailPlaceholder":
-    "Live log tail arrives with the per-server stream.",
+  // Overview live metrics strip + log tail (issue #440, WEBUI_SPEC.md 6.4).
+  "serverDetail.metric.cpu": "CPU",
+  "serverDetail.metric.memory": "Memory",
+  "serverDetail.metric.players": "Players",
+  "serverDetail.metric.cores": "cores",
+  "serverDetail.metric.mib": "MiB",
+  "serverDetail.logTailHeading": "Recent log",
+  "serverDetail.openConsole": "Open Console",
+  "serverDetail.logTailEmpty": "No log output yet.",
+  // Inline divider where the client fell behind and missed events (SPEC 7.2).
+  "serverDetail.missedEvents": "— missed events —",
+  // Console tab (issue #440, WEBUI_SPEC.md 6.5).
+  "serverDetail.console.follow": "Follow",
+  "serverDetail.console.filter": "Filter…",
+  "serverDetail.console.clear": "Clear",
+  "serverDetail.console.send": "Send",
+  "serverDetail.console.commandPlaceholder": "Type a command…",
+  "serverDetail.console.notRunning":
+    "Commands are available only while the server is running.",
+  "serverDetail.commandFailed": "Command failed.",
   // Lifecycle controls.
   "serverDetail.start": "Start",
   "serverDetail.stop": "Stop",
