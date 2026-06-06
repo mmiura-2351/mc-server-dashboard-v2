@@ -1305,3 +1305,38 @@ select.community-switcher {
   gap: 10px;
   flex-wrap: wrap;
 }
+
+/* ---------- Admin overview metric tiles (WEBUI_SPEC.md 6.12) ---------- */
+.grid.cols-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+@media (max-width: 900px) {
+  .grid.cols-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.admin-overview .metric-tiles {
+  margin-bottom: 14px;
+}
+.metric-tile .label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.metric-tile .value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 4px 0;
+}
+.metric-tile .value .unit {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.metric-tile .hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.admin-overview table.data td.num {
+  font-variant-numeric: tabular-nums;
+}

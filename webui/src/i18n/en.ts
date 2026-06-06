@@ -781,6 +781,29 @@ export const en = {
   "communitySettings.groups.attached": "Server attached.",
   "communitySettings.groups.unknownServer": "(unknown server)",
 
+  // Platform admin area (WEBUI_SPEC.md 6.12, Section 3) — #474
+  "admin.denied.title": "Platform administrators only",
+  "admin.denied.body": "You do not have access to the platform admin area.",
+  "admin.overview.subtitle":
+    "Fleet and global statistics — platform administrators only",
+  "admin.overview.loading": "Loading platform statistics…",
+  "admin.overview.loadError": "Could not load platform statistics.",
+  "admin.overview.workers": "Workers",
+  "admin.overview.workersOnline": "online",
+  "admin.overview.workersDraining": "draining",
+  "admin.overview.workersOffline": "offline",
+  "admin.overview.servers": "Servers running",
+  "admin.overview.serversHint": "assigned across the fleet",
+  "admin.overview.backups": "Backups (global)",
+  "admin.overview.jarPool": "jar pool",
+  "admin.overview.jars": "jars",
+  "admin.overview.fleet": "Worker fleet",
+  "admin.overview.fleetWorker": "Worker",
+  "admin.overview.fleetStatus": "Status",
+  "admin.overview.fleetLoad": "Load",
+  "admin.overview.fleetHeartbeat": "Heartbeat",
+  "admin.overview.fleetEmpty": "No workers registered.",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
