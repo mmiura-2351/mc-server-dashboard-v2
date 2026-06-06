@@ -8,6 +8,7 @@ import { AccountPage } from "./pages/AccountPage.tsx";
 import { AdminAuditPage } from "./pages/AdminAuditPage.tsx";
 import { AdminCommunitiesPage } from "./pages/AdminCommunitiesPage.tsx";
 import { AdminOverviewPage } from "./pages/AdminOverviewPage.tsx";
+import { AdminUsersPage } from "./pages/AdminUsersPage.tsx";
 import { AdminWorkersPage } from "./pages/AdminWorkersPage.tsx";
 import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
@@ -148,10 +149,7 @@ export function App() {
 
           <Route element={<RequireAdmin />}>
             <Route path="/admin" element={<AdminOverviewPage />} />
-            <Route
-              path="/admin/users"
-              element={<PlaceholderPage titleKey="page.adminUsers" />}
-            />
+            <Route path="/admin/users" element={<AdminUsersPage />} />
             <Route
               path="/admin/communities"
               element={<AdminCommunitiesPage />}
