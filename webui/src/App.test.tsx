@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -5,6 +6,7 @@ import { App } from "./App.tsx";
 import { SessionProvider } from "./auth/SessionProvider.tsx";
 import { clearAccessToken } from "./auth/tokenStore.ts";
 import { t } from "./i18n/index.ts";
+import { ActiveCommunityProvider } from "./permissions/ActiveCommunityProvider.tsx";
 
 // The bootstrap refresh decides signed-in vs signed-out. A 200 token response
 // signs in; a 401 signs out; a pending promise keeps it "bootstrapping".
@@ -19,13 +21,40 @@ function tokenResponse(): Response {
   );
 }
 
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+// Route the bootstrap refresh and the community list (and its per-community
+// permission fetch) so the shell can resolve an active community. The shell's
+// switcher reads `GET /communities` via the shared ActiveCommunityProvider.
+function signedInWith(communities: Array<{ id: string; name: string }>) {
+  fetchMock.mockImplementation((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === "/communities") {
+      return Promise.resolve(jsonResponse(communities));
+    }
+    if (url.endsWith("/me/permissions")) {
+      return Promise.resolve(jsonResponse({}));
+    }
+    return Promise.resolve(tokenResponse());
+  });
+}
+
 function renderAt(path: string) {
   render(
-    <MemoryRouter initialEntries={[path]}>
-      <SessionProvider>
-        <App />
-      </SessionProvider>
-    </MemoryRouter>,
+    <QueryClientProvider client={new QueryClient()}>
+      <MemoryRouter initialEntries={[path]}>
+        <SessionProvider>
+          <ActiveCommunityProvider>
+            <App />
+          </ActiveCommunityProvider>
+        </SessionProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -87,22 +116,25 @@ describe("App route guards", () => {
   });
 
   it("renders the shell for signed-in users", async () => {
-    fetchMock.mockResolvedValue(tokenResponse());
+    signedInWith([{ id: "alpha", name: "Alpha" }]);
 
-    renderAt("/communities/demo");
+    renderAt("/communities/alpha");
 
     await waitFor(() =>
       expect(
         screen.getByRole("heading", { name: t("page.dashboard") }),
       ).toBeInTheDocument(),
     );
-    expect(
-      screen.getByRole("link", { name: t("nav.dashboard") }),
-    ).toBeInTheDocument();
+    // The community-scoped nav resolves once the community list arrives.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("link", { name: t("nav.dashboard") }),
+      ).toBeInTheDocument(),
+    );
   });
 
   it("redirects signed-in users away from /login to the dashboard", async () => {
-    fetchMock.mockResolvedValue(tokenResponse());
+    signedInWith([{ id: "alpha", name: "Alpha" }]);
 
     renderAt("/login");
 

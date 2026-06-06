@@ -8,7 +8,8 @@ import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { PlaceholderPage } from "./pages/PlaceholderPage.tsx";
 import { RegisterPage } from "./pages/RegisterPage.tsx";
-import { DASHBOARD_PATH } from "./routes.ts";
+import { useActiveCommunity } from "./permissions/ActiveCommunityProvider.tsx";
+import { dashboardPath, LANDING_PATH } from "./routes.ts";
 import { AppShell } from "./shell/AppShell.tsx";
 
 // Neutral loading state shown while the session bootstraps (cookie refresh in
@@ -43,9 +44,24 @@ function RequireAnon({ children }: { children: ReactNode }) {
     return <SessionLoading />;
   }
   if (status === "signed-in") {
-    return <Navigate to={DASHBOARD_PATH} replace />;
+    return <Navigate to={LANDING_PATH} replace />;
   }
   return <>{children}</>;
+}
+
+// The community-agnostic landing (LANDING_PATH): once the active community
+// resolves, redirect to its dashboard. While the community list is loading,
+// hold on the session loading state (no flicker); a caller with no communities
+// stays here and the shell shows the no-communities hint.
+function Landing() {
+  const { communityId, communities } = useActiveCommunity();
+  if (communityId !== null) {
+    return <Navigate to={dashboardPath(communityId)} replace />;
+  }
+  if (communities === undefined) {
+    return <SessionLoading />;
+  }
+  return <PlaceholderPage titleKey="page.dashboard" />;
 }
 
 // Routing mirroring the screen map (WEBUI_SPEC.md Section 5). Auth pages render
@@ -79,6 +95,7 @@ export function App() {
             </RequireAuth>
           }
         >
+          <Route index element={<Landing />} />
           <Route path="/communities/:cid" element={<DashboardPage />} />
           <Route
             path="/communities/:cid/servers/new"
@@ -120,7 +137,6 @@ export function App() {
           />
         </Route>
 
-        <Route path="/" element={<Navigate to={DASHBOARD_PATH} replace />} />
         <Route
           path="*"
           element={<PlaceholderPage titleKey="page.notFound" />}
