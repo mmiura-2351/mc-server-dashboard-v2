@@ -661,6 +661,74 @@ select.community-switcher {
   color: var(--red);
   font-size: 12px;
 }
+/* ---------- Server create wizard (WEBUI_SPEC.md 6.3) ---------- */
+.wizard-steps {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+.wizard-steps .step {
+  color: var(--text-faint);
+}
+.wizard-steps .step.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+.wizard-steps .step.done {
+  color: var(--green);
+}
+.type-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.type-card {
+  font: inherit;
+  text-align: left;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  cursor: pointer;
+  color: var(--text);
+}
+.type-card.selected {
+  border-color: var(--accent);
+}
+.type-card.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.type-card .t-name {
+  font-weight: 600;
+}
+.type-card .t-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.field select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.field .checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+.field .hint.ok {
+  color: var(--green);
+}
+.field .hint.warn {
+  color: var(--amber);
+}
+.prop-row,
 .config-editor .config-row {
   display: flex;
   gap: 8px;
@@ -695,4 +763,18 @@ select.community-switcher {
 }
 .kv dt {
   color: var(--text-dim);
+}
+.prop-row input {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  flex: 1;
+}
+.wizard-foot {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
 }

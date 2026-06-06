@@ -120,12 +120,17 @@ async function rawRequest(
   init?: RequestInit,
 ): Promise<Response> {
   const token = getAccessToken();
+  // A FormData body is multipart: leave the content-type unset so the browser
+  // adds it with the generated boundary. Everything else is JSON.
+  const isFormData = init?.body instanceof FormData;
   return fetch(path, {
     ...init,
     method,
     credentials: "same-origin",
     headers: {
-      ...(init?.body != null ? { "content-type": "application/json" } : {}),
+      ...(init?.body != null && !isFormData
+        ? { "content-type": "application/json" }
+        : {}),
       ...(token != null ? { authorization: `Bearer ${token}` } : {}),
       ...init?.headers,
     },
@@ -188,6 +193,11 @@ export const api = {
     request("get", path, init),
   post: <P extends PathsWith<"post">>(path: P, init?: RequestInit) =>
     request("post", path, init),
+  // Multipart POST: the only typed-client escape hatch for `multipart/form-data`
+  // endpoints (server import / file & backup upload). Sends a FormData body
+  // through the same refresh/error pipeline; the browser sets the boundary.
+  postForm: <P extends PathsWith<"post">>(path: P, body: FormData) =>
+    request("post", path, { body }),
   put: <P extends PathsWith<"put">>(path: P, init?: RequestInit) =>
     request("put", path, init),
   patch: <P extends PathsWith<"patch">>(path: P, init?: RequestInit) =>

@@ -261,6 +261,89 @@ export const en = {
     "That game port is outside the allowed range.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
 
+  // Server create wizard (WEBUI_SPEC.md 6.3). One contiguous block to keep
+  // merge conflicts with sibling i18n PRs minimal.
+  "serverCreate.subtitle": "Provision a new Minecraft server.",
+  "serverCreate.denied": "You do not have permission to create servers.",
+  "serverCreate.tab.new": "New server",
+  "serverCreate.tab.import": "Import ZIP",
+  // Wizard step rail.
+  "serverCreate.step.type": "Type & version",
+  "serverCreate.step.runtime": "Runtime",
+  "serverCreate.step.config": "Config & EULA",
+  "serverCreate.next": "Next",
+  "serverCreate.back": "Back",
+  "serverCreate.create": "Create server",
+  "serverCreate.creating": "Creating…",
+  // Step 1 — type & version.
+  "serverCreate.typeHeading": "Server type",
+  "serverCreate.typeLoading": "Loading server types…",
+  "serverCreate.typeLoadError":
+    "Could not load the version catalog. Try refreshing.",
+  "serverCreate.versionLabel": "Minecraft version",
+  "serverCreate.versionLoading": "Loading versions…",
+  "serverCreate.versionLoadError": "Could not load versions for this type.",
+  "serverCreate.spigotHint":
+    "No official distribution API — use Paper instead.",
+  "serverCreate.type.vanilla": "Vanilla",
+  "serverCreate.type.paper": "Paper",
+  "serverCreate.type.fabric": "Fabric",
+  "serverCreate.type.forge": "Forge",
+  "serverCreate.type.spigot": "Spigot",
+  "serverCreate.typeSub.vanilla": "official",
+  "serverCreate.typeSub.paper": "performance fork",
+  "serverCreate.typeSub.fabric": "light modding",
+  "serverCreate.typeSub.forge": "heavy modding",
+  "serverCreate.typeSub.spigot": "unsupported",
+  // Step 2 — runtime.
+  "serverCreate.backendLabel": "Execution backend",
+  "serverCreate.backend.host_process": "Host process",
+  "serverCreate.backend.container": "Container",
+  "serverCreate.portLabel": "Game port",
+  "serverCreate.portHint": "Auto-suggested from the next free port.",
+  "serverCreate.portChecking": "Checking port availability…",
+  "serverCreate.portAvailable": "Port is available.",
+  "serverCreate.portTaken": "Port is already in use.",
+  "serverCreate.portOutOfRange": "Port is outside the allowed range.",
+  "serverCreate.portCheckFailed": "Could not check that port.",
+  // Step 3 — config & EULA.
+  "serverCreate.nameLabel": "Server name",
+  "serverCreate.namePlaceholder": "survival",
+  "serverCreate.propsHeading": "server.properties overrides",
+  "serverCreate.propsHint":
+    "Optional. Keys written into server.properties on first boot.",
+  "serverCreate.propKeyPlaceholder": "key (e.g. motd)",
+  "serverCreate.propValuePlaceholder": "value",
+  "serverCreate.propAdd": "Add override",
+  "serverCreate.propRemove": "Remove",
+  "serverCreate.eulaLabel": "I accept the Minecraft EULA.",
+  "serverCreate.eulaWarning":
+    "Without accepting the EULA the server is created but cannot start until you accept it later.",
+  // Create error surfacing.
+  "serverCreate.error.spigot_unsupported":
+    "Spigot is not supported — use Paper instead.",
+  "serverCreate.error.port_taken":
+    "That game port is already in use. Pick another.",
+  "serverCreate.error.port_out_of_range":
+    "That game port is outside the allowed range.",
+  "serverCreate.error.server_name_exists":
+    "A server with that name already exists in this community.",
+  "serverCreate.error.invalid_server_name": "That server name is not allowed.",
+  "serverCreate.error.unknown_version":
+    "That version is not available for this type.",
+  "serverCreate.genericError": "Could not create the server. Please try again.",
+  // Import tab.
+  "serverCreate.import.heading": "Import from a ZIP export",
+  "serverCreate.import.hint":
+    "Upload a ZIP exported from another instance. The name and backend below apply; the EULA is never carried over.",
+  "serverCreate.import.fileLabel": "Export archive (.zip)",
+  "serverCreate.import.submit": "Import server",
+  "serverCreate.import.importing": "Importing…",
+  "serverCreate.import.noFile": "Choose a ZIP file to import.",
+  "serverCreate.import.error.invalid_export_metadata":
+    "That archive is not a valid server export.",
+  "serverCreate.import.tooLarge": "That archive is too large to import.",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
