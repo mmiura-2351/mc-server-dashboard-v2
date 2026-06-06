@@ -70,8 +70,14 @@ restart or rebuild.
 
 ## 4. Bring the stack up
 
+`docker compose` builds the images from this checkout (the repo root is the
+deploy source), so the checkout must be on a clean `main` — a stray branch or
+dirty tree silently ships the wrong ref (CONTRIBUTING.md Section 3, issue #432).
+Run the preflight, which refuses (exit 1) when the checkout is not on `main` or
+is dirty, then build:
+
 ```sh
-docker compose up -d --build
+./scripts/deploy_preflight.sh && docker compose up -d --build
 ```
 
 This builds the `api` and `worker` images, starts `db`, runs `migrate` to apply
@@ -272,7 +278,7 @@ before the new `api` starts, so the schema is brought current automatically:
 
 ```sh
 git pull
-docker compose up -d --build
+./scripts/deploy_preflight.sh && docker compose up -d --build
 ```
 
 Stacks that were first deployed before the `api` image pre-created the storage

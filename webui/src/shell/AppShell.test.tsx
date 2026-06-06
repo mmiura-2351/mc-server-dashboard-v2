@@ -37,6 +37,9 @@ function signedInWith(communities: Array<{ id: string; name: string }>) {
     if (url.endsWith("/me/permissions")) {
       return Promise.resolve(jsonResponse({}));
     }
+    if (url.endsWith("/servers")) {
+      return Promise.resolve(jsonResponse([]));
+    }
     return Promise.resolve(tokenResponse());
   });
 }

@@ -86,22 +86,6 @@ export const en = {
   "common.cancel": "Cancel",
   "common.close": "Close",
 
-  // Primitives demonstration (placeholder dashboard)
-  "demo.showToast": "Show success toast",
-  "demo.showError": "Show error toast",
-  "demo.openModal": "Open modal",
-  "demo.deleteServer": "Delete server",
-  "demo.toastSuccess": "Action completed.",
-  "demo.toastError": "Something went wrong.",
-  "demo.modalTitle": "Example modal",
-  "demo.modalBody": "Modals overlay the shell and stay until dismissed.",
-  "demo.confirmTitle": "Delete server",
-  "demo.confirmBody":
-    "This permanently deletes the server and its data. Type the server name to confirm.",
-  "demo.confirmServerName": "survival",
-  "demo.confirmPrompt": "Type the server name to enable deletion",
-  "demo.deleted": "Server deleted.",
-
   // Account page (WEBUI_SPEC.md 6.11) — one contiguous block to minimise
   // merge conflicts with sibling PRs adding keys under other prefixes.
   "account.subtitle": "Your profile, security, and memberships.",
@@ -163,6 +147,31 @@ export const en = {
   "account.error.last_platform_admin":
     "You are the last platform admin and cannot delete your account.",
   "account.error.generic": "Something went wrong. Please try again.",
+
+  // Dashboard server cards (WEBUI_SPEC.md 6.2). One contiguous block to keep
+  // merge conflicts with sibling i18n PRs minimal.
+  "dashboard.subtitle": "Servers in this community.",
+  "dashboard.loading": "Loading servers…",
+  "dashboard.loadError": "Could not load servers. Try refreshing.",
+  "dashboard.empty": "No servers yet.",
+  "dashboard.emptyHint": "Create your first server to get started.",
+  "dashboard.createServer": "Create server",
+  "dashboard.noWorker": "no worker assigned",
+  "dashboard.start": "Start",
+  "dashboard.stop": "Stop",
+  "dashboard.restart": "Restart",
+  // Observed-state pill labels (WEBUI_SPEC.md 2.3).
+  "dashboard.state.starting": "starting",
+  "dashboard.state.running": "running",
+  "dashboard.state.stopping": "stopping",
+  "dashboard.state.stopped": "stopped",
+  "dashboard.state.restarting": "restarting",
+  "dashboard.state.crashed": "crashed",
+  "dashboard.state.unknown": "unknown",
+  // Lifecycle action feedback.
+  "dashboard.actionFailed": "Could not complete that action. Please try again.",
+  // Conflict-flavoured (server_unsettled-style) lifecycle races (SPEC 7.4).
+  "dashboard.stateChanged": "State changed — refreshed.",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",

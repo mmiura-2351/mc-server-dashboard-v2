@@ -48,7 +48,12 @@ make hooks-install
 
 This points `core.hooksPath` at the checked-in `.githooks/`. The **pre-commit**
 hook formats and lints the modules with staged changes; the **pre-push** hook
-runs the full `make check` (lint + typecheck + test for both ecosystems).
+runs the full `make check` (lint + typecheck + test for both ecosystems). The
+**post-checkout** hook warns loudly when the *primary* checkout (the repo root,
+not a worktree under `.claude/worktrees/`) is left off `main` — it is the deploy
+build source (Section 3), so the warning catches a stray checkout before the next
+rebuild ships the wrong ref. It does not auto-restore and stays silent in
+worktrees; restore the primary checkout with `git checkout main`.
 
 - Don't bypass failing pre-commit / pre-push hooks; fix the cause. If a hook
   fails, the commit did not happen — make a **new** commit rather than
