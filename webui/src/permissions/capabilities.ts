@@ -9,9 +9,8 @@
 
 import type { QueryClient } from "@tanstack/react-query";
 import { api } from "../api/client.ts";
+import { apiPath } from "../api/path.ts";
 import type { EffectivePermissions } from "./resolve.ts";
-
-const PERMISSIONS_PATH = "/communities/{community_id}/me/permissions" as const;
 
 /** Query key for one community's effective permission set. */
 export function capabilitiesKey(communityId: string) {
@@ -21,10 +20,11 @@ export function capabilitiesKey(communityId: string) {
 export function fetchCapabilities(
   communityId: string,
 ): Promise<EffectivePermissions> {
-  // The minimal client (api/client.ts) has no path-param interpolation, so the
-  // concrete URL is built here while the literal path keeps the response typed.
-  const url = `/communities/${encodeURIComponent(communityId)}/me/permissions`;
-  return api.get(url as typeof PERMISSIONS_PATH);
+  return api.get(
+    apiPath("/communities/{community_id}/me/permissions", {
+      community_id: communityId,
+    }),
+  );
 }
 
 /**
