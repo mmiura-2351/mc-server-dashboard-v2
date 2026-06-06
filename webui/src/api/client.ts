@@ -91,6 +91,15 @@ export function setRefresher(fn: Refresher): void {
   refresher = fn;
 }
 
+/**
+ * Reset the injected refresher for tests. It is a module-level singleton that
+ * otherwise survives across test cases/files; clearing it per case keeps the
+ * 401-retry path from invoking a stale refresher left by an earlier render.
+ */
+export function resetForTesting(): void {
+  refresher = null;
+}
+
 function isAuthPath(path: string): boolean {
   return path.startsWith("/auth/");
 }

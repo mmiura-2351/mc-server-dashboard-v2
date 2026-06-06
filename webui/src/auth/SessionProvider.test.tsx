@@ -1,7 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetForTesting as resetClientForTesting } from "../api/client.ts";
 import { SessionProvider, useSession } from "./SessionProvider.tsx";
+import { resetForTesting as resetSessionForTesting } from "./session.ts";
 import { clearAccessToken } from "./tokenStore.ts";
 
 function tokenResponse(): Response {
@@ -47,6 +49,12 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
   clearAccessToken();
+  // The session core keeps module-level singletons (the injected hard-logout
+  // handler / refresher and the in-flight refresh). A handler left by a prior
+  // case is bound to an unmounted render, so a later logout navigates a stale
+  // router and the path never reaches /login. Reset them per case to isolate.
+  resetSessionForTesting();
+  resetClientForTesting();
 });
 
 afterEach(() => {
@@ -99,6 +107,8 @@ describe("SessionProvider logout", () => {
     await waitFor(() =>
       expect(screen.getByTestId("status")).toHaveTextContent("signed-out"),
     );
-    expect(screen.getByTestId("path")).toHaveTextContent("/login");
+    await waitFor(() =>
+      expect(screen.getByTestId("path")).toHaveTextContent("/login"),
+    );
   });
 });

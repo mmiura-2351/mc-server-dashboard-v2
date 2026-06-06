@@ -4,6 +4,7 @@ import {
   logout,
   refreshForRetry,
   refreshSession,
+  resetForTesting,
   setHardLogoutHandler,
 } from "./session.ts";
 import {
@@ -29,6 +30,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
   clearAccessToken();
+  resetForTesting();
   setHardLogoutHandler(() => {});
 });
 
