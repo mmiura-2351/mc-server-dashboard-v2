@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router";
 import { useSession } from "./auth/SessionProvider.tsx";
 import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
+import { AccountPage } from "./pages/AccountPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { PlaceholderPage } from "./pages/PlaceholderPage.tsx";
@@ -91,10 +92,7 @@ export function App() {
             path="/communities/:cid/settings"
             element={<PlaceholderPage titleKey="page.communitySettings" />}
           />
-          <Route
-            path="/account"
-            element={<PlaceholderPage titleKey="page.account" />}
-          />
+          <Route path="/account" element={<AccountPage />} />
 
           <Route
             path="/admin"
