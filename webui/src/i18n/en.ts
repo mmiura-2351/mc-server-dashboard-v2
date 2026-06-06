@@ -347,6 +347,65 @@ export const en = {
     "backup_interval_hours must be a whole number of hours of at least 1.",
   "backups.error.generic": "Something went wrong. Please try again.",
 
+  // Files tab (WEBUI_SPEC.md 6.6). One contiguous block to keep merge
+  // conflicts with sibling tab PRs minimal.
+  "files.denied": "You do not have permission to view this server's files.",
+  "files.runningNotice":
+    "Server is running — file changes go to the live working set and may need a restart to take effect.",
+  "files.root": "root",
+  "files.loading": "Loading…",
+  "files.listError": "Could not list this directory. Try refreshing.",
+  "files.openError": "Could not open this file.",
+  "files.empty": "This directory is empty.",
+  "files.noSelection": "Select a file to view or edit.",
+  "files.truncated": "Listing truncated — too many entries to show them all.",
+  "files.binary": "Binary file — download to view.",
+  "files.editorLabel": "File contents",
+  "files.upload": "Upload",
+  "files.extractZip": "Extract ZIP",
+  "files.newFolder": "New folder",
+  "files.folderName": "Folder name",
+  "files.newName": "New name",
+  "files.create": "Create",
+  "files.rename": "Rename",
+  "files.delete": "Delete",
+  "files.download": "Download",
+  "files.save": "Save",
+  "files.delete.dialogTitle": "Delete file",
+  "files.delete.dialogBody":
+    "This permanently deletes the selected file or directory. Type its name to confirm.",
+  "files.delete.confirm": "Delete permanently",
+  "files.delete.prompt": "Type the name to enable deletion",
+  // Outcomes (toasts).
+  "files.saved": "File saved.",
+  "files.uploaded": "Upload complete.",
+  "files.folderCreated": "Folder created.",
+  "files.renamed": "Renamed.",
+  "files.deleted": "Deleted.",
+  "files.error.generic": "Something went wrong. Please try again.",
+
+  // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
+  // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
+  "players.heading": "Attached groups",
+  "players.loading": "Loading groups…",
+  "players.loadError": "Could not load groups. Try refreshing.",
+  "players.empty": "No groups are attached to this server yet.",
+  "players.kind.op": "op",
+  "players.kind.whitelist": "whitelist",
+  // Member count shown next to each group (the group's player list length).
+  "players.memberCount": "members",
+  "players.detach": "Detach",
+  "players.detached": "Group detached.",
+  // Attach picker: community groups not yet attached to this server.
+  "players.attachHeading": "Attach a group",
+  "players.attachEmpty": "All of this community's groups are already attached.",
+  "players.attach": "Attach",
+  "players.attached": "Group attached.",
+  // Inline pointer to the full Groups management surface (Phase 6).
+  "players.manageHint": "Create and edit groups in community settings.",
+  "players.manageLink": "Community settings",
+  "players.error.generic": "Something went wrong. Please try again.",
+
   // Server create wizard (WEBUI_SPEC.md 6.3). One contiguous block to keep
   // merge conflicts with sibling i18n PRs minimal.
   "serverCreate.subtitle": "Provision a new Minecraft server.",
