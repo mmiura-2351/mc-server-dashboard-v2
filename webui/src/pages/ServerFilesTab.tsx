@@ -1,0 +1,718 @@
+/**
+ * Files tab — two-pane browser + viewer/editor and basic file operations
+ * (WEBUI_SPEC.md 6.6).
+ *
+ * Left pane: a directory listing (entries + a `truncated` notice when the
+ * Worker clipped the live listing) with path breadcrumbs. Right pane: a viewer.
+ * A text file opens in an editor whose Save issues a versioned base64 `PUT`; a
+ * binary file offers download only. Operations: upload (with an "extract ZIP"
+ * toggle → `?extract=`), mkdir, rename, delete (typed confirm), download (reuses
+ * the authenticated helper in api/download.ts).
+ *
+ * Permission gating mirrors the API route gates (servers/api/files.py):
+ * `file:read` browses/views/downloads, `file:edit` writes/uploads/mkdir/rename/
+ * deletes. A 403 routes through onForbidden; other errors toast generically.
+ *
+ * The typed JSON client has no query-param helper, so the file routes' `?path=`
+ * / `?list=` / `?extract=` are appended to the interpolated path as a string and
+ * cast to the path type at the call site — the same escape hatch the lifecycle
+ * controls use for `?force=`.
+ *
+ * Search box and per-file history/rollback are an explicit follow-up (#450);
+ * this slice stops at browse + view/edit + the basic ops.
+ */
+
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { api } from "../api/client.ts";
+import { downloadFile } from "../api/download.ts";
+import { apiPath } from "../api/path.ts";
+import type { components } from "../api/schema";
+import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { Modal } from "../components/Modal.tsx";
+import { useToast } from "../components/Toast.tsx";
+import { t } from "../i18n/index.ts";
+import type { Can } from "../permissions/useCan.ts";
+import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import {
+  decodeBase64Utf8,
+  encodeUtf8Base64,
+  isProbablyText,
+} from "./fileText.ts";
+
+type DirListing = components["schemas"]["DirListingResponse"];
+type FileContent = components["schemas"]["FileContentResponse"];
+type DirEntry = components["schemas"]["DirEntryResponse"];
+type ServerResponse = components["schemas"]["ServerResponse"];
+
+/** Base `/communities/{cid}/servers/{sid}/files` path for `server`. */
+function filesBase(communityId: string, serverId: string): string {
+  return apiPath("/communities/{community_id}/servers/{server_id}/files", {
+    community_id: communityId,
+    server_id: serverId,
+  });
+}
+
+/** Join a directory rel-path and a child name into a POSIX rel-path. */
+function joinPath(dir: string, name: string): string {
+  return dir === "" ? name : `${dir}/${name}`;
+}
+
+/** Split a rel-path into ordered breadcrumb segments with their cumulative path. */
+function breadcrumbs(path: string): { name: string; path: string }[] {
+  if (path === "") {
+    return [];
+  }
+  const parts = path.split("/");
+  return parts.map((name, i) => ({
+    name,
+    path: parts.slice(0, i + 1).join("/"),
+  }));
+}
+
+export function ServerFilesTab({
+  server,
+  communityId,
+  can,
+}: {
+  server: ServerResponse;
+  communityId: string;
+  can: Can;
+}) {
+  const { showToast } = useToast();
+  const onForbidden = useOnForbidden();
+  const queryClient = useQueryClient();
+
+  const canRead = can("file:read", { serverId: server.id });
+  const canEdit = can("file:edit", { serverId: server.id });
+  const running = server.observed_state === "running";
+
+  // Current directory rel-path ("" is the working-set root) and the open file.
+  const [dir, setDir] = useState("");
+  const [openFile, setOpenFile] = useState<string | null>(null);
+
+  const onError = (error: unknown) => {
+    if (onForbidden(error)) {
+      return;
+    }
+    showToast(t("files.error.generic"), "error");
+  };
+
+  const listKey = ["files", "list", communityId, server.id, dir];
+  const listing = useQuery({
+    queryKey: listKey,
+    enabled: canRead,
+    queryFn: () =>
+      api.get(
+        `${filesBase(communityId, server.id)}?path=${encodeURIComponent(dir)}&list=true` as never,
+      ) as Promise<DirListing>,
+  });
+
+  const refetchList = () =>
+    queryClient.invalidateQueries({ queryKey: listKey });
+
+  if (!canRead) {
+    return <p className="field-error">{t("files.denied")}</p>;
+  }
+
+  const enter = (entry: DirEntry) => {
+    const next = joinPath(dir, entry.name);
+    if (entry.is_dir) {
+      setDir(next);
+      setOpenFile(null);
+    } else {
+      setOpenFile(next);
+    }
+  };
+
+  return (
+    <section className="files">
+      {running && <div className="notice info">{t("files.runningNotice")}</div>}
+      <Toolbar
+        dir={dir}
+        communityId={communityId}
+        serverId={server.id}
+        canEdit={canEdit}
+        onChanged={refetchList}
+        onError={onError}
+      />
+      <Crumbs
+        dir={dir}
+        onNavigate={(next) => {
+          setDir(next);
+          setOpenFile(null);
+        }}
+      />
+      <div className="file-layout">
+        <div className="card file-tree">
+          {listing.isPending ? (
+            <p className="sub">{t("files.loading")}</p>
+          ) : listing.isError ? (
+            <p className="field-error">{t("files.listError")}</p>
+          ) : (
+            <Listing
+              listing={listing.data}
+              dir={dir}
+              communityId={communityId}
+              serverId={server.id}
+              canEdit={canEdit}
+              openFile={openFile}
+              onEnter={enter}
+              onChanged={() => {
+                refetchList();
+                setOpenFile(null);
+              }}
+              onError={onError}
+            />
+          )}
+        </div>
+        <div className="card file-viewer">
+          {openFile === null ? (
+            <p className="sub">{t("files.noSelection")}</p>
+          ) : (
+            <Viewer
+              key={openFile}
+              path={openFile}
+              communityId={communityId}
+              serverId={server.id}
+              canEdit={canEdit}
+              running={running}
+              onError={onError}
+            />
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ── Breadcrumbs ──────────────────────────────────────────────────────────────
+
+function Crumbs({
+  dir,
+  onNavigate,
+}: {
+  dir: string;
+  onNavigate: (path: string) => void;
+}) {
+  return (
+    <div className="file-crumbs">
+      <button type="button" className="crumb" onClick={() => onNavigate("")}>
+        {t("files.root")}
+      </button>
+      {breadcrumbs(dir).map((crumb) => (
+        <span key={crumb.path}>
+          {" / "}
+          <button
+            type="button"
+            className="crumb"
+            onClick={() => onNavigate(crumb.path)}
+          >
+            {crumb.name}
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ── Listing pane ─────────────────────────────────────────────────────────────
+
+function Listing({
+  listing,
+  dir,
+  communityId,
+  serverId,
+  canEdit,
+  openFile,
+  onEnter,
+  onChanged,
+  onError,
+}: {
+  listing: DirListing;
+  dir: string;
+  communityId: string;
+  serverId: string;
+  canEdit: boolean;
+  openFile: string | null;
+  onEnter: (entry: DirEntry) => void;
+  onChanged: () => void;
+  onError: (error: unknown) => void;
+}) {
+  const { showToast } = useToast();
+  const [renaming, setRenaming] = useState<DirEntry | null>(null);
+  const [deleting, setDeleting] = useState<DirEntry | null>(null);
+
+  const remove = useMutation({
+    mutationFn: (entry: DirEntry) =>
+      api.delete(
+        `${filesBase(communityId, serverId)}?path=${encodeURIComponent(joinPath(dir, entry.name))}` as never,
+      ),
+    onSuccess: () => {
+      showToast(t("files.deleted"), "success");
+      onChanged();
+    },
+    onError: (error) => {
+      setDeleting(null);
+      onError(error);
+    },
+  });
+
+  const download = useMutation({
+    mutationFn: (entry: DirEntry) =>
+      downloadFile(
+        `${apiPath(
+          "/communities/{community_id}/servers/{server_id}/files/download",
+          { community_id: communityId, server_id: serverId },
+        )}?path=${encodeURIComponent(joinPath(dir, entry.name))}`,
+        entry.name,
+      ),
+    onError,
+  });
+
+  if (listing.entries.length === 0) {
+    return <p className="sub">{t("files.empty")}</p>;
+  }
+
+  return (
+    <>
+      {listing.truncated && (
+        <div className="notice warn">{t("files.truncated")}</div>
+      )}
+      <ul className="file-list">
+        {listing.entries.map((entry) => {
+          const full = joinPath(dir, entry.name);
+          return (
+            <li
+              key={entry.name}
+              className={`file-row${openFile === full ? " active" : ""}`}
+            >
+              <button
+                type="button"
+                className="file-name"
+                onClick={() => onEnter(entry)}
+              >
+                {entry.is_dir ? "📁 " : "📄 "}
+                {entry.name}
+              </button>
+              <span className="file-actions">
+                {!entry.is_dir && (
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    onClick={() => download.mutate(entry)}
+                  >
+                    {t("files.download")}
+                  </button>
+                )}
+                {canEdit && (
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    onClick={() => setRenaming(entry)}
+                  >
+                    {t("files.rename")}
+                  </button>
+                )}
+                {canEdit && (
+                  <button
+                    type="button"
+                    className="btn sm ghost danger"
+                    onClick={() => setDeleting(entry)}
+                  >
+                    {t("files.delete")}
+                  </button>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      {renaming !== null && (
+        <RenameDialog
+          entry={renaming}
+          dir={dir}
+          communityId={communityId}
+          serverId={serverId}
+          onClose={() => setRenaming(null)}
+          onRenamed={() => {
+            setRenaming(null);
+            onChanged();
+          }}
+          onError={onError}
+        />
+      )}
+      <ConfirmDialog
+        open={deleting !== null}
+        title={t("files.delete.dialogTitle")}
+        body={t("files.delete.dialogBody")}
+        confirmPhrase={deleting?.name ?? ""}
+        confirmLabel={t("files.delete.confirm")}
+        promptLabel={t("files.delete.prompt")}
+        onConfirm={() => deleting !== null && remove.mutate(deleting)}
+        onClose={() => setDeleting(null)}
+      />
+    </>
+  );
+}
+
+// ── Viewer / editor ──────────────────────────────────────────────────────────
+
+function Viewer({
+  path,
+  communityId,
+  serverId,
+  canEdit,
+  running,
+  onError,
+}: {
+  path: string;
+  communityId: string;
+  serverId: string;
+  canEdit: boolean;
+  running: boolean;
+  onError: (error: unknown) => void;
+}) {
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  // `null` until the user edits, so an untouched view always reflects the
+  // server's content even after a save invalidates and refetches it.
+  const [draft, setDraft] = useState<string | null>(null);
+
+  const contentKey = ["files", "content", communityId, serverId, path];
+  const content = useQuery({
+    queryKey: contentKey,
+    queryFn: () =>
+      api.get(
+        `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
+      ) as Promise<FileContent>,
+  });
+
+  const save = useMutation({
+    mutationFn: (text: string) =>
+      api.put(
+        `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
+        { body: JSON.stringify({ content_base64: encodeUtf8Base64(text) }) },
+      ),
+    onSuccess: () => {
+      showToast(t("files.saved"), "success");
+      queryClient.invalidateQueries({ queryKey: contentKey });
+      setDraft(null);
+    },
+    onError,
+  });
+
+  if (content.isPending) {
+    return <p className="sub">{t("files.loading")}</p>;
+  }
+  if (content.isError) {
+    return <p className="field-error">{t("files.openError")}</p>;
+  }
+
+  const isText = isProbablyText(content.data.content_base64);
+  const downloadName = path.split("/").at(-1) ?? path;
+
+  return (
+    <>
+      <div className="file-viewer-head">
+        <span className="path">/{path}</span>
+        <span className="file-viewer-actions">
+          <button
+            type="button"
+            className="btn sm"
+            onClick={() =>
+              void downloadFile(
+                `${apiPath(
+                  "/communities/{community_id}/servers/{server_id}/files/download",
+                  { community_id: communityId, server_id: serverId },
+                )}?path=${encodeURIComponent(path)}`,
+                downloadName,
+              ).catch(onError)
+            }
+          >
+            {t("files.download")}
+          </button>
+          {isText && canEdit && (
+            <button
+              type="button"
+              className="btn sm primary"
+              disabled={draft === null || save.isPending}
+              onClick={() => draft !== null && save.mutate(draft)}
+            >
+              {t("files.save")}
+            </button>
+          )}
+        </span>
+      </div>
+      {isText ? (
+        <>
+          {running && canEdit && (
+            <p className="field-hint">{t("files.runningNotice")}</p>
+          )}
+          <textarea
+            className="file-editor"
+            spellCheck={false}
+            readOnly={!canEdit}
+            aria-label={t("files.editorLabel")}
+            value={draft ?? decodeBase64Utf8(content.data.content_base64)}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+        </>
+      ) : (
+        <p className="sub">{t("files.binary")}</p>
+      )}
+    </>
+  );
+}
+
+// ── Toolbar: upload + mkdir ──────────────────────────────────────────────────
+
+function Toolbar({
+  dir,
+  communityId,
+  serverId,
+  canEdit,
+  onChanged,
+  onError,
+}: {
+  dir: string;
+  communityId: string;
+  serverId: string;
+  canEdit: boolean;
+  onChanged: () => void;
+  onError: (error: unknown) => void;
+}) {
+  const { showToast } = useToast();
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [extract, setExtract] = useState(false);
+
+  const upload = useMutation({
+    mutationFn: (file: File) => {
+      const form = new FormData();
+      form.append("file", file);
+      return api.postForm(
+        `${apiPath(
+          "/communities/{community_id}/servers/{server_id}/files/upload",
+          { community_id: communityId, server_id: serverId },
+        )}?path=${encodeURIComponent(dir)}&extract=${extract}` as never,
+        form,
+      );
+    },
+    onSuccess: () => {
+      showToast(t("files.uploaded"), "success");
+      onChanged();
+    },
+    onError,
+  });
+
+  if (!canEdit) {
+    return null;
+  }
+
+  return (
+    <div className="toolbar-row files-toolbar">
+      <label className="files-extract">
+        <input
+          type="checkbox"
+          checked={extract}
+          onChange={(e) => setExtract(e.target.checked)}
+        />
+        {t("files.extractZip")}
+      </label>
+      <label className="btn sm file-upload">
+        {t("files.upload")}
+        <input
+          type="file"
+          hidden
+          aria-label={t("files.upload")}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file !== undefined) {
+              upload.mutate(file);
+            }
+            e.target.value = "";
+          }}
+        />
+      </label>
+      <button
+        type="button"
+        className="btn sm"
+        onClick={() => setMkdirOpen(true)}
+      >
+        {t("files.newFolder")}
+      </button>
+      {mkdirOpen && (
+        <MkdirDialog
+          dir={dir}
+          communityId={communityId}
+          serverId={serverId}
+          onClose={() => setMkdirOpen(false)}
+          onCreated={() => {
+            setMkdirOpen(false);
+            onChanged();
+          }}
+          onError={onError}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Mkdir / rename prompt dialogs ────────────────────────────────────────────
+
+function MkdirDialog({
+  dir,
+  communityId,
+  serverId,
+  onClose,
+  onCreated,
+  onError,
+}: {
+  dir: string;
+  communityId: string;
+  serverId: string;
+  onClose: () => void;
+  onCreated: () => void;
+  onError: (error: unknown) => void;
+}) {
+  const { showToast } = useToast();
+  const [name, setName] = useState("");
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.post(
+        `${apiPath(
+          "/communities/{community_id}/servers/{server_id}/files/directories",
+          { community_id: communityId, server_id: serverId },
+        )}?path=${encodeURIComponent(joinPath(dir, name.trim()))}` as never,
+      ),
+    onSuccess: () => {
+      showToast(t("files.folderCreated"), "success");
+      onCreated();
+    },
+    onError: (error) => {
+      onClose();
+      onError(error);
+    },
+  });
+
+  return (
+    <PromptDialog
+      title={t("files.newFolder")}
+      label={t("files.folderName")}
+      value={name}
+      onChange={setName}
+      confirmLabel={t("files.create")}
+      onConfirm={() => create.mutate()}
+      onClose={onClose}
+    />
+  );
+}
+
+function RenameDialog({
+  entry,
+  dir,
+  communityId,
+  serverId,
+  onClose,
+  onRenamed,
+  onError,
+}: {
+  entry: DirEntry;
+  dir: string;
+  communityId: string;
+  serverId: string;
+  onClose: () => void;
+  onRenamed: () => void;
+  onError: (error: unknown) => void;
+}) {
+  const { showToast } = useToast();
+  const [name, setName] = useState(entry.name);
+
+  const rename = useMutation({
+    mutationFn: () =>
+      api.post(
+        apiPath(
+          "/communities/{community_id}/servers/{server_id}/files/rename",
+          { community_id: communityId, server_id: serverId },
+        ),
+        {
+          body: JSON.stringify({
+            from: joinPath(dir, entry.name),
+            to: joinPath(dir, name.trim()),
+          }),
+        },
+      ),
+    onSuccess: () => {
+      showToast(t("files.renamed"), "success");
+      onRenamed();
+    },
+    onError: (error) => {
+      onClose();
+      onError(error);
+    },
+  });
+
+  return (
+    <PromptDialog
+      title={t("files.rename")}
+      label={t("files.newName")}
+      value={name}
+      onChange={setName}
+      confirmLabel={t("files.rename")}
+      onConfirm={() => rename.mutate()}
+      onClose={onClose}
+    />
+  );
+}
+
+/** A minimal single-text-field modal for mkdir / rename, on the shared Modal. */
+function PromptDialog({
+  title,
+  label,
+  value,
+  onChange,
+  confirmLabel,
+  onConfirm,
+  onClose,
+}: {
+  title: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal
+      open
+      title={title}
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="btn ghost" onClick={onClose}>
+            {t("common.cancel")}
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={value.trim().length === 0}
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </button>
+        </>
+      }
+    >
+      <label className="field">
+        {label}
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      </label>
+    </Modal>
+  );
+}

@@ -155,7 +155,7 @@ describe("ServerDetailPage scaffold + header", () => {
 
     await screen.findByText("survival");
     fireEvent.click(
-      screen.getByRole("tab", { name: t("serverDetail.tab.files") }),
+      screen.getByRole("tab", { name: t("serverDetail.tab.backups") }),
     );
     expect(
       screen.getByText(t("serverDetail.tabPlaceholder")),
