@@ -120,6 +120,100 @@ describe("admin communities list", () => {
   });
 });
 
+describe("admin communities owner picker", () => {
+  it("requests the user list with the API max page size", async () => {
+    let usersUrl: string | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/communities")
+        return Promise.resolve(jsonResponse(COMMUNITIES));
+      if (url.endsWith("/me/permissions"))
+        return Promise.resolve(jsonResponse({}));
+      if (url.startsWith("/users")) {
+        usersUrl = url;
+        return Promise.resolve(jsonResponse(USERS));
+      }
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderApp({ path: "/admin/communities" });
+
+    await screen.findByRole("table");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("admin.communities.provision") }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByRole("option", { name: /alice/ });
+
+    const params = new URL(usersUrl ?? "", "http://localhost").searchParams;
+    expect(params.get("limit")).toBe("100");
+    expect(params.get("offset")).toBe("0");
+  });
+
+  it("warns that the picker is truncated when more users exist than one page", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/communities")
+        return Promise.resolve(jsonResponse(COMMUNITIES));
+      if (url.endsWith("/me/permissions"))
+        return Promise.resolve(jsonResponse({}));
+      if (url.startsWith("/users"))
+        // 150 users in total but the page only returns the two stubbed here.
+        return Promise.resolve(jsonResponse({ ...USERS, total: 150 }));
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderApp({ path: "/admin/communities" });
+
+    await screen.findByRole("table");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("admin.communities.provision") }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByRole("option", { name: /alice/ });
+
+    // The hint names how many of the total are shown so the admin knows the
+    // picker is incomplete (2 loaded of 150). The counts and the surrounding
+    // copy are interleaved text nodes, so assert on the whole composed string.
+    const prefix = within(dialog).getByText(
+      t("admin.communities.usersTruncatedPrefix"),
+      { exact: false },
+    );
+    expect(prefix.textContent).toContain("2");
+    expect(prefix.textContent).toContain("150");
+  });
+
+  it("does not warn when the whole user list fits in one page", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/communities")
+        return Promise.resolve(jsonResponse(COMMUNITIES));
+      if (url.endsWith("/me/permissions"))
+        return Promise.resolve(jsonResponse({}));
+      if (url.startsWith("/users")) return Promise.resolve(jsonResponse(USERS));
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderApp({ path: "/admin/communities" });
+
+    await screen.findByRole("table");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("admin.communities.provision") }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByRole("option", { name: /alice/ });
+
+    expect(
+      within(dialog).queryByText(t("admin.communities.usersTruncatedPrefix"), {
+        exact: false,
+      }),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("admin communities provisioning", () => {
   it("sends name + owner_user_id and invalidates the communities list", async () => {
     let communitiesCalls = 0;

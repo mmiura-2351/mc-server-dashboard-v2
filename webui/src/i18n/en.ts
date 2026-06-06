@@ -821,6 +821,12 @@ export const en = {
   "admin.communities.ownerHint":
     "The owner gets the preset Owner role (all community permissions).",
   "admin.communities.usersLoadError": "Could not load the user list.",
+  // Truncation hint composed around the loaded/total counts, e.g.
+  // "Showing the first 100 of 150 users." The owner picker requests the API
+  // max page (100); when more accounts exist the later ones are omitted.
+  "admin.communities.usersTruncatedPrefix": "Showing the first ",
+  "admin.communities.usersTruncatedMid": " of ",
+  "admin.communities.usersTruncatedSuffix": " users.",
   "admin.communities.provisioned": "Community provisioned.",
   "admin.communities.errNameRequired": "Enter a community name.",
   "admin.communities.errOwnerRequired": "Select an initial owner.",

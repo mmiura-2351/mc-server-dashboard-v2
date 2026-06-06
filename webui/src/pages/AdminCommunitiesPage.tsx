@@ -123,11 +123,14 @@ function ProvisionDialog({
   const [error, setError] = useState<string | null>(null);
 
   // Owner picker source: GET /users is the only listing endpoint (admin-only,
-  // paginated). The provision API takes a user UUID, so the picker shows
-  // username/email and submits the selected user's id. Only fetched while open.
+  // paginated; max limit=100, default 50 — admin_users.py). The provision API
+  // takes a user UUID, so the picker shows username/email and submits the
+  // selected user's id. Request the max page so deployments with >50 accounts
+  // are not silently truncated; when total exceeds it we surface a hint below.
+  // Only fetched while open.
   const users = useQuery({
     queryKey: ["users"],
-    queryFn: () => api.get("/users", { method: "GET" }),
+    queryFn: () => api.get("/users?limit=100&offset=0" as "/users"),
     enabled: open,
   });
 
@@ -166,6 +169,10 @@ function ProvisionDialog({
   };
 
   const userList: AdminUserResponse[] = users.data?.users ?? [];
+  // The API caps the page at 100; if more accounts exist, the owner picker is
+  // incomplete — say so rather than silently omitting the later users (#476).
+  const userTotal = users.data?.total ?? 0;
+  const usersTruncated = userTotal > userList.length;
 
   return (
     <Modal
@@ -213,6 +220,15 @@ function ProvisionDialog({
         </select>
       </label>
       <div className="hint">{t("admin.communities.ownerHint")}</div>
+      {usersTruncated && (
+        <div className="hint">
+          {t("admin.communities.usersTruncatedPrefix")}
+          {userList.length}
+          {t("admin.communities.usersTruncatedMid")}
+          {userTotal}
+          {t("admin.communities.usersTruncatedSuffix")}
+        </div>
+      )}
       {users.isError && (
         <span className="field-error">
           {t("admin.communities.usersLoadError")}
