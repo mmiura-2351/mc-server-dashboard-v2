@@ -42,7 +42,53 @@ Run from this directory (`webui/`):
 | Regenerate API client | `npm run openapi` |
 
 `npm run check` aggregates lint + typecheck + test + build — the single entry
-point later repo integration hooks into.
+point later repo integration hooks into. The Vitest unit suite (`npm run test`)
+covers `src/`; the Playwright E2E suite (below) is a separate, slower path that
+is **not** part of `npm run check` or `make check`.
+
+## End-to-end tests (Playwright)
+
+The E2E suite (`webui/e2e/`) drives the real UI in a browser against a **real
+API + Postgres** over the critical flows — register/login/session/logout, admin
+community provisioning, the server-create wizard, and community member +
+role management. Chromium only for the first cut.
+
+The honest cheap setup: the suite runs against the Vite **dev** server (so the
+dev-server proxy keeps the browser same-origin with the API, exactly as
+production does), with the API booted against a throwaway Postgres, migrated,
+and seeded with a platform admin.
+
+One-time browser install:
+
+```sh
+npx playwright install chromium
+```
+
+Run the whole suite from the repo root (boots Postgres via Docker, the API, the
+admin, and the browser, then tears it all down):
+
+```sh
+make webui-e2e
+```
+
+Pass extra `playwright test` args through `ARGS`, e.g. a single spec or the
+Playwright UI:
+
+```sh
+make webui-e2e ARGS=auth.spec.ts
+make webui-e2e ARGS=--ui
+```
+
+Notes:
+
+- No worker runs in the harness, so a created server parks unassigned/stopped —
+  the suite asserts creation + card rendering, not a running state.
+- The server-create flow reads the real version catalog (Mojang/PaperMC/…); the
+  API has no offline catalog seam, so that flow needs network to those
+  manifests, the same dependency the API has in production.
+- Override the API the UI proxies to with `MCD_E2E_API_URL`; the orchestration
+  knobs (`MCD_E2E_API_PORT`, `MCD_E2E_PG_PORT`, `MCD_E2E_REUSE_DB` +
+  `MCD_E2E_DATABASE_URL`) are documented in `scripts/run_webui_e2e.sh`.
 
 ## API client
 

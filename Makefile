@@ -12,7 +12,7 @@
 .PHONY: all check lint format test docs-check \
 	api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race \
-	webui-lint webui-format webui-test webui-build \
+	webui-lint webui-format webui-test webui-build webui-e2e \
 	proto-lint proto-gen proto-check proto-breaking \
 	bootstrap hooks-install
 
@@ -124,6 +124,15 @@ webui-test:
 
 webui-build:
 	cd webui && npm run build
+
+# Playwright E2E over the critical flows against a real API + Postgres (issue
+# #491). Deliberately NOT part of `make check` — it is the slow path: it boots
+# Postgres (Docker), the API, a seeded admin, and a browser. The orchestration
+# script brings the stack up and tears it down; extra args pass through to
+# `playwright test` (e.g. `make webui-e2e ARGS=auth.spec.ts`). Browsers must be
+# installed once: `cd webui && npx playwright install chromium`.
+webui-e2e:
+	scripts/run_webui_e2e.sh $(ARGS)
 
 # Install the pinned golangci-lint into worker/.bin if it is missing.
 $(GOLANGCI):
