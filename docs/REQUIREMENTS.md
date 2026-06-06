@@ -69,10 +69,12 @@ can be added later without a rewrite:
 
 ### 1.2 Repository topology
 
-The system ships as a **monorepo** containing `api/`, `worker/`, and a shared
-`proto/` package (the gRPC/protobuf control-plane contract). A single repo keeps
-the API and Worker in lock-step on the shared protocol so a contract change and
-both sides land in one change set.
+The system ships as a **monorepo** containing `api/`, `worker/`, a shared
+`proto/` package (the gRPC/protobuf control-plane contract), and `webui/` (the
+Web UI, added with the UI milestone — see docs/ui/WEBUI_SPEC.md). A single repo
+keeps the API and Worker in lock-step on the shared protocol so a contract
+change and both sides land in one change set, and keeps the UI in lock-step
+with the API surface it consumes.
 
 ---
 
@@ -97,8 +99,9 @@ both sides land in one change set.
 
 M2's theme is **the use-case-enabling foundation**: every intended user use case
 can be executed end-to-end through the API. The Web UI is a separate track that
-consumes this API surface — it is not built here (the UI lives in a separate
-repository; this document covers the API + Worker).
+consumes this API surface — it is not part of M2's pillars (which cover the
+API + Worker) and lives in `webui/` in this monorepo (see Section 1.2; design
+in docs/ui/WEBUI_SPEC.md).
 
 M2 is organized as four pillars, each tracked by an epic:
 
@@ -561,7 +564,8 @@ These need design-level decisions but do not change the requirements:
 - Storage adapter contracts (fs / remote-fs / object) and the atomic snapshot
   publish mechanism (FR-DATA-6).
 - Version/JAR source adapters and Java runtime selection per server type.
-- The web UI (separate repository) adaptation to the v2 API.
+- The web UI (`webui/` in this monorepo) adaptation to the v2 API
+  (docs/ui/WEBUI_SPEC.md).
 
 ---
 
