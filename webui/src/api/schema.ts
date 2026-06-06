@@ -1983,6 +1983,14 @@ export interface components {
             server_type: string;
         };
         /**
+         * ServerTypesResponse
+         * @description The server types the catalog can resolve at M1 (issue #286).
+         */
+        ServerTypesResponse: {
+            /** Server Types */
+            server_types: string[];
+        };
+        /**
          * TokenResponse
          * @description An issued access + refresh pair. ``token_type`` is the OAuth2 bearer hint.
          */
@@ -2059,6 +2067,14 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /**
+         * VersionsResponse
+         * @description The versions offered for a server type (issue #286).
+         */
+        VersionsResponse: {
+            /** Versions */
+            versions: string[];
         };
         /** WorkerResponse */
         WorkerResponse: {
@@ -4719,9 +4735,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string[];
-                    };
+                    "application/json": components["schemas"]["ServerTypesResponse"];
                 };
             };
         };
@@ -4814,9 +4828,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string[];
-                    };
+                    "application/json": components["schemas"]["VersionsResponse"];
                 };
             };
             /** @description Validation Error */
