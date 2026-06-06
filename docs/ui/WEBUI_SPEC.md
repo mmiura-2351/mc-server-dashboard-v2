@@ -68,7 +68,7 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 | GET / POST | `/communities/{cid}/grants` | List (`?user_id=` filter) / create per-resource grant. `resource_type` = `server` only; permission families `server:*`, `file:*`, `backup:*`. |
 | DELETE | `/communities/{cid}/grants/{gid}` | Revoke. |
 
-Permission catalog (community axis, 29 codes — the role/grant editor's source
+Permission catalog (community axis, 30 codes — the role/grant editor's source
 of truth): `server:{create,read,update,delete,start,stop,restart,command}`,
 `file:{read,edit,history,rollback}`, `backup:{create,read,restore,delete,schedule}`,
 `member:{read,add,remove}`, `role:{read,manage}`, `grant:{read,manage}`,
@@ -187,7 +187,7 @@ restore (stopped-only, guarded confirm), delete.
 to servers, per-server attached-group view.
 
 **Membership & access** — members list/add/remove, role assign/unassign,
-role editor over the 29-code catalog, per-server grants editor.
+role editor over the 30-code catalog, per-server grants editor.
 
 **Audit** — community audit log w/ filters; global audit (admin).
 
