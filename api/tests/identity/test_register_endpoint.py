@@ -19,6 +19,8 @@ from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
     PasswordPolicyError,
+    RegistrationDisabledError,
+    RegistrationThrottledError,
     UsernameAlreadyExistsError,
 )
 from mc_server_dashboard_api.identity.domain.value_objects import (
@@ -36,7 +38,9 @@ class _FakeRegisterUser:
         self._error = error
         self.calls: list[dict[str, str]] = []
 
-    async def __call__(self, *, username: str, email: str, password: str) -> User:
+    async def __call__(
+        self, *, username: str, email: str, password: str, ip: str | None = None
+    ) -> User:
         self.calls.append({"username": username, "email": email, "password": password})
         if self._error is not None:
             raise self._error
@@ -115,6 +119,36 @@ def test_register_duplicate_email_returns_409() -> None:
         },
     )
     assert resp.status_code == 409
+
+
+def test_register_disabled_returns_403() -> None:
+    fake = _FakeRegisterUser(error=RegistrationDisabledError())
+    client = next(_client(fake))
+    resp = client.post(
+        "/users",
+        json={
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": _VALID_PASSWORD,
+        },
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["reason"] == "registration_disabled"
+
+
+def test_register_throttled_returns_429() -> None:
+    fake = _FakeRegisterUser(error=RegistrationThrottledError())
+    client = next(_client(fake))
+    resp = client.post(
+        "/users",
+        json={
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": _VALID_PASSWORD,
+        },
+    )
+    assert resp.status_code == 429
+    assert resp.json()["detail"]["reason"] == "registration_throttled"
 
 
 def test_register_weak_password_returns_422_with_reason_no_echo() -> None:

@@ -28,6 +28,14 @@ from mc_server_dashboard_api.identity.domain.login_attempt_store import (
     LoginAttemptStore,
 )
 
+# Marker stored in ``login_attempt.failure_reason`` on a registration row so its
+# per-IP count is isolated from the login per-username/per-IP *failure* counts
+# (issue #362). Registration rows carry ``success=True`` so they are invisible to
+# ``count_*_failures`` (which filter ``success=False``); this marker is the extra
+# discriminator ``count_ip_registrations`` selects on. An adapter-private storage
+# detail of how the shared table is reused.
+_REGISTRATION_REASON = "registration"
+
 
 class SqlAlchemyLoginAttemptStore(LoginAttemptStore):
     """:class:`LoginAttemptStore` adapter over an async-SQLAlchemy session factory."""
@@ -79,6 +87,36 @@ class SqlAlchemyLoginAttemptStore(LoginAttemptStore):
                 .where(
                     LoginAttemptModel.ip == ip,
                     LoginAttemptModel.success.is_(False),
+                    LoginAttemptModel.created_at >= since,
+                )
+            )
+            return (await session.execute(stmt)).scalar_one()
+
+    async def record_registration(self, *, ip: str, at: dt.datetime) -> None:
+        # Stored with ``success=True`` (not a login failure) and the registration
+        # marker so it never feeds the login failure counts (issue #362). The
+        # ``username`` column is non-nullable, so the empty string stands in -- a
+        # registration row keys on ``ip`` alone.
+        async with self._session_factory() as session:
+            session.add(
+                LoginAttemptModel(
+                    username="",
+                    ip=ip,
+                    success=True,
+                    failure_reason=_REGISTRATION_REASON,
+                    created_at=at,
+                )
+            )
+            await session.commit()
+
+    async def count_ip_registrations(self, ip: str, *, since: dt.datetime) -> int:
+        async with self._session_factory() as session:
+            stmt = (
+                select(func.count())
+                .select_from(LoginAttemptModel)
+                .where(
+                    LoginAttemptModel.ip == ip,
+                    LoginAttemptModel.failure_reason == _REGISTRATION_REASON,
                     LoginAttemptModel.created_at >= since,
                 )
             )

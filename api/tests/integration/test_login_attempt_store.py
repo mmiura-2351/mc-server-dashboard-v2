@@ -119,6 +119,40 @@ async def test_count_ip_failures_within_window(engine: AsyncEngine) -> None:
     assert count == 2
 
 
+async def test_count_ip_registrations_within_window(engine: AsyncEngine) -> None:
+    store = _store(engine)
+    await store.record_registration(ip="10.0.0.9", at=_NOW)
+    await store.record_registration(ip="10.0.0.9", at=_NOW)
+    await store.record_registration(ip="10.0.0.8", at=_NOW)
+    # An out-of-window registration must not be counted.
+    await store.record_registration(ip="10.0.0.9", at=_NOW - dt.timedelta(hours=2))
+
+    count = await store.count_ip_registrations(
+        "10.0.0.9", since=_NOW - dt.timedelta(hours=1)
+    )
+    assert count == 2
+
+
+async def test_registration_rows_isolated_from_login_failure_counts(
+    engine: AsyncEngine,
+) -> None:
+    # Registration rows share the table but must never feed the login per-IP
+    # failure count, and login failures must never feed the registration count
+    # (issue #362).
+    store = _store(engine)
+    await store.record_registration(ip="10.0.0.7", at=_NOW)
+    await _record(store, username="alice", ip="10.0.0.7", success=False, at=_NOW)
+
+    ip_failures = await store.count_ip_failures(
+        "10.0.0.7", since=_NOW - dt.timedelta(hours=1)
+    )
+    registrations = await store.count_ip_registrations(
+        "10.0.0.7", since=_NOW - dt.timedelta(hours=1)
+    )
+    assert ip_failures == 1
+    assert registrations == 1
+
+
 async def test_lock_upserts_and_get_reads_back(engine: AsyncEngine) -> None:
     store = _store(engine)
     until = _NOW + dt.timedelta(minutes=15)

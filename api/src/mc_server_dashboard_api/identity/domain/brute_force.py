@@ -17,6 +17,8 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.identity.domain.registration import RegistrationConfig
+
 
 @dataclass(frozen=True)
 class BruteForceConfig:
@@ -38,17 +40,30 @@ def is_locked(locked_until: dt.datetime | None, *, now: dt.datetime) -> bool:
     return locked_until is not None and locked_until > now
 
 
-def prune_horizon(config: BruteForceConfig) -> dt.timedelta:
+def prune_horizon(
+    config: BruteForceConfig,
+    registration: RegistrationConfig | None = None,
+) -> dt.timedelta:
     """Oldest age a ``login_attempt`` row can still be relevant (Section 3).
 
     The sliding-window counts never look further back than the longest window, so
     a row older than that can never affect a decision. Both prune triggers — the
     on-success prune in the login use case and the periodic prune loop — delete
-    rows older than ``now - prune_horizon(config)``; sharing this one computation
+    rows older than ``now - prune_horizon(...)``; sharing this one computation
     keeps the bound identical between them.
+
+    Registration per-IP rows (issue #362) share the ``login_attempt`` table but
+    are counted over the *registration* per-IP window, which can outlast both
+    login windows. When the registration cap is enabled its window is folded in
+    so those rows survive their full window — otherwise a blanket prune at the
+    login horizon would silently shrink the registration cap. A disabled cap (or
+    no registration config) records no such rows, so it does not widen the bound.
     """
 
-    return max(config.username_window, config.ip_window)
+    horizon = max(config.username_window, config.ip_window)
+    if registration is not None and registration.ip_limit_enabled:
+        horizon = max(horizon, registration.ip_window)
+    return horizon
 
 
 def backoff_duration(

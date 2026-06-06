@@ -17,10 +17,13 @@ from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
     PasswordPolicyError,
+    RegistrationDisabledError,
+    RegistrationThrottledError,
     UsernameAlreadyExistsError,
 )
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
+from mc_server_dashboard_api.identity.domain.registration import RegistrationConfig
 from mc_server_dashboard_api.identity.domain.repositories import (
     RefreshTokenRepository,
     UserRepository,
@@ -31,6 +34,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId,
     Username,
 )
+from tests.identity.fakes import FakeLoginAttemptStore
 
 _VALID_PASSWORD = "Wm7!qz#Lp2vT"
 
@@ -214,3 +218,147 @@ async def test_rejects_duplicate_email_precheck() -> None:
             username="alice", email="alice@example.com", password=_VALID_PASSWORD
         )
     assert users.added == []
+
+
+_NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
+
+
+def _registration_config(
+    *,
+    open: bool = True,
+    ip_limit_enabled: bool = True,
+    ip_threshold: int = 3,
+    ip_window: dt.timedelta = dt.timedelta(hours=1),
+) -> RegistrationConfig:
+    return RegistrationConfig(
+        open=open,
+        ip_limit_enabled=ip_limit_enabled,
+        ip_threshold=ip_threshold,
+        ip_window=ip_window,
+    )
+
+
+def _register_guarded(
+    users: _FakeUserRepository,
+    attempts: FakeLoginAttemptStore,
+    *,
+    registration: RegistrationConfig,
+) -> RegisterUser:
+    return RegisterUser(
+        uow=_FakeUnitOfWork(users),
+        hasher=_StubHasher(),
+        clock=_FixedClock(),
+        policy=_policy(),
+        attempts=attempts,
+        registration=registration,
+    )
+
+
+async def test_rejects_when_open_registration_disabled() -> None:
+    users = _FakeUserRepository()
+    attempts = FakeLoginAttemptStore()
+    use_case = _register_guarded(
+        users, attempts, registration=_registration_config(open=False)
+    )
+
+    with pytest.raises(RegistrationDisabledError):
+        await use_case(
+            username="alice",
+            email="alice@example.com",
+            password=_VALID_PASSWORD,
+            ip="203.0.113.7",
+        )
+
+    assert users.added == []
+    # A closed endpoint records nothing -- the request never reached the counter.
+    assert attempts.attempts == []
+
+
+async def test_records_registration_attempt_per_ip() -> None:
+    users = _FakeUserRepository()
+    attempts = FakeLoginAttemptStore()
+    use_case = _register_guarded(users, attempts, registration=_registration_config())
+
+    await use_case(
+        username="alice",
+        email="alice@example.com",
+        password=_VALID_PASSWORD,
+        ip="203.0.113.7",
+    )
+
+    assert await attempts.count_ip_registrations("203.0.113.7", since=_NOW) == 1
+    assert users.added != []
+
+
+async def test_throttles_registration_over_ip_threshold() -> None:
+    users = _FakeUserRepository()
+    attempts = FakeLoginAttemptStore()
+    # Pre-load the window to the threshold so the next attempt is over the cap.
+    for _ in range(3):
+        await attempts.record_registration(ip="203.0.113.7", at=_NOW)
+    use_case = _register_guarded(
+        users, attempts, registration=_registration_config(ip_threshold=3)
+    )
+
+    with pytest.raises(RegistrationThrottledError):
+        await use_case(
+            username="alice",
+            email="alice@example.com",
+            password=_VALID_PASSWORD,
+            ip="203.0.113.7",
+        )
+
+    # Throttled before any user row is created.
+    assert users.added == []
+
+
+async def test_throttle_is_per_ip_not_global() -> None:
+    users = _FakeUserRepository()
+    attempts = FakeLoginAttemptStore()
+    for _ in range(3):
+        await attempts.record_registration(ip="203.0.113.7", at=_NOW)
+    use_case = _register_guarded(
+        users, attempts, registration=_registration_config(ip_threshold=3)
+    )
+
+    # A different IP is unaffected by the first IP's history.
+    user = await use_case(
+        username="alice",
+        email="alice@example.com",
+        password=_VALID_PASSWORD,
+        ip="198.51.100.4",
+    )
+
+    assert user.username.value == "alice"
+
+
+async def test_no_ip_skips_throttle_and_counter() -> None:
+    # No trustworthy client IP (e.g. unknown peer): the per-IP path is skipped,
+    # mirroring the login per-IP counter (SECURITY.md Section 4).
+    users = _FakeUserRepository()
+    attempts = FakeLoginAttemptStore()
+    use_case = _register_guarded(users, attempts, registration=_registration_config())
+
+    user = await use_case(
+        username="alice", email="alice@example.com", password=_VALID_PASSWORD, ip=None
+    )
+
+    assert user.username.value == "alice"
+    assert attempts.attempts == []
+
+
+async def test_ip_limit_disabled_skips_counter() -> None:
+    users = _FakeUserRepository()
+    attempts = FakeLoginAttemptStore()
+    use_case = _register_guarded(
+        users, attempts, registration=_registration_config(ip_limit_enabled=False)
+    )
+
+    await use_case(
+        username="alice",
+        email="alice@example.com",
+        password=_VALID_PASSWORD,
+        ip="203.0.113.7",
+    )
+
+    assert attempts.attempts == []
