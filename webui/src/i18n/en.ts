@@ -803,6 +803,39 @@ export const en = {
   "admin.overview.fleetLoad": "Load",
   "admin.overview.fleetHeartbeat": "Heartbeat",
   "admin.overview.fleetEmpty": "No workers registered.",
+  "admin.versions.subtitle":
+    "Version catalog and the shared JAR cache — platform administrators only",
+  "admin.versions.loading": "Loading version catalog…",
+  "admin.versions.loadError": "Could not load the version catalog.",
+  "admin.versions.catalog": "Server type catalog",
+  "admin.versions.refreshAll": "Refresh all catalogs",
+  "admin.versions.refresh": "Refresh",
+  "admin.versions.refreshing": "Refreshing…",
+  "admin.versions.type": "Server type",
+  "admin.versions.count": "Versions",
+  "admin.versions.latest": "Latest",
+  "admin.versions.empty": "No server types catalogued.",
+  "admin.versions.typeError": "unavailable",
+  "admin.versions.refreshedAll":
+    "Catalogs invalidated; listings refetch on next read.",
+  // Composed with the server type, e.g. "Refreshed catalog: paper".
+  "admin.versions.refreshedOne": "Refreshed catalog: ",
+  "admin.versions.refreshError": "Could not refresh the catalog.",
+  "admin.versions.jarPool": "JAR pool",
+  "admin.versions.jarPoolCached": "Cached JARs",
+  "admin.versions.jarPoolSize": "Total size",
+  "admin.versions.gc": "Run garbage collection",
+  "admin.versions.gcRunning": "Running…",
+  "admin.versions.gcHint": "Removes JARs no longer referenced by any server.",
+  "admin.versions.gcDialog.title": "Run JAR-pool garbage collection?",
+  "admin.versions.gcDialog.body":
+    "This deletes pooled JARs that no live server references. Unreferenced JARs are re-downloaded on demand.",
+  "admin.versions.gcDialog.confirm": "Run GC",
+  // Composed with freed bytes + deleted count, e.g. "Reclaimed 412 MiB across 3 JARs.".
+  "admin.versions.gcDoneReclaimed": "Reclaimed ",
+  "admin.versions.gcDoneAcross": " across ",
+  "admin.versions.gcDoneJars": " JARs.",
+  "admin.versions.gcError": "Garbage collection failed.",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",

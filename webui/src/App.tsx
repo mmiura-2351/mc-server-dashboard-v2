@@ -6,6 +6,7 @@ import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
 import { AccountPage } from "./pages/AccountPage.tsx";
 import { AdminOverviewPage } from "./pages/AdminOverviewPage.tsx";
+import { AdminVersionsPage } from "./pages/AdminVersionsPage.tsx";
 import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
@@ -157,10 +158,7 @@ export function App() {
               path="/admin/workers"
               element={<PlaceholderPage titleKey="page.adminWorkers" />}
             />
-            <Route
-              path="/admin/versions"
-              element={<PlaceholderPage titleKey="page.adminVersions" />}
-            />
+            <Route path="/admin/versions" element={<AdminVersionsPage />} />
             <Route
               path="/admin/audit"
               element={<PlaceholderPage titleKey="page.adminAudit" />}
