@@ -76,6 +76,7 @@ export function AccountPage() {
     <Loaded
       user={userQuery.data}
       communities={communitiesQuery.data ?? []}
+      communitiesError={communitiesQuery.isError}
       showToast={showToast}
     />
   );
@@ -84,10 +85,16 @@ export function AccountPage() {
 interface LoadedProps {
   user: UserResponse;
   communities: CommunityResponse[];
+  communitiesError: boolean;
   showToast: (message: string, variant: "success" | "error") => void;
 }
 
-function Loaded({ user, communities, showToast }: LoadedProps) {
+function Loaded({
+  user,
+  communities,
+  communitiesError,
+  showToast,
+}: LoadedProps) {
   const { logout } = useSession();
   const queryClient = useQueryClient();
 
@@ -113,7 +120,10 @@ function Loaded({ user, communities, showToast }: LoadedProps) {
         }}
       />
       <PasswordSection showToast={showToast} />
-      <MembershipsSection communities={communities} />
+      <MembershipsSection
+        communities={communities}
+        isError={communitiesError}
+      />
       <DangerZone user={user} showToast={showToast} onDeleted={logout} />
     </div>
   );
@@ -266,13 +276,17 @@ function PasswordSection({
 
 function MembershipsSection({
   communities,
+  isError,
 }: {
   communities: CommunityResponse[];
+  isError: boolean;
 }) {
   return (
     <div className="card">
       <h2>{t("account.memberships.heading")}</h2>
-      {communities.length === 0 ? (
+      {isError ? (
+        <p className="field-error">{t("account.memberships.loadError")}</p>
+      ) : communities.length === 0 ? (
         <p className="sub">{t("account.memberships.none")}</p>
       ) : (
         <table className="data">

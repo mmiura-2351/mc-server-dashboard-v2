@@ -352,11 +352,11 @@
 .account .form-row .field {
   flex: 1;
 }
-.field .field-error {
+.account .field-error {
   color: var(--red);
   font-size: 12px;
 }
-.field .field-hint {
+.account .field-hint {
   color: var(--text-faint);
   font-size: 12px;
 }

@@ -87,6 +87,24 @@ describe("AccountPage profile", () => {
     expect(screen.getByText("Dev Playground")).toBeInTheDocument();
   });
 
+  it("surfaces a memberships load failure instead of the empty state", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === "/users/me") return Promise.resolve(me);
+      if (path === "/communities")
+        return Promise.reject(new ApiError(500, { reason: "server_error" }));
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+    renderPage();
+    await waitForLoaded();
+
+    expect(
+      await screen.findByText(t("account.memberships.loadError")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("account.memberships.none")),
+    ).not.toBeInTheDocument();
+  });
+
   it("saves profile edits and shows a success toast", async () => {
     mockApi.patch.mockResolvedValue({ ...me, username: "miura2" });
     renderPage();

@@ -87,6 +87,8 @@ export const en = {
   "account.memberships.heading": "Memberships",
   "account.memberships.community": "Community",
   "account.memberships.none": "You are not a member of any community yet.",
+  "account.memberships.loadError":
+    "Could not load your memberships. Try refreshing.",
 
   "account.delete.heading": "Danger zone",
   "account.delete.label": "Delete account",
