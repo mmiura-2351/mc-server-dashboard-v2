@@ -21,7 +21,12 @@ from mc_server_dashboard_api.core.adapters.database import create_session_factor
 from mc_server_dashboard_api.identity.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
-from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
+from mc_server_dashboard_api.identity.domain.entities import (
+    REVOKED_FAMILY,
+    REVOKED_ROTATED,
+    RefreshToken,
+    User,
+)
 from mc_server_dashboard_api.identity.domain.errors import (
     UsernameAlreadyExistsError,
 )
@@ -209,13 +214,18 @@ async def test_revoke_marks_token_revoked(engine: AsyncEngine) -> None:
 
     revoked_at = _NOW + dt.timedelta(hours=1)
     async with SqlAlchemyUnitOfWork(factory) as uow:
-        await uow.refresh_tokens.revoke("to-revoke", revoked_at=revoked_at)
+        await uow.refresh_tokens.revoke(
+            "to-revoke", revoked_at=revoked_at, reason=REVOKED_ROTATED
+        )
         await uow.commit()
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
         loaded = await uow.refresh_tokens.get_by_token_hash("to-revoke")
     assert loaded is not None
     assert loaded.revoked_at == revoked_at
+    # The revocation cause round-trips so the reuse grace can distinguish a
+    # rotated predecessor from a family / logout revoke (issue #369).
+    assert loaded.revoked_reason == REVOKED_ROTATED
     assert loaded.is_active(now=_NOW + dt.timedelta(hours=2)) is False
 
 
@@ -257,6 +267,9 @@ async def test_revoke_all_for_user_revokes_only_active_tokens(
         loaded_active = await uow.refresh_tokens.get_by_token_hash("active")
         loaded_revoked = await uow.refresh_tokens.get_by_token_hash("revoked")
     assert loaded_active is not None and loaded_active.revoked_at == sweep_at
+    # A family revoke stamps the cause so the swept token is never graceable in
+    # the reuse window (issue #369).
+    assert loaded_active.revoked_reason == REVOKED_FAMILY
     # An already-revoked token keeps its original timestamp (only active swept).
     assert loaded_revoked is not None
     assert loaded_revoked.revoked_at == already_revoked_at

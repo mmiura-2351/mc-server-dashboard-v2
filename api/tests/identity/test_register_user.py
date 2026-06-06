@@ -90,7 +90,9 @@ class _FakeRefreshTokenRepository(RefreshTokenRepository):
     async def get_by_token_hash(self, token_hash: str) -> RefreshToken | None:
         raise NotImplementedError
 
-    async def revoke(self, token_hash: str, *, revoked_at: dt.datetime) -> None:
+    async def revoke(
+        self, token_hash: str, *, revoked_at: dt.datetime, reason: str
+    ) -> None:
         raise NotImplementedError
 
     async def revoke_all_for_user(

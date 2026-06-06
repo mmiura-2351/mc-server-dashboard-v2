@@ -14,7 +14,11 @@ from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.community_ownership import (
     CommunityOwnership,
 )
-from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
+from mc_server_dashboard_api.identity.domain.entities import (
+    REVOKED_FAMILY,
+    RefreshToken,
+    User,
+)
 from mc_server_dashboard_api.identity.domain.login_attempt_store import (
     Lockout,
     LoginAttemptStore,
@@ -121,20 +125,26 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
     async def get_by_token_hash(self, token_hash: str) -> RefreshToken | None:
         return self.by_hash.get(token_hash)
 
-    async def revoke(self, token_hash: str, *, revoked_at: dt.datetime) -> None:
+    async def revoke(
+        self, token_hash: str, *, revoked_at: dt.datetime, reason: str
+    ) -> None:
         existing = self.by_hash.get(token_hash)
         if existing is not None:
-            self.by_hash[token_hash] = _with_revoked(existing, revoked_at)
+            self.by_hash[token_hash] = _with_revoked(existing, revoked_at, reason)
 
     async def revoke_all_for_user(
         self, user_id: UserId, *, revoked_at: dt.datetime
     ) -> None:
         for token_hash, token in list(self.by_hash.items()):
             if token.user_id == user_id and token.revoked_at is None:
-                self.by_hash[token_hash] = _with_revoked(token, revoked_at)
+                self.by_hash[token_hash] = _with_revoked(
+                    token, revoked_at, REVOKED_FAMILY
+                )
 
 
-def _with_revoked(token: RefreshToken, revoked_at: dt.datetime) -> RefreshToken:
+def _with_revoked(
+    token: RefreshToken, revoked_at: dt.datetime, reason: str
+) -> RefreshToken:
     return RefreshToken(
         id=token.id,
         user_id=token.user_id,
@@ -142,6 +152,7 @@ def _with_revoked(token: RefreshToken, revoked_at: dt.datetime) -> RefreshToken:
         issued_at=token.issued_at,
         expires_at=token.expires_at,
         revoked_at=revoked_at,
+        revoked_reason=reason,
     )
 
 

@@ -211,7 +211,10 @@ def test_token_algorithm_rejects_miscased_value(
         load_settings(config_file=cfg)
 
 
-@pytest.mark.parametrize("field", ["access_ttl_seconds", "refresh_ttl_seconds"])
+@pytest.mark.parametrize(
+    "field",
+    ["access_ttl_seconds", "refresh_ttl_seconds", "refresh_reuse_grace_seconds"],
+)
 def test_token_ttl_must_be_positive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
 ) -> None:
@@ -454,6 +457,8 @@ def test_token_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.auth.token.signing_key is None
     assert settings.auth.token.access_ttl_seconds == 900
     assert settings.auth.token.refresh_ttl_seconds == 1209600
+    # Reuse grace window (issue #369) defaults to 60 s.
+    assert settings.auth.token.refresh_reuse_grace_seconds == 60
     # Refresh-cookie transport (issue #363): name + Secure flag default safely.
     assert settings.auth.token.refresh_cookie_name == "mcd_refresh"
     assert settings.auth.token.refresh_cookie_secure is True

@@ -192,10 +192,17 @@ revocation/expiry record.
 | `issued_at` | timestamptz | |
 | `expires_at` | timestamptz | |
 | `revoked_at` | timestamptz nullable | set on logout; non-null ⇒ invalid |
+| `revoked_reason` | text nullable | why revoked (`rotated` / `family` / `logout`); null exactly when `revoked_at` is null |
 
 Constraints: `UNIQUE(token_hash)`. Index on `(user_id)` for "revoke all sessions"
 and a partial index on `expires_at` for expiry sweeps. A token is valid iff
 `revoked_at IS NULL AND expires_at > now()`.
+
+`revoked_reason` records the *cause* so the refresh-token reuse grace window
+(issue #369) can grace only a `rotated` predecessor (a legitimate concurrent
+refresh / lost-response retry): a `family`- or `logout`-revoked token is never
+re-issued, so an attacker cannot escape a family revoke by re-presenting a
+just-revoked successor inside the window.
 
 ---
 

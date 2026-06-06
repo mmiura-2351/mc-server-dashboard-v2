@@ -770,6 +770,9 @@ def get_refresh_session(request: Request) -> RefreshSession:
         tokens=_build_token_service(settings.auth.token, clock),
         clock=clock,
         refresh_ttl=dt.timedelta(seconds=settings.auth.token.refresh_ttl_seconds),
+        reuse_grace=dt.timedelta(
+            seconds=settings.auth.token.refresh_reuse_grace_seconds
+        ),
     )
 
 

@@ -87,6 +87,10 @@ class RefreshTokenModel(Base):
     revoked_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Why the token was revoked (one of the ``REVOKED_*`` codes); null exactly
+    # when ``revoked_at`` is null. Only a ``rotated`` predecessor is graceable in
+    # the reuse window (issue #369).
+    revoked_reason: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class LoginAttemptModel(Base):

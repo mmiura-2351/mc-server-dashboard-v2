@@ -327,6 +327,11 @@ class TokenSettings(_Section):
     signing_key: str | None = None
     access_ttl_seconds: int = Field(default=900, gt=0)
     refresh_ttl_seconds: int = Field(default=1209600, gt=0)
+    # Grace window after a refresh token is rotated within which re-presenting the
+    # predecessor is treated as a legitimate concurrent refresh (a fresh pair is
+    # issued, the token family is kept) rather than theft (issue #369). Outside the
+    # window the reuse still revokes the whole family. Must be positive.
+    refresh_reuse_grace_seconds: int = Field(default=60, gt=0)
     # Refresh-token httpOnly-cookie transport for the Web UI session (issue #363).
     # The cookie name and the Secure flag are operator-configurable; the cookie's
     # Max-Age tracks ``refresh_ttl_seconds`` and its Path/SameSite are fixed in the
