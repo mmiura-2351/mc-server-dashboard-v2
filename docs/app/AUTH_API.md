@@ -91,6 +91,14 @@ Note the refresh failure path deliberately reuses the `invalid_credentials`
 reason rather than a token-specific code: the contract leaks no signal that would
 distinguish *why* a refresh was rejected.
 
+The same problem+json shape carries the password-policy `422` reason codes
+emitted outside `/auth/*` by the user-management endpoints (registration
+`POST /users`, password change `PUT /users/me/password`, admin user creation
+`POST /admin/users`). Those codes — `too_short`, `too_long`,
+`too_long_for_bcrypt`, `insufficient_complexity`, `common_password`,
+`contains_user_info`, `simple_pattern` — are enumerated in
+[`SECURITY.md`](SECURITY.md) Section 1.
+
 ## 3. Token transport: body vs cookie
 
 The refresh token rides two transports (issue #363): the JSON body that
