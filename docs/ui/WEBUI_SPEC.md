@@ -380,7 +380,14 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   posture). UI never invents authority; failures degrade politely.
 
 ### 7.4 Errors & confirmations
-- API error envelope surfaced via toast + inline field errors (422 detail).
+- Every API error is RFC 9457 `application/problem+json`: one body shape with
+  `type`, `title`, `status`, and a `reason` extension member. The machine code
+  is both the terminal segment of the `type` URI (`urn:mcsd:error:<reason>`) and
+  the `reason` field — the client switches on `reason`. Request-validation
+  failures (422) use `reason: "validation_error"` and carry the per-field list
+  in an `errors` extension member. The client branches on exactly this shape;
+  there is no legacy bare-string / `{reason}` fork.
+- API error surfaced via toast + inline field errors (422 `errors` list).
 - Conflict-flavored errors (e.g. lifecycle races, `server_unsettled`-style
   responses) get a "state changed — refresh" treatment, not a raw error dump.
 - Destructive operations (delete server/community/user/backup-restore) use

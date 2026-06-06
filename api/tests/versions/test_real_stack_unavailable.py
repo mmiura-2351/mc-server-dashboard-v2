@@ -75,7 +75,7 @@ def test_versions_endpoint_is_503_when_source_down_cold_cache() -> None:
     with client:
         resp = client.get("/versions/vanilla")
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "catalog_unavailable"
+    assert resp.json()["reason"] == "catalog_unavailable"
 
 
 @pytest.mark.asyncio

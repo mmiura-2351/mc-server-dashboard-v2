@@ -210,7 +210,7 @@ def test_start_invalid_transition_is_409() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "invalid_transition"
+    assert resp.json()["reason"] == "invalid_transition"
 
 
 def test_start_transition_conflict_is_409() -> None:
@@ -222,7 +222,7 @@ def test_start_transition_conflict_is_409() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "transition_conflict"
+    assert resp.json()["reason"] == "transition_conflict"
 
 
 def test_start_no_eligible_worker_is_503() -> None:
@@ -232,7 +232,7 @@ def test_start_no_eligible_worker_is_503() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "no_eligible_worker"
+    assert resp.json()["reason"] == "no_eligible_worker"
 
 
 def test_start_worker_unavailable_is_503() -> None:
@@ -242,7 +242,7 @@ def test_start_worker_unavailable_is_503() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "worker_unavailable"
+    assert resp.json()["reason"] == "worker_unavailable"
 
 
 def test_start_command_failure_is_409() -> None:
@@ -252,7 +252,7 @@ def test_start_command_failure_is_409() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "command_failed"
+    assert resp.json()["reason"] == "command_failed"
 
 
 def test_start_port_conflict_is_409_with_reason() -> None:
@@ -266,7 +266,7 @@ def test_start_port_conflict_is_409_with_reason() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "port_conflict"
+    assert resp.json()["reason"] == "port_conflict"
 
 
 def test_start_image_missing_is_409_with_reason() -> None:
@@ -278,7 +278,7 @@ def test_start_image_missing_is_409_with_reason() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "image_missing"
+    assert resp.json()["reason"] == "image_missing"
 
 
 def test_stop_missing_server_is_404() -> None:
@@ -323,4 +323,4 @@ def test_command_not_running_is_409() -> None:
         _url(uuid.uuid4(), uuid.uuid4(), "command"), json={"line": "list"}
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_not_running"
+    assert resp.json()["reason"] == "server_not_running"

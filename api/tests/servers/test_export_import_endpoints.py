@@ -229,7 +229,7 @@ def test_export_running_is_409_and_audits_denied() -> None:
     client = next(_client(app))
     resp = client.get(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_unsettled"
+    assert resp.json()["reason"] == "server_unsettled"
     assert [e.operation for e in recorder.events] == [ops.SERVER_EXPORT]
     assert recorder.events[0].outcome is Outcome.DENIED
 
@@ -299,7 +299,7 @@ def test_import_invalid_metadata_is_422() -> None:
         data=data,
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_export_metadata"
+    assert resp.json()["reason"] == "invalid_export_metadata"
 
 
 def test_import_spigot_metadata_is_422() -> None:
@@ -316,7 +316,7 @@ def test_import_spigot_metadata_is_422() -> None:
         data=data,
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "spigot_unsupported"
+    assert resp.json()["reason"] == "spigot_unsupported"
 
 
 def test_import_name_conflict_is_409() -> None:
@@ -333,7 +333,7 @@ def test_import_name_conflict_is_409() -> None:
         data=data,
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "server_name_exists"
+    assert resp.json()["reason"] == "server_name_exists"
 
 
 def test_import_oversized_is_413() -> None:
@@ -366,4 +366,4 @@ def test_import_seed_failure_is_503() -> None:
         data=data,
     )
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "seed_failed"
+    assert resp.json()["reason"] == "seed_failed"

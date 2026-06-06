@@ -42,6 +42,7 @@ from mc_server_dashboard_api.dependencies import (
     get_settings,
     get_storage,
 )
+from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
     NotFoundError,
@@ -90,9 +91,9 @@ async def require_worker_credential(
         or presented is None
         or not hmac.compare_digest(presented, expected)
     ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="worker_credential_rejected",
+        raise problem(
+            status.HTTP_401_UNAUTHORIZED,
+            "worker_credential_rejected",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -211,15 +212,9 @@ async def publish_snapshot(
     """
 
     if content_length is None:
-        raise HTTPException(
-            status_code=status.HTTP_411_LENGTH_REQUIRED,
-            detail="content_length_required",
-        )
+        raise problem(status.HTTP_411_LENGTH_REQUIRED, "content_length_required")
     if content_length > _MAX_SNAPSHOT_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="snapshot_too_large",
-        )
+        raise problem(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large")
 
     scope = (CommunityId(community_id), ServerId(server_id))
     handle = await storage.begin_snapshot(*scope)
@@ -231,10 +226,7 @@ async def publish_snapshot(
             # only made staging authoritative on commit, so an abort leaves the
             # prior snapshot intact.
             await storage.abort_snapshot(handle)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="length_mismatch",
-            )
+            raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch")
         await storage.commit_snapshot(handle)
     except HTTPException:
         raise
@@ -243,27 +235,21 @@ async def publish_snapshot(
         # the disk fills. (An over-run that stays under the cap surfaces as the
         # length mismatch above.)
         await storage.abort_snapshot(handle)
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="snapshot_too_large",
+        raise problem(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large"
         ) from None
     except _DeclaredLengthExceeded:
         # An under-declaring client streamed more than its Content-Length: abort
         # mid-stream rather than spooling the whole over-long body first.
         await storage.abort_snapshot(handle)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="length_mismatch",
-        ) from None
+        raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch") from None
     except IncompleteTransferError:
         # The body cleared the length gate but staged zero files: an empty working
         # set is not a publishable snapshot (STORAGE.md Section 4.1). A worker
         # packing an empty working dir is a bug signal, so reject it loudly; the
         # abort leaves the prior authoritative copy intact.
         await storage.abort_snapshot(handle)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="empty_snapshot"
-        ) from None
+        raise problem(status.HTTP_400_BAD_REQUEST, "empty_snapshot") from None
     except BaseException:
         # Any failure mid-transfer (client disconnect, extraction error) discards
         # staging; the authoritative copy is never touched.

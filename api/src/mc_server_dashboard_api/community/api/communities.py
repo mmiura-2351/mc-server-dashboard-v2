@@ -22,7 +22,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -63,6 +63,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.entities import User
 
 router = APIRouter()
@@ -105,22 +106,13 @@ async def provision_community(
         )
     except OwnerUserNotFoundError as exc:
         await _record_provision_failure(recorder, user)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "owner_not_found"},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "owner_not_found") from exc
     except CommunityAlreadyExistsError as exc:
         await _record_provision_failure(recorder, user)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "name_taken"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "name_taken") from exc
     except InvalidCommunityNameError as exc:
         await _record_provision_failure(recorder, user)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_name"},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_name") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.COMMUNITY_PROVISION,
@@ -175,15 +167,9 @@ async def rename_community(
     except CommunityNotFoundError as exc:
         raise _not_found() from exc
     except CommunityAlreadyExistsError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "name_taken"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "name_taken") from exc
     except InvalidCommunityNameError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_name"},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_name") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.COMMUNITY_UPDATE,
@@ -246,13 +232,12 @@ def _parse_user_id(raw: str) -> UserId:
     try:
         return UserId(uuid.UUID(raw))
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_owner_user_id"},
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_owner_user_id"
         ) from exc
 
 
-def _not_found() -> HTTPException:
+def _not_found() -> ProblemException:
     # A member with the permission whose community vanished concurrently: keep the
     # no-existence-signal posture (Section 6.4).
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")

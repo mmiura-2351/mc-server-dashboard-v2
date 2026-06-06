@@ -133,7 +133,7 @@ def test_register_disabled_returns_403() -> None:
         },
     )
     assert resp.status_code == 403
-    assert resp.json()["detail"]["reason"] == "registration_disabled"
+    assert resp.json()["reason"] == "registration_disabled"
 
 
 def test_register_throttled_returns_429() -> None:
@@ -148,7 +148,7 @@ def test_register_throttled_returns_429() -> None:
         },
     )
     assert resp.status_code == 429
-    assert resp.json()["detail"]["reason"] == "registration_throttled"
+    assert resp.json()["reason"] == "registration_throttled"
 
 
 def test_register_weak_password_returns_422_with_reason_no_echo() -> None:
@@ -161,7 +161,7 @@ def test_register_weak_password_returns_422_with_reason_no_echo() -> None:
     )
     assert resp.status_code == 422
     body = resp.json()
-    assert body["detail"]["reason"] == "too_short"
+    assert body["reason"] == "too_short"
     # The submitted password must never appear in the response body.
     assert weak not in resp.text
 

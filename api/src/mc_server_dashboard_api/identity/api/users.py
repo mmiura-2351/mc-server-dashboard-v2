@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Response, status
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -27,6 +27,7 @@ from mc_server_dashboard_api.dependencies import (
     get_register_user,
     get_update_profile,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.application.change_password import ChangePassword
 from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
@@ -96,29 +97,18 @@ async def register_user(
             ip=client_ip,
         )
     except RegistrationDisabledError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"reason": "registration_disabled"},
-        ) from exc
+        raise problem(status.HTTP_403_FORBIDDEN, "registration_disabled") from exc
     except RegistrationThrottledError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={"reason": "registration_throttled"},
+        raise problem(
+            status.HTTP_429_TOO_MANY_REQUESTS, "registration_throttled"
         ) from exc
     except (UsernameAlreadyExistsError, EmailAlreadyExistsError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": _conflict_reason(exc)},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, _conflict_reason(exc)) from exc
     except PasswordPolicyError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": exc.reason},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.reason) from exc
     except (InvalidUsernameError, InvalidEmailError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": _field_reason(exc)},
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, _field_reason(exc)
         ) from exc
     # Self-registration: the new user is both the actor and the target (FR-AUD-1).
     await recorder.record(
@@ -178,10 +168,7 @@ async def change_password(
     except UserNotFoundError as exc:
         raise _user_gone() from exc
     except PasswordPolicyError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": exc.reason},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, exc.reason) from exc
     await recorder.record(
         AuditEvent(
             operation=ops.AUTH_PASSWORD_CHANGE,
@@ -209,16 +196,12 @@ async def update_profile(
             user_id=user.id, username=body.username, email=body.email
         )
     except (UsernameAlreadyExistsError, EmailAlreadyExistsError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": _conflict_reason(exc)},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, _conflict_reason(exc)) from exc
     except UserNotFoundError as exc:
         raise _user_gone() from exc
     except (InvalidUsernameError, InvalidEmailError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": _field_reason(exc)},
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, _field_reason(exc)
         ) from exc
     await recorder.record(
         AuditEvent(
@@ -245,15 +228,9 @@ async def delete_account(
     try:
         await use_case(user_id=deleted_id)
     except CommunityOwnedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "owns_community"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "owns_community") from exc
     except LastPlatformAdminError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "last_platform_admin"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "last_platform_admin") from exc
     except UserNotFoundError as exc:
         raise _user_gone() from exc
     await recorder.record(
@@ -282,23 +259,23 @@ def _field_reason(exc: Exception) -> str:
     )
 
 
-def _unauthorized() -> HTTPException:
+def _unauthorized() -> ProblemException:
     # Mirrors login's uniform 401 so a wrong current password is indistinguishable
     # from any other credential failure (SECURITY.md Section 2).
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="invalid_credentials",
+    return problem(
+        status.HTTP_401_UNAUTHORIZED,
+        "invalid_credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
 
-def _user_gone() -> HTTPException:
+def _user_gone() -> ProblemException:
     # The token authenticated but the user row is gone (a concurrent self-delete
     # raced between get_current_user and the use case's get_by_id). The token now
     # references a non-existent principal, so it is treated like an invalidated
     # token: the same 401 invalid_token get_current_user returns, not a 500.
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="invalid_token",
+    return problem(
+        status.HTTP_401_UNAUTHORIZED,
+        "invalid_token",
         headers={"WWW-Authenticate": "Bearer"},
     )

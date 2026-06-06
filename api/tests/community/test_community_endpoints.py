@@ -146,7 +146,7 @@ def test_provision_unknown_owner_returns_422() -> None:
         json={"name": "guild", "owner_user_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "owner_not_found"
+    assert resp.json()["reason"] == "owner_not_found"
 
 
 def test_provision_duplicate_name_returns_409() -> None:

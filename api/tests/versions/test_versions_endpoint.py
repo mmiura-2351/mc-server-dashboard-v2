@@ -101,7 +101,7 @@ def test_unknown_type_spigot_is_404() -> None:
     with client:
         resp = client.get("/versions/spigot")
     assert resp.status_code == 404
-    assert resp.json()["detail"]["reason"] == "unknown_server_type"
+    assert resp.json()["reason"] == "unknown_server_type"
 
 
 def test_source_down_is_503() -> None:
@@ -109,4 +109,4 @@ def test_source_down_is_503() -> None:
     with client:
         resp = client.get("/versions/vanilla")
     assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "catalog_unavailable"
+    assert resp.json()["reason"] == "catalog_unavailable"

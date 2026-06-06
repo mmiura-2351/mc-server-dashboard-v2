@@ -20,7 +20,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, model_validator
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -59,6 +59,7 @@ from mc_server_dashboard_api.dependencies import (
     get_unassign_role,
     require_permission,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 
 router = APIRouter()
 
@@ -144,15 +145,9 @@ async def add_member(
             username=body.username,
         )
     except MemberUserNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "user_not_found"},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "user_not_found") from exc
     except MembershipAlreadyExistsError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "already_member"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "already_member") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.MEMBER_ADD,
@@ -199,10 +194,7 @@ async def remove_member(
     except MembershipNotFoundError as exc:
         raise _not_found() from exc
     except LastOwnerRemovalError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "last_owner"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "last_owner") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.MEMBER_REMOVE,
@@ -277,10 +269,7 @@ async def unassign_role(
     except RoleNotFoundError as exc:
         raise _not_found() from exc
     except LastOwnerRemovalError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "last_owner"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "last_owner") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.ROLE_UNASSIGN,
@@ -297,23 +286,17 @@ def _parse_user_id(raw: str) -> UserId:
     try:
         return UserId(uuid.UUID(raw))
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_user_id"},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_user_id") from exc
 
 
 def _parse_role_id(raw: str) -> RoleId:
     try:
         return RoleId(uuid.UUID(raw))
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_role_id"},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_role_id") from exc
 
 
-def _not_found() -> HTTPException:
+def _not_found() -> ProblemException:
     # Keep the no-existence-signal posture (Section 6.4): a missing member, a role
     # outside this community, or a community that vanished concurrently all 404.
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")

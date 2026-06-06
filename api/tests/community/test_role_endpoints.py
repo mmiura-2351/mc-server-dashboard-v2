@@ -200,7 +200,7 @@ def test_create_role_duplicate_name_returns_409() -> None:
         json={"name": "Editor", "permissions": []},
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "name_taken"
+    assert resp.json()["reason"] == "name_taken"
 
 
 def test_create_role_unknown_permission_returns_422() -> None:
@@ -215,7 +215,7 @@ def test_create_role_unknown_permission_returns_422() -> None:
         json={"name": "Editor", "permissions": ["server:read"]},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_permission"
+    assert resp.json()["reason"] == "invalid_permission"
 
 
 def test_create_role_malformed_permission_returns_422() -> None:
@@ -227,7 +227,7 @@ def test_create_role_malformed_permission_returns_422() -> None:
         json={"name": "Editor", "permissions": ["not-a-permission"]},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "invalid_permission"
+    assert resp.json()["reason"] == "invalid_permission"
 
 
 # --- update -----------------------------------------------------------------
@@ -245,7 +245,7 @@ def test_update_role_preset_returns_409() -> None:
         json={"name": "X"},
     )
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "preset_role"
+    assert resp.json()["reason"] == "preset_role"
 
 
 def test_update_role_cross_community_gets_404() -> None:
@@ -279,7 +279,7 @@ def test_delete_role_preset_returns_409() -> None:
     client = next(_client(app))
     resp = client.delete(f"/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "preset_role"
+    assert resp.json()["reason"] == "preset_role"
 
 
 def test_delete_role_cross_community_gets_404() -> None:

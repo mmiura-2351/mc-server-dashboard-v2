@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -53,6 +53,7 @@ from mc_server_dashboard_api.dependencies import (
     get_revoke_grant,
     require_permission,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 
 router = APIRouter()
 
@@ -130,17 +131,13 @@ async def create_grant(
         # not-found (issue #361), the same no-existence-signal posture.
         raise _not_found() from exc
     except InvalidGrantResourceTypeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_resource_type"},
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_resource_type"
         ) from exc
     except UnknownPermissionError as exc:
         raise _invalid_permission() from exc
     except ResourceGrantAlreadyExistsError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": "grant_exists"},
-        ) from exc
+        raise problem(status.HTTP_409_CONFLICT, "grant_exists") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.GRANT_CREATE,
@@ -190,19 +187,15 @@ def _parse_user_id(raw: str) -> UserId:
     try:
         return UserId(uuid.UUID(raw))
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_user_id"},
-        ) from exc
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_user_id") from exc
 
 
 def _parse_resource_id(raw: str) -> uuid.UUID:
     try:
         return uuid.UUID(raw)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"reason": "invalid_resource_id"},
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_resource_id"
         ) from exc
 
 
@@ -215,14 +208,11 @@ def _parse_permissions(raw: list[str]) -> set[Permission]:
         raise _invalid_permission() from exc
 
 
-def _invalid_permission() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail={"reason": "invalid_permission"},
-    )
+def _invalid_permission() -> ProblemException:
+    return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_permission")
 
 
-def _not_found() -> HTTPException:
+def _not_found() -> ProblemException:
     # Keep the no-existence-signal posture (Section 6.4): a grant outside this
     # community or a non-member target both 404.
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")

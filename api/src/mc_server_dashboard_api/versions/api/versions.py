@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -44,6 +44,7 @@ from mc_server_dashboard_api.dependencies import (
     get_list_versions,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.versions.application.catalog_refresh import CatalogRefresh
 from mc_server_dashboard_api.versions.application.jar_gc import RunJarPoolGc
@@ -187,15 +188,9 @@ def _parse_server_type(value: str) -> ServerType:
         raise _unknown_type() from exc
 
 
-def _unknown_type() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail={"reason": "unknown_server_type"},
-    )
+def _unknown_type() -> ProblemException:
+    return problem(status.HTTP_404_NOT_FOUND, "unknown_server_type")
 
 
-def _service_unavailable() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={"reason": "catalog_unavailable"},
-    )
+def _service_unavailable() -> ProblemException:
+    return problem(status.HTTP_503_SERVICE_UNAVAILABLE, "catalog_unavailable")

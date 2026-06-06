@@ -130,7 +130,7 @@ def test_refresh_unknown_type_is_404() -> None:
     with client:
         resp = client.post("/versions/refresh?server_type=forge")
     assert resp.status_code == 404
-    assert resp.json()["detail"]["reason"] == "unknown_server_type"
+    assert resp.json()["reason"] == "unknown_server_type"
 
 
 def test_refresh_requires_platform_admin() -> None:

@@ -109,7 +109,7 @@ def test_change_password_wrong_current_returns_uniform_401() -> None:
         json={"current_password": "bad", "new_password": _VALID_PASSWORD},
     )
     assert resp.status_code == 401
-    assert resp.json()["detail"] == "invalid_credentials"
+    assert resp.json()["reason"] == "invalid_credentials"
 
 
 def test_change_password_weak_new_returns_422_with_reason_no_echo() -> None:
@@ -122,7 +122,7 @@ def test_change_password_weak_new_returns_422_with_reason_no_echo() -> None:
         json={"current_password": "old", "new_password": weak},
     )
     assert resp.status_code == 422
-    assert resp.json()["detail"]["reason"] == "too_short"
+    assert resp.json()["reason"] == "too_short"
     assert weak not in resp.text
 
 
@@ -138,7 +138,7 @@ def test_change_password_user_gone_returns_401_invalid_token() -> None:
         json={"current_password": "old", "new_password": _VALID_PASSWORD},
     )
     assert resp.status_code == 401
-    assert resp.json()["detail"] == "invalid_token"
+    assert resp.json()["reason"] == "invalid_token"
 
 
 def test_change_password_requires_auth() -> None:
@@ -179,7 +179,7 @@ def test_update_profile_username_conflict_returns_409() -> None:
     client = next(_client(user, update_profile=fake))
     resp = client.patch("/users/me", json={"username": "taken"})
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "username_taken"
+    assert resp.json()["reason"] == "username_taken"
 
 
 def test_update_profile_email_conflict_returns_409() -> None:
@@ -188,7 +188,7 @@ def test_update_profile_email_conflict_returns_409() -> None:
     client = next(_client(user, update_profile=fake))
     resp = client.patch("/users/me", json={"email": "taken@example.com"})
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "email_taken"
+    assert resp.json()["reason"] == "email_taken"
 
 
 def test_update_profile_user_gone_returns_401_invalid_token() -> None:
@@ -197,7 +197,7 @@ def test_update_profile_user_gone_returns_401_invalid_token() -> None:
     client = next(_client(user, update_profile=fake))
     resp = client.patch("/users/me", json={"username": "alice2"})
     assert resp.status_code == 401
-    assert resp.json()["detail"] == "invalid_token"
+    assert resp.json()["reason"] == "invalid_token"
 
 
 # --- DELETE /users/me ------------------------------------------------------
@@ -222,7 +222,7 @@ def test_delete_account_owner_returns_409() -> None:
     client = next(_client(user, delete_account=fake))
     resp = client.delete("/users/me")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "owns_community"
+    assert resp.json()["reason"] == "owns_community"
 
 
 def test_delete_account_last_admin_returns_409() -> None:
@@ -231,7 +231,7 @@ def test_delete_account_last_admin_returns_409() -> None:
     client = next(_client(user, delete_account=fake))
     resp = client.delete("/users/me")
     assert resp.status_code == 409
-    assert resp.json()["detail"]["reason"] == "last_platform_admin"
+    assert resp.json()["reason"] == "last_platform_admin"
 
 
 def test_delete_account_user_gone_returns_401_invalid_token() -> None:
@@ -240,4 +240,4 @@ def test_delete_account_user_gone_returns_401_invalid_token() -> None:
     client = next(_client(user, delete_account=fake))
     resp = client.delete("/users/me")
     assert resp.status_code == 401
-    assert resp.json()["detail"] == "invalid_token"
+    assert resp.json()["reason"] == "invalid_token"

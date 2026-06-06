@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request, WebSocket, status
+from fastapi import Depends, Request, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -108,6 +108,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.adapters.client_ip import (
     forwarded_for_header,
     resolve_client_ip,
@@ -825,10 +826,10 @@ async def get_current_user(
         raise _unauthenticated() from exc
 
 
-def _unauthenticated() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="invalid_token",
+def _unauthenticated() -> ProblemException:
+    return problem(
+        status.HTTP_401_UNAUTHORIZED,
+        "invalid_token",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -1732,10 +1733,10 @@ def _resource_id_from_path(request: Request, param: str | None) -> uuid.UUID | N
     return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
 
 
-def _not_found() -> HTTPException:
+def _not_found() -> ProblemException:
     # Layer-1: non-members get no existence signal (FR-COMM-3, Section 6.4).
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")
 
 
-def _forbidden() -> HTTPException:
-    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+def _forbidden() -> ProblemException:
+    return problem(status.HTTP_403_FORBIDDEN, "forbidden")

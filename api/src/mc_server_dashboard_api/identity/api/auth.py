@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -41,6 +41,7 @@ from mc_server_dashboard_api.dependencies import (
     get_refresh_session,
     get_settings,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
@@ -213,9 +214,9 @@ async def logout(
     return response
 
 
-def _unauthorized() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="invalid_credentials",
+def _unauthorized() -> ProblemException:
+    return problem(
+        status.HTTP_401_UNAUTHORIZED,
+        "invalid_credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )

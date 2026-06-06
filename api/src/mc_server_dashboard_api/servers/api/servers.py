@@ -22,7 +22,6 @@ from fastapi import (
     APIRouter,
     Depends,
     Form,
-    HTTPException,
     Query,
     UploadFile,
     status,
@@ -52,6 +51,7 @@ from mc_server_dashboard_api.dependencies import (
     get_update_server,
     require_permission,
 )
+from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
@@ -782,7 +782,7 @@ _SERVICE_UNAVAILABLE_REASONS = {
 }
 
 
-def _lifecycle_http_error(exc: Exception) -> HTTPException:
+def _lifecycle_http_error(exc: Exception) -> ProblemException:
     _, reason = _LIFECYCLE_CLASSIFICATION[type(exc)]
     # A start failure the Worker classified into a sanitized category (issue #225)
     # carries its own reason (e.g. port_conflict / image_missing), surfacing it in
@@ -831,40 +831,28 @@ def _validated_config(config: Any) -> dict[str, Any]:
         raise _unprocessable("config_invalid_shape") from exc
 
 
-def _unprocessable(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail={"reason": reason},
-    )
+def _unprocessable(reason: str) -> ProblemException:
+    return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, reason)
 
 
-def _service_unavailable(reason: str) -> HTTPException:
+def _service_unavailable(reason: str) -> ProblemException:
     # Placement found no Worker, or the assigned Worker is gone / timed out: a
     # transient fleet-capacity condition, not a client-state conflict. 503 tells
     # the client to retry once the fleet has capacity again (FR-WRK-3/4).
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={"reason": reason},
-    )
+    return problem(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
 
 
-def _conflict(reason: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail={"reason": reason},
-    )
+def _conflict(reason: str) -> ProblemException:
+    return problem(status.HTTP_409_CONFLICT, reason)
 
 
-def _too_large() -> HTTPException:
+def _too_large() -> ProblemException:
     # The uploaded import archive (or its cumulative extracted size / entry count)
     # exceeded the caps reused from the upload path (issue #262).
-    return HTTPException(
-        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-        detail={"reason": "file_too_large"},
-    )
+    return problem(status.HTTP_413_CONTENT_TOO_LARGE, "file_too_large")
 
 
-def _not_found() -> HTTPException:
+def _not_found() -> ProblemException:
     # Keep the no-existence-signal posture (Section 6.4): a server outside this
     # community 404s the same as a wholly unknown one.
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+    return problem(status.HTTP_404_NOT_FOUND, "not_found")

@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -30,6 +30,7 @@ from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.registry import WorkerSnapshot
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.identity.domain.entities import User
 
 router = APIRouter()
@@ -98,7 +99,7 @@ async def set_worker_drain(
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     if not use_case(worker_id=WorkerId(worker_id), draining=True):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+        raise problem(status.HTTP_404_NOT_FOUND, "not_found")
     # Worker ids are not UUIDs; the worker is named by the operation code, not a
     # UUID target_id (DATABASE.md Section 9 target_id is a UUID soft reference).
     await recorder.record(
@@ -122,7 +123,7 @@ async def clear_worker_drain(
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     if not use_case(worker_id=WorkerId(worker_id), draining=False):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+        raise problem(status.HTTP_404_NOT_FOUND, "not_found")
     await recorder.record(
         AuditEvent(
             operation=ops.WORKER_DRAIN_CLEAR,
