@@ -80,6 +80,13 @@ def _set_cookie_header(resp: httpx.Response, name: str) -> str:
     raise AssertionError(f"no Set-Cookie for {name!r} in {headers!r}")
 
 
+def _assert_no_set_cookie(resp: httpx.Response, name: str) -> None:
+    headers: list[str] = resp.headers.get_list("set-cookie")
+    assert not any(header.startswith(f"{name}=") for header in headers), (
+        f"unexpected Set-Cookie for {name!r} in {headers!r}"
+    )
+
+
 def _client(**overrides: object) -> Iterator[TestClient]:
     app = create_app()
     for dependency, value in overrides.items():
@@ -247,6 +254,30 @@ def test_refresh_prefers_body_token_over_cookie() -> None:
     assert fake.calls == [{"refresh_token": "body-token"}]
 
 
+def test_refresh_body_only_emits_no_set_cookie() -> None:
+    # Body-only clients (worker/CLI) carried no cookie, so the rotated token must
+    # not ride a Set-Cookie they never asked for (issue #372).
+    fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
+    client = next(_client(refresh=fake))
+    resp = client.post("/auth/refresh", json={"refresh_token": "ref1"})
+    assert resp.status_code == 200
+    _assert_no_set_cookie(resp, "mcd_refresh")
+
+
+def test_refresh_with_cookie_rotates_cookie_even_when_body_token_wins() -> None:
+    # Both transports present: the body token is used (precedence unchanged), but
+    # because the request carried the cookie, the rotated token is re-set on it so
+    # a browser session does not go stale (issue #372).
+    fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
+    client = next(_client(refresh=fake))
+    client.cookies.set("mcd_refresh", "cookie-token")
+    resp = client.post("/auth/refresh", json={"refresh_token": "body-token"})
+    assert resp.status_code == 200
+    assert fake.calls == [{"refresh_token": "body-token"}]
+    cookie = _set_cookie_header(resp, "mcd_refresh")
+    assert "mcd_refresh=ref2" in cookie
+
+
 def test_refresh_without_body_or_cookie_returns_401() -> None:
     # No transport carries a token: uniform 401, use case not invoked.
     fake = _Fake(result=TokenPair(access_token="x", refresh_token="y"))
@@ -284,6 +315,17 @@ def test_logout_reads_token_from_cookie_and_clears_it() -> None:
     assert "Path=/auth" in cookie
 
 
+def test_logout_body_only_emits_no_clearing_set_cookie() -> None:
+    # Body-only clients (worker/CLI) carried no cookie, so logout must not emit a
+    # clearing Set-Cookie they never asked for (issue #372).
+    fake = _Fake(result=None)
+    client = next(_client(logout=fake))
+    resp = client.post("/auth/logout", json={"refresh_token": "ref"})
+    assert resp.status_code == 204
+    assert fake.calls == [{"refresh_token": "ref"}]
+    _assert_no_set_cookie(resp, "mcd_refresh")
+
+
 def test_logout_without_body_or_cookie_returns_204() -> None:
     # Idempotent: nothing to revoke, still a clean 204, use case not invoked.
     fake = _Fake(result=None)
@@ -291,6 +333,8 @@ def test_logout_without_body_or_cookie_returns_204() -> None:
     resp = client.post("/auth/logout", json={})
     assert resp.status_code == 204
     assert fake.calls == []
+    # No cookie was carried, so none is cleared (issue #372).
+    _assert_no_set_cookie(resp, "mcd_refresh")
 
 
 def test_me_returns_user_with_valid_bearer() -> None:
