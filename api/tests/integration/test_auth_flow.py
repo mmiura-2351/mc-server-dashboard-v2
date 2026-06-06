@@ -2,8 +2,9 @@
 
 Exercises the refresh-token DB paths end to end with the real SqlAlchemy
 UnitOfWork and JWT TokenService: login issues a persisted pair, refresh rotates
-it (old token rejected afterwards), and reuse of a rotated token revokes the
-family. Runs only when ``MCD_TEST_DATABASE_URL`` is set (CI Postgres service).
+it (old token rejected afterwards), and reuse of a rotated token past the grace
+window revokes the family. Runs only when ``MCD_TEST_DATABASE_URL`` is set (CI
+Postgres service).
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ pytestmark = pytest.mark.skipif(
 
 _PASSWORD = "Wm7!qz#Lp2vT"
 _REFRESH_TTL = dt.timedelta(days=14)
+_REUSE_GRACE = dt.timedelta(seconds=60)
 # Static dummy hash for the unknown-user verify path (login timing equalization).
 _DUMMY_HASH = Argon2PasswordHasher().hash("dummy")
 
@@ -118,14 +120,22 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
     )
     pair = (await login(username="alice", password=_PASSWORD)).pair
 
+    # A controllable clock lets the test step the reuse past the grace window so
+    # it exercises the theft path (family revoke) deterministically (issue #369).
+    clock = FakeClock(dt.datetime.now(tz=dt.timezone.utc))
     refresh = RefreshSession(
         uow=SqlAlchemyUnitOfWork(factory),
         tokens=_tokens(),
-        clock=SystemClock(),
+        clock=clock,
         refresh_ttl=_REFRESH_TTL,
+        reuse_grace=_REUSE_GRACE,
     )
     rotated = await refresh(refresh_token=pair.refresh_token)
     assert rotated.refresh_token != pair.refresh_token
+
+    # Step past the grace window so re-presenting the rotated token is treated as
+    # theft, not a concurrent refresh.
+    clock.set(clock.now() + _REUSE_GRACE + dt.timedelta(seconds=1))
 
     # The old (now-rotated) token must be rejected.
     with pytest.raises(InvalidRefreshTokenError):

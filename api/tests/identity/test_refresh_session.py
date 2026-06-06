@@ -1,8 +1,9 @@
 """Unit tests for the RefreshSession use case (rotation + reuse policy).
 
 Covers a valid rotation (old revoked, new pair issued in one commit), rejection
-of expired/revoked/unknown tokens, and the reuse-after-rotation policy: a second
-presentation of an already-revoked token revokes the whole family.
+of expired/unknown tokens, and the reuse-after-rotation policy: within the grace
+window a re-presented rotated token is a legitimate concurrent refresh (fresh
+pair, family kept); outside the window it revokes the whole family.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from tests.identity.fakes import FakeClock, FakeTokenService, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
 _REFRESH_TTL = dt.timedelta(days=14)
+_REUSE_GRACE = dt.timedelta(seconds=60)
 _USER = UserId.new()
 
 
@@ -31,6 +33,7 @@ def _refresh(uow: FakeUnitOfWork, clock: FakeClock) -> RefreshSession:
         tokens=FakeTokenService(),
         clock=clock,
         refresh_ttl=_REFRESH_TTL,
+        reuse_grace=_REUSE_GRACE,
     )
 
 
@@ -87,18 +90,67 @@ async def test_expired_token_is_rejected() -> None:
     assert uow.commits == 0
 
 
-async def test_already_revoked_token_is_rejected() -> None:
+async def test_reuse_within_grace_window_rotates_without_revoking_family() -> None:
+    # The predecessor was rotated 30 s ago (inside the 60 s grace window): a
+    # concurrent refresh / lost-response retry, not theft. Issue a fresh pair and
+    # leave the sibling session active (issue #369).
     uow = FakeUnitOfWork()
-    _seed_token(uow, secret="old-secret", revoked_at=_NOW - dt.timedelta(minutes=1))
+    reused_hash = _seed_token(
+        uow, secret="old-secret", revoked_at=_NOW - dt.timedelta(seconds=30)
+    )
+    sibling_hash = _seed_token(uow, secret="sibling-secret")
+    clock = FakeClock(_NOW)
+
+    pair = await _refresh(uow, clock)(refresh_token="old-secret")
+
+    # A fresh, active pair is issued.
+    assert pair.access_token == f"access::{_USER.value}"
+    assert pair.refresh_token == "refresh-secret-1"
+    assert uow.refresh_tokens.by_hash["hash::refresh-secret-1"].revoked_at is None
+    # The family is untouched: the sibling stays usable and the predecessor keeps
+    # its original revocation time.
+    assert uow.refresh_tokens.by_hash[sibling_hash].revoked_at is None
+    assert uow.refresh_tokens.by_hash[reused_hash].revoked_at == _NOW - dt.timedelta(
+        seconds=30
+    )
+    assert uow.commits == 1
+
+
+async def test_reuse_at_grace_window_boundary_rotates_without_revoking_family() -> None:
+    # Exactly at the window edge (60 s) the reuse is still treated as legitimate
+    # (the comparison is inclusive).
+    uow = FakeUnitOfWork()
+    _seed_token(uow, secret="old-secret", revoked_at=_NOW - _REUSE_GRACE)
+    sibling_hash = _seed_token(uow, secret="sibling-secret")
+    clock = FakeClock(_NOW)
+
+    pair = await _refresh(uow, clock)(refresh_token="old-secret")
+
+    assert pair.refresh_token == "refresh-secret-1"
+    assert uow.refresh_tokens.by_hash[sibling_hash].revoked_at is None
+
+
+async def test_expired_token_within_grace_window_is_rejected() -> None:
+    # A token rotated inside the grace window but already past its expiry is still
+    # rejected: the expiry check comes first, the window never resurrects it.
+    uow = FakeUnitOfWork()
+    _seed_token(
+        uow,
+        secret="old-secret",
+        expires_at=_NOW - dt.timedelta(seconds=1),
+        revoked_at=_NOW - dt.timedelta(seconds=30),
+    )
     with pytest.raises(InvalidRefreshTokenError):
         await _refresh(uow, FakeClock(_NOW))(refresh_token="old-secret")
+    assert uow.commits == 0
 
 
 async def test_reuse_after_rotation_revokes_the_family() -> None:
-    # Two live tokens for the user; the first is already-rotated (revoked).
+    # Two live tokens for the user; the first was rotated well outside the grace
+    # window (2 min ago), so the reuse is treated as theft.
     uow = FakeUnitOfWork()
     reused_hash = _seed_token(
-        uow, secret="old-secret", revoked_at=_NOW - dt.timedelta(minutes=1)
+        uow, secret="old-secret", revoked_at=_NOW - dt.timedelta(minutes=2)
     )
     sibling_hash = _seed_token(uow, secret="sibling-secret")
     clock = FakeClock(_NOW)
@@ -115,6 +167,6 @@ async def test_reuse_after_rotation_revokes_the_family() -> None:
     assert uow.refresh_tokens.by_hash[sibling_hash].revoked_at == _NOW
     # The already-revoked token keeps its original revocation time.
     assert uow.refresh_tokens.by_hash[reused_hash].revoked_at == _NOW - dt.timedelta(
-        minutes=1
+        minutes=2
     )
     assert uow.commits == 1
