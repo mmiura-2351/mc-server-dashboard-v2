@@ -95,7 +95,7 @@ async def _insert_server(
                 "(id, community_id, name, mc_edition, mc_version, server_type, "
                 "execution_backend, config, desired_state, observed_state, "
                 "created_at, updated_at) VALUES "
-                "(:id, :cid, :name, 'java', '1.21', 'vanilla', 'docker', "
+                "(:id, :cid, :name, 'java', '1.21', 'vanilla', 'container', "
                 "'{}'::jsonb, 'stopped', 'stopped', now(), now())"
             ),
             {"id": server_id, "cid": community_id.value, "name": f"srv-{server_id}"},

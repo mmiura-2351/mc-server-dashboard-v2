@@ -52,6 +52,7 @@ from mc_server_dashboard_api.community.domain.errors import (
     RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
+    CommunityId,
     Permission,
     UserId,
 )
@@ -91,6 +92,26 @@ async def _insert_user(engine: AsyncEngine, user_id: uuid.UUID, username: str) -
                 "(:id, :username, :email, 'h', false, now(), now())"
             ),
             {"id": user_id, "username": username, "email": f"{username}@e.com"},
+        )
+
+
+async def _insert_server(
+    engine: AsyncEngine, server_id: uuid.UUID, community_id: CommunityId
+) -> None:
+    """Insert a minimal ``server`` row directly so the grant's resource exists
+    (the resource-existence checker rejects fabricated ids; issue #361)."""
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "execution_backend, config, desired_state, observed_state, "
+                "created_at, updated_at) VALUES "
+                "(:id, :cid, :name, 'java', '1.21', 'vanilla', 'container', "
+                "'{}'::jsonb, 'stopped', 'stopped', now(), now())"
+            ),
+            {"id": server_id, "cid": community_id.value, "name": f"srv-{server_id}"},
         )
 
 
@@ -190,6 +211,7 @@ async def test_create_grant_persists_and_duplicate_is_translated(
     factory = create_session_factory(engine)
     create = CreateGrant(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())
     resource_id = uuid.uuid4()
+    await _insert_server(engine, resource_id, community.id)
     grant = await create(
         community_id=community.id,
         user_id=UserId(member_id),
@@ -230,11 +252,13 @@ async def test_cross_community_role_and_grant_ids_are_not_found(
         name="Editor",
         permissions={Permission("server:read")},
     )
+    resource_id = uuid.uuid4()
+    await _insert_server(engine, resource_id, community_a.id)
     grant = await CreateGrant(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())(
         community_id=community_a.id,
         user_id=UserId(member_a),
         resource_type="server",
-        resource_id=uuid.uuid4(),
+        resource_id=resource_id,
         permissions={Permission("server:start")},
     )
 
