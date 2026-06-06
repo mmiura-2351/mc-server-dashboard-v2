@@ -419,6 +419,24 @@ def test_token_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.auth.token.signing_key is None
     assert settings.auth.token.access_ttl_seconds == 900
     assert settings.auth.token.refresh_ttl_seconds == 1209600
+    # Refresh-cookie transport (issue #363): name + Secure flag default safely.
+    assert settings.auth.token.refresh_cookie_name == "mcd_refresh"
+    assert settings.auth.token.refresh_cookie_secure is True
+
+
+def test_refresh_cookie_settings_overridable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Plain-HTTP localhost dev needs Secure off so the browser stores the cookie;
+    # the name is operator-configurable too (issue #363).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        '[auth.token]\nrefresh_cookie_name = "sess"\nrefresh_cookie_secure = false\n',
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.auth.token.refresh_cookie_name == "sess"
+    assert settings.auth.token.refresh_cookie_secure is False
 
 
 def test_token_signing_key_from_env_is_masked(

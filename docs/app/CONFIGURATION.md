@@ -199,7 +199,9 @@ publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md (#17).
 | `auth.token.algorithm` | `HS256` | | Signing algorithm of the `TokenService` JWT adapter (REQUIREMENTS.md FR-AUTH-2). One of `HS256` / `RS256` (case-sensitive); any other value fails fast at load. A parameter of the adapter, not an adapter selector (Section 4). |
 | `auth.token.signing_key` | *required* | secret | Signing key/secret for access & refresh tokens (REQUIREMENTS.md FR-AUTH-2). For an asymmetric algorithm this is the private key (path or value). Under `HS256` the key is shared-secret entropy and **must be at least 32 bytes** (the 256-bit digest length); a shorter key fails fast at load. |
 | `auth.token.access_ttl_seconds` | `900` | | Short-lived access-token lifetime. Must be positive and **strictly less than** `refresh_ttl_seconds` (an access token may not outlive the refresh token); a non-conforming pair fails fast at load. |
-| `auth.token.refresh_ttl_seconds` | `1209600` | | Long-lived refresh-token lifetime (14 days). Must be positive. |
+| `auth.token.refresh_ttl_seconds` | `1209600` | | Long-lived refresh-token lifetime (14 days). Must be positive. Also the `Max-Age` of the refresh cookie below. |
+| `auth.token.refresh_cookie_name` | `mcd_refresh` | | Name of the httpOnly refresh-token cookie set on `POST /auth/login` for the Web UI session (issue #363, WEBUI_SPEC.md Section 7.1). The cookie is always `HttpOnly; SameSite=Strict; Path=/auth`; `Max-Age` tracks `refresh_ttl_seconds`. Body-based clients (worker/CLI) ignore it. Must be non-empty. |
+| `auth.token.refresh_cookie_secure` | `true` | | Sets the `Secure` flag on the refresh cookie (HTTPS-only). Turn it **off** only for plain-HTTP localhost development so the browser will store the cookie. |
 | `auth.password.hash` | `argon2` | | `PasswordHasher` selector (Section 4): `argon2` / `bcrypt`. |
 
 Password **policy** (strength, brute-force, proxy trust) is configured
