@@ -31,6 +31,13 @@ in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
 - If no issue exists, omit the `issue-{N}-` segment: `fix/{slug}` or
   `feature/{slug}`.
 
+Work in your own worktree, and create the branch there
+(`git checkout -B feature/issue-{N}-{slug}`). The primary checkout is the
+live-deployment build source (`docker compose` builds it from `compose.yaml` +
+`.env` at the repo root), so it must stay on `main` — never `git checkout` /
+`git switch` it as part of branch setup; a stray checkout silently changes what
+the next rebuild deploys.
+
 ## 4. Commits
 
 Install the git hooks once per clone:
