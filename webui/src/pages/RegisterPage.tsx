@@ -2,6 +2,7 @@ import { type FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
+import { PasswordInput } from "../components/PasswordInput.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
 
@@ -167,9 +168,8 @@ export function RegisterPage() {
         </div>
         <div className="field">
           <label htmlFor="register-password">{t("auth.fieldPassword")}</label>
-          <input
+          <PasswordInput
             id="register-password"
-            type="password"
             autoComplete="new-password"
             placeholder={t("register.passwordPlaceholder")}
             value={password}
@@ -187,9 +187,8 @@ export function RegisterPage() {
           <label htmlFor="register-confirm">
             {t("register.confirmPassword")}
           </label>
-          <input
+          <PasswordInput
             id="register-confirm"
-            type="password"
             autoComplete="new-password"
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}

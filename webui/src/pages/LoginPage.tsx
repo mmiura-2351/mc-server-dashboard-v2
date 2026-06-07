@@ -2,6 +2,7 @@ import { type FormEvent, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { useSession } from "../auth/SessionProvider.tsx";
+import { PasswordInput } from "../components/PasswordInput.tsx";
 import { t } from "../i18n/index.ts";
 import { postLoginPath } from "../routes.ts";
 
@@ -61,9 +62,8 @@ export function LoginPage() {
         </div>
         <div className="field">
           <label htmlFor="login-password">{t("auth.fieldPassword")}</label>
-          <input
+          <PasswordInput
             id="login-password"
-            type="password"
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
