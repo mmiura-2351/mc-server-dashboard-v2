@@ -80,19 +80,19 @@ def _client(
         yield client
 
 
-# --- GET /users ------------------------------------------------------------
+# --- GET /admin/users ------------------------------------------------------
 
 
 def test_list_users_requires_platform_admin() -> None:
     client = next(_client(platform_admin=False, list_users=_Fake()))
-    assert client.get("/api/users").status_code == 403
+    assert client.get("/api/admin/users").status_code == 403
 
 
 def test_list_users_returns_page() -> None:
     users = [make_user(username="a", email="a@example.com")]
     fake = _Fake(result=UserPage(users=users, total=1))
     client = next(_client(list_users=fake))
-    resp = client.get("/api/users?limit=10&offset=0")
+    resp = client.get("/api/admin/users?limit=10&offset=0")
     assert resp.status_code == 200
     body = resp.json()
     assert body["total"] == 1
@@ -107,7 +107,7 @@ def test_list_users_returns_page() -> None:
 def test_list_users_default_pagination() -> None:
     fake = _Fake(result=UserPage(users=[], total=0))
     client = next(_client(list_users=fake))
-    resp = client.get("/api/users")
+    resp = client.get("/api/admin/users")
     assert resp.status_code == 200
     assert fake.calls == [{"limit": 50, "offset": 0}]
 
@@ -115,11 +115,11 @@ def test_list_users_default_pagination() -> None:
 def test_list_users_rejects_out_of_range_limit() -> None:
     fake = _Fake(result=UserPage(users=[], total=0))
     client = next(_client(list_users=fake))
-    assert client.get("/api/users?limit=0").status_code == 422
-    assert client.get("/api/users?limit=101").status_code == 422
+    assert client.get("/api/admin/users?limit=0").status_code == 422
+    assert client.get("/api/admin/users?limit=101").status_code == 422
 
 
-# --- POST /users/{id}/deactivate -------------------------------------------
+# --- POST /admin/users/{id}/deactivate -------------------------------------
 
 
 def test_deactivate_returns_204_and_audits() -> None:
@@ -127,7 +127,7 @@ def test_deactivate_returns_204_and_audits() -> None:
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=None)
     client = next(_client(set_user_active=fake, recorder=recorder))
-    resp = client.post(f"/api/users/{target}/deactivate")
+    resp = client.post(f"/api/admin/users/{target}/deactivate")
     assert resp.status_code == 204
     assert fake.calls[0]["active"] is False
     assert [e.operation for e in recorder.events] == [ops.USER_DEACTIVATE]
@@ -136,13 +136,13 @@ def test_deactivate_returns_204_and_audits() -> None:
 
 def test_deactivate_requires_platform_admin() -> None:
     client = next(_client(platform_admin=False, set_user_active=_Fake()))
-    assert client.post(f"/api/users/{uuid.uuid4()}/deactivate").status_code == 403
+    assert client.post(f"/api/admin/users/{uuid.uuid4()}/deactivate").status_code == 403
 
 
 def test_deactivate_self_returns_409_self_target() -> None:
     fake = _Fake(error=SelfTargetError(str(uuid.uuid4())))
     client = next(_client(set_user_active=fake))
-    resp = client.post(f"/api/users/{uuid.uuid4()}/deactivate")
+    resp = client.post(f"/api/admin/users/{uuid.uuid4()}/deactivate")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "self_target"
 
@@ -150,7 +150,7 @@ def test_deactivate_self_returns_409_self_target() -> None:
 def test_deactivate_last_admin_returns_409() -> None:
     fake = _Fake(error=LastPlatformAdminError(str(uuid.uuid4())))
     client = next(_client(set_user_active=fake))
-    resp = client.post(f"/api/users/{uuid.uuid4()}/deactivate")
+    resp = client.post(f"/api/admin/users/{uuid.uuid4()}/deactivate")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "last_platform_admin"
 
@@ -158,17 +158,17 @@ def test_deactivate_last_admin_returns_409() -> None:
 def test_deactivate_unknown_returns_404() -> None:
     fake = _Fake(error=UserNotFoundError(str(uuid.uuid4())))
     client = next(_client(set_user_active=fake))
-    assert client.post(f"/api/users/{uuid.uuid4()}/deactivate").status_code == 404
+    assert client.post(f"/api/admin/users/{uuid.uuid4()}/deactivate").status_code == 404
 
 
-# --- POST /users/{id}/reactivate -------------------------------------------
+# --- POST /admin/users/{id}/reactivate -------------------------------------
 
 
 def test_reactivate_returns_204_and_audits() -> None:
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=None)
     client = next(_client(set_user_active=fake, recorder=recorder))
-    resp = client.post(f"/api/users/{uuid.uuid4()}/reactivate")
+    resp = client.post(f"/api/admin/users/{uuid.uuid4()}/reactivate")
     assert resp.status_code == 204
     assert fake.calls[0]["active"] is True
     assert [e.operation for e in recorder.events] == [ops.USER_REACTIVATE]
@@ -177,10 +177,10 @@ def test_reactivate_returns_204_and_audits() -> None:
 def test_reactivate_unknown_returns_404() -> None:
     fake = _Fake(error=UserNotFoundError(str(uuid.uuid4())))
     client = next(_client(set_user_active=fake))
-    assert client.post(f"/api/users/{uuid.uuid4()}/reactivate").status_code == 404
+    assert client.post(f"/api/admin/users/{uuid.uuid4()}/reactivate").status_code == 404
 
 
-# --- DELETE /users/{id} ----------------------------------------------------
+# --- DELETE /admin/users/{id} ----------------------------------------------
 
 
 def test_delete_returns_204_and_audits() -> None:
@@ -188,7 +188,7 @@ def test_delete_returns_204_and_audits() -> None:
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=None)
     client = next(_client(admin_delete_user=fake, recorder=recorder))
-    resp = client.delete(f"/api/users/{target}")
+    resp = client.delete(f"/api/admin/users/{target}")
     assert resp.status_code == 204
     assert [e.operation for e in recorder.events] == [ops.USER_DELETE]
     assert recorder.events[0].target_id == target
@@ -197,7 +197,7 @@ def test_delete_returns_204_and_audits() -> None:
 def test_delete_self_returns_409_self_target() -> None:
     fake = _Fake(error=SelfTargetError(str(uuid.uuid4())))
     client = next(_client(admin_delete_user=fake))
-    resp = client.delete(f"/api/users/{uuid.uuid4()}")
+    resp = client.delete(f"/api/admin/users/{uuid.uuid4()}")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "self_target"
 
@@ -205,7 +205,7 @@ def test_delete_self_returns_409_self_target() -> None:
 def test_delete_owner_returns_409() -> None:
     fake = _Fake(error=CommunityOwnedError(str(uuid.uuid4())))
     client = next(_client(admin_delete_user=fake))
-    resp = client.delete(f"/api/users/{uuid.uuid4()}")
+    resp = client.delete(f"/api/admin/users/{uuid.uuid4()}")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "owns_community"
 
@@ -213,24 +213,26 @@ def test_delete_owner_returns_409() -> None:
 def test_delete_last_admin_returns_409() -> None:
     fake = _Fake(error=LastPlatformAdminError(str(uuid.uuid4())))
     client = next(_client(admin_delete_user=fake))
-    resp = client.delete(f"/api/users/{uuid.uuid4()}")
+    resp = client.delete(f"/api/admin/users/{uuid.uuid4()}")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "last_platform_admin"
 
 
 def test_delete_requires_platform_admin() -> None:
     client = next(_client(platform_admin=False, admin_delete_user=_Fake()))
-    assert client.delete(f"/api/users/{uuid.uuid4()}").status_code == 403
+    assert client.delete(f"/api/admin/users/{uuid.uuid4()}").status_code == 403
 
 
-# --- PUT /users/{id}/platform-admin ----------------------------------------
+# --- PUT /admin/users/{id}/platform-admin ----------------------------------
 
 
 def test_grant_platform_admin_returns_204_and_audits() -> None:
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=None)
     client = next(_client(set_platform_admin=fake, recorder=recorder))
-    resp = client.put(f"/api/users/{uuid.uuid4()}/platform-admin", json={"grant": True})
+    resp = client.put(
+        f"/api/admin/users/{uuid.uuid4()}/platform-admin", json={"grant": True}
+    )
     assert resp.status_code == 204
     assert fake.calls[0]["grant"] is True
     assert [e.operation for e in recorder.events] == [ops.USER_PLATFORM_ADMIN_GRANT]
@@ -241,7 +243,7 @@ def test_revoke_platform_admin_returns_204_and_audits() -> None:
     fake = _Fake(result=None)
     client = next(_client(set_platform_admin=fake, recorder=recorder))
     resp = client.put(
-        f"/api/users/{uuid.uuid4()}/platform-admin", json={"grant": False}
+        f"/api/admin/users/{uuid.uuid4()}/platform-admin", json={"grant": False}
     )
     assert resp.status_code == 204
     assert [e.operation for e in recorder.events] == [ops.USER_PLATFORM_ADMIN_REVOKE]
@@ -251,7 +253,7 @@ def test_revoke_last_admin_returns_409() -> None:
     fake = _Fake(error=LastPlatformAdminError(str(uuid.uuid4())))
     client = next(_client(set_platform_admin=fake))
     resp = client.put(
-        f"/api/users/{uuid.uuid4()}/platform-admin", json={"grant": False}
+        f"/api/admin/users/{uuid.uuid4()}/platform-admin", json={"grant": False}
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "last_platform_admin"
@@ -259,7 +261,9 @@ def test_revoke_last_admin_returns_409() -> None:
 
 def test_set_platform_admin_requires_platform_admin() -> None:
     client = next(_client(platform_admin=False, set_platform_admin=_Fake()))
-    resp = client.put(f"/api/users/{uuid.uuid4()}/platform-admin", json={"grant": True})
+    resp = client.put(
+        f"/api/admin/users/{uuid.uuid4()}/platform-admin", json={"grant": True}
+    )
     assert resp.status_code == 403
 
 
