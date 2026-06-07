@@ -5,6 +5,10 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useState } from "react";
+import {
+  ADMIN_COMMUNITIES_KEY,
+  adminCommunitiesListKey,
+} from "../api/adminQueryKeys.ts";
 import { ApiError, api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -43,13 +47,13 @@ export function AdminCommunitiesPage() {
     useState<AdminCommunityResponse | null>(null);
 
   const communities = useQuery({
-    queryKey: ["admin", "communities", offset],
+    queryKey: adminCommunitiesListKey(PAGE_SIZE, offset),
     queryFn: () => api.get(communitiesUrl(offset)),
     placeholderData: keepPreviousData,
   });
 
   const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ["admin", "communities"] });
+    queryClient.invalidateQueries({ queryKey: ADMIN_COMMUNITIES_KEY });
     // The membership-scoped switcher list shares this key.
     queryClient.invalidateQueries({ queryKey: ["communities"] });
   };

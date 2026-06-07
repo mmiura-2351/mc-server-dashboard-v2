@@ -138,6 +138,54 @@ describe("AdminAuditPage", () => {
     expect(screen.getAllByText(COMMUNITY.id).length).toBeGreaterThan(0);
   });
 
+  it("warns that the community picker is truncated when more communities exist than one page", async () => {
+    // The picker requests one page (limit=100); report a larger total so the
+    // hint surfaces, mirroring the Provision owner picker (#476/#488).
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/communities")
+        return Promise.resolve(jsonResponse([COMMUNITY]));
+      if (url.startsWith("/admin/communities"))
+        return Promise.resolve(
+          jsonResponse({
+            total: 150,
+            limit: 100,
+            offset: 0,
+            communities: [adminCommunity()],
+          }),
+        );
+      if (url.endsWith("/me/permissions"))
+        return Promise.resolve(jsonResponse({}));
+      if (url.startsWith("/audit"))
+        return Promise.resolve(jsonResponse({ records: [record()] }));
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderApp({ path: "/admin/audit" });
+    await screen.findByText("server:start");
+
+    const hint = await screen.findByText(
+      t("admin.audit.communitiesTruncatedPrefix"),
+      { exact: false },
+    );
+    expect(hint.textContent).toContain("1");
+    expect(hint.textContent).toContain("150");
+  });
+
+  it("does not warn when the whole community list fits in one page", async () => {
+    signedInAs(ADMIN, [record()], [adminCommunity()]);
+
+    renderApp({ path: "/admin/audit" });
+    await screen.findByText("server:start");
+
+    expect(
+      screen.queryByText(t("admin.audit.communitiesTruncatedPrefix"), {
+        exact: false,
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it("sources the community picker from the admin-wide endpoint (incl. non-member)", async () => {
     signedInAs(
       ADMIN,

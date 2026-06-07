@@ -987,6 +987,12 @@ export const en = {
   "admin.audit.filterCommunity": "Community",
   "admin.audit.filterCommunityAll": "All communities",
   "admin.audit.colCommunity": "Community",
+  // Truncation hint composed around the loaded/total counts, e.g. "Showing the
+  // first 100 of 150 communities." The picker requests the API max page (100);
+  // when more communities exist the later ones are omitted (#476/#488).
+  "admin.audit.communitiesTruncatedPrefix": "Showing the first ",
+  "admin.audit.communitiesTruncatedMid": " of ",
+  "admin.audit.communitiesTruncatedSuffix": " communities.",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",

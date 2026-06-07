@@ -1,5 +1,6 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { adminCommunitiesPickerKey } from "../api/adminQueryKeys.ts";
 import { api } from "../api/client.ts";
 import { t } from "../i18n/index.ts";
 import {
@@ -20,6 +21,12 @@ interface AdminAuditFilters extends AuditFilters {
 }
 
 const EMPTY: AdminAuditFilters = { ...EMPTY_FILTERS, community: "" };
+
+// The community picker requests one max-size page (the API caps
+// /admin/communities at 100). When more communities exist the later ones are
+// omitted from the dropdown, so we surface a truncation hint — same pattern as
+// the Provision owner picker (#476/#488).
+const PICKER_PAGE_SIZE = 100;
 
 // Build the global audit-list URL: the shared filters plus the optional
 // `community` param, mapped to the exact query params the endpoint declares
@@ -45,14 +52,22 @@ function auditUrl(filters: AdminAuditFilters, offset: number): "/audit" {
 export function AdminAuditPage() {
   // The community picker lists ALL communities (admins see every community), not
   // just the admin's own — sourced from the platform-axis GET /admin/communities
-  // (#489), the same endpoint the admin Communities page uses. One full page is
-  // enough to populate the dropdown for current deployments.
+  // (#489), the same endpoint the admin Communities page uses. It requests one
+  // max-size page; when more communities exist the dropdown is truncated and we
+  // surface a hint below.
   const communitiesQuery = useQuery({
-    queryKey: ["admin", "communities", 0],
+    queryKey: adminCommunitiesPickerKey(PICKER_PAGE_SIZE),
     queryFn: () =>
-      api.get("/admin/communities?limit=100&offset=0" as "/admin/communities"),
+      api.get(
+        `/admin/communities?limit=${PICKER_PAGE_SIZE}&offset=0` as "/admin/communities",
+      ),
   });
   const communities = communitiesQuery.data?.communities;
+  // The picker shows only the first page; if more communities exist, say so
+  // rather than silently omitting the rest (#476/#488).
+  const communityTotal = communitiesQuery.data?.total ?? 0;
+  const communitiesTruncated =
+    communities !== undefined && communityTotal > communities.length;
   // Applied filters (committed on Apply) and the in-progress input draft.
   const [filters, setFilters] = useState<AdminAuditFilters>(EMPTY);
   const [draft, setDraft] = useState<AdminAuditFilters>(EMPTY);
@@ -103,6 +118,15 @@ export function AdminAuditPage() {
               </option>
             ))}
           </select>
+          {communitiesTruncated && communities !== undefined && (
+            <div className="hint">
+              {t("admin.audit.communitiesTruncatedPrefix")}
+              {communities.length}
+              {t("admin.audit.communitiesTruncatedMid")}
+              {communityTotal}
+              {t("admin.audit.communitiesTruncatedSuffix")}
+            </div>
+          )}
         </label>
         <AuditFilterFields
           draft={draft}

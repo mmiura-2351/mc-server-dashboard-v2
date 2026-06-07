@@ -198,6 +198,56 @@ describe("admin communities delete", () => {
       expect(adminListCalls).toBeGreaterThan(callsBefore);
     });
   });
+
+  it("treats a 404 (already gone) as success and refetches without an error toast", async () => {
+    let adminListCalls = 0;
+    fetchMock.mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const m = method(input, init);
+        if (url.startsWith("/admin/communities")) {
+          adminListCalls += 1;
+          return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
+        }
+        if (url.startsWith("/communities/") && m === "DELETE") {
+          return Promise.resolve(problemResponse("not_found", 404));
+        }
+        return Promise.resolve(baseRoute(url) ?? tokenResponse());
+      },
+    );
+
+    renderApp({ path: "/admin/communities" });
+
+    const table = await screen.findByRole("table");
+    const callsBefore = adminListCalls;
+    const row = within(table).getByText("Dev Playground").closest("tr");
+    if (row === null) throw new Error("row not found");
+    fireEvent.click(
+      within(row).getByRole("button", { name: t("admin.communities.delete") }),
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox"), {
+      target: { value: "Dev Playground" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: t("admin.communities.deleteConfirm"),
+      }),
+    );
+
+    // 404 means the community is already gone: show the success message and
+    // refetch the list, never the delete-error toast.
+    expect(
+      await screen.findByText(t("admin.communities.deleted")),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(adminListCalls).toBeGreaterThan(callsBefore);
+    });
+    expect(
+      screen.queryByText(t("admin.communities.deleteError")),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("admin communities owner picker", () => {

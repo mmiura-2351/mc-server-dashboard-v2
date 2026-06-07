@@ -999,6 +999,10 @@ export const ja: Record<TranslationKey, string> = {
   "admin.audit.filterCommunity": "コミュニティ",
   "admin.audit.filterCommunityAll": "すべてのコミュニティ",
   "admin.audit.colCommunity": "コミュニティ",
+  "admin.audit.communitiesTruncatedPrefix": "最初の ",
+  "admin.audit.communitiesTruncatedMid": " / ",
+  "admin.audit.communitiesTruncatedSuffix":
+    " 件のコミュニティを表示しています。",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "この操作を行う権限がありません。",
