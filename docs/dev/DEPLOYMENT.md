@@ -20,6 +20,20 @@ port. The worker attaches every MC container to the pinned compose network
 see Section 6). The `migrate` service is a one-shot that applies the database
 schema before `api` starts.
 
+### CPU priority for game-server containers
+
+The worker creates every Minecraft container with an elevated CPU weight
+(`CpuShares` 2048, double the Docker default of 1024), so a game server wins CPU
+contention against batch workloads — CI builds, test suites, image builds —
+sharing the same host. This was added after a running server starved under heavy
+host load: the MC server thread stalled tens of seconds ("Running 837 ticks
+behind") and players keepalive-dropped. Shares are a **relative weight, not a
+cap** (the Engine translates them to `cpu.weight` on cgroup v2): they only
+arbitrate who wins when the CPU is saturated. They do **not** raise absolute
+capacity, so running heavy builds on the game host still degrades a server's
+throughput — the weight just keeps the game ahead of the batch work. Do not rely
+on it as a substitute for keeping heavy build pipelines off the game host.
+
 ## 2. Prerequisites
 
 - A Linux host with Docker Engine and the Compose plugin (`docker compose`).

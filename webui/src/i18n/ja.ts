@@ -59,7 +59,6 @@ export const ja: Record<TranslationKey, string> = {
   "auth.fieldEmail": "メールアドレス",
   "auth.fieldPassword": "パスワード",
   "login.usernamePlaceholder": "ユーザー名",
-  "login.passwordPlaceholder": "••••••••",
   "login.submit": "サインイン",
   "login.submitting": "サインインしています…",
   "login.invalidCredentials": "ユーザー名またはパスワードが正しくありません。",

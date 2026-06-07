@@ -54,7 +54,6 @@ export const en = {
   "auth.fieldEmail": "Email",
   "auth.fieldPassword": "Password",
   "login.usernamePlaceholder": "username",
-  "login.passwordPlaceholder": "••••••••",
   "login.submit": "Sign in",
   "login.submitting": "Signing in…",
   "login.invalidCredentials": "Invalid username or password.",
