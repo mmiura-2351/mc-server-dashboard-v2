@@ -397,19 +397,38 @@ describe("ServerBackupsTab schedule field", () => {
     expect(config).toEqual({ motd: "hi" });
   });
 
-  it("shows the field read-only without server:update", async () => {
-    // The PATCH is gated on server:update; a backup:schedule-only user must not
-    // get a dead Save control.
+  it("lets a backup:schedule-only user edit and save (no server:update)", async () => {
+    // The API branches the PATCH gate by the changed-key set: a cadence-only edit
+    // needs backup:schedule, not server:update (issue #458). So a holder of only
+    // backup:schedule gets an editable field and a live Save control.
     mockCan = (code) => code !== "server:update";
     routeGet({ srv: { config: { backup_interval_hours: 12 } } });
+    mockApi.patch.mockResolvedValue(server());
     await openBackups();
 
     const input = (await screen.findByLabelText(
       t("backups.schedule.label"),
     )) as HTMLInputElement;
-    expect(input).toBeDisabled();
+    expect(input).not.toBeDisabled();
+    fireEvent.change(input, { target: { value: "24" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("backups.schedule.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    expect(config).toEqual({ backup_interval_hours: 24 });
+  });
+
+  it("hides the field without backup:schedule", async () => {
+    mockCan = (code) => code !== "backup:schedule";
+    routeGet({ srv: { config: { backup_interval_hours: 12 } } });
+    await openBackups();
+
+    // Wait for the tab to settle, then assert the schedule field is absent.
+    await screen.findByText(t("backups.col.created"));
     expect(
-      screen.queryByRole("button", { name: t("backups.schedule.save") }),
+      screen.queryByLabelText(t("backups.schedule.label")),
     ).not.toBeInTheDocument();
   });
 });

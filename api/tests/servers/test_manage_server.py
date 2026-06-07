@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,6 +28,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
     InvalidSnapshotIntervalError,
+    PermissionDeniedError,
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
@@ -574,21 +577,39 @@ async def test_list_is_scoped_to_the_community() -> None:
 # --- update ----------------------------------------------------------------
 
 
+async def _grant_all(_code: str) -> bool:
+    """A permissive ``authorize`` for tests that exercise non-authz behavior."""
+
+    return True
+
+
 def _updater(
     uow: FakeUnitOfWork,
     *,
     file_store: FakeFileStore | None = None,
     min_interval_seconds: int = 0,
-) -> UpdateServer:
-    """Build an :class:`UpdateServer` with the file seam + port range bound (#311)."""
+) -> Callable[..., Awaitable[Server]]:
+    """Build an :class:`UpdateServer` with the file seam + port range bound (#311).
 
-    return UpdateServer(
+    ``authorize`` is required on :class:`UpdateServer` (issue #458). Call sites that
+    do not exercise the gate omit it and get a permit-all default; gate tests pass an
+    explicit ``authorize=`` which overrides the default.
+    """
+
+    use_case = UpdateServer(
         uow=uow,
         clock=FakeClock(_LATER),
         file_store=file_store or FakeFileStore(),
         port_range=_PORTS,
         min_interval_seconds=min_interval_seconds,
     )
+
+    async def call(
+        *, authorize: Callable[..., Awaitable[bool]] = _grant_all, **kwargs: Any
+    ) -> Server:
+        return await use_case(authorize=authorize, **kwargs)
+
+    return call
 
 
 async def test_update_edits_name_and_config_while_at_rest() -> None:
@@ -662,6 +683,222 @@ async def test_update_rejects_invalid_backup_schedule_override() -> None:
             config={"backup_interval_hours": 0},
         )
     assert uow.commits == 0
+
+
+# --- update permission gate (issue #458) -----------------------------------
+#
+# A config edit that touches only the backup-scheduling key
+# (``backup_interval_hours``) requires ``backup:schedule``; any other change
+# requires ``server:update``; a mixed edit requires both. ``server:update`` no
+# longer implies scheduling. The gate keys off the *changed* set vs the current
+# config, so it sees what the edit actually alters (not the round-tripped blob).
+
+
+class _Grant:
+    """An ``authorize`` callback granting exactly ``codes`` (denying anything else).
+
+    Records the codes it was asked about in ``seen`` so tests can assert the gate
+    queried only the permissions the changed-key set requires.
+    """
+
+    def __init__(self, *codes: str) -> None:
+        self._granted = set(codes)
+        self.seen: list[str] = []
+
+    async def __call__(self, code: str) -> bool:
+        self.seen.append(code)
+        return code in self._granted
+
+
+def _grant(*codes: str) -> _Grant:
+    return _Grant(*codes)
+
+
+async def test_update_scheduling_only_requires_backup_schedule() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    authorize = _grant("backup:schedule")
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hi", "backup_interval_hours": 6},
+        authorize=authorize,
+    )
+    assert updated.config["backup_interval_hours"] == 6
+    assert authorize.seen == ["backup:schedule"]
+    assert uow.commits == 1
+
+
+async def test_update_scheduling_only_denied_without_backup_schedule() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "hi", "backup_interval_hours": 6},
+            authorize=_grant("server:update"),
+        )
+    assert exc.value.permission == "backup:schedule"
+    assert uow.commits == 0
+
+
+async def test_update_non_scheduling_change_requires_server_update() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    authorize = _grant("server:update")
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        name="creative",
+        authorize=authorize,
+    )
+    assert updated.name == ServerName("creative")
+    assert authorize.seen == ["server:update"]
+    assert uow.commits == 1
+
+
+async def test_update_non_scheduling_change_denied_without_server_update() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            name="creative",
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_mixed_change_requires_both_permissions() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        name="creative",
+        config={"motd": "hi", "backup_interval_hours": 6},
+        authorize=_grant("server:update", "backup:schedule"),
+    )
+    assert updated.name == ServerName("creative")
+    assert updated.config["backup_interval_hours"] == 6
+    assert uow.commits == 1
+
+
+async def test_update_mixed_change_denied_missing_server_update() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            name="creative",
+            config={"motd": "hi", "backup_interval_hours": 6},
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_mixed_change_denied_missing_backup_schedule() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            name="creative",
+            config={"motd": "hi", "backup_interval_hours": 6},
+            authorize=_grant("server:update"),
+        )
+    assert exc.value.permission == "backup:schedule"
+    assert uow.commits == 0
+
+
+async def test_update_snapshot_interval_change_requires_server_update() -> None:
+    # snapshot_interval_seconds has no dedicated permission code; it stays under
+    # server:update (only the backup-scheduling key maps to backup:schedule).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow, min_interval_seconds=300)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "hi", "snapshot_interval_seconds": 600},
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_empty_body_requires_server_update() -> None:
+    # A PATCH that asserts an edit but touches nothing (empty body) must still
+    # require server:update — the conservative pre-#458 default. Otherwise a caller
+    # with no permissions could use the 200 as an info leak / state oracle.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_no_op_config_requires_server_update() -> None:
+    # A config that round-trips identical to the current config has an empty
+    # changed-key set, but the PATCH still requires server:update.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            config=dict(server.config),
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_empty_body_succeeds_with_server_update() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    authorize = _grant("server:update")
+    await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        authorize=authorize,
+    )
+    assert authorize.seen == ["server:update"]
+    assert uow.commits == 1
+    assert uow.commits == 1
 
 
 async def test_update_rejects_backend_change_as_immutable() -> None:
@@ -1167,6 +1404,7 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
         community_id=community,
         server_id=server.id,
         game_port=25570,
+        authorize=_grant_all,
     )
     assert updated.game_port == 25570
 

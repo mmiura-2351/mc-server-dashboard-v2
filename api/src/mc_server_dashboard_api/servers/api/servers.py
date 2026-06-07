@@ -37,6 +37,7 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 # routes reference the ``server:*`` codes through it, as the community routes do.
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
+    ServerUpdateAuthz,
     get_audit_recorder,
     get_create_server,
     get_delete_server,
@@ -50,6 +51,7 @@ from mc_server_dashboard_api.dependencies import (
     get_stop_server,
     get_update_server,
     require_permission,
+    require_server_update_authz,
 )
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.application.export_import import (
@@ -91,6 +93,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidSnapshotIntervalError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
+    PermissionDeniedError,
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
@@ -443,11 +446,10 @@ async def update_server(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     body: UpdateServerRequest,
-    authorized: Annotated[
-        AuthUser,
+    authz: Annotated[
+        ServerUpdateAuthz,
         Depends(
-            require_permission(
-                Permission("server:update"),
+            require_server_update_authz(
                 resource_type=_SERVER_RESOURCE_TYPE,
                 resource_id_param="server_id",
             )
@@ -456,7 +458,18 @@ async def update_server(
     use_case: Annotated[UpdateServer, Depends(get_update_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ServerResponse:
-    """Edit a server's name/config/game port (server:update).
+    """Edit a server's name/config/game port.
+
+    **Permission gate (issue #458).** The required permission branches by the
+    changed-key set rather than a single fixed code: an edit that changes only the
+    backup-scheduling key (``backup_interval_hours``) requires ``backup:schedule``;
+    any other change (name, game port, backend, or any non-scheduling config key)
+    requires ``server:update``; a mixed edit requires both. ``server:update`` no
+    longer implies scheduling — a ``backup:schedule``-only holder may set the
+    cadence, and a ``server:update``-only holder may not. A missing required
+    permission is 403 carrying it in the ``permission`` member (#425/#555). Layer-1
+    membership is checked at the edge (non-member -> 404); the changed-key decision
+    runs in the use case, which has the current config in hand.
 
     **Error precedence (issue #115).** Validation runs first: config-bounds
     (``config_too_large`` / ``config_invalid_shape``), the cadence-override
@@ -481,6 +494,7 @@ async def update_server(
     leaves the row unchanged.
     """
 
+    authorized = authz.auth_user
     config = None if body.config is None else _validated_config(body.config)
     try:
         server = await use_case(
@@ -490,7 +504,12 @@ async def update_server(
             config=config,
             execution_backend=body.execution_backend,
             game_port=body.game_port,
+            authorize=authz.authorize,
         )
+    except PermissionDeniedError as exc:
+        # The caller lacks a permission the changed-key set requires (issue #458);
+        # carry the missing code in the 403 ``permission`` member (#425/#555).
+        raise _forbidden(exc.permission) from exc
     except ServerNotFoundError as exc:
         raise _not_found() from exc
     except ExecutionBackendImmutableError as exc:
@@ -844,6 +863,15 @@ def _service_unavailable(reason: str) -> ProblemException:
 
 def _conflict(reason: str) -> ProblemException:
     return problem(status.HTTP_409_CONFLICT, reason)
+
+
+def _forbidden(permission: str) -> ProblemException:
+    # The update gate denied a specific permission (issue #458); carry its code in
+    # the ``permission`` extension member so the Web UI can name what is missing
+    # (#425/#555). ``reason`` stays the stable ``"forbidden"`` code.
+    return problem(
+        status.HTTP_403_FORBIDDEN, "forbidden", extensions={"permission": permission}
+    )
 
 
 def _too_large() -> ProblemException:

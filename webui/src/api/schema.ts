@@ -600,7 +600,18 @@ export interface paths {
         head?: never;
         /**
          * Update Server
-         * @description Edit a server's name/config/game port (server:update).
+         * @description Edit a server's name/config/game port.
+         *
+         *     **Permission gate (issue #458).** The required permission branches by the
+         *     changed-key set rather than a single fixed code: an edit that changes only the
+         *     backup-scheduling key (``backup_interval_hours``) requires ``backup:schedule``;
+         *     any other change (name, game port, backend, or any non-scheduling config key)
+         *     requires ``server:update``; a mixed edit requires both. ``server:update`` no
+         *     longer implies scheduling — a ``backup:schedule``-only holder may set the
+         *     cadence, and a ``server:update``-only holder may not. A missing required
+         *     permission is 403 carrying it in the ``permission`` member (#425/#555). Layer-1
+         *     membership is checked at the edge (non-member -> 404); the changed-key decision
+         *     runs in the use case, which has the current config in hand.
          *
          *     **Error precedence (issue #115).** Validation runs first: config-bounds
          *     (``config_too_large`` / ``config_invalid_shape``), the cadence-override
