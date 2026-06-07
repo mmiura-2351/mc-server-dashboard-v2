@@ -417,7 +417,7 @@ describe("ServerFilesTab permission gating", () => {
       list: listing([{ name: "x", is_dir: false }]),
     });
     mockApi.delete.mockRejectedValue(
-      new ApiError(403, { reason: "file:edit" }),
+      new ApiError(403, { reason: "forbidden", permission: "file:edit" }),
     );
     renderPage();
     await openFiles();

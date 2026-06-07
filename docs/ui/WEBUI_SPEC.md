@@ -401,8 +401,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   (the set may have changed since cache). Controls render from
   `permissions ∪ (matching resource grant)`.
 - Every denied action is still handled at response time (403 toast "you lack
-  server:start"; 404 treated as nonexistence per the no-existence-signal
-  posture). UI never invents authority; failures degrade politely.
+  server:start", named from the `permission` extension member — see 7.4; 404
+  treated as nonexistence per the no-existence-signal posture). UI never invents
+  authority; failures degrade politely.
 
 ### 7.4 Errors & confirmations
 - Every API error is RFC 9457 `application/problem+json`: one body shape with
@@ -410,9 +411,13 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   is both the terminal segment of the `type` URI (`urn:mcsd:error:<reason>`) and
   the `reason` field — the client switches on `reason`. Request-validation
   failures (422) use `reason: "validation_error"` and carry the per-field list
-  in an `errors` extension member. The client branches on exactly this shape;
-  there is no legacy bare-string / `{reason}` fork. The auth endpoints' reason
-  codes are enumerated in [`AUTH_API.md`](../app/AUTH_API.md) Section 2.
+  in an `errors` extension member. A 403 permission denial keeps
+  `reason: "forbidden"` and carries the required permission code in a
+  `permission` extension member, which the client names in the denial toast
+  (7.3). The client branches on exactly this shape; there is no legacy
+  bare-string / `{reason}` fork. The auth endpoints' reason codes and the
+  `permission` member are enumerated in [`AUTH_API.md`](../app/AUTH_API.md)
+  Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
 - Conflict-flavored errors (e.g. lifecycle races, `server_unsettled`-style
   responses) get a "state changed — refresh" treatment, not a raw error dump.
