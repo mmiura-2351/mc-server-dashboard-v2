@@ -23,12 +23,29 @@ every other auth failure.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.errors import InvalidRefreshTokenError
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
+
+
+@dataclass(frozen=True)
+class RestoreResult:
+    """A successful restore: the issued access token plus the session's user id.
+
+    The ``user_id`` lets the route attribute the ``auth:session_restore`` SUCCESS
+    audit row to the actor (FR-AUD-1, issue #530) without re-querying. Restore
+    never rotates, so it has no *incidental* theft signal; this audit row is the
+    explicit one, surfacing session-restore activity per family for operators. A
+    restore *failure* stays unattributed (uniform 401), so the user id is carried
+    only on the success result, not threaded through the error path.
+    """
+
+    access_token: str
+    user_id: uuid.UUID
 
 
 @dataclass(frozen=True)
@@ -39,11 +56,12 @@ class RestoreSession:
     tokens: TokenService
     clock: Clock
 
-    async def __call__(self, *, refresh_token: str) -> str:
+    async def __call__(self, *, refresh_token: str) -> RestoreResult:
         token_hash = self.tokens.hash_refresh_token(refresh_token)
         now = self.clock.now()
         async with self.uow:
             stored = await self.uow.refresh_tokens.get_by_token_hash(token_hash)
         if stored is None or not stored.is_active(now=now):
             raise InvalidRefreshTokenError
-        return self.tokens.issue_access_token(stored.user_id)
+        access_token = self.tokens.issue_access_token(stored.user_id)
+        return RestoreResult(access_token=access_token, user_id=stored.user_id.value)

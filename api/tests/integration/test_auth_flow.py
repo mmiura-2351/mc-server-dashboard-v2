@@ -184,8 +184,8 @@ async def test_restore_yields_access_token_and_leaves_family_intact(
     # torn-rotation race) and the access token resolves back to the same user.
     first = await restore(refresh_token=pair.refresh_token)
     second = await restore(refresh_token=pair.refresh_token)
-    assert _tokens().verify_access_token(first) == user.id
-    assert _tokens().verify_access_token(second) == user.id
+    assert _tokens().verify_access_token(first.access_token) == user.id
+    assert _tokens().verify_access_token(second.access_token) == user.id
 
     # The refresh token was never rotated by restore, so the original still
     # rotates normally on the in-session refresh path — the family is intact.
@@ -244,7 +244,7 @@ async def test_restore_with_revoked_token_does_not_revoke_family(
     # ...but did NOT revoke the family: the rotated successor still restores fine.
     assert (
         _tokens().verify_access_token(
-            await restore(refresh_token=rotated.refresh_token)
+            (await restore(refresh_token=rotated.refresh_token)).access_token
         )
         == user.id
     )

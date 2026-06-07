@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,16 +16,18 @@ function renderLogin(fromState?: {
   from: { pathname: string; search: string };
 }) {
   render(
-    <MemoryRouter
-      initialEntries={[{ pathname: "/login", state: fromState ?? null }]}
-    >
-      <SessionProvider>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="*" element={<PathProbe />} />
-        </Routes>
-      </SessionProvider>
-    </MemoryRouter>,
+    <QueryClientProvider client={new QueryClient()}>
+      <MemoryRouter
+        initialEntries={[{ pathname: "/login", state: fromState ?? null }]}
+      >
+        <SessionProvider>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="*" element={<PathProbe />} />
+          </Routes>
+        </SessionProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 

@@ -173,11 +173,15 @@ export function AppShell() {
           <CommunitySwitcher />
           <div className="spacer" />
           <LanguageSwitcher />
-          <NavLink className="user-menu" to="/account">
+          <NavLink
+            className="user-menu"
+            to="/account"
+            aria-label={t("shell.account")}
+          >
             <span className="avatar" aria-hidden="true">
               A
             </span>
-            {t("shell.account")}
+            <span className="label">{t("shell.account")}</span>
           </NavLink>
         </header>
         <main className="content">

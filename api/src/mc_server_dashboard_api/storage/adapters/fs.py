@@ -716,6 +716,13 @@ class FsStorage(Storage):
         rel_path: RelPath,
         data: bytes,
     ) -> None:
+        # The working-set root (an empty rel_path, e.g. the file route's default
+        # ``path="."``) names a directory, not a file. Writing it would target the
+        # live snapshot directory itself and the atomic rename onto a directory
+        # raises IsADirectoryError (the at-rest 500, issue #542); refuse it as an
+        # invalid path instead.
+        if not rel_path.parts:
+            raise PathTraversalError("rel_path must name a file, not the root")
         # A never-snapshotted server has no live snapshot to edit in place (issue
         # #205). Initialize the first published version containing just this file,
         # through the same atomic-publish path a snapshot uses: stage the file into
@@ -727,6 +734,13 @@ class FsStorage(Storage):
             return
         current = self._current_dir(community_id, server_id)
         target = self._safe_target(current, rel_path)
+        # Refuse to overwrite a directory with file bytes (issue #542): the atomic
+        # rename onto an existing directory raises IsADirectoryError, so reject it
+        # as an invalid path rather than crashing.
+        if target.is_dir():
+            raise PathTraversalError(
+                f"rel_path names a directory, not a file: {rel_path.value}"
+            )
         # Capture the prior version BEFORE overwriting (Section 4.4/5), so a crash
         # mid-write leaves both the old content and the retained version consistent.
         if target.is_file():

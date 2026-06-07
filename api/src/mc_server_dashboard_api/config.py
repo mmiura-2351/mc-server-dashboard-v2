@@ -30,6 +30,17 @@ _MASK = "***"
 # (CONFIGURATION.md Section 5.3).
 _HS256_MIN_KEY_BYTES = 32
 
+# Floor for the reconciler's backoff-entry expiry slack (issue #353). The
+# crash-loop damping added in #346 keeps a flapping server's backoff entry alive
+# until ``now`` is past ``next_eligible_at`` by ``backoff_max_seconds`` of slack;
+# a still-diverged server that briefly drops out of the reconcilable set (sitting
+# in ``starting`` during a slow modded boot) must re-arrive and refresh its entry
+# within that slack, or its failure count is silently reset and the boot-crash
+# loop re-arms. The slack therefore has to comfortably exceed the longest
+# plausible ``starting`` window. Ten minutes covers even a heavily-modded boot
+# while staying far below the shipped 3600s default.
+_RECONCILER_BACKOFF_EXPIRY_SLACK_FLOOR_SECONDS = 600
+
 
 class _Section(BaseModel):
     # Reject unknown keys (fail-fast) and forbid mutation after load.
@@ -240,6 +251,20 @@ class ReconcilerSettings(_Section):
             raise ValueError(
                 "reconciler.backoff_max_seconds must be >= "
                 "reconciler.backoff_base_seconds"
+            )
+        # backoff_max_seconds is also the slack past next_eligible_at that keeps a
+        # flapping server's backoff entry alive while it briefly sits in starting
+        # (#346). Too small a slack lets a still-diverged server in a slow modded
+        # boot expire and reset its failure count, re-arming the crash-loop. Reject
+        # a slack below the floor that a plausible boot window could outlast (#353).
+        if self.backoff_max_seconds < _RECONCILER_BACKOFF_EXPIRY_SLACK_FLOOR_SECONDS:
+            raise ValueError(
+                "reconciler.backoff_max_seconds must be >= "
+                f"{_RECONCILER_BACKOFF_EXPIRY_SLACK_FLOOR_SECONDS}: it doubles as "
+                "the backoff-entry expiry slack that keeps crash-loop damping "
+                "alive across a slow (modded) boot's starting window; a smaller "
+                "slack lets a still-diverged server expire and reset its failure "
+                "count, re-arming the boot-crash loop"
             )
         return self
 

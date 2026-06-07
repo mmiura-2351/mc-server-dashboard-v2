@@ -191,9 +191,20 @@ stolen refresh token is still invalidated the moment the legitimate holder's nex
 rotated token to `/auth/refresh` still trips the family revoke above. The gap is
 the *idle* victim: a thief who replays the cookie **exclusively** against
 `/auth/session` never collides with a rotation, so it raises no reuse signal and
-can quietly mint access tokens until the refresh TTL expires. That residual
-exposure — and candidate mitigations (`last_used_at`, audit-on-restore, a
-rotation deadline) — is tracked as the hardening follow-up in issue #530. Restore
+can quietly mint access tokens until the refresh TTL expires.
+
+The hardening follow-up (issue #530) closes that *detection* gap by making the
+signal **explicit** rather than incidental: every successful restore now emits an
+`auth:session_restore` SUCCESS audit row attributed to the session's user (see
+Section 6). The eviction model is unchanged — restore still never revokes — but
+the gap is no longer *invisible*: a thief minting access tokens against an idle
+victim leaves a per-family restore trail an operator can review, and an anomalous
+burst (or restores while the legitimate user believes they are logged out) is now
+observable. This is proportionate to the minor severity (the cookie is httpOnly,
+so the threat boundary is host/network compromise); a `last_used_at` column was
+**not** added — the `refresh_token` row has no such column and adding one would
+mean a new migration for a single-signal gain that the audit row already
+delivers — and no restore-lifetime cap was introduced. Restore
 deliberately does **not** trip reuse-detection: it has no rotation to
 disambiguate, so a revoked/rotated cookie is simply an invalid token there (plain
 `401`, no family action). Its read-only, no-rotation shape means a stolen cookie
@@ -239,12 +250,18 @@ status code returned to the client:
 | login failure | `auth:login` | `DENIED` | none (enumeration defence; the username / IP record lives in the `login_attempt` table) |
 | refresh success | `auth:refresh` | `SUCCESS` | — |
 | refresh reuse (family revoked) | `auth:refresh_reuse` | `DENIED` | the affected user (target: user) |
+| session restore success | `auth:session_restore` | `SUCCESS` | the session's user (target: user) |
 | logout (token presented) | `auth:logout` | `SUCCESS` | — |
 
 A plain unknown / expired refresh token is **not** audited — it is not a
-token-theft signal, so auditing it would be noise. `/auth/session` is likewise
-not audited: it is a read-only restore that neither mutates state nor carries a
-theft signal (a revoked cookie there is just an invalid token, issue #512).
+token-theft signal, so auditing it would be noise. `/auth/session` follows the
+same rule on failure: a missing, unknown, or revoked cookie stays a silent `401`
+with no row (no enumeration signal). A *successful* restore, however, **is**
+audited (`auth:session_restore`, issue #530): restore never rotates, so it lacks
+the incidental reuse signal `/auth/refresh` carries, and this explicit per-family
+SUCCESS row is its replacement — it lets operators see session-restore activity
+against an idle victim's cookie even though restore never revokes the family
+(Section 4).
 
 ## 7. Related documents
 

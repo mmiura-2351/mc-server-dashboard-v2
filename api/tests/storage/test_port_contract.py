@@ -19,6 +19,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     IncompleteTransferError,
     NotFoundError,
+    PathTraversalError,
     SnapshotHandleError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -538,6 +539,45 @@ async def test_write_file_creates_new_file_without_version(
         await harness.storage.list_file_versions(community, server, RelPath("new.txt"))
         == []
     )
+
+
+async def test_write_file_to_working_set_root_is_refused(
+    harness: StorageHarness,
+) -> None:
+    """A write whose ``rel_path`` names the working-set root is refused (#542).
+
+    ``RelPath(".")`` (the file route's default ``path``) names the working set
+    root — a directory, not a file. The atomic rename would target the live
+    snapshot directory itself; refuse it as a traversal/invalid path rather than
+    raising an unhandled ``IsADirectoryError`` (the at-rest 500, issue #542).
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"a=1"})
+
+    with pytest.raises(PathTraversalError):
+        await harness.storage.write_file(community, server, RelPath("."), b"x")
+    # The published copy is untouched by the refused write.
+    assert (
+        await harness.storage.read_file(community, server, RelPath("server.properties"))
+        == b"a=1"
+    )
+
+
+async def test_write_file_onto_existing_directory_is_refused(
+    harness: StorageHarness,
+) -> None:
+    """A write whose ``rel_path`` names an existing directory is refused (#542).
+
+    Overwriting a directory with file bytes is never a valid edit; refuse it as a
+    traversal/invalid path rather than crashing the atomic rename.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"config/server.properties": b"a=1"})
+
+    with pytest.raises(PathTraversalError):
+        await harness.storage.write_file(community, server, RelPath("config"), b"x")
 
 
 async def test_version_retention_is_count_bounded(backend: str, tmp_path: Path) -> None:
