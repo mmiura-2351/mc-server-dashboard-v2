@@ -17,7 +17,6 @@ func (c Config) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Group("api",
 			slog.String("grpc_endpoint", c.API.GRPCEndpoint),
-			slog.String("data_plane_url", c.API.DataPlaneURL),
 			slog.String("credential", masked(c.API.Credential)),
 			slog.Group("tls",
 				slog.String("ca_file", c.API.TLS.CAFile),

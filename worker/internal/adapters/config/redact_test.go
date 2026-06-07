@@ -11,7 +11,6 @@ func TestLogValueMasksSecrets(t *testing.T) {
 	cfg := Config{
 		API: APIConfig{
 			GRPCEndpoint: "api:50051",
-			DataPlaneURL: "https://api/data",
 			Credential:   "super-secret-token",
 			TLS:          TLSConfig{ClientKeyFile: "/keys/worker.key"},
 		},

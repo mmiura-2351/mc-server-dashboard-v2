@@ -302,7 +302,6 @@ can run**, and **where its scratch space is**.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `api.grpc_endpoint` | *required* | | Address of the API control-plane gRPC server the Worker dials to open its persistent stream (REQUIREMENTS.md Section 5.1). |
-| `api.data_plane_url` | *required* | | Base URL of the API's HTTP data-plane endpoint for hydrate/snapshot transfer (REQUIREMENTS.md FR-DATA-3). May be discovered from the API at registration; this key is the fallback/override. |
 | `api.credential` | *required* | secret | The Worker's credential for authenticating to the API (REQUIREMENTS.md NFR-SEC-1, FR-WRK-1). |
 | `api.tls.ca_file` | *required¹* | | Path to the CA bundle used to verify the API's control-channel TLS (REQUIREMENTS.md NFR-SEC-1). |
 | `api.tls.insecure` | `false` | | When `true`, dial the control channel in plaintext (no TLS). Local/dev only; the Worker logs a `WARN` at startup. Required to opt out of TLS when `api.tls.ca_file` is unset. |
