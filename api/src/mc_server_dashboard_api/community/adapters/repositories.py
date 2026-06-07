@@ -11,8 +11,9 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 from mc_server_dashboard_api.community.adapters.models import (
     CommunityModel,
@@ -23,6 +24,7 @@ from mc_server_dashboard_api.community.adapters.models import (
 )
 from mc_server_dashboard_api.community.domain.entities import (
     Community,
+    CommunitySummary,
     Membership,
     ResourceGrant,
     Role,
@@ -43,6 +45,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     RoleName,
     UserId,
 )
+from mc_server_dashboard_api.servers.adapters.models import ServerModel
 
 
 def _to_community(row: CommunityModel) -> Community:
@@ -116,6 +119,62 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
         stmt = select(CommunityModel).where(CommunityModel.name == name.value)
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_community(row) if row is not None else None
+
+    async def count_all(self) -> int:
+        stmt = select(func.count()).select_from(CommunityModel)
+        return (await self._session.execute(stmt)).scalar_one()
+
+    async def list_summaries_page(
+        self, *, limit: int, offset: int
+    ) -> list[CommunitySummary]:
+        # The page of communities (newest first), then the per-community counts.
+        # Two grouped aggregates keyed by the page's community ids — no N+1: one
+        # query for memberships, one for servers (the server table lives in the
+        # servers context, the same cross-context reach the unit of work uses).
+        rows = (
+            (
+                await self._session.execute(
+                    select(CommunityModel)
+                    .order_by(CommunityModel.created_at.desc(), CommunityModel.id)
+                    .limit(limit)
+                    .offset(offset)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ids = [row.id for row in rows]
+        if not ids:
+            return []
+        member_counts = await self._counts_by_community(
+            MembershipModel.community_id, ids
+        )
+        server_counts = await self._counts_by_community(ServerModel.community_id, ids)
+        return [
+            CommunitySummary(
+                id=CommunityId(row.id),
+                name=CommunityName(row.name),
+                created_at=row.created_at,
+                member_count=member_counts.get(row.id, 0),
+                server_count=server_counts.get(row.id, 0),
+            )
+            for row in rows
+        ]
+
+    async def _counts_by_community(
+        self,
+        column: InstrumentedAttribute[uuid.UUID],
+        community_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, int]:
+        """Count rows grouped by ``column`` (a ``community_id`` FK), scoped to ids."""
+
+        stmt = (
+            select(column, func.count())
+            .where(column.in_(community_ids))
+            .group_by(column)
+        )
+        result = await self._session.execute(stmt)
+        return {cid: count for cid, count in result.all()}
 
     async def update(self, community: Community) -> None:
         stmt = (

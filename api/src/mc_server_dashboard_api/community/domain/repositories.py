@@ -18,6 +18,7 @@ from collections.abc import Sequence
 
 from mc_server_dashboard_api.community.domain.entities import (
     Community,
+    CommunitySummary,
     Membership,
     ResourceGrant,
     Role,
@@ -46,6 +47,22 @@ class CommunityRepository(abc.ABC):
     @abc.abstractmethod
     async def get_by_name(self, name: CommunityName) -> Community | None:
         """Return the community with ``name``, or ``None`` if absent."""
+
+    @abc.abstractmethod
+    async def count_all(self) -> int:
+        """Return the total number of communities (platform-admin listing, #489)."""
+
+    @abc.abstractmethod
+    async def list_summaries_page(
+        self, *, limit: int, offset: int
+    ) -> list[CommunitySummary]:
+        """Return a page of communities with their member/server counts.
+
+        Backs the platform-admin ``GET /admin/communities`` listing (#489):
+        ordered by ``created_at``, each row enriched with its ``member_count`` and
+        ``server_count`` computed in grouped queries (no N+1). The counts cross
+        into the ``server`` table, which the community adapter already reaches.
+        """
 
     @abc.abstractmethod
     async def update(self, community: Community) -> None:

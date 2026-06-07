@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
@@ -10,6 +10,23 @@ import { renderApp } from "../test/render.tsx";
 // endpoint (path carries the query string).
 
 const COMMUNITY = { id: "11111111-1111-1111-1111-111111111111", name: "Alpha" };
+// A second community the admin is NOT a member of: it must still appear in the
+// picker, proving it is sourced from the admin-wide endpoint (#489).
+const OTHER_COMMUNITY = {
+  id: "33333333-3333-3333-3333-333333333333",
+  name: "Bravo",
+};
+
+function adminCommunity(over: Record<string, unknown> = {}) {
+  return {
+    id: COMMUNITY.id,
+    name: COMMUNITY.name,
+    created_at: "2026-06-06T12:00:00Z",
+    member_count: 1,
+    server_count: 0,
+    ...over,
+  };
+}
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -53,12 +70,25 @@ const MEMBER = { ...ADMIN, is_platform_admin: false };
 // Wire the fetch mock for a signed-in user with the given admin flag. The audit
 // endpoint returns the given records; the bootstrap refresh and any unmatched
 // URL fall through to a token response.
-function signedInAs(user: typeof ADMIN, records: unknown[]) {
+function signedInAs(
+  user: typeof ADMIN,
+  records: unknown[],
+  adminCommunities: unknown[] = [adminCommunity()],
+) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === "/users/me") return Promise.resolve(jsonResponse(user));
     if (url === "/communities")
       return Promise.resolve(jsonResponse([COMMUNITY]));
+    if (url.startsWith("/admin/communities"))
+      return Promise.resolve(
+        jsonResponse({
+          total: adminCommunities.length,
+          limit: 100,
+          offset: 0,
+          communities: adminCommunities,
+        }),
+      );
     if (url.endsWith("/me/permissions"))
       return Promise.resolve(jsonResponse({}));
     if (url.startsWith("/audit"))
@@ -106,6 +136,27 @@ describe("AdminAuditPage", () => {
     expect(await screen.findByText("server:start")).toBeInTheDocument();
     // The global view shows the community column.
     expect(screen.getAllByText(COMMUNITY.id).length).toBeGreaterThan(0);
+  });
+
+  it("sources the community picker from the admin-wide endpoint (incl. non-member)", async () => {
+    signedInAs(
+      ADMIN,
+      [record()],
+      [
+        adminCommunity(),
+        adminCommunity({ id: OTHER_COMMUNITY.id, name: OTHER_COMMUNITY.name }),
+      ],
+    );
+
+    renderApp({ path: "/admin/audit" });
+    await screen.findByText("server:start");
+
+    const picker = screen.getByLabelText(t("admin.audit.filterCommunity"));
+    // "Bravo" is not in the membership-scoped switcher list, so its presence as
+    // an option proves the picker reads GET /admin/communities.
+    expect(
+      within(picker).getByRole("option", { name: OTHER_COMMUNITY.name }),
+    ).toBeInTheDocument();
   });
 
   it("requests the first page with limit and offset only", async () => {

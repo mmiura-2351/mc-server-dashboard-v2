@@ -52,6 +52,71 @@
         "title": "AddPlayerRequest",
         "type": "object"
       },
+      "AdminCommunityListResponse": {
+        "properties": {
+          "communities": {
+            "items": {
+              "$ref": "#/components/schemas/AdminCommunityResponse"
+            },
+            "title": "Communities",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "communities",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "AdminCommunityListResponse",
+        "type": "object"
+      },
+      "AdminCommunityResponse": {
+        "description": "Admin view of a community: identity, age, and its operational counts.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "member_count": {
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "server_count": {
+            "title": "Server Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "member_count",
+          "server_count"
+        ],
+        "title": "AdminCommunityResponse",
+        "type": "object"
+      },
       "AdminCreateUserRequest": {
         "properties": {
           "email": {
@@ -1791,6 +1856,64 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/admin/communities": {
+      "get": {
+        "operationId": "list_all_communities_admin_communities_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminCommunityListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List All Communities"
+      }
+    },
     "/admin/users": {
       "post": {
         "operationId": "admin_create_user_admin_users_post",

@@ -1,28 +1,94 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiError, api } from "../api/client.ts";
+import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
+import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 
-// Platform admin Communities page (WEBUI_SPEC.md 6.12): list communities and
-// provision new ones (name + initial owner). The list reads ["communities"] —
-// the same key the community switcher uses — so a successful provision
-// invalidates both views at once. CommunityResponse carries only {id, name};
-// the API exposes no admin-wide community list, so this shows the communities
-// the admin is a member of (#476).
+// Platform admin Communities page (WEBUI_SPEC.md 6.12): list ALL communities and
+// provision new ones (name + initial owner). The listing reads the platform-axis
+// endpoint GET /admin/communities (#489) — admin sees every community with its
+// member/server counts, regardless of membership — paginated like GET /users.
+// Provision (and delete) invalidate both this admin list and the membership-
+// scoped ["communities"] query the community switcher reuses.
 
-type CommunityResponse = components["schemas"]["CommunityResponse"];
+type AdminCommunityResponse = components["schemas"]["AdminCommunityResponse"];
 type AdminUserResponse = components["schemas"]["AdminUserResponse"];
 
+// The API caps a single page at 100 and defaults to 50 (admin_communities.py).
+const PAGE_SIZE = 50;
+
+function communitiesUrl(offset: number): "/admin/communities" {
+  const params = new URLSearchParams({
+    limit: String(PAGE_SIZE),
+    offset: String(offset),
+  });
+  return `/admin/communities?${params.toString()}` as "/admin/communities";
+}
+
 export function AdminCommunitiesPage() {
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
   const [provisionOpen, setProvisionOpen] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [deleteTarget, setDeleteTarget] =
+    useState<AdminCommunityResponse | null>(null);
 
   const communities = useQuery({
-    queryKey: ["communities"],
-    queryFn: () => api.get("/communities"),
+    queryKey: ["admin", "communities", offset],
+    queryFn: () => api.get(communitiesUrl(offset)),
+    placeholderData: keepPreviousData,
   });
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["admin", "communities"] });
+    // The membership-scoped switcher list shares this key.
+    queryClient.invalidateQueries({ queryKey: ["communities"] });
+  };
+
+  const remove = useMutation({
+    mutationFn: (id: string) =>
+      api.delete(apiPath("/communities/{community_id}", { community_id: id })),
+    onSuccess: () => {
+      showToast(t("admin.communities.deleted"), "success");
+      invalidate();
+    },
+    onError: (err) => {
+      const reason = err instanceof ApiError ? err.reason : undefined;
+      showToast(
+        reason === "not_found"
+          ? t("admin.communities.deleted")
+          : t("admin.communities.deleteError"),
+        reason === "not_found" ? "success" : "error",
+      );
+      if (reason === "not_found") {
+        invalidate();
+      }
+    },
+  });
+
+  const onConfirmDelete = () => {
+    if (deleteTarget === null) {
+      return;
+    }
+    const target = deleteTarget;
+    setDeleteTarget(null);
+    remove.mutate(target.id);
+  };
+
+  const total = communities.data?.total ?? 0;
+  const rows = communities.data?.communities ?? [];
+  const hasNext = offset + PAGE_SIZE < total;
+  const rangeFrom = total === 0 ? 0 : offset + 1;
+  const rangeTo = offset + rows.length;
 
   return (
     <div className="admin-communities">
@@ -46,23 +112,76 @@ export function AdminCommunitiesPage() {
         <p className="sub" role="status">
           {t("admin.communities.loading")}
         </p>
-      ) : communities.isError || communities.data === undefined ? (
+      ) : communities.isError ? (
         <p className="field-error" role="alert">
           {t("admin.communities.loadError")}
         </p>
       ) : (
-        <CommunityTable communities={communities.data} />
+        <CommunityTable
+          communities={rows}
+          pending={remove.isPending}
+          onDelete={setDeleteTarget}
+        />
       )}
+
+      <div className="users-paging">
+        <button
+          type="button"
+          className="btn sm ghost"
+          disabled={offset === 0 || communities.isFetching}
+          onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+        >
+          {t("admin.communities.prev")}
+        </button>
+        <span className="sub">
+          {t("admin.communities.range")
+            .replace("{from}", String(rangeFrom))
+            .replace("{to}", String(rangeTo))
+            .replace("{total}", String(total))}
+        </span>
+        <button
+          type="button"
+          className="btn sm ghost"
+          disabled={!hasNext || communities.isFetching}
+          onClick={() => setOffset((o) => o + PAGE_SIZE)}
+        >
+          {t("admin.communities.next")}
+        </button>
+      </div>
 
       <ProvisionDialog
         open={provisionOpen}
         onClose={() => setProvisionOpen(false)}
+        onProvisioned={() => {
+          setProvisionOpen(false);
+          showToast(t("admin.communities.provisioned"), "success");
+          invalidate();
+        }}
+      />
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={t("admin.communities.deleteTitle")}
+        body={t("admin.communities.deleteBody")}
+        confirmPhrase={deleteTarget?.name ?? ""}
+        confirmLabel={t("admin.communities.deleteConfirm")}
+        promptLabel={t("admin.communities.deletePrompt")}
+        onConfirm={onConfirmDelete}
+        onClose={() => setDeleteTarget(null)}
       />
     </div>
   );
 }
 
-function CommunityTable({ communities }: { communities: CommunityResponse[] }) {
+function CommunityTable({
+  communities,
+  pending,
+  onDelete,
+}: {
+  communities: AdminCommunityResponse[];
+  pending: boolean;
+  onDelete: (community: AdminCommunityResponse) => void;
+}) {
   if (communities.length === 0) {
     return <p className="sub">{t("admin.communities.empty")}</p>;
   }
@@ -73,6 +192,9 @@ function CommunityTable({ communities }: { communities: CommunityResponse[] }) {
           <tr>
             <th>{t("admin.communities.colName")}</th>
             <th>{t("admin.communities.colId")}</th>
+            <th className="num">{t("admin.communities.colMembers")}</th>
+            <th className="num">{t("admin.communities.colServers")}</th>
+            <th>{t("admin.communities.colActions")}</th>
           </tr>
         </thead>
         <tbody>
@@ -82,6 +204,18 @@ function CommunityTable({ communities }: { communities: CommunityResponse[] }) {
                 <strong>{c.name}</strong>
               </td>
               <td className="mono">{c.id}</td>
+              <td className="num">{c.member_count}</td>
+              <td className="num">{c.server_count}</td>
+              <td className="row-actions">
+                <button
+                  type="button"
+                  className="btn sm danger"
+                  disabled={pending}
+                  onClick={() => onDelete(c)}
+                >
+                  {t("admin.communities.delete")}
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -112,12 +246,12 @@ function provisionErrorMessage(error: unknown): string {
 function ProvisionDialog({
   open,
   onClose,
+  onProvisioned,
 }: {
   open: boolean;
   onClose: () => void;
+  onProvisioned: () => void;
 }) {
-  const { showToast } = useToast();
-  const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [ownerId, setOwnerId] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -145,9 +279,10 @@ function ProvisionDialog({
     mutationFn: (body: { name: string; owner_user_id: string }) =>
       api.post("/communities", { body: JSON.stringify(body) }),
     onSuccess: () => {
-      showToast(t("admin.communities.provisioned"), "success");
-      queryClient.invalidateQueries({ queryKey: ["communities"] });
-      close();
+      setName("");
+      setOwnerId("");
+      setError(null);
+      onProvisioned();
     },
     onError: (err) => {
       setError(provisionErrorMessage(err));

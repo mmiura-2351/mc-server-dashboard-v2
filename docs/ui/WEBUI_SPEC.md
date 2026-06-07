@@ -62,9 +62,10 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/communities` | Communities the caller belongs to (admin: all). |
+| GET | `/communities` | Communities the caller belongs to (membership-scoped; the admin axis does not pierce isolation — #489). |
+| GET | `/admin/communities` `[A]` | All communities with `member_count`/`server_count` (`limit`/`offset`, returns `total`); the platform-axis listing (#489). |
 | POST | `/communities` `[A]` | Provision a community + initial owner. |
-| GET / PATCH / DELETE | `/communities/{cid}` | Read / rename / delete. |
+| GET / PATCH / DELETE | `/communities/{cid}` | Read / rename / delete. Delete also allows a platform admin to remove any community (orphan cleanup, #489); read/rename stay membership-scoped. |
 | GET / POST | `/communities/{cid}/members` | List (with `username`, `role_names`) / add an existing user by exactly one of `user_id` or exact `username` (#355). |
 | GET | `/communities/{cid}/me/permissions` | Caller's own effective set: community-wide codes + per-resource grants (#354). Membership-gated only (Layer-1). |
 | DELETE | `/communities/{cid}/members/{uid}` | Remove member (revokes roles & grants). |
@@ -347,7 +348,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   stats, jar-pool stats.
 - **Users**: paginated table (username, email, active, admin flag,
   created_at); actions: deactivate/reactivate, grant/revoke admin, delete.
-- **Communities**: list all; provision dialog (name + initial owner user).
+- **Communities**: paginated table of all communities (name, id, member/server
+  counts) from `GET /admin/communities`; provision dialog (name + initial owner
+  user); delete a community (typed-confirm) via `DELETE /communities/{cid}`
+  (#489).
 - **Workers**: table (id, version, status incl. draining, drivers,
   assigned/max, cpu/mem, heartbeat age); drain/undrain toggle with confirm.
 - **Versions**: per-type catalog freshness, refresh button (all or one type);

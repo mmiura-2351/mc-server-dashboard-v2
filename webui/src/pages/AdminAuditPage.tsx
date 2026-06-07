@@ -2,7 +2,6 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client.ts";
 import { t } from "../i18n/index.ts";
-import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import {
   AuditFilterFields,
   type AuditFilters,
@@ -44,7 +43,16 @@ function auditUrl(filters: AdminAuditFilters, offset: number): "/audit" {
 // route is gated by RequireAdmin (App.tsx); the `/audit` endpoint is guarded by
 // platform-admin server-side (audit.py).
 export function AdminAuditPage() {
-  const { communities } = useActiveCommunity();
+  // The community picker lists ALL communities (admins see every community), not
+  // just the admin's own — sourced from the platform-axis GET /admin/communities
+  // (#489), the same endpoint the admin Communities page uses. One full page is
+  // enough to populate the dropdown for current deployments.
+  const communitiesQuery = useQuery({
+    queryKey: ["admin", "communities", 0],
+    queryFn: () =>
+      api.get("/admin/communities?limit=100&offset=0" as "/admin/communities"),
+  });
+  const communities = communitiesQuery.data?.communities;
   // Applied filters (committed on Apply) and the in-progress input draft.
   const [filters, setFilters] = useState<AdminAuditFilters>(EMPTY);
   const [draft, setDraft] = useState<AdminAuditFilters>(EMPTY);

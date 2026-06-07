@@ -14,6 +14,7 @@ from collections.abc import Sequence
 
 from mc_server_dashboard_api.community.domain.entities import (
     Community,
+    CommunitySummary,
     Membership,
     ResourceGrant,
     Role,
@@ -43,6 +44,9 @@ _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 class FakeCommunityRepository(CommunityRepository):
     def __init__(self) -> None:
         self.by_id: dict[CommunityId, Community] = {}
+        # Per-community counts the summary listing reports; default to 0 (#489).
+        self.member_counts: dict[CommunityId, int] = {}
+        self.server_counts: dict[CommunityId, int] = {}
 
     async def add(self, community: Community) -> None:
         self.by_id[community.id] = community
@@ -55,6 +59,25 @@ class FakeCommunityRepository(CommunityRepository):
             if community.name == name:
                 return community
         return None
+
+    async def count_all(self) -> int:
+        return len(self.by_id)
+
+    async def list_summaries_page(
+        self, *, limit: int, offset: int
+    ) -> list[CommunitySummary]:
+        ordered = sorted(self.by_id.values(), key=lambda c: c.created_at, reverse=True)
+        page = ordered[offset : offset + limit]
+        return [
+            CommunitySummary(
+                id=c.id,
+                name=c.name,
+                created_at=c.created_at,
+                member_count=self.member_counts.get(c.id, 0),
+                server_count=self.server_counts.get(c.id, 0),
+            )
+            for c in page
+        ]
 
     async def update(self, community: Community) -> None:
         self.by_id[community.id] = community

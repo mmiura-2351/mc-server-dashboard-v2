@@ -21,7 +21,13 @@ from collections.abc import Iterator
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
-from mc_server_dashboard_api.community.domain.entities import Community
+from mc_server_dashboard_api.community.application.list_all_communities import (
+    CommunityPage,
+)
+from mc_server_dashboard_api.community.domain.entities import (
+    Community,
+    CommunitySummary,
+)
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
     CommunityNotFoundError,
@@ -42,6 +48,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.dependencies import (
     get_current_user,
     get_delete_community,
+    get_list_all_communities,
     get_list_my_communities,
     get_membership_visibility,
     get_permission_checker,
@@ -290,6 +297,93 @@ def test_list_my_communities_returns_user_communities() -> None:
     resp = client.get("/communities")
     assert resp.status_code == 200
     assert resp.json() == [{"id": str(community.id.value), "name": "guild"}]
+
+
+# --- delete: platform-admin bypass (issue #489) ----------------------------
+
+
+def test_delete_platform_admin_non_member_returns_204() -> None:
+    # The admin axis pierces isolation for deletion only: a platform admin who is
+    # NOT a member can delete any community (orphan cleanup), unlike read/rename.
+    app = _managed_app(
+        member=False, allow=False, platform_admin=True, delete_uc=_FakeUseCase()
+    )
+    client = next(_client(app))
+    resp = client.delete(f"/communities/{uuid.uuid4()}")
+    assert resp.status_code == 204
+
+
+def test_delete_non_admin_non_member_still_gets_404() -> None:
+    # The bypass is admin-only; a non-admin non-member keeps the no-signal 404.
+    app = _managed_app(member=False, allow=True, delete_uc=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.delete(f"/communities/{uuid.uuid4()}")
+    assert resp.status_code == 404
+
+
+# --- list-all-communities (platform-admin axis, issue #489) ----------------
+
+
+def _summary(name: str, *, members: int = 0, servers: int = 0) -> CommunitySummary:
+    return CommunitySummary(
+        id=CommunityId.new(),
+        name=CommunityName(name),
+        created_at=_NOW,
+        member_count=members,
+        server_count=servers,
+    )
+
+
+def _admin_list_app(*, platform_admin: bool, use_case: _FakeUseCase) -> object:
+    app = create_app()
+    user = make_user()
+    user.is_platform_admin = platform_admin
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_list_all_communities] = lambda: use_case
+    return app
+
+
+def test_list_all_communities_requires_platform_admin() -> None:
+    use_case = _FakeUseCase(result=CommunityPage(communities=[], total=0))
+    app = _admin_list_app(platform_admin=False, use_case=use_case)
+    client = next(_client(app))
+    assert client.get("/admin/communities").status_code == 403
+
+
+def test_list_all_communities_returns_page_with_counts() -> None:
+    summary = _summary("guild", members=3, servers=2)
+    use_case = _FakeUseCase(result=CommunityPage(communities=[summary], total=1))
+    app = _admin_list_app(platform_admin=True, use_case=use_case)
+    client = next(_client(app))
+    resp = client.get("/admin/communities?limit=10&offset=0")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["limit"] == 10
+    assert body["offset"] == 0
+    row = body["communities"][0]
+    assert row["id"] == str(summary.id.value)
+    assert row["name"] == "guild"
+    assert row["member_count"] == 3
+    assert row["server_count"] == 2
+    assert "created_at" in row
+    assert use_case.calls == [{"limit": 10, "offset": 0}]
+
+
+def test_list_all_communities_default_pagination() -> None:
+    use_case = _FakeUseCase(result=CommunityPage(communities=[], total=0))
+    app = _admin_list_app(platform_admin=True, use_case=use_case)
+    client = next(_client(app))
+    assert client.get("/admin/communities").status_code == 200
+    assert use_case.calls == [{"limit": 50, "offset": 0}]
+
+
+def test_list_all_communities_rejects_out_of_range_limit() -> None:
+    use_case = _FakeUseCase(result=CommunityPage(communities=[], total=0))
+    app = _admin_list_app(platform_admin=True, use_case=use_case)
+    client = next(_client(app))
+    assert client.get("/admin/communities?limit=0").status_code == 422
+    assert client.get("/admin/communities?limit=101").status_code == 422
 
 
 # --- cross-community isolation ---------------------------------------------

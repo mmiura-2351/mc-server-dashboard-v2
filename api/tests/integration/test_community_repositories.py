@@ -705,3 +705,76 @@ async def test_resource_checker_rejects_unknown_and_cross_community(
         # Absent id, and a server that exists only in another community, both miss.
         assert await uow.resources.exists(community.id, "server", uuid.uuid4()) is False
         assert await uow.resources.exists(community.id, "server", server_id) is False
+
+
+# --- admin-wide listing with counts (issue #489) ---------------------------
+
+
+async def test_list_summaries_page_counts_members_and_servers(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    busy = Community(
+        id=CommunityId.new(),
+        name=CommunityName("busy"),
+        created_at=dt.datetime(2026, 6, 2, tzinfo=dt.timezone.utc),
+        updated_at=_NOW,
+    )
+    empty = Community(
+        id=CommunityId.new(),
+        name=CommunityName("empty"),
+        created_at=dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc),
+        updated_at=_NOW,
+    )
+    alice, bob = uuid.uuid4(), uuid.uuid4()
+    await _insert_user(engine, alice, "alice")
+    await _insert_user(engine, bob, "bob")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(busy)
+        await uow.communities.add(empty)
+        for uid in (alice, bob):
+            await uow.memberships.add(
+                Membership(
+                    id=MembershipId.new(),
+                    user_id=UserId(uid),
+                    community_id=busy.id,
+                    created_at=_NOW,
+                )
+            )
+        await uow.commit()
+    await _insert_server(engine, uuid.uuid4(), busy.id)
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        total = await uow.communities.count_all()
+        page = await uow.communities.list_summaries_page(limit=50, offset=0)
+
+    assert total == 2
+    # Newest-first: busy (Jun 2) before empty (Jun 1).
+    assert [s.name.value for s in page] == ["busy", "empty"]
+    assert page[0].member_count == 2
+    assert page[0].server_count == 1
+    # A community with no members / servers reports zeros, not a missing row.
+    assert page[1].member_count == 0
+    assert page[1].server_count == 0
+
+
+async def test_list_summaries_page_paginates(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        for i in range(5):
+            await uow.communities.add(
+                Community(
+                    id=CommunityId.new(),
+                    name=CommunityName(f"c{i}"),
+                    created_at=dt.datetime(2026, 1, 1 + i, tzinfo=dt.timezone.utc),
+                    updated_at=_NOW,
+                )
+            )
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        first = await uow.communities.list_summaries_page(limit=2, offset=0)
+        third = await uow.communities.list_summaries_page(limit=2, offset=4)
+
+    assert [s.name.value for s in first] == ["c4", "c3"]
+    assert [s.name.value for s in third] == ["c0"]
