@@ -93,6 +93,7 @@ export const ja: Record<TranslationKey, string> = {
   // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "キャンセル",
   "common.close": "閉じる",
+  "common.resizeColumn": "ドラッグで幅を変更、ダブルクリックでリセット",
 
   // Account page (WEBUI_SPEC.md 6.11)
   "account.subtitle": "プロフィール、セキュリティ、メンバーシップ。",

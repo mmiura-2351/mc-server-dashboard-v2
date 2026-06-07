@@ -87,6 +87,7 @@ export const en = {
   // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "Cancel",
   "common.close": "Close",
+  "common.resizeColumn": "Drag to resize, double-click to reset",
 
   // Account page (WEBUI_SPEC.md 6.11) — one contiguous block to minimise
   // merge conflicts with sibling PRs adding keys under other prefixes.

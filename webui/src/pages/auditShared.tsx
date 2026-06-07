@@ -9,6 +9,7 @@
  */
 
 import type { components } from "../api/schema";
+import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { t } from "../i18n/index.ts";
 
 type AuditRecordResponse = components["schemas"]["AuditRecordResponse"];
@@ -131,8 +132,13 @@ export function AuditTable({
   records: AuditRecordResponse[];
   showCommunity?: boolean;
 }) {
+  // Keyed per view: the global view's extra Community column shifts column
+  // indices, so the two persist widths independently.
+  const storageKey = showCommunity
+    ? "mcsd.colw.audit-global"
+    : "mcsd.colw.audit";
   return (
-    <table className="data">
+    <ResizableTable storageKey={storageKey} className="data">
       <thead>
         <tr>
           <th>{t("communitySettings.audit.colTime")}</th>
@@ -152,7 +158,7 @@ export function AuditTable({
           />
         ))}
       </tbody>
-    </table>
+    </ResizableTable>
   );
 }
 

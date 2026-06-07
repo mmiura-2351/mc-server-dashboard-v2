@@ -20,6 +20,7 @@ import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -279,7 +280,7 @@ export function ServerBackupsTab({
       </div>
 
       <div className="card backups-table">
-        <table className="data">
+        <ResizableTable storageKey="mcsd.colw.backups" className="data">
           <thead>
             <tr>
               <th>{t("backups.col.created")}</th>
@@ -342,7 +343,7 @@ export function ServerBackupsTab({
               ))
             )}
           </tbody>
-        </table>
+        </ResizableTable>
       </div>
 
       {restoreTarget !== null && (

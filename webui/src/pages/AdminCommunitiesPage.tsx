@@ -14,6 +14,7 @@ import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 
@@ -193,7 +194,7 @@ function CommunityTable({
   }
   return (
     <div className="card" style={{ padding: 0 }}>
-      <table className="data">
+      <ResizableTable storageKey="mcsd.colw.admin-communities" className="data">
         <thead>
           <tr>
             <th>{t("admin.communities.colName")}</th>
@@ -227,7 +228,7 @@ function CommunityTable({
             </tr>
           ))}
         </tbody>
-      </table>
+      </ResizableTable>
     </div>
   );
 }

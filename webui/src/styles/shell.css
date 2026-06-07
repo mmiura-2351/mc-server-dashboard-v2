@@ -227,6 +227,44 @@ select.community-switcher {
   padding: 16px;
 }
 
+/* ---------- Resizable table columns (issue #520) ----------
+ * Drag handle injected by ResizableTable on each header cell's right boundary.
+ * The cell is positioned so the handle can sit flush against its trailing edge;
+ * the affordance is hover-revealed (accent on grab) to stay quiet at rest. */
+table.data thead th {
+  position: relative;
+}
+.col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+  z-index: 1;
+}
+.col-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 25%;
+  left: 50%;
+  width: 2px;
+  height: 50%;
+  transform: translateX(-50%);
+  background: transparent;
+}
+.col-resize-handle:hover::after {
+  background: var(--accent-dim);
+}
+/* While a drag is active the body carries .col-resizing so the resize cursor
+ * holds even as the pointer leaves the handle. */
+body.col-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
 /* ---------- Dashboard server cards (WEBUI_SPEC.md 6.2) ---------- */
 .grid {
   display: grid;
