@@ -420,7 +420,7 @@ function Overview({
     <section>
       <MetricsStrip
         samples={events.metrics}
-        running={normalizeState(server.observed_state) === "running"}
+        running={!atRest(normalizeState(server.observed_state))}
       />
       <div className="card log-tail">
         <div className="log-tail-head">
@@ -458,12 +458,13 @@ function MetricsStrip({
 }) {
   const latest = samples.at(-1);
   // Until the first frame arrives, say so honestly: "collecting" while the
-  // server is running (frames are sparse, ~10-15s), else "no metrics while
-  // stopped" since SPEC 7.2 has no metrics stream when not running.
+  // server is live — running or still coming up (frames are sparse, ~10-15s) —
+  // else "no metrics while stopped" since SPEC 7.2 has no metrics stream when
+  // the server is at rest.
   if (latest === undefined) {
     return (
       <div className="card metrics-strip metrics-strip-empty">
-        <p className="sub">
+        <p>
           {t(
             running
               ? "serverDetail.metric.collecting"

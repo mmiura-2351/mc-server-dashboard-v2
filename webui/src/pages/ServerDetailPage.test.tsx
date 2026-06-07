@@ -698,11 +698,49 @@ describe("ServerDetailPage Overview live streams", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows the collecting state while the server is starting", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "starting" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    // Coming up but no frame yet: honest "collecting", not the stopped copy.
+    expect(
+      screen.getByText(t("serverDetail.metric.collecting")),
+    ).toBeInTheDocument();
+  });
+
   it("says metrics are unavailable while the server is stopped", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
     renderPage();
     await screen.findByText("survival");
 
+    expect(screen.getByText(t("serverDetail.metric.idle"))).toBeInTheDocument();
+  });
+
+  it("drops stale metrics and shows idle when the server stops mid-view", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("metrics", {
+          cpu_millis: 1500,
+          memory_bytes: 2 * 1024 * 1024,
+          player_count: 4,
+        }),
+      );
+    });
+    expect(screen.getByText("1.5")).toBeInTheDocument();
+
+    // The server stops: the strip falls back to idle, not the frozen value.
+    act(() => {
+      MockWebSocket.last().message(
+        serverFrame("status", { state: "stopped", detail: "" }),
+      );
+    });
+    expect(screen.queryByText("1.5")).not.toBeInTheDocument();
     expect(screen.getByText(t("serverDetail.metric.idle"))).toBeInTheDocument();
   });
 
