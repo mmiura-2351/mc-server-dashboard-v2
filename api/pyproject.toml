@@ -20,6 +20,15 @@ dependencies = [
     # 2026-05-28 as of this change.
     "fastapi>=0.136.3,<0.137",          # 2026-05-23
     "uvicorn>=0.48.0,<0.49",            # 2026-05-24
+    # WebSocket protocol implementation for uvicorn (#507). Bare uvicorn ships no
+    # WS library, so its auto-selector resolves AutoWebSocketsProtocol to None and
+    # silently downgrades every WS upgrade to plain HTTP — the live /events
+    # sockets never handshake. `websockets` is the explicit single dependency
+    # (over `uvicorn[standard]`, which would also drag in uvloop/httptools/
+    # watchfiles we don't want); uvicorn 0.48 requires ``websockets>=10.4``. 16.0
+    # (2026-01-10) is well outside the 7-day cooldown (Section 3); cap the next
+    # major (Section 1).
+    "websockets>=16.0,<17",             # 2026-01-10
     "pydantic-settings>=2.14.1,<3",     # 2026-05-08
     # FastAPI multipart parsing for the file-upload endpoint (issue #259):
     # ``UploadFile``/``Form`` need python-multipart. 0.0.x library, so the
