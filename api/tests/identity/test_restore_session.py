@@ -64,9 +64,12 @@ async def test_active_token_yields_access_token_without_rotation() -> None:
     seeded_hash = _seed_token(uow, secret="live-secret")
     clock = FakeClock(_NOW)
 
-    access_token = await _restore(uow, clock)(refresh_token="live-secret")
+    result = await _restore(uow, clock)(refresh_token="live-secret")
 
-    assert access_token == f"access::{_USER.value}"
+    assert result.access_token == f"access::{_USER.value}"
+    # The session's user id rides the result so the route can attribute the
+    # auth:session_restore SUCCESS audit row (issue #530).
+    assert result.user_id == _USER.value
     # No new refresh row was minted (the only row is the one we seeded).
     assert set(uow.refresh_tokens.by_hash) == {seeded_hash}
     # The presented token is left active — not rotated, not revoked.
@@ -148,7 +151,9 @@ async def test_repeated_restore_is_idempotent() -> None:
     first = await restore(refresh_token="live-secret")
     second = await restore(refresh_token="live-secret")
 
-    assert first == second == f"access::{_USER.value}"
+    assert first == second
+    assert first.access_token == f"access::{_USER.value}"
+    assert first.user_id == _USER.value
     assert set(uow.refresh_tokens.by_hash) == {seeded_hash}
     assert uow.refresh_tokens.by_hash[seeded_hash].revoked_at is None
     assert uow.commits == 0
