@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { ToastProvider } from "../components/Toast.tsx";
@@ -54,14 +54,26 @@ function listResponse(over: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage() {
+// A history probe: drives navigate(-1) so a test can simulate the Back button
+// against the in-memory router (#514 offset history).
+function BackProbe() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(-1)}>
+      router-back
+    </button>
+  );
+}
+
+function renderPage(path = "/admin/users") {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
       <ToastProvider>
-        <MemoryRouter>
+        <MemoryRouter initialEntries={[path]}>
+          <BackProbe />
           <AdminUsersPage />
         </MemoryRouter>
       </ToastProvider>
@@ -104,6 +116,34 @@ describe("AdminUsersPage", () => {
     await waitFor(() => {
       expect(mockApi.get).toHaveBeenCalledWith("/api/users?limit=50&offset=50");
     });
+  });
+
+  it("reads the page offset from the URL (deep link)", async () => {
+    mockApi.get.mockResolvedValue(listResponse({ total: 120 }));
+    renderPage("/admin/users?offset=50");
+    await screen.findByText("alice");
+
+    expect(mockApi.get).toHaveBeenCalledWith("/api/users?limit=50&offset=50");
+  });
+
+  it("Back restores the prior page after paging forward (#514)", async () => {
+    mockApi.get.mockResolvedValue(listResponse({ total: 120 }));
+    renderPage();
+    await screen.findByText("alice");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("admin.users.next") }),
+    );
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith("/api/users?limit=50&offset=50"),
+    );
+
+    mockApi.get.mockClear();
+    // Simulate the browser Back button: it pops the pushed offset entry.
+    fireEvent.click(screen.getByText("router-back"));
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith("/api/users?limit=50&offset=0"),
+    );
   });
 
   it("deactivates an active user via POST .../deactivate", async () => {

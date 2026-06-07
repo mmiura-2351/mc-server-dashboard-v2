@@ -28,6 +28,7 @@ import {
   normalizeState,
   statePill,
 } from "./serverState.ts";
+import { useTabHash } from "./urlState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
 import {
   type LogEntry,
@@ -76,7 +77,9 @@ function Loaded({
   serverId: string;
 }) {
   const can = useCan();
-  const [tab, setTab] = useState<Tab>("overview");
+  // Active tab lives in the URL hash (#514) so Back walks the tab history;
+  // #overview is the default and keeps a clean URL.
+  const [tab, setTab] = useTabHash(TABS);
   // One WS per open detail page, shared by all tabs (WEBUI_SPEC.md 7.2).
   const events = useServerEvents(communityId, serverId);
   const query = useQuery({

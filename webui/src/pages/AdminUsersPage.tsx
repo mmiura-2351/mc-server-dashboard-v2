@@ -13,6 +13,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
+import { useOffsetParam } from "./urlState.ts";
 
 // Platform admin Users page (WEBUI_SPEC.md 6.12 / 2.1): a paginated user table
 // with the full lifecycle an admin owns — deactivate/reactivate, grant/revoke
@@ -98,7 +99,8 @@ export function AdminUsersPage() {
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const { data: me } = useCurrentUser();
-  const [offset, setOffset] = useState(0);
+  // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
+  const [offset, setOffset] = useOffsetParam();
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AdminUserResponse | null>(
     null,
@@ -258,7 +260,7 @@ export function AdminUsersPage() {
           type="button"
           className="btn sm ghost"
           disabled={offset === 0 || usersQuery.isFetching}
-          onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+          onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
         >
           {t("admin.users.prev")}
         </button>
@@ -272,7 +274,7 @@ export function AdminUsersPage() {
           type="button"
           className="btn sm ghost"
           disabled={!hasNext || usersQuery.isFetching}
-          onClick={() => setOffset((o) => o + PAGE_SIZE)}
+          onClick={() => setOffset(offset + PAGE_SIZE)}
         >
           {t("admin.users.next")}
         </button>

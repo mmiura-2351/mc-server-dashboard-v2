@@ -15,6 +15,7 @@ import {
   isUuid,
   PAGE_SIZE,
 } from "./auditShared.tsx";
+import { useOffsetParam } from "./urlState.ts";
 
 export function auditKey(
   communityId: string,
@@ -64,7 +65,8 @@ function Loaded({ communityId }: { communityId: string }) {
   // Applied filters (committed on Apply) and the in-progress input draft.
   const [filters, setFilters] = useState<AuditFilters>(EMPTY_FILTERS);
   const [draft, setDraft] = useState<AuditFilters>(EMPTY_FILTERS);
-  const [offset, setOffset] = useState(0);
+  // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
+  const [offset, setOffset] = useOffsetParam();
   const [actorError, setActorError] = useState(false);
 
   const query = useQuery({
@@ -129,8 +131,8 @@ function Loaded({ communityId }: { communityId: string }) {
         offset={offset}
         hasNext={hasNext}
         isFetching={query.isFetching}
-        onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
-        onNext={() => setOffset((o) => o + PAGE_SIZE)}
+        onPrev={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+        onNext={() => setOffset(offset + PAGE_SIZE)}
       />
     </section>
   );
