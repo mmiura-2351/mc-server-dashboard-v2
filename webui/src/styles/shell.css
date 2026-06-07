@@ -97,6 +97,7 @@
   }
   .brand .label,
   .nav-group .nav-label,
+  .nav-hint,
   .nav-item .label {
     display: none;
   }

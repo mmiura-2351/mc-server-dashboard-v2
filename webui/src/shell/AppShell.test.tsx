@@ -177,7 +177,13 @@ describe("AppShell community switcher", () => {
     // empty-state CTA rule (shell.css `.empty { padding: 48px 20px }`), which
     // overrode the switcher's padding and overflowed the top bar (#533).
     expect(noCommunityLabel).not.toHaveClass("empty");
-    expect(screen.getByText(t("shell.noCommunities"))).toBeInTheDocument();
+    // The sidebar hint must carry the `nav-hint` class: the narrow-width
+    // breakpoint rule hides `.nav-hint` so this long prose string does not
+    // become the widest rail child and reintroduce horizontal overflow when a
+    // no-community user is on a phone (#586).
+    const hint = screen.getByText(t("shell.noCommunities"));
+    expect(hint).toBeInTheDocument();
+    expect(hint).toHaveClass("nav-hint");
     expect(
       screen.queryByRole("link", { name: t("nav.dashboard") }),
     ).not.toBeInTheDocument();
