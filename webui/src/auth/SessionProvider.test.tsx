@@ -1,9 +1,13 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetForTesting as resetClientForTesting } from "../api/client.ts";
 import { SessionProvider, useSession } from "./SessionProvider.tsx";
-import { resetForTesting as resetSessionForTesting } from "./session.ts";
+import {
+  refreshForRetry,
+  resetForTesting as resetSessionForTesting,
+} from "./session.ts";
 import { clearAccessToken } from "./tokenStore.ts";
 
 function tokenResponse(): Response {
@@ -31,15 +35,17 @@ function StatusProbe() {
   );
 }
 
-function renderSession() {
+function renderSession(queryClient = new QueryClient()) {
   return render(
-    <MemoryRouter initialEntries={["/account"]}>
-      <SessionProvider>
-        <Routes>
-          <Route path="*" element={<StatusProbe />} />
-        </Routes>
-      </SessionProvider>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/account"]}>
+        <SessionProvider>
+          <Routes>
+            <Route path="*" element={<StatusProbe />} />
+          </Routes>
+        </SessionProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -113,5 +119,50 @@ describe("SessionProvider logout", () => {
     await waitFor(() =>
       expect(screen.getByTestId("path")).toHaveTextContent("/login"),
     );
+  });
+
+  it("clears the query cache so the next user sees no stale data", async () => {
+    const queryClient = new QueryClient();
+    // Seed the cache as if the previous user's queries had populated it.
+    queryClient.setQueryData(["users", "me"], { username: "alice" });
+    queryClient.setQueryData(["communities"], [{ id: "c1", name: "Alpha" }]);
+
+    fetchMock.mockResolvedValueOnce(tokenResponse());
+    renderSession(queryClient);
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-in"),
+    );
+
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    screen.getByRole("button", { name: "logout" }).click();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-out"),
+    );
+    // The previous user's cached queries are gone before the next sign-in,
+    // so no stale data renders for the next account (#532).
+    expect(queryClient.getQueryData(["users", "me"])).toBeUndefined();
+    expect(queryClient.getQueryData(["communities"])).toBeUndefined();
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+  });
+
+  it("clears the query cache on a hard logout from a failed refresh", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["users", "me"], { username: "alice" });
+
+    fetchMock.mockResolvedValueOnce(tokenResponse());
+    renderSession(queryClient);
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-in"),
+    );
+
+    // A transparent refresh that fails drives a hard logout (no API logout call).
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 401 }));
+    await refreshForRetry();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-out"),
+    );
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
   });
 });
