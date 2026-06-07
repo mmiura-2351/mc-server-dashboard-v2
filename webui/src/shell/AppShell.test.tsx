@@ -1,8 +1,10 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { initLanguage, t } from "../i18n/index.ts";
 import { ja } from "../i18n/ja.ts";
+import { LANDING_PATH } from "../routes.ts";
 import { renderApp } from "../test/render.tsx";
 
 function jsonResponse(body: unknown): Response {
@@ -43,6 +45,13 @@ function signedInWith(communities: Array<{ id: string; name: string }>) {
 
 function renderAt(path: string) {
   renderApp({ path });
+}
+
+// Surfaces the live URL so brand navigation can be asserted without depending
+// on a guarded page's content.
+function LocationProbe() {
+  const { pathname } = useLocation();
+  return <span data-testid="url">{pathname}</span>;
 }
 
 beforeEach(() => {
@@ -172,5 +181,22 @@ describe("AppShell community switcher", () => {
     expect(
       screen.queryByRole("link", { name: t("nav.dashboard") }),
     ).not.toBeInTheDocument();
+  });
+
+  it("clicking the brand navigates to the landing page", async () => {
+    signedInWith([ALPHA, BETA]);
+
+    renderApp({ path: "/account", extras: <LocationProbe /> });
+
+    const brand = await screen.findByRole("link", { name: t("shell.brand") });
+    expect(brand).toHaveAttribute("href", LANDING_PATH);
+
+    fireEvent.click(brand);
+
+    // LANDING_PATH resolves the active community and redirects to its dashboard,
+    // so a click from /account lands on the active community's dashboard.
+    await waitFor(() =>
+      expect(screen.getByTestId("url")).toHaveTextContent("/communities/alpha"),
+    );
   });
 });

@@ -30,6 +30,18 @@
   font-size: 15px;
   color: var(--text);
 }
+/* The brand is a Link to the landing page (#538); keep it visually identical to
+ * the static heading at rest, with a quiet hover/focus affordance matching the
+ * nav links. */
+.sidebar a.brand:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+.sidebar a.brand:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
 .brand .cube {
   width: 22px;
   height: 22px;
