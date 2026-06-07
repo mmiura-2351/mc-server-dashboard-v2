@@ -162,7 +162,12 @@ describe("AppShell community switcher", () => {
 
     // Once the (empty) list resolves the switcher shows the empty label; the
     // sidebar then offers the no-communities hint instead of nav links.
-    expect(await screen.findByText(t("shell.noCommunity"))).toBeInTheDocument();
+    const noCommunityLabel = await screen.findByText(t("shell.noCommunity"));
+    expect(noCommunityLabel).toBeInTheDocument();
+    // The label must not carry the generic `empty` class: it collides with the
+    // empty-state CTA rule (shell.css `.empty { padding: 48px 20px }`), which
+    // overrode the switcher's padding and overflowed the top bar (#533).
+    expect(noCommunityLabel).not.toHaveClass("empty");
     expect(screen.getByText(t("shell.noCommunities"))).toBeInTheDocument();
     expect(
       screen.queryByRole("link", { name: t("nav.dashboard") }),
