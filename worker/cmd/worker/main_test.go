@@ -13,7 +13,6 @@ func TestRunFailsFastOnMissingConfig(t *testing.T) {
 	for _, k := range []string{
 		"MCD_WORKER_CONFIG",
 		"MCD_WORKER_API_GRPC_ENDPOINT",
-		"MCD_WORKER_API_DATA_PLANE_URL",
 		"MCD_WORKER_API_CREDENTIAL",
 		"MCD_WORKER_WORKER_SCRATCH_DIR",
 	} {

@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { ToastProvider } from "../components/Toast.tsx";
@@ -21,13 +21,6 @@ vi.mock("../api/client.ts", async () => {
       "../api/client.ts",
     );
   return { ...actual, api: mockApi };
-});
-
-const mockNavigate = vi.fn();
-vi.mock("react-router", async () => {
-  const actual =
-    await vi.importActual<typeof import("react-router")>("react-router");
-  return { ...actual, useNavigate: () => mockNavigate };
 });
 
 let mockCanCreate = true;
@@ -60,18 +53,41 @@ function defaultGet(path: string) {
   return Promise.reject(new Error(`unexpected GET ${path}`));
 }
 
-function renderPage() {
+// A location probe: mirrors the current path + hash so a test can assert the
+// post-create redirect (the URL the page navigates to) and the tab hash that
+// useTabHash writes — both go through real router navigation now that
+// useNavigate is no longer mocked.
+let lastPath = "";
+let lastHash = "";
+function LocationProbe() {
+  const loc = useLocation();
+  lastPath = loc.pathname;
+  lastHash = loc.hash;
+  return null;
+}
+
+function renderPage(path = `/communities/${CID}/servers/new`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
+          <LocationProbe />
           <ServerCreatePage />
         </ToastProvider>
       </QueryClientProvider>
     </MemoryRouter>,
+  );
+}
+
+function activeTab(): string | null {
+  return (
+    screen
+      .getAllByRole("tab")
+      .find((el) => el.getAttribute("aria-selected") === "true")?.textContent ??
+    null
   );
 }
 
@@ -99,7 +115,8 @@ beforeEach(() => {
   mockApi.get.mockReset();
   mockApi.post.mockReset();
   mockApi.postForm.mockReset();
-  mockNavigate.mockReset();
+  lastPath = "";
+  lastHash = "";
   mockCanCreate = true;
   mockApi.get.mockImplementation(defaultGet);
 });
@@ -242,9 +259,7 @@ describe("Step 3 — config & EULA", () => {
     );
 
     await waitFor(() => {
-      expect(mockNavigate).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/s-new`,
-      );
+      expect(lastPath).toBe(`/communities/${CID}/servers/s-new`);
     });
     const body = JSON.parse(mockApi.post.mock.calls[0][1].body);
     expect(body).toMatchObject({
@@ -292,7 +307,7 @@ describe("create error surfacing", () => {
     expect(
       await screen.findByText(t("serverCreate.error.port_taken")),
     ).toBeInTheDocument();
-    expect(mockNavigate).not.toHaveBeenCalled();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
   });
 
   it("surfaces 422 spigot_unsupported", async () => {
@@ -347,9 +362,7 @@ describe("import tab", () => {
     fireEvent.click(screen.getByText(t("serverCreate.import.submit")));
 
     await waitFor(() => {
-      expect(mockNavigate).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/s-imported`,
-      );
+      expect(lastPath).toBe(`/communities/${CID}/servers/s-imported`);
     });
     const form = mockApi.postForm.mock.calls[0][1] as FormData;
     expect(form.get("name")).toBe("restored");
@@ -381,6 +394,37 @@ describe("import tab", () => {
         t("serverCreate.import.error.invalid_export_metadata"),
       ),
     ).toBeInTheDocument();
-    expect(mockNavigate).not.toHaveBeenCalled();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+});
+
+describe("create-vs-import tab in the URL (#540)", () => {
+  it("defaults to the new-server tab with a clean (hash-less) URL", async () => {
+    renderPage();
+    await screen.findByText(t("serverCreate.typeHeading"));
+    expect(activeTab()).toBe(t("serverCreate.tab.new"));
+    expect(lastHash).toBe("");
+  });
+
+  it("deep-links to the import tab via the #import hash", async () => {
+    renderPage(`/communities/${CID}/servers/new#import`);
+    expect(
+      await screen.findByText(t("serverCreate.import.heading")),
+    ).toBeInTheDocument();
+    expect(activeTab()).toBe(t("serverCreate.tab.import"));
+  });
+
+  it("switching to the import tab writes the #import hash", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
+    expect(activeTab()).toBe(t("serverCreate.tab.import"));
+    expect(lastHash).toBe("#import");
+  });
+
+  it("switching back to the new-server tab clears the hash", async () => {
+    renderPage(`/communities/${CID}/servers/new#import`);
+    fireEvent.click(await screen.findByText(t("serverCreate.tab.new")));
+    expect(activeTab()).toBe(t("serverCreate.tab.new"));
+    expect(lastHash).toBe("");
   });
 });

@@ -75,7 +75,9 @@ function CommunitySwitcher() {
 
   if (communities.length === 0) {
     return (
-      <div className="community-switcher empty">{t("shell.noCommunity")}</div>
+      <div className="community-switcher no-community">
+        {t("shell.noCommunity")}
+      </div>
     );
   }
 
