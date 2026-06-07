@@ -207,7 +207,7 @@ async def test_restore_with_revoked_token_does_not_revoke_family(
     # invalid-token error and triggers NO family revoke — restore has no rotation
     # to disambiguate, so it never walks the theft path (issue #512). The rotated
     # successor stays usable.
-    await _seed_user(engine)
+    user = await _seed_user(engine)
     factory = create_session_factory(engine)
 
     login = Login(
@@ -242,8 +242,11 @@ async def test_restore_with_revoked_token_does_not_revoke_family(
         await restore(refresh_token=pair.refresh_token)
 
     # ...but did NOT revoke the family: the rotated successor still restores fine.
-    assert _tokens().verify_access_token(
-        await restore(refresh_token=rotated.refresh_token)
+    assert (
+        _tokens().verify_access_token(
+            await restore(refresh_token=rotated.refresh_token)
+        )
+        == user.id
     )
 
 

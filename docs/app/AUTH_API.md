@@ -173,14 +173,21 @@ logout is never graced — re-presenting it stays on the theft path regardless o
 how recent the revocation is. The grace-window predecessor is **not** re-revoked,
 so repeated reuse cannot roll the window forward and keep a leaked token alive.
 
-**`/auth/session` does not rotate, and does not weaken this model** (issue #512).
-Restore validates the cookie and mints an access token without revoking or
-re-issuing the refresh token, so it can never create a torn rotation in the
-first place — which is exactly why the Web UI bootstrap uses it instead of
-`/auth/refresh`. Rotation and reuse-detection remain entirely on `/auth/refresh`,
-the periodic in-session path: a stolen refresh token is still invalidated the
-moment the legitimate holder's next *refresh* rotates it, and re-presenting a
-rotated token to `/auth/refresh` still trips the family revoke above. Restore
+**`/auth/session` does not rotate; it leaves the rotation/reuse-detection
+mechanism on `/auth/refresh` unchanged, but it does remove one *incidental*
+theft signal** (issue #512). Restore validates the cookie and mints an access
+token without revoking or re-issuing the refresh token, so it can never create a
+torn rotation in the first place — which is exactly why the Web UI bootstrap uses
+it instead of `/auth/refresh`. Rotation and reuse-detection remain entirely on
+`/auth/refresh`, the periodic in-session path: against an *active* victim a
+stolen refresh token is still invalidated the moment the legitimate holder's next
+*refresh* rotates it (which revokes the stolen cookie), and re-presenting a
+rotated token to `/auth/refresh` still trips the family revoke above. The gap is
+the *idle* victim: a thief who replays the cookie **exclusively** against
+`/auth/session` never collides with a rotation, so it raises no reuse signal and
+can quietly mint access tokens until the refresh TTL expires. That residual
+exposure — and candidate mitigations (`last_used_at`, audit-on-restore, a
+rotation deadline) — is tracked as the hardening follow-up in issue #530. Restore
 deliberately does **not** trip reuse-detection: it has no rotation to
 disambiguate, so a revoked/rotated cookie is simply an invalid token there (plain
 `401`, no family action). Its read-only, no-rotation shape means a stolen cookie
