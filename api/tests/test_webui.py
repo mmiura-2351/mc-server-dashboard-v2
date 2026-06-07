@@ -91,6 +91,25 @@ def test_openapi_takes_precedence(webui_client: TestClient) -> None:
     assert resp.json()["openapi"].startswith("3.")
 
 
+def test_unmatched_api_path_is_404_problem_not_spa(webui_client: TestClient) -> None:
+    # Regression for issue #567: an unmatched /api/* path must return an RFC 9457
+    # problem 404, never the SPA index.html. The SPA fallback is reserved for
+    # non-/api paths ("everything non-/api serves the SPA").
+    resp = webui_client.get("/api/nonexistent")
+    assert resp.status_code == 404
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.json()["reason"] == "not_found"
+
+
+def test_spa_route_still_serves_index(webui_client: TestClient) -> None:
+    # The counterpart to the /api 404: a non-/api path still falls back to the
+    # SPA index.html with 200 text/html (issue #567).
+    resp = webui_client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "spa" in resp.text
+
+
 def test_no_mount_when_dist_dir_unset() -> None:
     # Default (unset): root is not served, so dev (Vite proxy) and tests see the
     # bare API. FastAPI returns 404 for the unrouted path.
