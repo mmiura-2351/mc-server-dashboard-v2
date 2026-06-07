@@ -370,6 +370,27 @@ describe("import tab", () => {
     expect(form.get("file")).toBeInstanceOf(File);
   });
 
+  it("shows the chosen filename after selecting a file", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
+    expect(
+      await screen.findByText(t("common.noFileChosen")),
+    ).toBeInTheDocument();
+
+    const file = new File(["zip-bytes"], "export.zip", {
+      type: "application/zip",
+    });
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.import.fileLabel")),
+      {
+        target: { files: [file] },
+      },
+    );
+
+    expect(await screen.findByText("export.zip")).toBeInTheDocument();
+    expect(screen.queryByText(t("common.noFileChosen"))).toBeNull();
+  });
+
   it("surfaces an invalid export archive", async () => {
     mockApi.postForm.mockRejectedValue(
       new ApiError(422, { reason: "invalid_export_metadata" }),

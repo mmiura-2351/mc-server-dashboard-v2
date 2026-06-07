@@ -90,6 +90,8 @@ export const en = {
   "common.showPassword": "Show password",
   "common.hidePassword": "Hide password",
   "common.resizeColumn": "Drag to resize, double-click to reset",
+  "common.chooseFile": "Choose file",
+  "common.noFileChosen": "No file chosen",
 
   // Account page (WEBUI_SPEC.md 6.11) — one contiguous block to minimise
   // merge conflicts with sibling PRs adding keys under other prefixes.
