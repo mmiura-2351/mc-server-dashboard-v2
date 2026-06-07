@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.application.files import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
+    FileAccessReason,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
@@ -490,11 +491,89 @@ async def test_read_running_file_access_denied_maps_to_invalid_path() -> None:
         outcome=CommandOutcome(status=CommandStatus.FILE_ACCESS_DENIED, message="nope")
     )
     use_case = ReadFile(uow=uow, control_plane=cp, file_store=FakeFileStore())
-    with pytest.raises(InvalidFilePathError):
+    with pytest.raises(InvalidFilePathError) as caught:
         await use_case(
             community_id=CommunityId(community),
             server_id=ServerId(server_id),
             rel_path="../escape",
+        )
+    # An unspecified reason (the genuine path denial) keeps the invalid_path reason.
+    assert caught.value.reason == "invalid_path"
+
+
+def _running_read(
+    community: uuid.UUID, server_id: uuid.UUID, outcome: CommandOutcome
+) -> ReadFile:
+    """A ReadFile use case over a running server returning ``outcome`` (issue #548)."""
+
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=uuid.uuid4(),
+        ),
+    )
+    cp = FakeControlPlane(outcome=outcome)
+    return ReadFile(uow=uow, control_plane=cp, file_store=FakeFileStore())
+
+
+async def test_read_running_is_a_directory_maps_to_is_a_directory_reason() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = _running_read(
+        community,
+        server_id,
+        CommandOutcome(
+            status=CommandStatus.FILE_ACCESS_DENIED,
+            file_access_reason=FileAccessReason.IS_A_DIRECTORY,
+        ),
+    )
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="config",
+        )
+    assert caught.value.reason == "is_a_directory"
+
+
+async def test_read_running_symlink_refused_maps_to_symlink_reason() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = _running_read(
+        community,
+        server_id,
+        CommandOutcome(
+            status=CommandStatus.FILE_ACCESS_DENIED,
+            file_access_reason=FileAccessReason.SYMLINK_REFUSED,
+        ),
+    )
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="link",
+        )
+    assert caught.value.reason == "symlink_refused"
+
+
+async def test_read_running_payload_too_large_maps_to_file_too_large() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = _running_read(
+        community,
+        server_id,
+        CommandOutcome(
+            status=CommandStatus.FILE_ACCESS_DENIED,
+            file_access_reason=FileAccessReason.PAYLOAD_TOO_LARGE,
+        ),
+    )
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="big.bin",
         )
 
 
@@ -830,6 +909,85 @@ async def test_write_running_traversal_rejected_before_dispatch() -> None:
     assert cp.dispatched == []  # rejected at the edge; never reached the worker
 
 
+def _running_write(
+    community: uuid.UUID, server_id: uuid.UUID, outcome: CommandOutcome
+) -> WriteFile:
+    """A WriteFile use case over a running server returning ``outcome`` (issue #548)."""
+
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=uuid.uuid4(),
+        ),
+    )
+    cp = FakeControlPlane(outcome=outcome)
+    return WriteFile(uow=uow, control_plane=cp, file_store=FakeFileStore())
+
+
+async def test_write_running_is_a_directory_maps_to_is_a_directory_reason() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = _running_write(
+        community,
+        server_id,
+        CommandOutcome(
+            status=CommandStatus.FILE_ACCESS_DENIED,
+            file_access_reason=FileAccessReason.IS_A_DIRECTORY,
+        ),
+    )
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="config",
+            content=b"x",
+        )
+    assert caught.value.reason == "is_a_directory"
+
+
+async def test_write_running_symlink_refused_maps_to_symlink_reason() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = _running_write(
+        community,
+        server_id,
+        CommandOutcome(
+            status=CommandStatus.FILE_ACCESS_DENIED,
+            file_access_reason=FileAccessReason.SYMLINK_REFUSED,
+        ),
+    )
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="link",
+            content=b"x",
+        )
+    assert caught.value.reason == "symlink_refused"
+
+
+async def test_write_running_payload_too_large_maps_to_file_too_large() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = _running_write(
+        community,
+        server_id,
+        CommandOutcome(
+            status=CommandStatus.FILE_ACCESS_DENIED,
+            file_access_reason=FileAccessReason.PAYLOAD_TOO_LARGE,
+        ),
+    )
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="big.bin",
+            content=b"x",
+        )
+
+
 async def test_write_transitional_state_is_unsettled() -> None:
     community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     uow = FakeUnitOfWork()
@@ -1050,12 +1208,43 @@ async def test_list_dir_running_file_access_denied_maps_to_invalid_path() -> Non
     )
     use_case = ListDir(uow=uow, control_plane=cp, file_store=FakeFileStore())
 
-    with pytest.raises(InvalidFilePathError):
+    with pytest.raises(InvalidFilePathError) as caught:
         await use_case(
             community_id=CommunityId(community),
             server_id=ServerId(server_id),
             rel_path="plugins",
         )
+    assert caught.value.reason == "invalid_path"
+
+
+async def test_list_dir_running_not_a_directory_reason() -> None:
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=CommandStatus.FILE_ACCESS_DENIED,
+            file_access_reason=FileAccessReason.NOT_A_DIRECTORY,
+        )
+    )
+    use_case = ListDir(uow=uow, control_plane=cp, file_store=FakeFileStore())
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+        )
+    assert caught.value.reason == "not_a_directory"
 
 
 async def test_history_lists_versions() -> None:

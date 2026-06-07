@@ -482,6 +482,12 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 			return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 				fmt.Sprintf("instancemanager: read file: %q not found", cmd.Path))
 		}
+		// O_NOFOLLOW refused an intermediate-component symlink (ELOOP); any other
+		// resolution failure is the generic path denial.
+		if errors.Is(err, unix.ELOOP) {
+			return failFileAccess(cmd.CommandID, session.FileAccessReasonSymlinkRefused,
+				fmt.Sprintf("instancemanager: read file: %v", err))
+		}
 		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
 			fmt.Sprintf("instancemanager: read file: %v", err))
 	}
@@ -490,14 +496,14 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 	content, err := readLeafNoFollow(parentFd, leaf)
 	switch {
 	case errors.Is(err, errIsDir):
-		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+		return failFileAccess(cmd.CommandID, session.FileAccessReasonIsADirectory,
 			fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
 	case errors.Is(err, errTooLarge):
-		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+		return failFileAccess(cmd.CommandID, session.FileAccessReasonPayloadTooLarge,
 			fmt.Sprintf("instancemanager: %q exceeds the %d-byte read cap", cmd.Path, MaxFileBytes))
 	case errors.Is(err, unix.ELOOP):
 		// O_NOFOLLOW refused a final-component symlink: the classic escape vector.
-		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+		return failFileAccess(cmd.CommandID, session.FileAccessReasonSymlinkRefused,
 			fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
 	case errors.Is(err, unix.ENOENT):
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
@@ -520,7 +526,7 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 // torn file. It runs inline on the receive loop (a small, interactive edit).
 func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	if len(cmd.Content) > MaxFileBytes {
-		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+		return failFileAccess(cmd.CommandID, session.FileAccessReasonPayloadTooLarge,
 			fmt.Sprintf("instancemanager: edit exceeds the %d-byte cap", MaxFileBytes))
 	}
 
@@ -539,6 +545,12 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	// concurrent symlink swap between the walk and the rename cannot redirect it.
 	parentFd, leaf, err := openParentBeneath(root, target, true)
 	if err != nil {
+		// O_NOFOLLOW refused an intermediate-component symlink (ELOOP); any other
+		// resolution failure is the generic path denial.
+		if errors.Is(err, unix.ELOOP) {
+			return failFileAccess(cmd.CommandID, session.FileAccessReasonSymlinkRefused,
+				fmt.Sprintf("instancemanager: edit file: %v", err))
+		}
 		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
 			fmt.Sprintf("instancemanager: edit file: %v", err))
 	}
@@ -547,10 +559,10 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	if err := atomicWriteAt(parentFd, leaf, cmd.Content); err != nil {
 		switch {
 		case errors.Is(err, errIsDir):
-			return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			return failFileAccess(cmd.CommandID, session.FileAccessReasonIsADirectory,
 				fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
 		case errors.Is(err, unix.ELOOP):
-			return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			return failFileAccess(cmd.CommandID, session.FileAccessReasonSymlinkRefused,
 				fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
 		default:
 			return fail(cmd.CommandID, session.CommandErrorInternal,
@@ -581,10 +593,10 @@ func (m *Manager) handleListFiles(cmd session.Command) session.CommandResult {
 	dirFd, err := m.openListDir(root, cmd.Path)
 	switch {
 	case errors.Is(err, unix.ELOOP):
-		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+		return failFileAccess(cmd.CommandID, session.FileAccessReasonSymlinkRefused,
 			fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
 	case errors.Is(err, unix.ENOTDIR):
-		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+		return failFileAccess(cmd.CommandID, session.FileAccessReasonNotADirectory,
 			fmt.Sprintf("instancemanager: %q is not a directory", cmd.Path))
 	case errors.Is(err, unix.ENOENT):
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
@@ -1045,6 +1057,19 @@ func fail(commandID string, code session.CommandErrorCode, msg string) session.C
 		Success:      false,
 		ErrorCode:    code,
 		ErrorMessage: msg,
+	}
+}
+
+// failFileAccess builds a CommandErrorFileAccessDenied result carrying the
+// specific reason that refines it (issue #548). The API maps the reason to an
+// honest problem reason and HTTP status instead of a blanket invalid_path.
+func failFileAccess(commandID string, reason session.FileAccessReason, msg string) session.CommandResult {
+	return session.CommandResult{
+		CommandID:        commandID,
+		Success:          false,
+		ErrorCode:        session.CommandErrorFileAccessDenied,
+		ErrorMessage:     msg,
+		FileAccessReason: reason,
 	}
 }
 

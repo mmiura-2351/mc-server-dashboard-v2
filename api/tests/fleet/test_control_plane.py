@@ -28,6 +28,7 @@ from grpc import aio
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
     GrpcControlPlane,
+    _to_result,
 )
 from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServicer
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
@@ -35,6 +36,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResultCode,
     CommandTimedOutError,
     EditFileCommand,
+    FileAccessReason,
     LaunchMode,
     ListFilesCommand,
     ReadFileCommand,
@@ -300,6 +302,37 @@ async def test_dispatch_failure_maps_typed_code(harness: _Harness) -> None:
     assert result.code is CommandResultCode.INVALID_STATE
     assert result.message == "running"
     await call.done_writing()
+
+
+@pytest.mark.parametrize(
+    ("wire_reason", "domain_reason"),
+    [
+        (pb.FILE_ACCESS_REASON_UNSPECIFIED, FileAccessReason.UNSPECIFIED),
+        (pb.FILE_ACCESS_REASON_IS_A_DIRECTORY, FileAccessReason.IS_A_DIRECTORY),
+        (pb.FILE_ACCESS_REASON_NOT_A_DIRECTORY, FileAccessReason.NOT_A_DIRECTORY),
+        (pb.FILE_ACCESS_REASON_SYMLINK_REFUSED, FileAccessReason.SYMLINK_REFUSED),
+        (
+            pb.FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE,
+            FileAccessReason.PAYLOAD_TOO_LARGE,
+        ),
+    ],
+)
+def test_to_result_carries_file_access_reason(
+    wire_reason: "pb.FileAccessReason.ValueType", domain_reason: FileAccessReason
+) -> None:
+    """The wire file_access_reason maps onto the domain reason (issue #548)."""
+
+    message = pb.CommandResult(
+        success=False,
+        error=pb.CommandError(
+            code=pb.COMMAND_ERROR_CODE_FILE_ACCESS_DENIED,
+            message="denied",
+            file_access_reason=wire_reason,
+        ),
+    )
+    result = _to_result(message)
+    assert result.code is CommandResultCode.FILE_ACCESS_DENIED
+    assert result.file_access_reason is domain_reason
 
 
 async def test_start_carries_forge_launch_mode_on_the_wire(harness: _Harness) -> None:
