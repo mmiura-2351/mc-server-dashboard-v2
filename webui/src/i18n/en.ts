@@ -168,6 +168,18 @@ export const en = {
   "dashboard.start": "Start",
   "dashboard.stop": "Stop",
   "dashboard.restart": "Restart",
+  // Card/table view toggle (#541); cards remain the default.
+  "dashboard.view.label": "Server list view",
+  "dashboard.view.cards": "Cards",
+  "dashboard.view.table": "Table",
+  // Table-view column headers (#541): the same data as the cards.
+  "dashboard.col.name": "Name",
+  "dashboard.col.state": "State",
+  "dashboard.col.type": "Type / version",
+  "dashboard.col.backend": "Backend",
+  "dashboard.col.port": "Port",
+  "dashboard.col.worker": "Worker",
+  "dashboard.col.actions": "Actions",
   // Observed-state pill labels (WEBUI_SPEC.md 2.3).
   "dashboard.state.starting": "starting",
   "dashboard.state.running": "running",
