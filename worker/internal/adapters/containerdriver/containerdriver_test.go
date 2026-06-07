@@ -37,6 +37,11 @@ type fakeDocker struct {
 
 	stopCalled bool
 	stopNoExit bool
+	// stopBlocksUntilCancel models a wedged daemon: Stop ignores the timeout and
+	// blocks until its context is cancelled, returning the context error. It drives
+	// the bounded-Sweep test (issue #338); without a per-call deadline on Sweep's
+	// Stop call this would block forever and the test would hang.
+	stopBlocksUntilCancel bool
 	// stopped records the ids passed to Stop (in order), and stopErr forces a Stop
 	// failure. Used by the Sweep tests to assert the graceful-stop-before-remove
 	// ordering for running orphans (issue #336).
@@ -134,13 +139,18 @@ func (f *fakeDocker) Start(_ context.Context, _ string) error {
 	return f.startErr
 }
 
-func (f *fakeDocker) Stop(_ context.Context, id string, _ time.Duration) error {
+func (f *fakeDocker) Stop(ctx context.Context, id string, _ time.Duration) error {
 	f.mu.Lock()
 	f.stopCalled = true
 	f.stopped = append(f.stopped, id)
 	noExit := f.stopNoExit
 	stopErr := f.stopErr
+	blockUntilCancel := f.stopBlocksUntilCancel
 	f.mu.Unlock()
+	if blockUntilCancel {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if stopErr != nil {
 		return stopErr
 	}
@@ -325,6 +335,8 @@ func newTestDriver(docker *fakeDocker, ctrl execution.ServerControl, ctrlErr err
 		// Short conflict-loop timing keeps the wait-for-name-free tests fast.
 		ConflictPollInterval: time.Millisecond,
 		ConflictDeadline:     100 * time.Millisecond,
+		// A short sweep margin keeps the wedged-daemon Sweep test fast (issue #338).
+		SweepCallMargin: 50 * time.Millisecond,
 	})
 }
 
@@ -1258,6 +1270,37 @@ func TestSweepListError(t *testing.T) {
 
 	if err := d.Sweep(context.Background()); err == nil {
 		t.Fatal("expected Sweep to return the list error")
+	}
+}
+
+// A wedged daemon must not block worker startup: Sweep bounds each daemon call so
+// a Stop that never returns is cut off by its per-call deadline and surfaced as a
+// stop error, rather than hanging startup forever (issue #338). The fake's Stop
+// blocks until its context is cancelled, so without the bound this test would
+// hang; with it, Sweep returns within the deadline and still force-removes the
+// orphan.
+func TestSweepBoundsWedgedStop(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
+	docker.stopBlocksUntilCancel = true
+	d := newTestDriver(docker, nil, nil)
+
+	done := make(chan error, 1)
+	go func() { done <- d.Sweep(context.Background()) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected Sweep to surface the bounded stop failure")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error = %v, want it to wrap context.DeadlineExceeded", err)
+		}
+		if len(docker.removed) != 1 || docker.removed[0] != "a" {
+			t.Fatalf("removed = %v, want [a] (the orphan must not leak)", docker.removed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Sweep hung on a wedged daemon; the per-call deadline did not fire")
 	}
 }
 
