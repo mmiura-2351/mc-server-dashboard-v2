@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { adminCommunitiesPickerKey } from "../api/adminQueryKeys.ts";
 import { api } from "../api/client.ts";
 import { t } from "../i18n/index.ts";
@@ -9,11 +9,10 @@ import {
   AuditPaging,
   AuditTable,
   applyAuditParams,
-  EMPTY_FILTERS,
   isUuid,
   PAGE_SIZE,
 } from "./auditShared.tsx";
-import { useOffsetParam } from "./urlState.ts";
+import { useAuditFilterParams, useOffsetParam } from "./urlState.ts";
 
 // The global view adds a `community` filter (empty = all communities) on top of
 // the shared operation/actor/since/until filters.
@@ -21,7 +20,23 @@ interface AdminAuditFilters extends AuditFilters {
   community: string;
 }
 
-const EMPTY: AdminAuditFilters = { ...EMPTY_FILTERS, community: "" };
+const EMPTY: AdminAuditFilters = {
+  operation: "",
+  actor: "",
+  since: "",
+  until: "",
+  community: "",
+};
+
+// The filter keys persisted in the URL query string (#563); `community` is the
+// global view's extra dropdown alongside the shared text/datetime filters.
+const FILTER_KEYS = [
+  "operation",
+  "actor",
+  "since",
+  "until",
+  "community",
+] as const;
 
 // The community picker requests one max-size page (the API caps
 // /admin/communities at 100). When more communities exist the later ones are
@@ -69,12 +84,25 @@ export function AdminAuditPage() {
   const communityTotal = communitiesQuery.data?.total ?? 0;
   const communitiesTruncated =
     communities !== undefined && communityTotal > communities.length;
-  // Applied filters (committed on Apply) and the in-progress input draft.
-  const [filters, setFilters] = useState<AdminAuditFilters>(EMPTY);
-  const [draft, setDraft] = useState<AdminAuditFilters>(EMPTY);
+  // Applied filters live in the URL query string (#563) so reloads and shared
+  // links restore them; `urlFilters` is the applied set, `draft` the in-progress
+  // input. The draft re-syncs to the URL on Back so the inputs follow history.
+  const [urlFilters, applyFilters] = useAuditFilterParams(FILTER_KEYS);
+  const filters: AdminAuditFilters = { ...EMPTY, ...urlFilters };
+  const [draft, setDraft] = useState<AdminAuditFilters>(filters);
   // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
   const [offset, setOffset] = useOffsetParam();
   const [actorError, setActorError] = useState(false);
+
+  // Keep the inputs in step with the applied (URL) filters: Back/forward and
+  // deep links drive the URL, and the draft mirrors it. The signature folds the
+  // filter values into one stable dep so the re-sync fires only on a real URL
+  // change, not on every render's fresh object.
+  const urlSignature = JSON.stringify(urlFilters);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `urlSignature` stands in for the filter values; `filters` is derived from them.
+  useEffect(() => {
+    setDraft(filters);
+  }, [urlSignature]);
 
   const query = useQuery({
     queryKey: ["admin", "audit", filters, offset],
@@ -90,8 +118,9 @@ export function AdminAuditPage() {
       return;
     }
     setActorError(false);
-    setFilters(draft);
-    setOffset(0);
+    // Applying writes the filters to the URL and resets offset to 0 in one
+    // history entry (useAuditFilterParams drops the offset param).
+    applyFilters(draft);
   };
 
   const records = query.data?.records ?? [];

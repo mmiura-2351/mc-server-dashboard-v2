@@ -15,7 +15,12 @@ import {
   isUuid,
   PAGE_SIZE,
 } from "./auditShared.tsx";
-import { useOffsetParam } from "./urlState.ts";
+import { useAuditFilterParams, useOffsetParam } from "./urlState.ts";
+
+// The filter keys persisted in the URL query string (#563): the shared
+// operation/actor/since/until set (the community-scoped view has no community
+// filter — every row is the same community).
+const FILTER_KEYS = ["operation", "actor", "since", "until"] as const;
 
 export function auditKey(
   communityId: string,
@@ -62,12 +67,25 @@ export function CommunityAuditTab({
 
 function Loaded({ communityId }: { communityId: string }) {
   const onForbidden = useOnForbidden();
-  // Applied filters (committed on Apply) and the in-progress input draft.
-  const [filters, setFilters] = useState<AuditFilters>(EMPTY_FILTERS);
-  const [draft, setDraft] = useState<AuditFilters>(EMPTY_FILTERS);
+  // Applied filters live in the URL query string (#563) so reloads and shared
+  // links restore them; `urlFilters` is the applied set, `draft` the in-progress
+  // input. The draft re-syncs to the URL on Back so the inputs follow history.
+  const [urlFilters, applyFilters] = useAuditFilterParams(FILTER_KEYS);
+  const filters: AuditFilters = { ...EMPTY_FILTERS, ...urlFilters };
+  const [draft, setDraft] = useState<AuditFilters>(filters);
   // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
   const [offset, setOffset] = useOffsetParam();
   const [actorError, setActorError] = useState(false);
+
+  // Keep the inputs in step with the applied (URL) filters: Back/forward and
+  // deep links drive the URL, and the draft mirrors it. The signature folds the
+  // filter values into one stable dep so the re-sync fires only on a real URL
+  // change, not on every render's fresh object.
+  const urlSignature = JSON.stringify(urlFilters);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `urlSignature` stands in for the filter values; `filters` is derived from them.
+  useEffect(() => {
+    setDraft(filters);
+  }, [urlSignature]);
 
   const query = useQuery({
     queryKey: auditKey(communityId, filters, offset),
@@ -89,8 +107,9 @@ function Loaded({ communityId }: { communityId: string }) {
       return;
     }
     setActorError(false);
-    setFilters(draft);
-    setOffset(0);
+    // Applying writes the filters to the URL and resets offset to 0 in one
+    // history entry (useAuditFilterParams drops the offset param).
+    applyFilters(draft);
   };
 
   const records = query.data?.records ?? [];

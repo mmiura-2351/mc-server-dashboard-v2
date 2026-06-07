@@ -86,3 +86,58 @@ export function useOffsetParam(): [number, (offset: number) => void] {
 
   return [offset, setOffset];
 }
+
+/**
+ * Drive a set of filter inputs from the query string (#563). Each key maps to a
+ * `?key=value` param; a blank value omits its param so the canonical URL stays
+ * clean. The applied filters derive purely from the URL — sharing a link or
+ * reloading restores them. `applyFilters` writes the next set, drops the
+ * `offset` param (changing the query invalidates the old page position), keeps
+ * the hash (a filtered table can live inside a hash-driven tab), and pushes a
+ * history entry so Back restores the prior filter set.
+ *
+ * The keys are caller-supplied (the global audit view adds `community` to the
+ * shared operation/actor/since/until set), so the hook stays reusable wherever
+ * list filters appear. Values are stored verbatim — the audit endpoints' UTC
+ * conversion happens at request-build time, not here, so the inputs round-trip
+ * exactly.
+ */
+export function useAuditFilterParams<K extends string>(
+  keys: readonly K[],
+): [Record<K, string>, (next: Record<K, string>) => void] {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const params = new URLSearchParams(location.search);
+  const filters = Object.fromEntries(
+    keys.map((key) => [key, params.get(key) ?? ""]),
+  ) as Record<K, string>;
+
+  const setFilters = useCallback(
+    (next: Record<K, string>) => {
+      const params = new URLSearchParams(location.search);
+      for (const key of keys) {
+        const value = next[key].trim();
+        if (value === "") {
+          params.delete(key);
+        } else {
+          params.set(key, value);
+        }
+      }
+      // Changing the filter set invalidates the current page position, so reset
+      // to the first page (offset 0 keeps the param out of the URL).
+      params.delete("offset");
+      const search = params.toString();
+      // Applying the same filter set (e.g. Apply pressed twice unchanged, or an
+      // empty Apply on the first page) is a no-op: skip the navigate so it does
+      // not push a duplicate history entry (which would make Back a double
+      // press).
+      if (search === new URLSearchParams(location.search).toString()) return;
+      navigate(
+        `${location.pathname}${search ? `?${search}` : ""}${location.hash}`,
+      );
+    },
+    [navigate, location.pathname, location.search, location.hash, keys],
+  );
+
+  return [filters, setFilters];
+}
