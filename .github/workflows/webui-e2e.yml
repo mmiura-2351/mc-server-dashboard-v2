@@ -128,7 +128,7 @@ jobs:
           echo "UVICORN_PID=$!" >> "$GITHUB_ENV"
           ready=
           for _ in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8000/healthz 2>/dev/null | grep -q '"ok":true'; then
+            if curl -fsS http://127.0.0.1:8000/api/healthz 2>/dev/null | grep -q '"ok":true'; then
               ready=1
               break
             fi

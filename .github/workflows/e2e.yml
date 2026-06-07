@@ -106,11 +106,11 @@ jobs:
           cleanup() { kill "$uvicorn_pid" 2>/dev/null || true; }
           trap cleanup EXIT
 
-          # Wait for readiness. /healthz returns 200 even when the DB is
+          # Wait for readiness. /api/healthz returns 200 even when the DB is
           # degraded (with ok=false), so assert the body reports ok=true.
           ready=
           for _ in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8000/healthz 2>/dev/null | grep -q '"ok":true'; then
+            if curl -fsS http://127.0.0.1:8000/api/healthz 2>/dev/null | grep -q '"ok":true'; then
               ready=1
               break
             fi
@@ -121,7 +121,7 @@ jobs:
             cat /tmp/uvicorn.log >&2
             exit 1
           fi
-          echo "healthz: $(curl -fsS http://127.0.0.1:8000/healthz)"
+          echo "healthz: $(curl -fsS http://127.0.0.1:8000/api/healthz)"
 
           # Run the real Go client against the real API.
           cd worker
