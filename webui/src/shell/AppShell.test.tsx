@@ -200,6 +200,25 @@ describe("AppShell community switcher", () => {
     expect(label).toHaveTextContent(t("shell.account"));
   });
 
+  it("wraps each nav label so the sidebar can collapse to an icon rail", async () => {
+    signedInWith([ALPHA, BETA]);
+
+    renderAt("/");
+
+    // At narrow widths the sidebar collapses to an icon-only rail: the nav text
+    // moves into a dedicated `.label` span the breakpoint rule hides, while the
+    // icon stays. The link keeps an `aria-label`, so its accessible name still
+    // resolves once the visible text is hidden (#586, mirroring the #554
+    // account-link treatment).
+    const dashboard = await screen.findByRole("link", {
+      name: t("nav.dashboard"),
+    });
+    const label = dashboard.querySelector(".label");
+    expect(label).not.toBeNull();
+    expect(label).toHaveTextContent(t("nav.dashboard"));
+    expect(dashboard).toHaveAttribute("aria-label", t("nav.dashboard"));
+  });
+
   it("clicking the brand navigates to the landing page", async () => {
     signedInWith([ALPHA, BETA]);
 
