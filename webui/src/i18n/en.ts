@@ -87,6 +87,8 @@ export const en = {
   // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "Cancel",
   "common.close": "Close",
+  "common.showPassword": "Show password",
+  "common.hidePassword": "Hide password",
   "common.resizeColumn": "Drag to resize, double-click to reset",
   "common.chooseFile": "Choose file",
   "common.noFileChosen": "No file chosen",

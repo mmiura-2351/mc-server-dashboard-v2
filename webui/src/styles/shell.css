@@ -30,6 +30,18 @@
   font-size: 15px;
   color: var(--text);
 }
+/* The brand is a Link to the landing page (#538); keep it visually identical to
+ * the static heading at rest, with a quiet hover/focus affordance matching the
+ * nav links. */
+.sidebar a.brand:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+.sidebar a.brand:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
 .brand .cube {
   width: 22px;
   height: 22px;
@@ -468,6 +480,41 @@ body.col-resizing {
 .field input:focus {
   outline: none;
   border-color: var(--accent);
+}
+
+/* Password field with show/hide toggle (issue #535). The wrapper anchors the
+ * toggle button over the input's trailing edge; the input keeps its `.field
+ * input` styling and reserves room so typed text never slips under the icon. */
+.password-input {
+  position: relative;
+  display: flex;
+}
+.password-input input {
+  flex: 1;
+  padding-right: 38px;
+}
+.password-toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.password-toggle:hover {
+  color: var(--text);
+}
+.password-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
 }
 
 /* ---------- Auth pages (outside the shell chrome) ---------- */

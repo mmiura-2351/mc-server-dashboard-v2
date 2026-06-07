@@ -250,7 +250,7 @@ describe("ServerPlayersTab", () => {
       community: [],
     });
     mockApi.delete.mockRejectedValue(
-      new ApiError(403, { reason: "group:manage" }),
+      new ApiError(403, { reason: "forbidden", permission: "group:manage" }),
     );
     renderTab();
     await openPlayers();

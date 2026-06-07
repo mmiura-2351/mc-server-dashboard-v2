@@ -14,7 +14,10 @@ export async function signIn(
 ): Promise<void> {
   await page.goto("/login");
   await page.getByLabel("Username").fill(username);
-  await page.getByLabel("Password").fill(password);
+  // The PasswordInput toggle button's accessible name ("Show password") also
+  // contains "Password"; match the field label exactly so the lookup is
+  // unambiguous (issue #535).
+  await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page).not.toHaveURL(/\/login/);
 }

@@ -5,6 +5,7 @@ import type { components } from "../api/schema";
 import { useSession } from "../auth/SessionProvider.tsx";
 import { useCurrentUser } from "../auth/useCurrentUser.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { PasswordInput } from "../components/PasswordInput.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
 
@@ -233,27 +234,30 @@ function PasswordSection({
   return (
     <form className="card" onSubmit={onSubmit}>
       <h2>{t("account.password.heading")}</h2>
-      <label className="field">
+      <label className="field" htmlFor="account-password-current">
         {t("account.password.current")}
-        <input
-          type="password"
+        <PasswordInput
+          id="account-password-current"
+          autoComplete="current-password"
           value={current}
           onChange={(event) => setCurrent(event.target.value)}
         />
       </label>
       <div className="form-row">
-        <label className="field">
+        <label className="field" htmlFor="account-password-new">
           {t("account.password.new")}
-          <input
-            type="password"
+          <PasswordInput
+            id="account-password-new"
+            autoComplete="new-password"
             value={next}
             onChange={(event) => setNext(event.target.value)}
           />
         </label>
-        <label className="field">
+        <label className="field" htmlFor="account-password-confirm">
           {t("account.password.confirm")}
-          <input
-            type="password"
+          <PasswordInput
+            id="account-password-confirm"
+            autoComplete="new-password"
             value={confirm}
             onChange={(event) => setConfirm(event.target.value)}
           />

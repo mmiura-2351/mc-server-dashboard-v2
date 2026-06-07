@@ -459,7 +459,7 @@ describe("ServerBackupsTab permission gating", () => {
   it("routes a create 403 through the permission glue", async () => {
     routeGet();
     mockApi.post.mockRejectedValue(
-      new ApiError(403, { reason: "backup:create" }),
+      new ApiError(403, { reason: "forbidden", permission: "backup:create" }),
     );
     await openBackups();
 

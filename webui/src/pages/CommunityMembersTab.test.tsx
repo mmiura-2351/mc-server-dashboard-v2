@@ -391,7 +391,7 @@ describe("CommunityMembersTab", () => {
       roles: [role({ id: "r1", name: "Moderator" })],
     });
     mockApi.post.mockRejectedValue(
-      new ApiError(403, { reason: "role:manage" }),
+      new ApiError(403, { reason: "forbidden", permission: "role:manage" }),
     );
     renderPage();
     await awaitMembers();

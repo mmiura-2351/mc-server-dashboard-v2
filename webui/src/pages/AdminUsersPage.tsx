@@ -11,6 +11,7 @@ import type { components } from "../api/schema";
 import { useCurrentUser } from "../auth/useCurrentUser.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { PasswordInput } from "../components/PasswordInput.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -542,9 +543,8 @@ function CreateUserDialog({
           <label htmlFor="admin-create-password">
             {t("admin.users.passwordLabel")}
           </label>
-          <input
+          <PasswordInput
             id="admin-create-password"
-            type="password"
             autoComplete="new-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

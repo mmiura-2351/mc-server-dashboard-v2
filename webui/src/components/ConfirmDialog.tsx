@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { t } from "../i18n/index.ts";
 import { Modal } from "./Modal.tsx";
+import { PasswordInput } from "./PasswordInput.tsx";
 
 // Typed-confirm dialog for destructive operations (WEBUI_SPEC.md Section 7.4).
 // The destructive button stays disabled until the user types confirmPhrase
@@ -85,10 +86,11 @@ export function ConfirmDialog({
         />
       </label>
       {passwordLabel !== undefined && (
-        <label className="field">
+        <label className="field" htmlFor="confirm-dialog-password">
           {passwordLabel}
-          <input
-            type="password"
+          <PasswordInput
+            id="confirm-dialog-password"
+            autoComplete="current-password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />

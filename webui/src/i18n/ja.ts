@@ -93,6 +93,8 @@ export const ja: Record<TranslationKey, string> = {
   // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "キャンセル",
   "common.close": "閉じる",
+  "common.showPassword": "パスワードを表示",
+  "common.hidePassword": "パスワードを非表示",
   "common.resizeColumn": "ドラッグで幅を変更、ダブルクリックでリセット",
   "common.chooseFile": "ファイルを選択",
   "common.noFileChosen": "ファイルが選択されていません",
