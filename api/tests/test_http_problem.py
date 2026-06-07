@@ -56,6 +56,13 @@ def _client() -> TestClient:
     def validated(limit: int) -> int:  # noqa: ARG001 — query param drives 422
         return 0
 
+    @app.get("/boom")
+    def boom() -> None:
+        # An unexpected OSError (e.g. the IsADirectoryError the at-rest write
+        # raised, issue #542) must be normalized to problem+json, not leak as a
+        # bare text/plain 500 with the secret in the detail.
+        raise IsADirectoryError(21, "Is a directory: '/secret/path'")
+
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -111,6 +118,22 @@ def test_request_validation_error_is_problem_json() -> None:
     assert body["reason"] == "validation_error"
     assert body["status"] == 422
     assert isinstance(body["errors"], list) and body["errors"]
+
+
+def test_unexpected_exception_is_problem_json_not_bare_500() -> None:
+    # An unexpected OSError escaping a route must be normalized to problem+json
+    # ``internal_error`` (500), not a bare text/plain 500 that escapes RFC 9457
+    # (issue #542, consistent with #371).
+    resp = _client().get("/boom")
+    assert resp.status_code == 500
+    assert resp.headers["content-type"] == "application/problem+json"
+    body = resp.json()
+    assert body["type"] == "urn:mcsd:error:internal_error"
+    assert body["reason"] == "internal_error"
+    assert body["status"] == 500
+    # The body must not leak the exception's internals (path / errno message).
+    assert "secret" not in resp.text
+    assert "Is a directory" not in resp.text
 
 
 def test_validation_error_entries_omit_input_and_ctx() -> None:

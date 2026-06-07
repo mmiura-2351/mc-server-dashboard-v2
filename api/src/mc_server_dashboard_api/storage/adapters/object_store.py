@@ -791,6 +791,12 @@ class ObjectStorage(Storage):
         data: bytes,
     ) -> None:
         sub = self._safe_subkey(rel_path)
+        # The working-set root (an empty rel_path, e.g. the file route's default
+        # ``path="."``) names a directory, not a file; refuse it rather than
+        # writing a bogus empty-suffix object onto the snapshot prefix (the at-rest
+        # 500 parity with the fs backend, issue #542).
+        if not sub:
+            raise PathTraversalError("rel_path must name a file, not the root")
         async with self._client_factory() as client:
             server_prefix = self._server_prefix(community_id, server_id)
             snapshot_prefix = await self._read_pointer(client, server_prefix)
@@ -803,6 +809,14 @@ class ObjectStorage(Storage):
                 await self._publish_initial(client, community_id, server_id, sub, data)
                 return
             key = snapshot_prefix + sub
+            # Refuse to overwrite a directory with file bytes (issue #542): a
+            # ``config`` write where ``config/...`` objects exist would create a
+            # file/prefix collision. The fs backend raises IsADirectoryError here;
+            # match it with the invalid-path refusal.
+            if await client.list_objects(key + "/"):
+                raise PathTraversalError(
+                    f"rel_path names a directory, not a file: {rel_path.value}"
+                )
             # Capture the prior version BEFORE overwriting (Section 4.4/5).
             if await client.head_object(key) is not None:
                 await self._capture_version(
