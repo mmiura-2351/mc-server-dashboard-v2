@@ -1,27 +1,79 @@
-import type { ReactNode } from "react";
+import { lazy, type ReactNode, Suspense } from "react";
 import { Navigate, Outlet, Route, Routes, useLocation } from "react-router";
 import { useSession } from "./auth/SessionProvider.tsx";
 import { useCurrentUser } from "./auth/useCurrentUser.ts";
 import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
-import { AccountPage } from "./pages/AccountPage.tsx";
-import { AdminAuditPage } from "./pages/AdminAuditPage.tsx";
-import { AdminCommunitiesPage } from "./pages/AdminCommunitiesPage.tsx";
-import { AdminOverviewPage } from "./pages/AdminOverviewPage.tsx";
-import { AdminUsersPage } from "./pages/AdminUsersPage.tsx";
-import { AdminVersionsPage } from "./pages/AdminVersionsPage.tsx";
-import { AdminWorkersPage } from "./pages/AdminWorkersPage.tsx";
-import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
-import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { NoCommunityPage } from "./pages/NoCommunityPage.tsx";
 import { PlaceholderPage } from "./pages/PlaceholderPage.tsx";
 import { RegisterPage } from "./pages/RegisterPage.tsx";
-import { ServerCreatePage } from "./pages/ServerCreatePage.tsx";
-import { ServerDetailPage } from "./pages/ServerDetailPage.tsx";
 import { useActiveCommunity } from "./permissions/ActiveCommunityProvider.tsx";
 import { dashboardPath, postLoginPath } from "./routes.ts";
 import { AppShell } from "./shell/AppShell.tsx";
+
+// Route-level code splitting (#553): the heavier authenticated pages (dashboard,
+// server detail/create, community settings, the admin area, account) load on
+// demand so the SPA no longer ships every page in the initial chunk. React.lazy
+// needs a default export; these pages are named exports, so each loader re-maps
+// the named export to `default`. The eagerly imported pages above stay in the
+// initial chunk on purpose: the auth pages (Login/Register) and PlaceholderPage
+// are first paint / fallback chrome, and NoCommunityPage renders inline from the
+// Landing redirect — splitting them would only add a Suspense flash before the
+// very first screen.
+const AccountPage = lazy(() =>
+  import("./pages/AccountPage.tsx").then((m) => ({ default: m.AccountPage })),
+);
+const AdminAuditPage = lazy(() =>
+  import("./pages/AdminAuditPage.tsx").then((m) => ({
+    default: m.AdminAuditPage,
+  })),
+);
+const AdminCommunitiesPage = lazy(() =>
+  import("./pages/AdminCommunitiesPage.tsx").then((m) => ({
+    default: m.AdminCommunitiesPage,
+  })),
+);
+const AdminOverviewPage = lazy(() =>
+  import("./pages/AdminOverviewPage.tsx").then((m) => ({
+    default: m.AdminOverviewPage,
+  })),
+);
+const AdminUsersPage = lazy(() =>
+  import("./pages/AdminUsersPage.tsx").then((m) => ({
+    default: m.AdminUsersPage,
+  })),
+);
+const AdminVersionsPage = lazy(() =>
+  import("./pages/AdminVersionsPage.tsx").then((m) => ({
+    default: m.AdminVersionsPage,
+  })),
+);
+const AdminWorkersPage = lazy(() =>
+  import("./pages/AdminWorkersPage.tsx").then((m) => ({
+    default: m.AdminWorkersPage,
+  })),
+);
+const CommunitySettingsPage = lazy(() =>
+  import("./pages/CommunitySettingsPage.tsx").then((m) => ({
+    default: m.CommunitySettingsPage,
+  })),
+);
+const DashboardPage = lazy(() =>
+  import("./pages/DashboardPage.tsx").then((m) => ({
+    default: m.DashboardPage,
+  })),
+);
+const ServerCreatePage = lazy(() =>
+  import("./pages/ServerCreatePage.tsx").then((m) => ({
+    default: m.ServerCreatePage,
+  })),
+);
+const ServerDetailPage = lazy(() =>
+  import("./pages/ServerDetailPage.tsx").then((m) => ({
+    default: m.ServerDetailPage,
+  })),
+);
 
 // Neutral loading state shown while the session bootstraps (cookie refresh in
 // flight). Guards hold here instead of bouncing a returning user to /login,
@@ -108,65 +160,67 @@ function Landing() {
 export function App() {
   return (
     <ToastProvider>
-      <Routes>
-        <Route
-          path="/login"
-          element={
-            <RequireAnon>
-              <LoginPage />
-            </RequireAnon>
-          }
-        />
-        <Route
-          path="/register"
-          element={
-            <RequireAnon>
-              <RegisterPage />
-            </RequireAnon>
-          }
-        />
+      <Suspense fallback={<SessionLoading />}>
+        <Routes>
+          <Route
+            path="/login"
+            element={
+              <RequireAnon>
+                <LoginPage />
+              </RequireAnon>
+            }
+          />
+          <Route
+            path="/register"
+            element={
+              <RequireAnon>
+                <RegisterPage />
+              </RequireAnon>
+            }
+          />
 
-        <Route
-          element={
-            <RequireAuth>
-              <AppShell />
-            </RequireAuth>
-          }
-        >
-          <Route index element={<Landing />} />
-          <Route path="/communities/:cid" element={<DashboardPage />} />
           <Route
-            path="/communities/:cid/servers/new"
-            element={<ServerCreatePage />}
-          />
-          <Route
-            path="/communities/:cid/servers/:sid"
-            element={<ServerDetailPage />}
-          />
-          <Route
-            path="/communities/:cid/settings"
-            element={<CommunitySettingsPage />}
-          />
-          <Route path="/account" element={<AccountPage />} />
-
-          <Route element={<RequireAdmin />}>
-            <Route path="/admin" element={<AdminOverviewPage />} />
-            <Route path="/admin/users" element={<AdminUsersPage />} />
+            element={
+              <RequireAuth>
+                <AppShell />
+              </RequireAuth>
+            }
+          >
+            <Route index element={<Landing />} />
+            <Route path="/communities/:cid" element={<DashboardPage />} />
             <Route
-              path="/admin/communities"
-              element={<AdminCommunitiesPage />}
+              path="/communities/:cid/servers/new"
+              element={<ServerCreatePage />}
             />
-            <Route path="/admin/workers" element={<AdminWorkersPage />} />
-            <Route path="/admin/versions" element={<AdminVersionsPage />} />
-            <Route path="/admin/audit" element={<AdminAuditPage />} />
-          </Route>
-        </Route>
+            <Route
+              path="/communities/:cid/servers/:sid"
+              element={<ServerDetailPage />}
+            />
+            <Route
+              path="/communities/:cid/settings"
+              element={<CommunitySettingsPage />}
+            />
+            <Route path="/account" element={<AccountPage />} />
 
-        <Route
-          path="*"
-          element={<PlaceholderPage titleKey="page.notFound" />}
-        />
-      </Routes>
+            <Route element={<RequireAdmin />}>
+              <Route path="/admin" element={<AdminOverviewPage />} />
+              <Route path="/admin/users" element={<AdminUsersPage />} />
+              <Route
+                path="/admin/communities"
+                element={<AdminCommunitiesPage />}
+              />
+              <Route path="/admin/workers" element={<AdminWorkersPage />} />
+              <Route path="/admin/versions" element={<AdminVersionsPage />} />
+              <Route path="/admin/audit" element={<AdminAuditPage />} />
+            </Route>
+          </Route>
+
+          <Route
+            path="*"
+            element={<PlaceholderPage titleKey="page.notFound" />}
+          />
+        </Routes>
+      </Suspense>
     </ToastProvider>
   );
 }
