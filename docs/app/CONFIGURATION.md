@@ -425,14 +425,39 @@ spec.
 
 ### 7.1 Password policy
 
+Password strength is selected by a named preset rather than per-rule toggles
+(issue #536). The preset fixes which strength rules fire and their thresholds;
+the rejection reason codes are identical across presets (SECURITY.md Section 1),
+so a Web UI built against them keeps working when the operator changes the
+preset.
+
 | Key | Default | Meaning |
 |---|---|---|
-| `auth.password.min_length` | `12` | Minimum password length (characters). Must be positive and **not exceed** `max_length`; a min above the max fails fast at load. |
-| `auth.password.max_length` | `128` | Maximum length (bcrypt 72-byte cap plus a DoS guard). Must be positive. |
-| `auth.password.require_complexity` | `true` | Enforce the complexity-or-length rule: at least 3 of {upper, lower, digit, symbol} **or** at least 16 characters. |
-| `auth.password.check_common_list` | `true` | Reject passwords on a common-password blocklist (legacy baseline: SecLists xato-net top-10,000). |
-| `auth.password.forbid_user_info` | `true` | Reject a password containing the username or the email local-part. |
-| `auth.password.forbid_simple_patterns` | `true` | Reject 4+ repeated characters or 4+ sequential alphabet/keyboard/numeric runs. |
+| `auth.password.policy` | `middle` | Strength preset: `low` / `middle` / `high`. Any other value fails fast at load. See the preset table in [SECURITY.md](SECURITY.md) Section 1 for the rules each fires. Env: `MCD_API_AUTH__PASSWORD__POLICY`. |
+| `auth.password.max_length` | `128` | Maximum length (bcrypt 72-byte cap plus a DoS guard); independent of the preset. Must be positive and **not below** the selected preset's minimum length; a max below the preset minimum fails fast at load. |
+
+Preset thresholds (full table in [SECURITY.md](SECURITY.md) Section 1):
+
+| Preset | Min length | Complexity-or-length | Common-list | User-info | Simple-pattern |
+|---|---|---|---|---|---|
+| `low` | 8 | off | on | on | off |
+| `middle` *(default)* | 10 | 2 of 4 (or 16+ chars) | on | on | on |
+| `high` | 12 | 3 of 4 (or 16+ chars) | on | on | on |
+
+The default is `middle`. It changed from the historical fixed posture, which was
+equivalent to `high`. Because the policy only validates *newly set* passwords,
+existing hashes are unaffected; set `auth.password.policy=high` to keep the old
+posture.
+
+> **Breaking change (upgrading from per-rule config):** the previous per-rule
+> keys were removed in favour of the preset above. If your config still sets any
+> of `auth.password.min_length`, `auth.password.require_complexity`,
+> `auth.password.check_common_list`, `auth.password.forbid_user_info`, or
+> `auth.password.forbid_simple_patterns` (or their `MCD_API_AUTH__PASSWORD__*`
+> env forms), **remove them** and select a preset instead. The `auth.password`
+> section forbids unknown keys, so leaving any of them set fails fast with a
+> startup validation error. To keep the old strictness, choose
+> `auth.password.policy=high`, which reproduces the previous default posture.
 
 ### 7.2 Brute-force protection
 

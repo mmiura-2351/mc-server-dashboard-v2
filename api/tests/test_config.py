@@ -87,12 +87,24 @@ def test_password_policy_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)
     assert settings.auth.password.hash == "argon2"
-    assert settings.auth.password.min_length == 12
+    # Default strength preset is ``middle`` (issue #536), not the historical
+    # high-equivalent fixed posture.
+    assert settings.auth.password.policy == "middle"
     assert settings.auth.password.max_length == 128
-    assert settings.auth.password.require_complexity is True
-    assert settings.auth.password.check_common_list is True
-    assert settings.auth.password.forbid_user_info is True
-    assert settings.auth.password.forbid_simple_patterns is True
+
+
+def test_password_policy_preset_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_AUTH__PASSWORD__POLICY", "high")
+    settings = load_settings(config_file=None)
+    assert settings.auth.password.policy == "high"
+
+
+def test_unknown_password_policy_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_AUTH__PASSWORD__POLICY", "paranoid")
+    with pytest.raises(ValidationError, match="policy"):
+        load_settings(config_file=None)
 
 
 def test_brute_force_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,12 +271,11 @@ def test_numeric_setting_rejects_out_of_range(
         load_settings(config_file=cfg)
 
 
-@pytest.mark.parametrize("field", ["min_length", "max_length"])
-def test_password_length_must_be_positive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+def test_password_max_length_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
-    cfg = _write_toml(tmp_path, f"[auth.password]\n{field} = 0\n")
+    cfg = _write_toml(tmp_path, "[auth.password]\nmax_length = 0\n")
     with pytest.raises(ValidationError):
         load_settings(config_file=cfg)
 
@@ -453,10 +464,10 @@ def test_password_hash_selector_from_toml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
-    cfg = _write_toml(tmp_path, '[auth.password]\nhash = "bcrypt"\nmin_length = 10\n')
+    cfg = _write_toml(tmp_path, '[auth.password]\nhash = "bcrypt"\npolicy = "low"\n')
     settings = load_settings(config_file=cfg)
     assert settings.auth.password.hash == "bcrypt"
-    assert settings.auth.password.min_length == 10
+    assert settings.auth.password.policy == "low"
 
 
 def test_unknown_password_hash_fails_fast(
@@ -547,29 +558,31 @@ def test_hs256_signing_key_at_32_bytes_is_accepted(
 # TTL pair is strict (``<``) since equal lifetimes defeat the refresh mechanism.
 
 
-def test_password_min_length_above_max_fails_fast(
+def test_preset_min_length_above_max_fails_fast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The high preset's 12-char minimum cannot coexist with a max_length of 8.
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     cfg = _write_toml(
         tmp_path,
-        "[auth.password]\nmin_length = 130\nmax_length = 128\n",
+        '[auth.password]\npolicy = "high"\nmax_length = 8\n',
     )
     with pytest.raises(ValidationError, match="min_length"):
         load_settings(config_file=cfg)
 
 
-def test_password_min_length_equal_to_max_is_accepted(
+def test_preset_min_length_equal_to_max_is_accepted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # max_length equal to the preset minimum is a valid fixed-length requirement.
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     cfg = _write_toml(
         tmp_path,
-        "[auth.password]\nmin_length = 64\nmax_length = 64\n",
+        '[auth.password]\npolicy = "high"\nmax_length = 12\n',
     )
     settings = load_settings(config_file=cfg)
-    assert settings.auth.password.min_length == 64
-    assert settings.auth.password.max_length == 64
+    assert settings.auth.password.policy == "high"
+    assert settings.auth.password.max_length == 12
 
 
 def test_lockout_base_above_max_fails_fast(
