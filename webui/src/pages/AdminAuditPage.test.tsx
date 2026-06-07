@@ -135,7 +135,13 @@ describe("AdminAuditPage", () => {
 
     expect(await screen.findByText("server:start")).toBeInTheDocument();
     // The global view shows the community column.
-    expect(screen.getAllByText(COMMUNITY.id).length).toBeGreaterThan(0);
+    const communityCells = screen.getAllByText(COMMUNITY.id);
+    expect(communityCells.length).toBeGreaterThan(0);
+    // The community cell carries the full id as a hover title (#519).
+    expect(communityCells[0].closest("td")).toHaveAttribute(
+      "title",
+      COMMUNITY.id,
+    );
   });
 
   it("warns that the community picker is truncated when more communities exist than one page", async () => {

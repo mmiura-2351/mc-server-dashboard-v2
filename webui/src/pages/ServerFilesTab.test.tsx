@@ -50,11 +50,8 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
 }));
 vi.mock("../permissions/useCan.ts", () => ({ useCan: () => mockCan }));
 
-vi.mock("react-router", async () => {
-  const actual =
-    await vi.importActual<typeof import("react-router")>("react-router");
-  return { ...actual, useNavigate: () => vi.fn() };
-});
+// Use the real router (incl. useNavigate): switching to the Files tab now
+// drives the URL hash (#514), so navigate must update the location, not no-op.
 
 const FILES_BASE = `/api/communities/${CID}/servers/${SID}/files`;
 
@@ -171,6 +168,19 @@ describe("ServerFilesTab listing", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(`${FILES_BASE}?path=&list=true`),
     );
+  });
+
+  it("exposes the full file name via title on the truncating name cell", async () => {
+    const longName = "a-very-long-file-name-that-the-ellipsis-truncates.txt";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: longName, is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const cell = await screen.findByText(new RegExp(longName));
+    expect(cell.closest("button.file-name")).toHaveAttribute("title", longName);
   });
 
   it("shows the truncated notice when the listing was clipped", async () => {

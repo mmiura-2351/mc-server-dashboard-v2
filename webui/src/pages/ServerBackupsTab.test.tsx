@@ -49,11 +49,8 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
 }));
 vi.mock("../permissions/useCan.ts", () => ({ useCan: () => mockCan }));
 
-vi.mock("react-router", async () => {
-  const actual =
-    await vi.importActual<typeof import("react-router")>("react-router");
-  return { ...actual, useNavigate: () => vi.fn() };
-});
+// Use the real router (incl. useNavigate): switching to the Backups tab now
+// drives the URL hash (#514), so navigate must update the location, not no-op.
 
 function server(overrides: Record<string, unknown> = {}) {
   return {
@@ -172,7 +169,11 @@ describe("ServerBackupsTab stats + table", () => {
     // "1.5 GiB" appears for both the total-size stat and the single row.
     expect((await screen.findAllByText("1.5 GiB")).length).toBe(2);
     expect(screen.getByText("manual")).toBeInTheDocument();
-    expect(screen.getByText("miura")).toBeInTheDocument();
+    // The creator cell carries the full value as a hover title (#519).
+    expect(screen.getByText("miura").closest("td")).toHaveAttribute(
+      "title",
+      "miura",
+    );
     // The stats header labels render (count uses "Backups", scoped to the strip).
     expect(screen.getByText(t("backups.stat.totalSize"))).toBeInTheDocument();
     expect(screen.getByText(t("backups.stat.newest"))).toBeInTheDocument();
