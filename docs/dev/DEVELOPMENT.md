@@ -63,9 +63,11 @@ covered here.
 | Format both modules | `make format` | ruff format + `ruff check --fix` (api), `gofmt -w` (worker) |
 | Lint + typecheck | `make lint` | ruff, mypy, import-linter (api); gofmt-check, `go vet`, golangci-lint (worker); `buf lint` (proto) |
 | Test | `make test` | `pytest` (api), `go test ./...` (worker) |
-| Full gate | `make check` | `lint` + `test` + `proto-check` — what pre-push and CI run |
+| Full gate | `make check` | `lint` + `test` + `openapi-check` + `proto-check` — what pre-push and CI run |
 | Regenerate proto stubs | `make proto-gen` | regenerate the Go + Python control-plane stubs (Section 6) |
 | Check proto stubs are current | `make proto-check` | regenerate and fail if the committed stubs drift |
+| Regenerate webui OpenAPI client | `make openapi-gen` | regenerate `webui/openapi.json` + `webui/src/api/schema.ts` from the api routes |
+| Check webui OpenAPI client is current | `make openapi-check` | regenerate and fail if the committed client artifacts drift |
 | Install pinned local tooling | `make bootstrap` | golangci-lint into `worker/.bin`, `uv sync` for api |
 | Install git hooks | `make hooks-install` | one-time, sets `core.hooksPath` |
 

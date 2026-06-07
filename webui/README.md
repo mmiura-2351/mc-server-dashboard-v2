@@ -114,6 +114,11 @@ schema hermetically — no running server, database, or network — then
 `openapi:generate` runs `openapi-typescript`. A clean working tree after
 `npm run openapi` means the committed client is up to date.
 
+Freshness is enforced by a drift gate: `make openapi-check` (run by `make check`
+and the `openapi` CI workflow) regenerates these files and fails if they drift
+from the committed copies, so a route change that landed without `npm run
+openapi` is caught before merge.
+
 ## Dev-server proxy
 
 The browser only ever talks to the Vite dev server, which proxies the single

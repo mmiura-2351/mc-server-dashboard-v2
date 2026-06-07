@@ -13,8 +13,9 @@
 	api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race \
 	webui-lint webui-format webui-test webui-build webui-e2e \
+	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
-	bootstrap hooks-install
+	bootstrap hooks-install hooks-check
 
 # golangci-lint is not part of the Go distribution; it is installed into a
 # module-local, gitignored ./.bin (see worker/README.md).
@@ -41,7 +42,7 @@ PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
-check: lint test webui-build proto-check docs-check
+check: hooks-check lint test webui-build openapi-check proto-check docs-check
 
 lint: api-lint worker-lint webui-lint proto-lint
 
@@ -134,6 +135,29 @@ webui-build:
 webui-e2e:
 	scripts/run_webui_e2e.sh $(ARGS)
 
+# ---------------------------------------------------------------------------
+# webui OpenAPI client artifacts (webui/openapi.json + webui/src/api/schema.ts)
+#
+# Both are generated from the api/ route table but committed by hand. The
+# `openapi` npm script chains the two generators: `openapi:export` dumps
+# `app.openapi()` to webui/openapi.json (deterministic — sorted keys, stable
+# formatting; see api/src/.../export_openapi.py and its determinism test), then
+# `openapi:generate` runs openapi-typescript over that JSON to webui/src/api/
+# schema.ts. Mirrors the proto-gen / proto-check pair.
+# ---------------------------------------------------------------------------
+
+openapi-gen:
+	cd webui && npm run openapi
+
+# Drift gate: regenerate the client artifacts and fail if they differ from the
+# committed copies (CI + `make check`). Catches an api route change that landed
+# without regenerating the webui contract.
+openapi-check: openapi-gen
+	@if ! git diff --exit-code -- webui/openapi.json webui/src/api/schema.ts; then \
+		echo "webui OpenAPI artifacts are stale; run 'make openapi-gen' and commit the result."; \
+		exit 1; \
+	fi
+
 # Install the pinned golangci-lint into worker/.bin if it is missing.
 $(GOLANGCI):
 	cd worker && GOBIN="$$(pwd)/.bin" go install \
@@ -153,6 +177,24 @@ bootstrap: $(GOLANGCI)
 hooks-install:
 	git config core.hooksPath .githooks
 	@echo "git hooks installed (core.hooksPath -> .githooks)"
+
+# Preflight for `make check`: warn (do not fail) when core.hooksPath is not
+# pointing at the checked-in .githooks, which silently disables the pre-commit /
+# pre-push / post-checkout gates for every checkout sharing this .git/config.
+# The parallel-worktree tooling has been seen resetting it (#551). This only
+# reads the config -- it never mutates it -- and warns rather than failing so it
+# stays out of the way on CI runners (which never install the hooks); it also
+# short-circuits when CI=true. Run `make hooks-install` to restore.
+hooks-check:
+	@if [ "$$CI" != "true" ] && [ "$$(git config core.hooksPath)" != ".githooks" ]; then \
+		echo "============================================================"; \
+		echo "WARNING: git core.hooksPath is not '.githooks'"; \
+		echo "  current: $$(git config core.hooksPath || echo '<unset>')"; \
+		echo "  The pre-commit / pre-push / post-checkout hooks are DISABLED"; \
+		echo "  for every checkout sharing this .git/config (see #551)."; \
+		echo "  Restore them with: make hooks-install"; \
+		echo "============================================================"; \
+	fi
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.
