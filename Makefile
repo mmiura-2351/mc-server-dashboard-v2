@@ -10,7 +10,7 @@
 #   make hooks-install  # install the git hooks (one-time)
 
 .PHONY: all check lint format test docs-check \
-	api-lint api-format api-test \
+	api-env-check api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race \
 	webui-lint webui-format webui-test webui-build webui-e2e \
 	openapi-gen openapi-check \
@@ -60,17 +60,31 @@ docs-check:
 # api/ (Python via uv)
 # ---------------------------------------------------------------------------
 
-api-lint:
+# Preflight for every api/ gate: fail loud when the active Python environment
+# resolves mc_server_dashboard_api from a DIFFERENT checkout than this one. Agent
+# worktrees under .claude/worktrees/ inherit VIRTUAL_ENV pointing at the primary
+# checkout's api/.venv, so depending on the uv version `uv run mypy/pytest` can
+# silently check the primary checkout's sources (on main) instead of the branch
+# -- a false pass that costs a CI round (#566). The check runs through the SAME
+# `cd api && uv run` path as the real gate so it observes exactly what the gate
+# would, and fails (not warns) with the `uv sync` fix, since a wrong-source gate
+# invalidates everything after it. On a fresh checkout (CI, the primary checkout)
+# there is no shadowing, so it is a silent no-op. Prerequisite of the api-*
+# targets so a directly-invoked `make api-test` is guarded too.
+api-env-check:
+	cd api && uv run python ../scripts/check_api_env.py
+
+api-lint: api-env-check
 	cd api && uv run ruff check .
 	cd api && uv run ruff format --check .
 	cd api && uv run mypy .
 	cd api && uv run lint-imports
 
-api-format:
+api-format: api-env-check
 	cd api && uv run ruff format .
 	cd api && uv run ruff check --fix .
 
-api-test:
+api-test: api-env-check
 	cd api && uv run pytest
 
 # ---------------------------------------------------------------------------
