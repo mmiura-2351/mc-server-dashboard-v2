@@ -1,5 +1,10 @@
 {
   "compilerOptions": {
+    // composite so the root tsconfig can reference this project and `tsc -b`
+    // type-checks the specs alongside the app/node projects (issue #501); the
+    // buildinfo lives next to the others' under webui/node_modules.
+    "composite": true,
+    "tsBuildInfoFile": "../node_modules/.tmp/tsconfig.e2e.tsbuildinfo",
     "target": "ES2022",
     "lib": ["ES2022", "DOM"],
     "module": "ESNext",

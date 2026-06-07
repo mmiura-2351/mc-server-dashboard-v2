@@ -12,6 +12,13 @@ const API_URL = process.env.MCD_E2E_API_URL ?? "http://127.0.0.1:8000";
 const ADMIN_USERNAME = process.env.MCD_E2E_ADMIN_USERNAME ?? "e2e-admin";
 const ADMIN_PASSWORD = process.env.MCD_E2E_ADMIN_PASSWORD ?? "E2eAdminPass!234";
 
+// The seeded platform admin's credentials, exposed so specs can sign in as the
+// admin through the UI (e.g. the admin Communities provision flow).
+export const adminCredentials = {
+  username: ADMIN_USERNAME,
+  password: ADMIN_PASSWORD,
+};
+
 const RUN_ID = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
 let counter = 0;
 
