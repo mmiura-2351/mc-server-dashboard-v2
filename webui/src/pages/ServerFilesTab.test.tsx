@@ -173,6 +173,19 @@ describe("ServerFilesTab listing", () => {
     );
   });
 
+  it("exposes the full file name via title on the truncating name cell", async () => {
+    const longName = "a-very-long-file-name-that-the-ellipsis-truncates.txt";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: longName, is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const cell = await screen.findByText(new RegExp(longName));
+    expect(cell.closest("button.file-name")).toHaveAttribute("title", longName);
+  });
+
   it("shows the truncated notice when the listing was clipped", async () => {
     routeGet({
       detail: server(),
