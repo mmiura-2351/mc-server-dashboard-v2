@@ -113,6 +113,48 @@ func TestListFilesOnRegularFileIsDenied(t *testing.T) {
 	if res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ErrorCode = %v, want FileAccessDenied", res.ErrorCode)
 	}
+	// issue #548: a file (not a directory) is its own reason, not invalid_path.
+	if res.FileAccessReason != session.FileAccessReasonNotADirectory {
+		t.Fatalf("FileAccessReason = %v, want NotADirectory", res.FileAccessReason)
+	}
+}
+
+func TestListFilesIntermediateSymlinkReasonSymlinkRefused(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	workingDir := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(workingDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// An intermediate-component symlink the MC process could plant; the hardened
+	// O_NOFOLLOW walk refuses it with ELOOP, distinct from a final-component file.
+	outsideDir := t.TempDir()
+	if err := os.Symlink(outsideDir, filepath.Join(workingDir, "sub")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "sub/child",
+	})
+	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("ListFiles through an intermediate symlink result = %+v, want FileAccessDenied", res)
+	}
+	if res.FileAccessReason != session.FileAccessReasonSymlinkRefused {
+		t.Fatalf("FileAccessReason = %v, want SymlinkRefused", res.FileAccessReason)
+	}
+}
+
+func TestListFilesTraversalReasonUnspecified(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "../escape",
+	})
+	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("ListFiles traversal result = %+v, want FileAccessDenied", res)
+	}
+	// A genuine path denial carries no refined reason, so the API keeps invalid_path.
+	if res.FileAccessReason != session.FileAccessReasonUnspecified {
+		t.Fatalf("FileAccessReason = %v, want Unspecified", res.FileAccessReason)
+	}
 }
 
 func TestListFilesTraversalIsDenied(t *testing.T) {

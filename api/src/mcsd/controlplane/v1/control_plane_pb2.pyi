@@ -86,6 +86,68 @@ supervised phase of the start, then launches via the now-present args file.
 """
 Global___LaunchMode: _TypeAlias = LaunchMode  # noqa: Y015
 
+class _FileAccessReason:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _FileAccessReasonEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_FileAccessReason.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    FILE_ACCESS_REASON_UNSPECIFIED: _FileAccessReason.ValueType  # 0
+    """Unspecified is the default for a non-file failure and for a genuine path
+    denial (a traversal-unsafe path: absolute, a ".." component, or a
+    resolution refusal). The API maps it to 422 invalid_path, the historical
+    behaviour, so an older Worker that never sets this field is unchanged.
+    """
+    FILE_ACCESS_REASON_IS_A_DIRECTORY: _FileAccessReason.ValueType  # 1
+    """The target path resolves to a directory where a file was required (a read or
+    an edit of a directory). The API maps it to 422 is_a_directory.
+    """
+    FILE_ACCESS_REASON_NOT_A_DIRECTORY: _FileAccessReason.ValueType  # 2
+    """The target path resolves to a regular file where a directory was required (a
+    list of a file). The API maps it to 422 not_a_directory.
+    """
+    FILE_ACCESS_REASON_SYMLINK_REFUSED: _FileAccessReason.ValueType  # 3
+    """The Worker refused to follow a symlink on the final or an intermediate path
+    component (the escape-vector defence, FR-FILE-4). The API maps it to 422
+    symlink_refused.
+    """
+    FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE: _FileAccessReason.ValueType  # 4
+    """The read result or the edit payload exceeds the control-plane file cap. The
+    API maps it to 413 file_too_large.
+    """
+
+class FileAccessReason(_FileAccessReason, metaclass=_FileAccessReasonEnumTypeWrapper):
+    """FileAccessReason refines a FILE_ACCESS_DENIED failure (issue #548). The Worker
+    emits FILE_ACCESS_DENIED for several conditions that are NOT path-syntax
+    problems; this enum carries which one so the API maps each to an honest
+    problem reason and HTTP status instead of a misleading "invalid path".
+    """
+
+FILE_ACCESS_REASON_UNSPECIFIED: FileAccessReason.ValueType  # 0
+"""Unspecified is the default for a non-file failure and for a genuine path
+denial (a traversal-unsafe path: absolute, a ".." component, or a
+resolution refusal). The API maps it to 422 invalid_path, the historical
+behaviour, so an older Worker that never sets this field is unchanged.
+"""
+FILE_ACCESS_REASON_IS_A_DIRECTORY: FileAccessReason.ValueType  # 1
+"""The target path resolves to a directory where a file was required (a read or
+an edit of a directory). The API maps it to 422 is_a_directory.
+"""
+FILE_ACCESS_REASON_NOT_A_DIRECTORY: FileAccessReason.ValueType  # 2
+"""The target path resolves to a regular file where a directory was required (a
+list of a file). The API maps it to 422 not_a_directory.
+"""
+FILE_ACCESS_REASON_SYMLINK_REFUSED: FileAccessReason.ValueType  # 3
+"""The Worker refused to follow a symlink on the final or an intermediate path
+component (the escape-vector defence, FR-FILE-4). The API maps it to 422
+symlink_refused.
+"""
+FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE: FileAccessReason.ValueType  # 4
+"""The read result or the edit payload exceeds the control-plane file cap. The
+API maps it to 413 file_too_large.
+"""
+Global___FileAccessReason: _TypeAlias = FileAccessReason  # noqa: Y015
+
 class _CommandErrorCode:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -912,19 +974,31 @@ class CommandError(_message.Message):
 
     CODE_FIELD_NUMBER: _builtins.int
     MESSAGE_FIELD_NUMBER: _builtins.int
+    FILE_ACCESS_REASON_FIELD_NUMBER: _builtins.int
     code: Global___CommandErrorCode.ValueType
     """code classifies the failure for programmatic handling."""
     message: _builtins.str
     """message is a human-readable explanation for logs and operators."""
+    file_access_reason: Global___FileAccessReason.ValueType
+    """file_access_reason refines a FILE_ACCESS_DENIED failure into the specific
+    condition the Worker hit (is-a-directory, symlink refusal, oversized
+    payload, etc.) so the API can surface an honest problem reason rather than
+    collapsing every file denial into "invalid path" (issue #548). It is only
+    meaningful when code is COMMAND_ERROR_CODE_FILE_ACCESS_DENIED; for every
+    other code it is UNSPECIFIED. The field is additive: an older Worker that
+    leaves it UNSPECIFIED, and a genuine traversal/path denial, both map back to
+    the pre-existing invalid-path behaviour.
+    """
     def __init__(
         self,
         *,
         code: Global___CommandErrorCode.ValueType = ...,
         message: _builtins.str = ...,
+        file_access_reason: Global___FileAccessReason.ValueType = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["code", b"code", "message", b"message"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["code", b"code", "file_access_reason", b"file_access_reason", "message", b"message"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
