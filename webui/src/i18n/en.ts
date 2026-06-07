@@ -43,6 +43,17 @@ export const en = {
   "page.placeholder": "Placeholder page — content arrives in a later phase.",
   "page.notFound": "Page not found",
 
+  // No-community empty state (#584): shown on the landing route when the
+  // signed-in account belongs to zero communities.
+  "noCommunity.title": "No community yet",
+  "noCommunity.body":
+    "Your account isn't a member of any community yet. Communities scope your servers, members, and settings.",
+  "noCommunity.memberHint":
+    "Ask a platform administrator to add you to a community.",
+  "noCommunity.adminHint":
+    "As a platform administrator, you can create the first community.",
+  "noCommunity.adminCta": "Create a community",
+
   // Auth links
   "auth.toRegister": "No account? Register",
   "auth.toLogin": "Have an account? Sign in",
