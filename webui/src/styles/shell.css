@@ -227,6 +227,55 @@ select.community-switcher {
   padding: 16px;
 }
 
+/* ---------- Resizable table columns (issue #520) ----------
+ * Drag handle injected by ResizableTable on each header cell's right boundary.
+ * The cell is positioned so the handle can sit flush against its trailing edge;
+ * the affordance is hover-revealed (accent on grab) to stay quiet at rest. */
+table.data thead th {
+  position: relative;
+}
+.col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+  z-index: 1;
+}
+.col-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 25%;
+  left: 50%;
+  width: 2px;
+  height: 50%;
+  transform: translateX(-50%);
+  background: transparent;
+}
+.col-resize-handle:hover::after {
+  background: var(--accent-dim);
+}
+/* While a drag is active the body carries .col-resizing so the resize cursor
+ * holds even as the pointer leaves the handle. */
+body.col-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+/* With `table-layout: fixed` a narrowed column would otherwise clip its text
+ * mid-glyph. Single-token id/operation cells already expose the full value on
+ * hover via a `title` (#527), so ellipsize exactly those cells. Breakable-text
+ * cells (names, emails) have no `title` and keep wrapping. */
+.audit table.data td[title],
+.backups table.data td[title],
+.admin-communities table.data td.mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- Dashboard server cards (WEBUI_SPEC.md 6.2) ---------- */
 .grid {
   display: grid;

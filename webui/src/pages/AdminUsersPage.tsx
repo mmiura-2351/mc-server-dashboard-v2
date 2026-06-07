@@ -11,6 +11,7 @@ import type { components } from "../api/schema";
 import { useCurrentUser } from "../auth/useCurrentUser.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { useOffsetParam } from "./urlState.ts";
@@ -227,7 +228,7 @@ export function AdminUsersPage() {
         <p className="sub">{t("admin.users.empty")}</p>
       ) : (
         <div className="card" style={{ padding: 0 }}>
-          <table className="data">
+          <ResizableTable storageKey="mcsd.colw.admin-users" className="data">
             <thead>
               <tr>
                 <th>{t("admin.users.colUsername")}</th>
@@ -251,7 +252,7 @@ export function AdminUsersPage() {
                 />
               ))}
             </tbody>
-          </table>
+          </ResizableTable>
         </div>
       )}
 
