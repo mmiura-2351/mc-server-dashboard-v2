@@ -23,6 +23,15 @@ export async function signIn(
   await expect(page).not.toHaveURL(/\/login/);
 }
 
+// Sign out via the account page and wait for the login screen. Needed when a
+// spec switches the signed-in user mid-flow: an already-authenticated session
+// redirects off /login, so the next signIn never sees the form.
+export async function signOut(page: Page): Promise<void> {
+  await page.goto("/account");
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(/\/login/);
+}
+
 // Register through the form and wait for the authenticated shell. A successful
 // registration auto-logs the user in (issue #537), so the app leaves /register
 // for the resolved dashboard. Wait for the shell's Account nav link (a positive

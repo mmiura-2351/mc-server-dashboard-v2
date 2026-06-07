@@ -10,9 +10,9 @@
 #   3. the seeded platform admin (register over HTTP + promote in the DB),
 #   4. `playwright test`, which itself starts the Vite dev server.
 #
-# Everything it starts, it stops on exit. CI does not run this script — it
-# re-implements the same orchestration inline (.github/workflows/webui-e2e.yml);
-# unifying the two is tracked in issue #501.
+# Everything it starts, it stops on exit. CI runs this same script as its one
+# source of orchestration truth, pointing it at the workflow's Postgres service
+# via MCD_E2E_REUSE_DB=1 (.github/workflows/webui-e2e.yml).
 
 set -euo pipefail
 
@@ -21,6 +21,16 @@ cd "$REPO_ROOT"
 
 API_PORT="${MCD_E2E_API_PORT:-8000}"
 API_URL="http://127.0.0.1:${API_PORT}"
+
+# Fail fast if the API port is already taken: otherwise our uvicorn fails to
+# bind while the readiness probe later latches onto the FOREIGN API already
+# listening there (observed against the live deployment on :8000) and reports a
+# false ready. Set MCD_E2E_API_PORT to a free port to run alongside a deployment.
+if (exec 3<>"/dev/tcp/127.0.0.1/${API_PORT}") 2>/dev/null; then
+  echo "API port $API_PORT is already in use; set MCD_E2E_API_PORT to a free port" >&2
+  exit 1
+fi
+
 PG_CONTAINER="mcsd-webui-e2e-pg"
 PG_PORT="${MCD_E2E_PG_PORT:-5544}"
 # postgres:17.6-alpine, the api.yml-vetted digest (docs/dev/DEPENDENCIES.md).
@@ -101,6 +111,14 @@ uvicorn_pid=$!
 echo "==> waiting for the API to be ready"
 ready=
 for _ in $(seq 1 60); do
+  # Fail fast if our uvicorn died (e.g. the port was already bound): otherwise
+  # the probe below can latch onto a DIFFERENT API already listening on the port
+  # and report a false ready (observed against the live deployment on :8000).
+  if ! kill -0 "$uvicorn_pid" 2>/dev/null; then
+    echo "uvicorn exited before becoming ready (port $API_PORT already in use?); log:" >&2
+    cat /tmp/webui-e2e-uvicorn.log >&2
+    exit 1
+  fi
   if curl -fsS "$API_URL/api/healthz" 2>/dev/null | grep -q '"ok":true'; then
     ready=1
     break

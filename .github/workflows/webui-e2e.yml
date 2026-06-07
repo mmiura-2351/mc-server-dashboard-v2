@@ -7,12 +7,13 @@ name: webui-e2e
 # its own path filters, so it lives in its own workflow rather than bolted onto
 # either.
 #
-# The API is booted here (uvicorn against the Postgres service, migrated, with a
-# seeded admin) the same way e2e.yml boots it; the UI is the Vite dev server,
-# which Playwright starts itself (playwright.config.ts) so the dev-server proxy
-# keeps the browser same-origin with the API. No worker runs, so a created
-# server parks unassigned/stopped — the suite asserts creation, not a running
-# state.
+# Orchestration is delegated to scripts/run_webui_e2e.sh (one source of truth,
+# shared with local `make webui-e2e`, issue #501): it migrates, boots uvicorn
+# against the Postgres service (MCD_E2E_REUSE_DB=1), seeds the admin, and runs
+# Playwright. The UI is the Vite dev server, which Playwright starts itself
+# (playwright.config.ts) so the dev-server proxy keeps the browser same-origin
+# with the API. No worker runs, so a created server parks unassigned/stopped —
+# the suite asserts creation, not a running state.
 
 on:
   pull_request:
@@ -20,6 +21,7 @@ on:
       - "webui/**"
       - "api/**"
       - "Makefile"
+      - "scripts/run_webui_e2e.sh"
       - ".github/workflows/webui-e2e.yml"
   push:
     branches: [main]
@@ -27,6 +29,7 @@ on:
       - "webui/**"
       - "api/**"
       - "Makefile"
+      - "scripts/run_webui_e2e.sh"
       - ".github/workflows/webui-e2e.yml"
 
 permissions:
@@ -53,18 +56,11 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      # The API boot config (mirrors e2e.yml). The control plane is off — no
-      # worker, so servers park unassigned/stopped. The per-IP open-registration
-      # cap is disabled: the suite registers several users from the runner's one
-      # IP, which is a deliberate sequence, not a flood (#362).
-      MCD_API_DATABASE__URL: postgresql+asyncpg://mcsd:mcsd@localhost:5432/mcsd_e2e
-      MCD_API_CONTROL__ENABLED: "false"
-      MCD_API_CONTROL__WORKER_CREDENTIAL: webui-e2e-worker-credential
-      MCD_API_AUTH__TOKEN__SIGNING_KEY: webui-e2e-signing-key-0123456789abcdef
-      MCD_API_AUTH__REGISTRATION__IP_LIMIT_ENABLED: "false"
-      MCD_API_STORAGE__BACKEND: fs
-      MCD_API_LOG__FORMAT: text
-      MCD_E2E_API_URL: http://127.0.0.1:8000
+      # The orchestration script owns the API boot config (signing key, control
+      # plane off, storage, the per-IP registration cap, #362); CI only points it
+      # at the Postgres service to reuse rather than start its own container.
+      MCD_E2E_REUSE_DB: "1"
+      MCD_E2E_DATABASE_URL: postgresql+asyncpg://mcsd:mcsd@localhost:5432/mcsd_e2e
     steps:
       # Action versions are pinned to a commit SHA per docs/dev/DEPENDENCIES.md
       # (pinning + 7-day cooldown), reusing the api.yml / webui.yml / worker.yml
@@ -115,40 +111,8 @@ jobs:
         working-directory: webui
         run: npx playwright install --with-deps chromium
 
-      - name: Migrate the database
-        working-directory: api
-        run: uv run alembic upgrade head
-
-      - name: Boot the API
-        run: |
-          set -euo pipefail
-          export MCD_API_STORAGE__FS__ROOT="$(mktemp -d)"
-          (cd api && uv run uvicorn mc_server_dashboard_api.app:create_app \
-            --factory --host 127.0.0.1 --port 8000 >/tmp/webui-e2e-uvicorn.log 2>&1) &
-          echo "UVICORN_PID=$!" >> "$GITHUB_ENV"
-          ready=
-          for _ in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8000/api/healthz 2>/dev/null | grep -q '"ok":true'; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [ -z "$ready" ]; then
-            echo "API did not become ready; uvicorn log:" >&2
-            cat /tmp/webui-e2e-uvicorn.log >&2
-            exit 1
-          fi
-
-      - name: Seed the platform admin
-        run: |
-          set -euo pipefail
-          export MCD_E2E_PROMOTE_CMD="cd '$GITHUB_WORKSPACE/api' && uv run python '$GITHUB_WORKSPACE/webui/e2e/promote_admin.py' e2e-admin"
-          node webui/e2e/seed-admin.mjs
-
-      - name: Run Playwright (starts the Vite dev server itself)
-        working-directory: webui
-        run: npm run e2e
+      - name: Run E2E (migrate, boot the API, seed admin, run Playwright)
+        run: scripts/run_webui_e2e.sh
 
       - name: API log on failure
         if: failure()
