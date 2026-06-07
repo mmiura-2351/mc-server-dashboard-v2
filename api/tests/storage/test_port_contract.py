@@ -625,6 +625,133 @@ async def test_rollback_restores_and_is_reversible(
     assert latest == b"second"
 
 
+async def test_retain_file_version_dedups_repeated_identical_snapshots(
+    backend: str, tmp_path: Path
+) -> None:
+    # The retain-only-if-changed primitive (#351): repeated retains of an UNCHANGED
+    # current/ file retain exactly one version, so the bounded ring is not churned
+    # with identical copies and distinct at-rest versions are not evicted.
+    harness = build_harness(backend, tmp_path, version_retention=3)
+    community, server = new_scope()
+    await harness.publish(community, server, {"cfg": b"frozen"})
+
+    for _ in range(10):
+        await harness.storage.retain_file_version(community, server, RelPath("cfg"))
+
+    versions = await harness.storage.list_file_versions(
+        community, server, RelPath("cfg")
+    )
+    assert len(versions) == 1
+    assert (
+        await harness.storage.read_file_version(
+            community, server, RelPath("cfg"), versions[0]
+        )
+        == b"frozen"
+    )
+    # current/ is never mutated by a retain.
+    assert (
+        await harness.storage.read_file(community, server, RelPath("cfg")) == b"frozen"
+    )
+
+
+async def test_retain_file_version_retains_again_when_content_changes(
+    harness: StorageHarness,
+) -> None:
+    # The dedup is only against the NEWEST retained version: a genuinely changed
+    # authoritative copy retains a fresh version (#351).
+    community, server = new_scope()
+    await harness.publish(community, server, {"cfg": b"a"})
+
+    await harness.storage.retain_file_version(community, server, RelPath("cfg"))
+    # Change current/ at rest, then retain again.
+    await harness.storage.write_file(community, server, RelPath("cfg"), b"bb")
+    await harness.storage.retain_file_version(community, server, RelPath("cfg"))
+
+    versions = await harness.storage.list_file_versions(
+        community, server, RelPath("cfg")
+    )
+    # newest-first: the second retain captured the now-current b"bb".
+    assert (
+        await harness.storage.read_file_version(
+            community, server, RelPath("cfg"), versions[0]
+        )
+        == b"bb"
+    )
+
+
+async def test_retain_file_version_does_not_evict_distinct_at_rest_versions(
+    backend: str, tmp_path: Path
+) -> None:
+    # The core #351 regression: many identical running-edit snapshots of the frozen
+    # current/ retain AT MOST ONE version, so they do not churn the bounded ring and
+    # evict genuinely distinct at-rest versions. Without the dedup, 20 snapshots
+    # would push 20 identical copies and evict every distinct one.
+    harness = build_harness(backend, tmp_path, version_retention=3)
+    community, server = new_scope()
+    # Publish, then snapshot once so the newest retained version equals current/.
+    await harness.publish(community, server, {"cfg": b"frozen"})
+    await harness.storage.retain_file_version(community, server, RelPath("cfg"))
+    # Two distinct at-rest edits add two more versions; the ring now holds three
+    # distinct versions (b"frozen", b"v1", b"v2"), and current/ is b"v2".
+    await harness.storage.write_file(community, server, RelPath("cfg"), b"v1")
+    await harness.storage.write_file(community, server, RelPath("cfg"), b"v2")
+    before = await harness.storage.list_file_versions(community, server, RelPath("cfg"))
+    assert len(before) == 3
+    # The newest retained version (b"v1", retained before the b"v2" overwrite)
+    # differs from current/ (b"v2"), so the first running snapshot legitimately
+    # retains b"v2" once; arrange the equal case so all 20 snapshots dedup.
+    await harness.storage.retain_file_version(community, server, RelPath("cfg"))
+    baseline = await harness.storage.list_file_versions(
+        community, server, RelPath("cfg")
+    )
+
+    # Twenty more identical running-edit snapshots of the still-frozen current/.
+    for _ in range(20):
+        await harness.storage.retain_file_version(community, server, RelPath("cfg"))
+
+    after = await harness.storage.list_file_versions(community, server, RelPath("cfg"))
+    # The ring is unchanged across the 20 repeats: every identical snapshot deduped.
+    assert after == baseline
+    contents = [
+        await harness.storage.read_file_version(community, server, RelPath("cfg"), v)
+        for v in after
+    ]
+    # current/ (b"v2") was retained once, leaving two distinct earlier versions; the
+    # 20 repeats added nothing.
+    assert contents == [b"v2", b"v1", b"frozen"]
+
+
+async def test_retain_file_version_missing_file_is_noop(
+    harness: StorageHarness,
+) -> None:
+    # A file with no authoritative copy yet (created while running) is a no-op: no
+    # error, no version (#351).
+    community, server = new_scope()
+    await harness.publish(community, server, {"cfg": b"x"})
+
+    await harness.storage.retain_file_version(community, server, RelPath("absent.txt"))
+    assert (
+        await harness.storage.list_file_versions(
+            community, server, RelPath("absent.txt")
+        )
+        == []
+    )
+
+
+async def test_retain_file_version_before_any_publish_is_noop(
+    harness: StorageHarness,
+) -> None:
+    # A never-snapshotted server has no authoritative copy at all: retaining is a
+    # no-op rather than raising (#351).
+    community, server = new_scope()
+
+    await harness.storage.retain_file_version(community, server, RelPath("cfg"))
+    assert (
+        await harness.storage.list_file_versions(community, server, RelPath("cfg"))
+        == []
+    )
+
+
 # --- delete / mkdir (Section 3.4, issue #259) ------------------------------
 
 
