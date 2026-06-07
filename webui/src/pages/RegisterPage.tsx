@@ -2,16 +2,21 @@ import { type FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
+import { useSession } from "../auth/SessionProvider.tsx";
 import { PasswordInput } from "../components/PasswordInput.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
+import { LANDING_PATH } from "../routes.ts";
 
-// Register page (WEBUI_SPEC.md 6.1). Posts to /users; on success routes to
-// /login with a success toast (no auto-login — keeping the honest "register
-// then sign in" flow). The server is authoritative on password strength; the
-// client only mirrors the FR-AUTH-4 hints to catch the obvious cases before a
-// round-trip. 422 reason codes surface inline against the relevant field; other
-// failures (registration closed / throttled / unexpected) go to a toast.
+// Register page (WEBUI_SPEC.md 6.1). Posts to /users; on success it signs the
+// new user in directly by logging in with the just-entered credentials, adopting
+// the token through the session layer, and landing on the dashboard (#537). If
+// that auto-login step fails (e.g. a registration-policy race), it falls back to
+// the route-to-login-with-notice path so the user can sign in manually with no
+// scary error. The server is authoritative on password strength; the client only
+// mirrors the FR-AUTH-4 hints to catch the obvious cases before a round-trip. 422
+// reason codes surface inline against the relevant field; other failures
+// (registration closed / throttled / unexpected) go to a toast.
 
 const MIN_PASSWORD_LENGTH = 12;
 
@@ -76,6 +81,7 @@ function localValidate(
 
 export function RegisterPage() {
   const navigate = useNavigate();
+  const { signIn } = useSession();
   const { showToast } = useToast();
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -97,8 +103,20 @@ export function RegisterPage() {
       await api.post("/api/users", {
         body: JSON.stringify({ username, email, password }),
       });
-      showToast(t("register.success"), "success");
-      navigate("/login", { replace: true });
+      // Sign the new user in directly with the just-entered credentials (#537),
+      // reusing the same /auth/login + session-adopt path the login page takes.
+      // If this step fails (e.g. a registration-policy race), fall back to the
+      // route-to-login-with-notice path so the user can sign in manually.
+      try {
+        const tokens = await api.post("/api/auth/login", {
+          body: JSON.stringify({ username, password }),
+        });
+        signIn(tokens.access_token);
+        navigate(LANDING_PATH, { replace: true });
+      } catch {
+        showToast(t("register.success"), "success");
+        navigate("/login", { replace: true });
+      }
     } catch (err) {
       if (err instanceof ApiError && err.reason !== undefined) {
         const messageKey = REASON_KEY[err.reason];

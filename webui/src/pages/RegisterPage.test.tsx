@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SessionProvider } from "../auth/SessionProvider.tsx";
+import { resetForTesting } from "../auth/session.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import { RegisterPage } from "./RegisterPage.tsx";
@@ -13,10 +15,12 @@ function renderRegister() {
   render(
     <ToastProvider>
       <MemoryRouter initialEntries={["/register"]}>
-        <Routes>
-          <Route path="/register" element={<RegisterPage />} />
-          <Route path="*" element={<PathProbe />} />
-        </Routes>
+        <SessionProvider>
+          <Routes>
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="*" element={<PathProbe />} />
+          </Routes>
+        </SessionProvider>
       </MemoryRouter>
     </ToastProvider>,
   );
@@ -39,15 +43,63 @@ function fillValid() {
   });
 }
 
-const fetchMock = vi.fn();
+// A successful POST /api/users 201 response body.
+function registeredResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      id: "u1",
+      username: "alice",
+      email: "alice@example.com",
+      is_platform_admin: false,
+    }),
+    { status: 201, headers: { "content-type": "application/json" } },
+  );
+}
+
+// Route fetches by URL so the SessionProvider's bootstrap probe
+// (POST /api/auth/session) does not consume the per-test register/login mocks.
+// The bootstrap resolves signed-out; the register and login responses are queued
+// per test.
+const usersQueue: Response[] = [];
+const loginQueue: Response[] = [];
+
+function queueUsers(response: Response) {
+  usersQueue.push(response);
+}
+
+function queueLogin(response: Response) {
+  loginQueue.push(response);
+}
+
+const fetchMock = vi.fn((input: RequestInfo | URL) => {
+  const url = typeof input === "string" ? input : input.toString();
+  if (url.endsWith("/api/auth/session")) {
+    // Bootstrap probe: resolve signed-out so it stays out of the way.
+    return Promise.resolve(new Response(null, { status: 401 }));
+  }
+  if (url.endsWith("/api/users")) {
+    const next = usersQueue.shift();
+    if (next === undefined) throw new Error(`unqueued POST ${url}`);
+    return Promise.resolve(next);
+  }
+  if (url.endsWith("/api/auth/login")) {
+    const next = loginQueue.shift();
+    if (next === undefined) throw new Error(`unqueued POST ${url}`);
+    return Promise.resolve(next);
+  }
+  throw new Error(`unexpected fetch ${url}`);
+});
 
 beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
-  fetchMock.mockReset();
+  fetchMock.mockClear();
+  usersQueue.length = 0;
+  loginQueue.length = 0;
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  resetForTesting();
 });
 
 function submit() {
@@ -56,7 +108,7 @@ function submit() {
 
 describe("RegisterPage", () => {
   it("surfaces a server 422 weak-password reason inline", async () => {
-    fetchMock.mockResolvedValueOnce(
+    queueUsers(
       new Response(JSON.stringify({ reason: "simple_pattern", status: 422 }), {
         status: 422,
         headers: { "content-type": "application/problem+json" },
@@ -76,7 +128,7 @@ describe("RegisterPage", () => {
     // submits, where Pydantic's min_length=1 rejects it as a structural
     // validation_error carrying the per-field errors list (#410, #395 shape:
     // loc/msg/type, input/ctx scrubbed).
-    fetchMock.mockResolvedValueOnce(
+    queueUsers(
       new Response(
         JSON.stringify({
           reason: "validation_error",
@@ -113,7 +165,7 @@ describe("RegisterPage", () => {
   });
 
   it("falls back to the generic toast for an unmappable structural 422", async () => {
-    fetchMock.mockResolvedValueOnce(
+    queueUsers(
       new Response(
         JSON.stringify({
           reason: "validation_error",
@@ -142,7 +194,7 @@ describe("RegisterPage", () => {
   });
 
   it("surfaces a username-taken conflict against the username field", async () => {
-    fetchMock.mockResolvedValueOnce(
+    queueUsers(
       new Response(JSON.stringify({ reason: "username_taken", status: 409 }), {
         status: 409,
         headers: { "content-type": "application/problem+json" },
@@ -173,21 +225,48 @@ describe("RegisterPage", () => {
     expect(
       screen.getByText(t("register.reason.too_short")),
     ).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    // Submission is blocked before any /api/users request goes out.
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/users", expect.anything());
   });
 
-  it("routes to /login with a success notice on a 201", async () => {
-    fetchMock.mockResolvedValueOnce(
+  it("auto-logs in and lands on the dashboard after a 201 (#537)", async () => {
+    queueUsers(registeredResponse());
+    queueLogin(
       new Response(
         JSON.stringify({
-          id: "u1",
-          username: "alice",
-          email: "alice@example.com",
-          is_platform_admin: false,
+          access_token: "tok",
+          refresh_token: "ref",
+          token_type: "bearer",
         }),
-        { status: 201, headers: { "content-type": "application/json" } },
+        { status: 200, headers: { "content-type": "application/json" } },
       ),
     );
+    renderRegister();
+    fillValid();
+    submit();
+
+    // Auto-login navigates to the landing path, not back to /login.
+    await waitFor(() =>
+      expect(screen.getByTestId("path")).toHaveTextContent("/"),
+    );
+    expect(screen.queryByTestId("path")).not.toHaveTextContent("/login");
+    // The login was performed with the just-entered credentials.
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/auth/login",
+      expect.objectContaining({
+        body: JSON.stringify({
+          username: "alice",
+          password: "longenoughpassword",
+        }),
+      }),
+    );
+  });
+
+  it("falls back to /login with a notice when the auto-login fails (#537)", async () => {
+    queueUsers(registeredResponse());
+    // The login step fails (e.g. a registration-policy race); the user is routed
+    // to /login with the success notice rather than shown a scary error.
+    queueLogin(new Response(null, { status: 401 }));
     renderRegister();
     fillValid();
     submit();

@@ -4,6 +4,7 @@
 // it on reload.
 
 import { expect, type Page } from "@playwright/test";
+import type { TestUser } from "./api.ts";
 
 // Sign in through the login form and wait for the authenticated shell. After a
 // successful login the app navigates off /login to the resolved landing.
@@ -20,4 +21,24 @@ export async function signIn(
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page).not.toHaveURL(/\/login/);
+}
+
+// Register through the form and wait for the authenticated shell. A successful
+// registration auto-logs the user in (issue #537), so the app leaves /register
+// for the resolved dashboard. Wait for the shell's Account nav link (a positive
+// signed-in signal) rather than a bare URL check: the form starts on /register,
+// so a "not /login" assertion would pass before the auto-login even completes
+// and let a follow-up reload interrupt the in-flight login.
+export async function register(page: Page, user: TestUser): Promise<void> {
+  await page.goto("/register");
+  await page.getByLabel("Username").fill(user.username);
+  await page.getByLabel("Email").fill(user.email);
+  // Two password fields (password + confirm) share the "Password" prefix, and
+  // the visibility toggle's accessible name also contains "password"; fill by
+  // exact id to keep them apart.
+  await page.locator("#register-password").fill(user.password);
+  await page.locator("#register-confirm").fill(user.password);
+  await page.getByRole("button", { name: "Create account" }).click();
+  await expect(page.getByRole("link", { name: "Account" })).toBeVisible();
+  await expect(page).not.toHaveURL(/\/(login|register)/);
 }
