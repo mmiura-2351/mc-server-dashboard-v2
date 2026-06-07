@@ -135,6 +135,9 @@ func (t *transport) SendCommandResult(_ context.Context, result session.CommandR
 		cr.Error = &controlplanev1.CommandError{
 			Code:    mapErrorCode(result.ErrorCode),
 			Message: result.ErrorMessage,
+			// FileAccessReason refines a FILE_ACCESS_DENIED failure (issue #548);
+			// it is UNSPECIFIED for every other code, the proto3 default.
+			FileAccessReason: mapFileAccessReason(result.FileAccessReason),
 		}
 	}
 	msg := &controlplanev1.WorkerMessage{
@@ -297,6 +300,24 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING
 	default:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
+	}
+}
+
+// mapFileAccessReason translates the domain file-access reason to the wire enum
+// (issue #548). The zero value (and any unrecognized value) maps to UNSPECIFIED,
+// the generic path denial.
+func mapFileAccessReason(reason session.FileAccessReason) controlplanev1.FileAccessReason {
+	switch reason {
+	case session.FileAccessReasonIsADirectory:
+		return controlplanev1.FileAccessReason_FILE_ACCESS_REASON_IS_A_DIRECTORY
+	case session.FileAccessReasonNotADirectory:
+		return controlplanev1.FileAccessReason_FILE_ACCESS_REASON_NOT_A_DIRECTORY
+	case session.FileAccessReasonSymlinkRefused:
+		return controlplanev1.FileAccessReason_FILE_ACCESS_REASON_SYMLINK_REFUSED
+	case session.FileAccessReasonPayloadTooLarge:
+		return controlplanev1.FileAccessReason_FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE
+	default:
+		return controlplanev1.FileAccessReason_FILE_ACCESS_REASON_UNSPECIFIED
 	}
 }
 

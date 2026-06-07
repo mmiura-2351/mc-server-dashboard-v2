@@ -28,6 +28,9 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ControlPlane as FleetControlPlane,
 )
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    FileAccessReason as FleetFileAccessReason,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
     FileEntry as FleetFileEntry,
 )
 from mc_server_dashboard_api.fleet.domain.control_plane import (
@@ -40,6 +43,9 @@ from mc_server_dashboard_api.servers.adapters.control_plane import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandStatus,
     WorkerUnavailableError,
+)
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    FileAccessReason as OutcomeFileAccessReason,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -247,6 +253,50 @@ async def test_file_access_denied_maps_to_status() -> None:
     )
     assert outcome.status is CommandStatus.FILE_ACCESS_DENIED
     assert outcome.message == "nope"
+    # The default (unrefined) reason rides through as UNSPECIFIED.
+    assert outcome.file_access_reason is OutcomeFileAccessReason.UNSPECIFIED
+
+
+@pytest.mark.parametrize(
+    ("fleet_reason", "outcome_reason"),
+    [
+        (
+            FleetFileAccessReason.IS_A_DIRECTORY,
+            OutcomeFileAccessReason.IS_A_DIRECTORY,
+        ),
+        (
+            FleetFileAccessReason.NOT_A_DIRECTORY,
+            OutcomeFileAccessReason.NOT_A_DIRECTORY,
+        ),
+        (
+            FleetFileAccessReason.SYMLINK_REFUSED,
+            OutcomeFileAccessReason.SYMLINK_REFUSED,
+        ),
+        (
+            FleetFileAccessReason.PAYLOAD_TOO_LARGE,
+            OutcomeFileAccessReason.PAYLOAD_TOO_LARGE,
+        ),
+    ],
+)
+async def test_file_access_reason_maps_through_seam(
+    fleet_reason: FleetFileAccessReason, outcome_reason: OutcomeFileAccessReason
+) -> None:
+    fleet = _CapturingFleetControlPlane(
+        result=CommandResult(
+            code=CommandResultCode.FILE_ACCESS_DENIED,
+            message="nope",
+            file_access_reason=fleet_reason,
+        )
+    )
+    adapter = _adapter(fleet)
+
+    outcome = await adapter.read_file(
+        worker_id=WorkerId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+        rel_path="config",
+    )
+    assert outcome.status is CommandStatus.FILE_ACCESS_DENIED
+    assert outcome.file_access_reason is outcome_reason
 
 
 async def test_hydrate_without_base_url_is_worker_unavailable() -> None:

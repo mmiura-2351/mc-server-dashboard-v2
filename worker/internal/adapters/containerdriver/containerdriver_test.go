@@ -873,6 +873,73 @@ func TestSurvivedKillFromStartingDoesNotReportRunning(t *testing.T) {
 	}
 }
 
+// The container can exit during the post-kill confirm wait, in the window between
+// waitExitDone timing out and the survived-kill restore re-acquiring the lock:
+// supervise sets the terminal state, and the restore must not stomp it back to
+// the pre-stop state (issue #392). The beforeSurvivedReset hook drives the exit
+// and supervise into that exact window, then the restore runs.
+func TestSurvivedKillRestoreDoesNotStompTerminalState(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true // docker stop falls through to docker kill
+	docker.killNoExit = true // the first confirm wait times out: the kill "survived"
+	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	in := inst.(*instance)
+	in.beforeSurvivedReset = func() {
+		// The container exits in the window; wait for supervise to record the terminal
+		// state before the restore re-acquires the lock.
+		docker.exit(137, nil)
+		drainTo(t, inst.Events(), execution.StateStopped)
+	}
+
+	// The container did exit (during the window), so Stop succeeds rather than
+	// reporting a survived-kill failure.
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop = %v, want nil once the container exits in the wait window", err)
+	}
+	if got := inst.Status(); got != execution.StateStopped {
+		t.Fatalf("Status = %v after the exit-in-window Stop, want stopped (not stomped back)", got)
+	}
+}
+
+// A container that survives the kill for the whole timeout and then dies after the
+// survived-kill restore reset the stopping latch must still be recorded stopped,
+// not a spurious crash: a stop was requested (issue #257). The reset clears
+// stopping (so a retry can run), but the sticky stop intent makes supervise
+// report the operator-requested stop correctly.
+func TestSurvivedKillThenLateExitRecordsStopped(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true // docker stop falls through to docker kill
+	docker.killNoExit = true // the kill survives for the whole confirm wait
+	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// The kill survives the whole timeout, so Stop fails with the survived-kill
+	// error and the latch is reset.
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected Stop to fail when the container survives docker kill")
+	}
+
+	// The orphan dies later; supervise must record it stopped, not crashed, because
+	// a stop was requested.
+	docker.exit(137, nil)
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if got := inst.Status(); got != execution.StateStopped {
+		t.Fatalf("Status = %v after the late exit, want stopped (not a spurious crash)", got)
+	}
+}
+
 // After a Stop that fails because the container survives docker kill, a retry
 // Stop must re-run the kill-and-confirm sequence rather than short-circuit on the
 // stopping latch. When the container then dies on the retry kill, the retry

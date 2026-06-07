@@ -53,6 +53,23 @@ class CommandStatus(enum.Enum):
     IMAGE_MISSING = "image_missing"
 
 
+class FileAccessReason(enum.Enum):
+    """Refines a ``FILE_ACCESS_DENIED`` outcome (issue #548).
+
+    The Worker collapses several distinct conditions into ``FILE_ACCESS_DENIED``;
+    this carries which one so the file use cases map each to an honest problem
+    reason instead of a blanket ``invalid_path``. Same names as the wire/fleet
+    enum, a distinct type on this side of the seam. ``UNSPECIFIED`` is a genuine
+    path denial (the historical 422 ``invalid_path``).
+    """
+
+    UNSPECIFIED = "unspecified"
+    IS_A_DIRECTORY = "is_a_directory"
+    NOT_A_DIRECTORY = "not_a_directory"
+    SYMLINK_REFUSED = "symlink_refused"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
+
+
 @dataclass(frozen=True)
 class FileEntry:
     """One child of a running server's directory listing (file:read).
@@ -96,6 +113,8 @@ class CommandOutcome:
     output: str = ""
     file_content: bytes = b""
     listing: FileListing | None = None
+    # Refines a FILE_ACCESS_DENIED status (issue #548); UNSPECIFIED otherwise.
+    file_access_reason: FileAccessReason = FileAccessReason.UNSPECIFIED
 
     @property
     def success(self) -> bool:

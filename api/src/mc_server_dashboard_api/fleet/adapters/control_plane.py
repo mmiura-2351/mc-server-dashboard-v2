@@ -30,6 +30,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandTimedOutError,
     ControlPlane,
     EditFileCommand,
+    FileAccessReason,
     FileEntry,
     FileListing,
     HydrateCommand,
@@ -72,6 +73,16 @@ _CODE_FROM_PROTO: dict[int, CommandResultCode] = {
     pb.COMMAND_ERROR_CODE_INTERNAL: CommandResultCode.INTERNAL,
     pb.COMMAND_ERROR_CODE_PORT_CONFLICT: CommandResultCode.PORT_CONFLICT,
     pb.COMMAND_ERROR_CODE_IMAGE_MISSING: CommandResultCode.IMAGE_MISSING,
+}
+
+# Map the wire file-access reason onto the domain reason (issue #548). An
+# unrecognized value (an UNSPECIFIED, or a future reason an older API does not
+# know) falls back to UNSPECIFIED, the generic path denial.
+_FILE_ACCESS_REASON_FROM_PROTO: dict[int, FileAccessReason] = {
+    pb.FILE_ACCESS_REASON_IS_A_DIRECTORY: FileAccessReason.IS_A_DIRECTORY,
+    pb.FILE_ACCESS_REASON_NOT_A_DIRECTORY: FileAccessReason.NOT_A_DIRECTORY,
+    pb.FILE_ACCESS_REASON_SYMLINK_REFUSED: FileAccessReason.SYMLINK_REFUSED,
+    pb.FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE: FileAccessReason.PAYLOAD_TOO_LARGE,
 }
 
 
@@ -245,7 +256,12 @@ def _to_result(message: pb.CommandResult) -> CommandResult:
             file_listing=listing,
         )
     code = _CODE_FROM_PROTO.get(message.error.code, CommandResultCode.INTERNAL)
-    return CommandResult(code=code, message=message.error.message)
+    reason = _FILE_ACCESS_REASON_FROM_PROTO.get(
+        message.error.file_access_reason, FileAccessReason.UNSPECIFIED
+    )
+    return CommandResult(
+        code=code, message=message.error.message, file_access_reason=reason
+    )
 
 
 def _to_listing(message: pb.FileListing) -> FileListing:
