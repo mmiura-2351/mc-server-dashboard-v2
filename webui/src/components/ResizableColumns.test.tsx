@@ -128,6 +128,32 @@ describe("ResizableTable", () => {
     expect(cols()[2].style.width).toBe("120px");
   });
 
+  it("renders exactly one header row regardless of body row count (#534)", () => {
+    render(
+      <ResizableTable storageKey={STORAGE_KEY} className="data">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Id</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>a</td>
+            <td>b</td>
+          </tr>
+          <tr>
+            <td>c</td>
+            <td>d</td>
+          </tr>
+        </tbody>
+      </ResizableTable>,
+    );
+    expect(document.querySelectorAll("thead")).toHaveLength(1);
+    expect(document.querySelectorAll("thead tr")).toHaveLength(1);
+    expect(document.querySelectorAll("thead th")).toHaveLength(2);
+  });
+
   it("resets a column to auto width on double-click of its handle", () => {
     render(<Harness />);
     dragHandle(0, 80);
