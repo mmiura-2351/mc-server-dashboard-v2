@@ -13,6 +13,7 @@ import datetime as dt
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
+    RefreshTokenId,
     UserId,
     Username,
 )
@@ -117,4 +118,47 @@ class RefreshTokenRepository(abc.ABC):
         Stamps ``revoked_reason = 'family'`` so none of the revoked tokens is
         graceable in the reuse window: a family revoke is the theft response (or
         a password change / deactivate / delete), never a rotation (issue #369).
+        """
+
+    @abc.abstractmethod
+    async def list_active_for_user(
+        self, user_id: UserId, *, now: dt.datetime
+    ) -> list[RefreshToken]:
+        """Return ``user_id``'s active (unrevoked, unexpired) tokens (issue #387).
+
+        Backs the session listing. Ordered newest-first by ``issued_at``.
+        """
+
+    @abc.abstractmethod
+    async def revoke_by_id(
+        self,
+        token_id: RefreshTokenId,
+        user_id: UserId,
+        *,
+        revoked_at: dt.datetime,
+        reason: str,
+    ) -> bool:
+        """Revoke ``user_id``'s active token ``token_id`` (issue #387).
+
+        Scoped to ``user_id`` so a caller can only revoke their own session: a
+        ``token_id`` owned by another user matches no row. Returns whether an
+        active row was revoked, so the caller maps a miss to 404 (the id is
+        unknown *or* belongs to someone else — no existence leak).
+        """
+
+    @abc.abstractmethod
+    async def revoke_all_for_user_except(
+        self,
+        user_id: UserId,
+        *,
+        keep_token_hash: str | None,
+        revoked_at: dt.datetime,
+        reason: str,
+    ) -> None:
+        """Revoke ``user_id``'s active tokens except ``keep_token_hash`` (issue #387).
+
+        Backs everywhere-else logout: the caller's current session (identified by
+        the refresh token it presented) is kept alive, the rest revoked. With
+        ``keep_token_hash`` ``None`` no row is spared (the caller could not
+        identify its current session).
         """

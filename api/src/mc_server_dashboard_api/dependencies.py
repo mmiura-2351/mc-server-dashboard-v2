@@ -148,12 +148,17 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.application.change_password import ChangePassword
 from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
+from mc_server_dashboard_api.identity.application.list_sessions import ListSessions
 from mc_server_dashboard_api.identity.application.list_users import ListUsers
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
 from mc_server_dashboard_api.identity.application.restore_session import RestoreSession
+from mc_server_dashboard_api.identity.application.revoke_other_sessions import (
+    RevokeOtherSessions,
+)
+from mc_server_dashboard_api.identity.application.revoke_session import RevokeSession
 from mc_server_dashboard_api.identity.application.set_platform_admin import (
     SetPlatformAdmin,
 )
@@ -836,6 +841,39 @@ def get_logout(request: Request) -> Logout:
     clock = SystemClock()
     session_factory = create_session_factory(get_engine(request))
     return Logout(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        tokens=_build_token_service(settings.auth.token, clock),
+        clock=clock,
+    )
+
+
+def get_list_sessions(request: Request) -> ListSessions:
+    """Assemble the :class:`ListSessions` use case (session listing, issue #387)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListSessions(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        clock=SystemClock(),
+    )
+
+
+def get_revoke_session(request: Request) -> RevokeSession:
+    """Assemble the :class:`RevokeSession` use case (revoke one, issue #387)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RevokeSession(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        clock=SystemClock(),
+    )
+
+
+def get_revoke_other_sessions(request: Request) -> RevokeOtherSessions:
+    """Assemble the :class:`RevokeOtherSessions` use case (everywhere-else, #387)."""
+
+    settings = get_settings(request)
+    clock = SystemClock()
+    session_factory = create_session_factory(get_engine(request))
+    return RevokeOtherSessions(
         uow=SqlAlchemyUnitOfWork(session_factory),
         tokens=_build_token_service(settings.auth.token, clock),
         clock=clock,

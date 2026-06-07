@@ -1325,6 +1325,24 @@
         "title": "RenameRequest",
         "type": "object"
       },
+      "RevokeOtherSessionsRequest": {
+        "properties": {
+          "refresh_token": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Token"
+          }
+        },
+        "title": "RevokeOtherSessionsRequest",
+        "type": "object"
+      },
       "RoleResponse": {
         "description": "Public view of a community role (DATABASE.md Section 5).",
         "properties": {
@@ -1555,6 +1573,30 @@
           "server_types"
         ],
         "title": "ServerTypesResponse",
+        "type": "object"
+      },
+      "SessionResponse": {
+        "description": "Safe metadata for one active refresh-token session (issue #387).\n\nAddressed by the row ``id`` (an opaque session id); the token hash/secret is\ndeliberately never exposed. No client-hint field is included because none is\nstored on the row.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "SessionResponse",
         "type": "object"
       },
       "TokenResponse": {
@@ -6362,6 +6404,112 @@
           }
         ],
         "summary": "Change Password"
+      }
+    },
+    "/api/users/me/sessions": {
+      "delete": {
+        "operationId": "revoke_other_sessions_api_users_me_sessions_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RevokeOtherSessionsRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Revoke Other Sessions"
+      },
+      "get": {
+        "description": "List the caller's active (non-revoked, non-expired) sessions (issue #387).",
+        "operationId": "list_sessions_api_users_me_sessions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionResponse"
+                  },
+                  "title": "Response List Sessions Api Users Me Sessions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Sessions"
+      }
+    },
+    "/api/users/me/sessions/{session_id}": {
+      "delete": {
+        "operationId": "revoke_session_api_users_me_sessions__session_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Revoke Session"
       }
     },
     "/api/versions": {

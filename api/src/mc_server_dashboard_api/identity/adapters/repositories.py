@@ -9,8 +9,9 @@ framework-free domain entities here.
 from __future__ import annotations
 
 import datetime as dt
+from typing import Any, cast
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -214,4 +215,59 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
             )
             .values(revoked_at=revoked_at, revoked_reason=REVOKED_FAMILY)
         )
+        await self._session.execute(stmt)
+
+    async def list_active_for_user(
+        self, user_id: UserId, *, now: dt.datetime
+    ) -> list[RefreshToken]:
+        stmt = (
+            select(RefreshTokenModel)
+            .where(
+                RefreshTokenModel.user_id == user_id.value,
+                RefreshTokenModel.revoked_at.is_(None),
+                RefreshTokenModel.expires_at > now,
+            )
+            .order_by(RefreshTokenModel.issued_at.desc(), RefreshTokenModel.id)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_refresh_token(row) for row in rows]
+
+    async def revoke_by_id(
+        self,
+        token_id: RefreshTokenId,
+        user_id: UserId,
+        *,
+        revoked_at: dt.datetime,
+        reason: str,
+    ) -> bool:
+        # Scope the UPDATE to (id, user_id) and still-active so a caller can only
+        # revoke their own live session; rowcount tells the caller whether a row
+        # matched (else 404, no existence leak).
+        stmt = (
+            update(RefreshTokenModel)
+            .where(
+                RefreshTokenModel.id == token_id.value,
+                RefreshTokenModel.user_id == user_id.value,
+                RefreshTokenModel.revoked_at.is_(None),
+            )
+            .values(revoked_at=revoked_at, revoked_reason=reason)
+        )
+        result = cast(CursorResult[Any], await self._session.execute(stmt))
+        return result.rowcount > 0
+
+    async def revoke_all_for_user_except(
+        self,
+        user_id: UserId,
+        *,
+        keep_token_hash: str | None,
+        revoked_at: dt.datetime,
+        reason: str,
+    ) -> None:
+        stmt = update(RefreshTokenModel).where(
+            RefreshTokenModel.user_id == user_id.value,
+            RefreshTokenModel.revoked_at.is_(None),
+        )
+        if keep_token_hash is not None:
+            stmt = stmt.where(RefreshTokenModel.token_hash != keep_token_hash)
+        stmt = stmt.values(revoked_at=revoked_at, revoked_reason=reason)
         await self._session.execute(stmt)

@@ -53,6 +53,11 @@ class User:
 REVOKED_ROTATED = "rotated"
 REVOKED_FAMILY = "family"
 REVOKED_LOGOUT = "logout"
+# A session the user explicitly revoked through the session-management API
+# (``DELETE /users/me/sessions[/{id}]``, issue #387). Like ``LOGOUT`` and
+# ``FAMILY`` it is never graced in the reuse window: re-presenting a user-revoked
+# token stays on the theft path (the grace covers only ``ROTATED`` predecessors).
+REVOKED_USER = "user_revoked"
 
 
 @dataclass

@@ -31,6 +31,7 @@ from mc_server_dashboard_api.identity.domain.repositories import (
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
+    RefreshTokenId,
     UserId,
     Username,
 )
@@ -97,6 +98,31 @@ class _FakeRefreshTokenRepository(RefreshTokenRepository):
 
     async def revoke_all_for_user(
         self, user_id: UserId, *, revoked_at: dt.datetime
+    ) -> None:
+        raise NotImplementedError
+
+    async def list_active_for_user(
+        self, user_id: UserId, *, now: dt.datetime
+    ) -> list[RefreshToken]:
+        raise NotImplementedError
+
+    async def revoke_by_id(
+        self,
+        token_id: RefreshTokenId,
+        user_id: UserId,
+        *,
+        revoked_at: dt.datetime,
+        reason: str,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def revoke_all_for_user_except(
+        self,
+        user_id: UserId,
+        *,
+        keep_token_hash: str | None,
+        revoked_at: dt.datetime,
+        reason: str,
     ) -> None:
         raise NotImplementedError
 
