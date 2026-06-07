@@ -22,6 +22,12 @@ AUTH_REFRESH: Final = "auth:refresh"
 # SECURITY.md). Kept a separate code so the family-revocation trail is queryable
 # apart from ordinary refresh activity.
 AUTH_REFRESH_REUSE: Final = "auth:refresh_reuse"
+# Non-rotating session restore (the Web UI bootstrap, issue #512). Restore never
+# rotates, so it carries no *incidental* theft signal the way /auth/refresh does;
+# this SUCCESS row is the explicit one, surfacing session-restore activity per
+# family so operators can spot a thief minting access tokens against an idle
+# victim (issue #530). Attributed to the session's user.
+AUTH_SESSION_RESTORE: Final = "auth:session_restore"
 # Account self-service (FR-AUTH self-service): the authenticated user changing
 # their own password, profile (username/email), or deleting their account.
 AUTH_PASSWORD_CHANGE: Final = "auth:password_change"

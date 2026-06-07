@@ -2,7 +2,8 @@
 
 Proves the recorder is invoked from the routes with the right operation code and
 outcome for a representative sample across contexts: auth (login success/failure,
-refresh success, refresh-reuse denial), community provisioning, server create, a
+refresh success, refresh-reuse denial, session-restore success), community
+provisioning, server create, a
 failed privileged server op (DENIED/ERROR), and worker drain. The recorder is
 faked, so this asserts the edge wiring, not persistence (covered separately).
 """
@@ -40,10 +41,12 @@ from mc_server_dashboard_api.dependencies import (
     get_permission_checker,
     get_provision_community,
     get_refresh_session,
+    get_restore_session,
     get_set_worker_drain,
     get_start_server,
 )
 from mc_server_dashboard_api.identity.application.login import LoginResult
+from mc_server_dashboard_api.identity.application.restore_session import RestoreResult
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
@@ -207,6 +210,48 @@ def test_refresh_invalid_token_records_nothing() -> None:
 
     assert resp.status_code == 401
     # A plain bad/expired token is not a security event: no row (proportionate).
+    assert recorder.events == []
+
+
+def test_session_restore_success_records_success_with_actor() -> None:
+    # Restore no longer trips an incidental theft signal (it never rotates), so a
+    # SUCCESS row is the explicit replacement: it surfaces session-restore activity
+    # per family for operators (issue #530).
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    actor = uuid.uuid4()
+    app.dependency_overrides[get_restore_session] = lambda: _FakeUseCase(
+        result=RestoreResult(access_token="a3", user_id=actor)
+    )
+    client = next(_client(app))
+    client.cookies.set("mcd_refresh", "live-cookie")
+
+    resp = client.post("/api/auth/session")
+
+    assert resp.status_code == 200
+    assert len(recorder.events) == 1
+    event = recorder.events[0]
+    assert event.operation == ops.AUTH_SESSION_RESTORE
+    assert event.outcome is Outcome.SUCCESS
+    assert event.actor_id == actor
+    assert event.target_type == ops.TARGET_USER
+    assert event.target_id == actor
+
+
+def test_session_restore_invalid_token_records_nothing() -> None:
+    # A missing/invalid cookie stays a silent 401 with no row — same proportionate
+    # posture as a plain bad token on /refresh (issue #530).
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    app.dependency_overrides[get_restore_session] = lambda: _FakeUseCase(
+        error=InvalidRefreshTokenError()
+    )
+    client = next(_client(app))
+    client.cookies.set("mcd_refresh", "stale-cookie")
+
+    resp = client.post("/api/auth/session")
+
+    assert resp.status_code == 401
     assert recorder.events == []
 
 

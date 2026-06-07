@@ -358,10 +358,38 @@ def test_reconciler_backoff_max_equal_base_is_accepted(
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     cfg = _write_toml(
         tmp_path,
-        "[reconciler]\nbackoff_base_seconds = 30\nbackoff_max_seconds = 30\n",
+        "[reconciler]\nbackoff_base_seconds = 600\nbackoff_max_seconds = 600\n",
     )
     settings = load_settings(config_file=cfg)
-    assert settings.reconciler.backoff_max_seconds == 30
+    assert settings.reconciler.backoff_max_seconds == 600
+
+
+def test_reconciler_backoff_max_below_slack_floor_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # backoff_max_seconds doubles as the expiry slack that keeps crash-loop
+    # damping alive across a slow boot's starting window (#346). A slack below the
+    # plausible-boot floor lets a still-diverged server expire and reset its
+    # failure count, re-arming the boot-crash loop, so reject it at load (#353).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[reconciler]\nbackoff_base_seconds = 30\nbackoff_max_seconds = 599\n",
+    )
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+def test_reconciler_backoff_max_at_slack_floor_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[reconciler]\nbackoff_base_seconds = 30\nbackoff_max_seconds = 600\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.reconciler.backoff_max_seconds == 600
 
 
 def test_registration_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

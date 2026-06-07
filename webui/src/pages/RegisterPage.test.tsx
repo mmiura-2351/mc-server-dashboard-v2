@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,16 +14,18 @@ function PathProbe() {
 
 function renderRegister() {
   render(
-    <ToastProvider>
-      <MemoryRouter initialEntries={["/register"]}>
-        <SessionProvider>
-          <Routes>
-            <Route path="/register" element={<RegisterPage />} />
-            <Route path="*" element={<PathProbe />} />
-          </Routes>
-        </SessionProvider>
-      </MemoryRouter>
-    </ToastProvider>,
+    <QueryClientProvider client={new QueryClient()}>
+      <ToastProvider>
+        <MemoryRouter initialEntries={["/register"]}>
+          <SessionProvider>
+            <Routes>
+              <Route path="/register" element={<RegisterPage />} />
+              <Route path="*" element={<PathProbe />} />
+            </Routes>
+          </SessionProvider>
+        </MemoryRouter>
+      </ToastProvider>
+    </QueryClientProvider>,
   );
 }
 
