@@ -14,6 +14,7 @@ import { AdminWorkersPage } from "./pages/AdminWorkersPage.tsx";
 import { CommunitySettingsPage } from "./pages/CommunitySettingsPage.tsx";
 import { DashboardPage } from "./pages/DashboardPage.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
+import { NoCommunityPage } from "./pages/NoCommunityPage.tsx";
 import { PlaceholderPage } from "./pages/PlaceholderPage.tsx";
 import { RegisterPage } from "./pages/RegisterPage.tsx";
 import { ServerCreatePage } from "./pages/ServerCreatePage.tsx";
@@ -98,7 +99,7 @@ function Landing() {
   if (communities === undefined) {
     return <SessionLoading />;
   }
-  return <PlaceholderPage titleKey="page.dashboard" />;
+  return <NoCommunityPage />;
 }
 
 // Routing mirroring the screen map (WEBUI_SPEC.md Section 5). Auth pages render

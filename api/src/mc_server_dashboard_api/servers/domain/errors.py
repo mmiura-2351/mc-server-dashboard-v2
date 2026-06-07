@@ -201,7 +201,19 @@ class InvalidFilePathError(ServerError):
     path (Worker ``FILE_ACCESS_DENIED``): an absolute path, a ``..`` component, or
     a symlink escape. The edge maps this to 422; the rejection is explicit, never
     a silent clamp.
+
+    ``reason`` names the 422 problem reason the edge renders (issue #548). It
+    defaults to ``"invalid_path"`` (a genuine path-syntax rejection). The running
+    path refines it from the Worker's :class:`FileAccessReason` so a non-path
+    denial surfaces honestly: ``"is_a_directory"`` (read/edit of a directory),
+    ``"not_a_directory"`` (list of a file), or ``"symlink_refused"`` (a refused
+    symlink). The oversized case is not carried here — it is raised as
+    :class:`FileTooLargeError` (413) instead.
     """
+
+    def __init__(self, message: str = "", *, reason: str = "invalid_path") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class FileTooLargeError(ServerError):

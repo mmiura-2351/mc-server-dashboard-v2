@@ -49,6 +49,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
     ControlPlane,
+    FileAccessReason,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -160,11 +161,30 @@ def _is_running(server: Server) -> bool:
     )
 
 
+# The 422 problem reason each non-default file-access reason maps to (issue #548).
+# UNSPECIFIED (a genuine path denial) keeps the historical ``invalid_path``;
+# PAYLOAD_TOO_LARGE is handled separately as a 413, so it is not in this table.
+_INVALID_PATH_REASON: dict[FileAccessReason, str] = {
+    FileAccessReason.IS_A_DIRECTORY: "is_a_directory",
+    FileAccessReason.NOT_A_DIRECTORY: "not_a_directory",
+    FileAccessReason.SYMLINK_REFUSED: "symlink_refused",
+}
+
+
 def _map_file_status(server_id: ServerId, kind: str, outcome: CommandOutcome) -> None:
     """Translate a Worker file-command failure to a servers file error.
 
     ``kind`` is the command label (the calling use case) so an unmapped failure
     is logged once with server and kind context before raising (issue #200).
+
+    A ``FILE_ACCESS_DENIED`` outcome is refined by ``file_access_reason`` (issue
+    #548): the Worker emits that umbrella status for several conditions that are
+    NOT path-syntax problems, so each is mapped to an honest error instead of a
+    blanket ``invalid_path``. ``PAYLOAD_TOO_LARGE`` raises
+    :class:`FileTooLargeError` (413); ``IS_A_DIRECTORY`` / ``NOT_A_DIRECTORY`` /
+    ``SYMLINK_REFUSED`` raise :class:`InvalidFilePathError` carrying the matching
+    422 problem reason; ``UNSPECIFIED`` (a genuine path denial, or an older Worker
+    that never set the field) keeps the historical 422 ``invalid_path``.
     """
 
     if outcome.status is CommandStatus.SERVER_NOT_FOUND:
@@ -172,7 +192,12 @@ def _map_file_status(server_id: ServerId, kind: str, outcome: CommandOutcome) ->
         # either way the path the caller asked for is not there.
         raise ServerFileNotFoundError(str(server_id.value))
     if outcome.status is CommandStatus.FILE_ACCESS_DENIED:
-        raise InvalidFilePathError(outcome.message or str(server_id.value))
+        if outcome.file_access_reason is FileAccessReason.PAYLOAD_TOO_LARGE:
+            raise FileTooLargeError(outcome.message or str(server_id.value))
+        reason = _INVALID_PATH_REASON.get(outcome.file_access_reason, "invalid_path")
+        raise InvalidFilePathError(
+            outcome.message or str(server_id.value), reason=reason
+        )
     raise dispatch_failure(server_id=server_id, kind=kind, outcome=outcome)
 
 

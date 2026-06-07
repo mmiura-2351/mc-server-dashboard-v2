@@ -49,6 +49,17 @@ export const ja: Record<TranslationKey, string> = {
     "プレースホルダーページ — 内容は後のフェーズで追加されます。",
   "page.notFound": "ページが見つかりません",
 
+  // No-community empty state (#584): shown on the landing route when the
+  // signed-in account belongs to zero communities.
+  "noCommunity.title": "コミュニティがありません",
+  "noCommunity.body":
+    "このアカウントはまだどのコミュニティにも所属していません。コミュニティはサーバー・メンバー・設定の範囲を定めます。",
+  "noCommunity.memberHint":
+    "コミュニティに追加してもらうには、プラットフォーム管理者に依頼してください。",
+  "noCommunity.adminHint":
+    "プラットフォーム管理者は、最初のコミュニティを作成できます。",
+  "noCommunity.adminCta": "コミュニティを作成",
+
   // Auth links
   "auth.toRegister": "アカウントがない場合は登録",
   "auth.toLogin": "アカウントがある場合はサインイン",

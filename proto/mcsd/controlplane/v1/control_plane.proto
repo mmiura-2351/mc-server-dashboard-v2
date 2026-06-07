@@ -327,6 +327,40 @@ message CommandError {
   CommandErrorCode code = 1;
   // message is a human-readable explanation for logs and operators.
   string message = 2;
+  // file_access_reason refines a FILE_ACCESS_DENIED failure into the specific
+  // condition the Worker hit (is-a-directory, symlink refusal, oversized
+  // payload, etc.) so the API can surface an honest problem reason rather than
+  // collapsing every file denial into "invalid path" (issue #548). It is only
+  // meaningful when code is COMMAND_ERROR_CODE_FILE_ACCESS_DENIED; for every
+  // other code it is UNSPECIFIED. The field is additive: an older Worker that
+  // leaves it UNSPECIFIED, and a genuine traversal/path denial, both map back to
+  // the pre-existing invalid-path behaviour.
+  FileAccessReason file_access_reason = 3;
+}
+
+// FileAccessReason refines a FILE_ACCESS_DENIED failure (issue #548). The Worker
+// emits FILE_ACCESS_DENIED for several conditions that are NOT path-syntax
+// problems; this enum carries which one so the API maps each to an honest
+// problem reason and HTTP status instead of a misleading "invalid path".
+enum FileAccessReason {
+  // Unspecified is the default for a non-file failure and for a genuine path
+  // denial (a traversal-unsafe path: absolute, a ".." component, or a
+  // resolution refusal). The API maps it to 422 invalid_path, the historical
+  // behaviour, so an older Worker that never sets this field is unchanged.
+  FILE_ACCESS_REASON_UNSPECIFIED = 0;
+  // The target path resolves to a directory where a file was required (a read or
+  // an edit of a directory). The API maps it to 422 is_a_directory.
+  FILE_ACCESS_REASON_IS_A_DIRECTORY = 1;
+  // The target path resolves to a regular file where a directory was required (a
+  // list of a file). The API maps it to 422 not_a_directory.
+  FILE_ACCESS_REASON_NOT_A_DIRECTORY = 2;
+  // The Worker refused to follow a symlink on the final or an intermediate path
+  // component (the escape-vector defence, FR-FILE-4). The API maps it to 422
+  // symlink_refused.
+  FILE_ACCESS_REASON_SYMLINK_REFUSED = 3;
+  // The read result or the edit payload exceeds the control-plane file cap. The
+  // API maps it to 413 file_too_large.
+  FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE = 4;
 }
 
 // CommandErrorCode classifies a command failure.

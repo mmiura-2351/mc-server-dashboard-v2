@@ -401,6 +401,44 @@ def test_read_traversal_is_422() -> None:
     assert resp.json()["reason"] == "invalid_path"
 
 
+def test_read_is_a_directory_surfaces_reason() -> None:
+    # A running-server read of a directory (issue #548): the refined reason rides
+    # through to the 422 body rather than the misleading invalid_path.
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(error=InvalidFilePathError("x", reason="is_a_directory")),
+    )
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "config"})
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "is_a_directory"
+
+
+def test_read_payload_too_large_is_413() -> None:
+    # A running-server read past the control-plane cap (issue #548) -> 413.
+    app = _app(member=True, allow=True, read=_FakeUseCase(error=FileTooLargeError("x")))
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "big.bin"})
+    assert resp.status_code == 413
+    assert resp.json()["reason"] == "file_too_large"
+
+
+def test_list_not_a_directory_surfaces_reason() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        list_=_FakeUseCase(error=InvalidFilePathError("x", reason="not_a_directory")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "server.properties", "list": "true"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "not_a_directory"
+
+
 def test_read_transitional_is_409() -> None:
     app = _app(
         member=True,
@@ -449,6 +487,24 @@ def test_write_traversal_is_422() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_path"
+
+
+def test_write_symlink_refused_surfaces_reason() -> None:
+    # A running-server write onto a refused symlink (issue #548) -> 422 with the
+    # honest reason rather than invalid_path.
+    app = _app(
+        member=True,
+        allow=True,
+        write=_FakeUseCase(error=InvalidFilePathError("x", reason="symlink_refused")),
+    )
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "link"},
+        json={"content_base64": ""},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "symlink_refused"
 
 
 # --- history / rollback ----------------------------------------------------

@@ -301,7 +301,7 @@ classes a Worker can hit:
 | `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, or a missing file target). |
 | `INVALID_STATE` | The command is invalid for the current state (e.g. start or hydrate a running server). |
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
-| `FILE_ACCESS_DENIED` | A file path was rejected (traversal / not found / not permitted). |
+| `FILE_ACCESS_DENIED` | A file path was rejected. A refining `file_access_reason` (Section 7.2) splits the distinct conditions so the API maps each to an honest HTTP reason instead of one blanket `invalid_path`. |
 | `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |
 | `PORT_CONFLICT` | A `StartServer` could not publish a host port already in use (the container driver classifies it from the Docker daemon's error message). |
 | `IMAGE_MISSING` | A `StartServer` could not find or pull the server's container image (the container driver classifies it from the Docker daemon's error message). |
@@ -330,6 +330,27 @@ rows. Two table-driven tests hold both sides to it (issue #204):
 
 Add a new convergence match or change a Worker emission only together with the
 table; the asymmetry is intentional — drift on either side fails that side's CI.
+
+### 7.2 File-access reason (issue #548)
+
+`FILE_ACCESS_DENIED` is an umbrella for several conditions, only one of which is a
+path-syntax problem. The Worker carries which one in `CommandError.file_access_reason`
+(a `FileAccessReason` enum) so the API surfaces an honest HTTP reason instead of
+collapsing every file denial into a misleading `invalid_path`. The field is
+additive: `UNSPECIFIED` is the proto3 default, so an older Worker that never sets
+it — and a genuine path denial — both keep the historical behaviour.
+
+| `file_access_reason` | Worker condition (read / edit / list) | API result |
+|---|---|---|
+| `UNSPECIFIED` | A traversal-unsafe path (absolute, `..`), or an unrefined resolution denial. | 422 `invalid_path` |
+| `IS_A_DIRECTORY` | A read or edit whose path is a directory. | 422 `is_a_directory` |
+| `NOT_A_DIRECTORY` | A list whose path is a regular file. | 422 `not_a_directory` |
+| `SYMLINK_REFUSED` | A refused final/intermediate-component symlink (the FR-FILE-4 escape-vector defence). | 422 `symlink_refused` |
+| `PAYLOAD_TOO_LARGE` | A read result or an edit payload past the control-plane file cap. | 413 `file_too_large` |
+
+The reason refines only `FILE_ACCESS_DENIED`; it is `UNSPECIFIED` for every other
+code. The HTTP mapping lives at the file routes
+(`api/src/mc_server_dashboard_api/servers/api/files.py`).
 
 ---
 
