@@ -316,7 +316,10 @@ function DangerZone({ user, showToast, onDeleted }: DangerZoneProps) {
   const [open, setOpen] = useState(false);
 
   const mutation = useMutation({
-    mutationFn: () => api.delete("/users/me"),
+    // Re-auth: the API verifies the current password before deleting the account
+    // (WEBUI_SPEC.md 6.11). A wrong password is a 401 invalid_credentials.
+    mutationFn: (password: string) =>
+      api.delete("/users/me", { body: JSON.stringify({ password }) }),
     onSuccess: () => {
       setOpen(false);
       // Hard logout: the account is gone, so reset the local session and route
@@ -353,7 +356,8 @@ function DangerZone({ user, showToast, onDeleted }: DangerZoneProps) {
         confirmPhrase={user.username}
         confirmLabel={t("account.delete.confirm")}
         promptLabel={t("account.delete.prompt")}
-        onConfirm={() => mutation.mutate()}
+        passwordLabel={t("account.delete.password")}
+        onConfirm={(password) => mutation.mutate(password)}
         onClose={() => setOpen(false)}
       />
     </div>

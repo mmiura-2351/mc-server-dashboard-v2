@@ -16,6 +16,7 @@ from mc_server_dashboard_api.identity.application.delete_account import DeleteAc
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken
 from mc_server_dashboard_api.identity.domain.errors import (
     CommunityOwnedError,
+    InvalidCredentialsError,
     LastPlatformAdminError,
     UserNotFoundError,
 )
@@ -27,14 +28,18 @@ from tests.identity.fakes import (
     FakeClock,
     FakeCommunityOwnership,
     FakeUnitOfWork,
+    StubHasher,
     make_user,
 )
 
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
+_PASSWORD = "Wm7!qz#Lp2vT"
 
 
 def _use_case(uow: FakeUnitOfWork, ownership: FakeCommunityOwnership) -> DeleteAccount:
-    return DeleteAccount(uow=uow, ownership=ownership, clock=FakeClock(_NOW))
+    return DeleteAccount(
+        uow=uow, ownership=ownership, hasher=StubHasher(), clock=FakeClock(_NOW)
+    )
 
 
 def _active_token(user_id: UserId) -> RefreshToken:
@@ -53,7 +58,7 @@ async def test_delete_account_removes_user_and_revokes_tokens() -> None:
     uow.users.seed(user)
     uow.refresh_tokens.seed(_active_token(user.id))
 
-    await _use_case(uow, FakeCommunityOwnership())(user_id=user.id)
+    await _use_case(uow, FakeCommunityOwnership())(user_id=user.id, password=_PASSWORD)
 
     assert user.id not in uow.users.by_id
     assert all(t.revoked_at == _NOW for t in uow.refresh_tokens.by_hash.values())
@@ -67,7 +72,7 @@ async def test_delete_account_refused_when_user_owns_a_community() -> None:
     ownership = FakeCommunityOwnership(owners={user.id})
 
     with pytest.raises(CommunityOwnedError):
-        await _use_case(uow, ownership)(user_id=user.id)
+        await _use_case(uow, ownership)(user_id=user.id, password=_PASSWORD)
     assert user.id in uow.users.by_id
     assert uow.commits == 0
 
@@ -79,7 +84,9 @@ async def test_delete_account_refused_when_last_platform_admin() -> None:
     uow.users.seed(admin)
 
     with pytest.raises(LastPlatformAdminError):
-        await _use_case(uow, FakeCommunityOwnership())(user_id=admin.id)
+        await _use_case(uow, FakeCommunityOwnership())(
+            user_id=admin.id, password=_PASSWORD
+        )
     assert admin.id in uow.users.by_id
     assert uow.commits == 0
 
@@ -93,7 +100,7 @@ async def test_delete_account_allowed_when_other_admin_remains() -> None:
     uow.users.seed(admin)
     uow.users.seed(other)
 
-    await _use_case(uow, FakeCommunityOwnership())(user_id=admin.id)
+    await _use_case(uow, FakeCommunityOwnership())(user_id=admin.id, password=_PASSWORD)
 
     assert admin.id not in uow.users.by_id
 
@@ -111,7 +118,9 @@ async def test_delete_account_refused_when_only_other_admin_is_deactivated() -> 
     uow.users.seed(deactivated)
 
     with pytest.raises(LastPlatformAdminError):
-        await _use_case(uow, FakeCommunityOwnership())(user_id=admin.id)
+        await _use_case(uow, FakeCommunityOwnership())(
+            user_id=admin.id, password=_PASSWORD
+        )
     assert admin.id in uow.users.by_id
 
 
@@ -126,7 +135,7 @@ async def test_delete_account_admin_locks_active_admins() -> None:
     uow.users.seed(admin)
     uow.users.seed(other)
 
-    await _use_case(uow, FakeCommunityOwnership())(user_id=admin.id)
+    await _use_case(uow, FakeCommunityOwnership())(user_id=admin.id, password=_PASSWORD)
 
     assert uow.users.lock_calls == 1
 
@@ -138,7 +147,7 @@ async def test_delete_account_non_admin_does_not_lock_active_admins() -> None:
     uow = FakeUnitOfWork()
     uow.users.seed(user)
 
-    await _use_case(uow, FakeCommunityOwnership())(user_id=user.id)
+    await _use_case(uow, FakeCommunityOwnership())(user_id=user.id, password=_PASSWORD)
 
     assert uow.users.lock_calls == 0
 
@@ -146,4 +155,33 @@ async def test_delete_account_non_admin_does_not_lock_active_admins() -> None:
 async def test_delete_account_unknown_user_raises() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(UserNotFoundError):
-        await _use_case(uow, FakeCommunityOwnership())(user_id=UserId.new())
+        await _use_case(uow, FakeCommunityOwnership())(
+            user_id=UserId.new(), password=_PASSWORD
+        )
+
+
+async def test_delete_account_wrong_password_raises_invalid_credentials() -> None:
+    # Re-auth gates before any deletion or refusal-reason leak (issue #420): a
+    # wrong password is the same InvalidCredentialsError login raises.
+    user = make_user(now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    with pytest.raises(InvalidCredentialsError):
+        await _use_case(uow, FakeCommunityOwnership())(
+            user_id=user.id, password="not-the-password"
+        )
+    assert user.id in uow.users.by_id
+    assert uow.commits == 0
+
+
+async def test_delete_account_wrong_password_gates_before_owner_check() -> None:
+    # Re-auth runs before the community-owner refusal, so a wrong password never
+    # reveals whether the account would otherwise be blocked from deletion.
+    user = make_user(now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    ownership = FakeCommunityOwnership(owners={user.id})
+
+    with pytest.raises(InvalidCredentialsError):
+        await _use_case(uow, ownership)(user_id=user.id, password="not-the-password")

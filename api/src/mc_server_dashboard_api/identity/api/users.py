@@ -139,6 +139,13 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=1, max_length=1024)
 
 
+class DeleteAccountRequest(BaseModel):
+    # Re-authentication for this destructive self-service action (issue #420):
+    # the caller's current password, verified before deletion. Mirrors
+    # ChangePasswordRequest; the same min_length=1 makes a blank password a 422.
+    password: str = Field(min_length=1)
+
+
 class UpdateProfileRequest(BaseModel):
     # Both optional: a self-service edit may change either field or both. Structural
     # validation lives in the value objects; the router maps their errors to 422.
@@ -217,16 +224,22 @@ async def update_profile(
 
 @router.delete("/users/me", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_account(
+    body: DeleteAccountRequest,
     user: Annotated[User, Depends(get_current_user)],
     use_case: Annotated[DeleteAccount, Depends(get_delete_account)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> Response:
+    # This destructive self-service action re-authenticates the caller (issue
+    # #420): a wrong password is the same uniform 401 change_password returns, so
+    # the endpoint is no password-confirmation oracle (SECURITY.md Section 2).
     # Capture the id before deletion so the fire-after-commit audit row still
     # attributes the actor/target once the user row is gone (the audit_log
     # actor_id is a soft reference with no FK, so it survives, DATABASE.md 9).
     deleted_id: UserId = user.id
     try:
-        await use_case(user_id=deleted_id)
+        await use_case(user_id=deleted_id, password=body.password)
+    except InvalidCredentialsError as exc:
+        raise _unauthorized() from exc
     except CommunityOwnedError as exc:
         raise problem(status.HTTP_409_CONFLICT, "owns_community") from exc
     except LastPlatformAdminError as exc:

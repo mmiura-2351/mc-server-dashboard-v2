@@ -131,9 +131,10 @@ export const ja: Record<TranslationKey, string> = {
   "account.delete.open": "削除…",
   "account.delete.dialogTitle": "アカウントを削除",
   "account.delete.dialogBody":
-    "アカウントを完全に削除します。この操作は元に戻せません。確認のためユーザー名を入力してください。",
+    "アカウントを完全に削除します。この操作は元に戻せません。確認のためユーザー名とパスワードを入力してください。",
   "account.delete.confirm": "アカウントを削除",
   "account.delete.prompt": "削除を有効にするにはユーザー名を入力",
+  "account.delete.password": "パスワードを確認のため入力",
 
   // API reason codes (RFC 9457 `reason`) surfaced inline / via toast.
   "account.error.username_taken": "そのユーザー名はすでに使用されています。",
