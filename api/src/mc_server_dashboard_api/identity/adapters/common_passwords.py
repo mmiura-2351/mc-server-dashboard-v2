@@ -4,8 +4,9 @@ The blocklist is a packaged data file (``data/common_passwords.txt``) sourced
 from SecLists ``Passwords/Common-Credentials/10k-most-common.txt`` (the
 xato-net-derived 10,000 most-common passwords), one entry per line. Reading the
 file is an adapter concern; the wiring layer loads it once and injects the
-case-folded set into the pure :class:`PasswordPolicy` (CONFIGURATION.md
-``auth.password.check_common_list``).
+case-folded set into the pure :class:`PasswordPolicy` whenever the selected
+``auth.password.policy`` preset screens the common-password list (every preset
+does; CONFIGURATION.md Section 7.1).
 """
 
 from __future__ import annotations

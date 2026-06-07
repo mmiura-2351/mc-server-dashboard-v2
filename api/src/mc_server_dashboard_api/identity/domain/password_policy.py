@@ -31,6 +31,62 @@ _RUN_LENGTH = 4
 
 
 @dataclass(frozen=True)
+class PolicyPreset:
+    """The strength knobs a named preset fixes (SECURITY.md Section 1).
+
+    A preset bundles the *strength* rules so the deployment selects a posture by
+    name (``auth.password.policy``) instead of toggling each rule. It deliberately
+    omits the hasher-bound ``max_bytes`` and the injected ``common_passwords``:
+    those are runtime concerns supplied where the :class:`PasswordPolicy` is built.
+    """
+
+    min_length: int
+    require_complexity: bool
+    complexity_classes: int
+    check_common_list: bool
+    forbid_user_info: bool
+    forbid_simple_patterns: bool
+
+
+# Selectable password-strength presets. The reason codes the rules emit are
+# identical across presets; a preset only changes WHICH rules fire and their
+# thresholds (SECURITY.md Section 1):
+#   - low:    length-only floor (8+), still screening the common-password list
+#             and user-info so the weakest posture is not trivially bypassable.
+#   - middle: 10+ with mixed classes (2 of 4, e.g. mixed case + digits) and the
+#             simple-pattern guard; the out-of-box default.
+#   - high:   the historical fixed posture (12+, 3-of-4-or-16, every screen on).
+PRESETS: dict[str, PolicyPreset] = {
+    "low": PolicyPreset(
+        min_length=8,
+        require_complexity=False,
+        # Inert when require_complexity is False: the complexity check
+        # short-circuits, so this 0 is never read.
+        complexity_classes=0,
+        check_common_list=True,
+        forbid_user_info=True,
+        forbid_simple_patterns=False,
+    ),
+    "middle": PolicyPreset(
+        min_length=10,
+        require_complexity=True,
+        complexity_classes=2,
+        check_common_list=True,
+        forbid_user_info=True,
+        forbid_simple_patterns=True,
+    ),
+    "high": PolicyPreset(
+        min_length=12,
+        require_complexity=True,
+        complexity_classes=3,
+        check_common_list=True,
+        forbid_user_info=True,
+        forbid_simple_patterns=True,
+    ),
+}
+
+
+@dataclass(frozen=True)
 class PasswordPolicy:
     """The configured password rules; :meth:`validate` enforces them in order."""
 
@@ -41,6 +97,10 @@ class PasswordPolicy:
     # such cap. Enforced here so the bcrypt adapter never truncates silently.
     max_bytes: int | None
     require_complexity: bool
+    # Minimum number of distinct character classes ({upper, lower, digit, symbol})
+    # the complexity rule demands when the 16-char length shortcut is not met.
+    # Only consulted while ``require_complexity`` is set.
+    complexity_classes: int
     check_common_list: bool
     forbid_user_info: bool
     forbid_simple_patterns: bool
@@ -61,7 +121,9 @@ class PasswordPolicy:
             and len(password.encode("utf-8")) > self.max_bytes
         ):
             raise PasswordPolicyError("too_long_for_bcrypt")
-        if self.require_complexity and not _has_complexity_or_length(password):
+        if self.require_complexity and not _has_complexity_or_length(
+            password, self.complexity_classes
+        ):
             raise PasswordPolicyError("insufficient_complexity")
         if self.check_common_list and password.casefold() in self.common_passwords:
             raise PasswordPolicyError("common_password")
@@ -71,8 +133,8 @@ class PasswordPolicy:
             raise PasswordPolicyError("simple_pattern")
 
 
-def _has_complexity_or_length(password: str) -> bool:
-    """At least 3 of {upper, lower, digit, symbol}, or at least 16 characters.
+def _has_complexity_or_length(password: str, required_classes: int) -> bool:
+    """At least ``required_classes`` of {upper, lower, digit, symbol}, or 16+ chars.
 
     Whitespace counts toward the symbol class so passphrases with spaces get the
     credit they deserve.
@@ -89,7 +151,7 @@ def _has_complexity_or_length(password: str) -> bool:
         classes += 1
     if any(not c.isalnum() for c in password):
         classes += 1
-    return classes >= 3
+    return classes >= required_classes
 
 
 def _contains_user_info(password: str, username: Username, email: EmailAddress) -> bool:

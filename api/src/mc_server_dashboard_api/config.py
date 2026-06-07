@@ -23,6 +23,8 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from mc_server_dashboard_api.identity.domain.password_policy import PRESETS
+
 _MASK = "***"
 
 # Minimum HS256 signing-key length: the key is the shared-secret entropy of the
@@ -322,28 +324,29 @@ class WebuiSettings(_Section):
 class PasswordSettings(_Section):
     """Password hashing + policy (CONFIGURATION.md Sections 5.3 and 7.1).
 
-    ``hash`` selects the :class:`PasswordHasher` adapter (Section 4); the rest
-    are the password-policy knobs enforced at registration (SECURITY.md
-    Section 1). Defaults are the proven legacy baseline (Section 7.1).
+    ``hash`` selects the :class:`PasswordHasher` adapter (Section 4). ``policy``
+    selects the password-strength preset enforced at registration and password
+    change (SECURITY.md Section 1); the preset fixes which strength rules fire.
+    ``max_length`` stays an independent DoS guard. The default preset is
+    ``middle`` (issue #536): the historical fixed posture is the ``high`` preset,
+    opt-in for operators who want it.
     """
 
     hash: Literal["argon2", "bcrypt"] = "argon2"
-    min_length: int = Field(default=12, gt=0)
+    policy: Literal["low", "middle", "high"] = "middle"
     max_length: int = Field(default=128, gt=0)
-    require_complexity: bool = True
-    check_common_list: bool = True
-    forbid_user_info: bool = True
-    forbid_simple_patterns: bool = True
 
     @model_validator(mode="after")
-    def _enforce_min_below_max(self) -> PasswordSettings:
-        # A minimum length above the maximum admits no valid password, so the
-        # pair is contradictory even though each value passes its own bound.
-        # Reject at load (SECURITY.md Section 1, fail-fast). Equal is fine (a
-        # fixed-length requirement).
-        if self.min_length > self.max_length:
+    def _enforce_preset_min_below_max(self) -> PasswordSettings:
+        # A preset minimum length above the configured maximum admits no valid
+        # password. Each preset ships a small min (<= 12), so this only fires
+        # when an operator drives max_length unusually low; reject at load
+        # (SECURITY.md Section 1, fail-fast). Equal is fine.
+        if PRESETS[self.policy].min_length > self.max_length:
             raise ValueError(
-                "auth.password.min_length must be <= auth.password.max_length"
+                f"auth.password.policy={self.policy} requires "
+                f"min_length {PRESETS[self.policy].min_length} <= max_length "
+                f"{self.max_length}"
             )
         return self
 
