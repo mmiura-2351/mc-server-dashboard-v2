@@ -27,6 +27,10 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId as StorageCommunityId,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
+    RelPath,
+    VersionId,
+)
+from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
 from tests.storage.helpers import publish
@@ -378,6 +382,109 @@ async def test_delete_file_removes_and_retains_version(tmp_path: Path) -> None:
         community_id=cid, server_id=sid, rel_path="a.txt"
     )
     assert len(versions) == 1
+
+
+async def test_retain_if_changed_dedups_repeated_identical_snapshots(
+    tmp_path: Path,
+) -> None:
+    # The running-edit authoritative snapshot (#351): repeated retain_if_changed
+    # calls on an UNCHANGED current/ file retain exactly one version, not one per
+    # call, so the bounded ring is not churned with identical copies.
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    for _ in range(5):
+        await adapter.retain_if_changed(
+            community_id=cid, server_id=sid, rel_path="server.properties"
+        )
+
+    versions = await adapter.list_versions(
+        community_id=cid, server_id=sid, rel_path="server.properties"
+    )
+    assert len(versions) == 1
+    # The retained version is the authoritative content, and current/ is untouched.
+    assert (
+        await adapter.read_file(
+            community_id=cid, server_id=sid, rel_path="server.properties"
+        )
+        == b"motd=original"
+    )
+
+
+async def test_retain_if_changed_retains_again_when_authoritative_changes(
+    tmp_path: Path,
+) -> None:
+    # A genuinely changed authoritative copy retains a NEW version (the dedup is
+    # only against the newest retained version, #351).
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    await adapter.retain_if_changed(
+        community_id=cid, server_id=sid, rel_path="server.properties"
+    )
+    # Change current/ at rest (write_file retains the prior + publishes new bytes),
+    # then snapshot again: the new authoritative bytes differ from the newest
+    # retained version, so a fresh version is retained.
+    await adapter.write_file(
+        community_id=cid,
+        server_id=sid,
+        rel_path="server.properties",
+        content=b"motd=v2",
+    )
+    await adapter.retain_if_changed(
+        community_id=cid, server_id=sid, rel_path="server.properties"
+    )
+
+    version_ids = await adapter.list_versions(
+        community_id=cid, server_id=sid, rel_path="server.properties"
+    )
+    # The newest retained version is the now-current b"motd=v2" the second snapshot
+    # captured (versions are newest-first), proving a changed copy is re-retained.
+    newest = await storage.read_file_version(
+        StorageCommunityId(community),
+        StorageServerId(server),
+        RelPath("server.properties"),
+        VersionId(version_ids[0]),
+    )
+    assert newest == b"motd=v2"
+
+
+async def test_retain_if_changed_missing_file_is_noop(tmp_path: Path) -> None:
+    # A file created while running has no authoritative copy yet, so retaining is a
+    # no-op (no error, no version) — the edit proceeds unversioned (#351/#344).
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    await adapter.retain_if_changed(
+        community_id=cid, server_id=sid, rel_path="created-while-running.txt"
+    )
+    versions = await adapter.list_versions(
+        community_id=cid, server_id=sid, rel_path="created-while-running.txt"
+    )
+    assert versions == []
+
+
+async def test_retain_if_changed_traversal_is_invalid_path(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    with pytest.raises(InvalidFilePathError):
+        await adapter.retain_if_changed(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="../escape",
+        )
 
 
 async def test_delete_missing_file_is_file_not_found(tmp_path: Path) -> None:

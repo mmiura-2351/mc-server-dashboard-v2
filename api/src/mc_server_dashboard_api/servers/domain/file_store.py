@@ -93,6 +93,25 @@ class FileStore(abc.ABC):
         """Edit one file in ``current/``, retaining the prior version (FR-FILE-3)."""
 
     @abc.abstractmethod
+    async def retain_if_changed(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        """Retain the current authoritative bytes as a version, deduped (#351).
+
+        Captures the file's current ``current/`` content into the version ring the
+        same way an at-rest edit's retain-before-overwrite does, but **skips the
+        capture when those bytes equal the newest retained version**. A running
+        edit snapshots the frozen authoritative copy before each edit; this dedup
+        stops repeated identical snapshots from churning the bounded ring and
+        evicting genuinely distinct at-rest versions.
+
+        A missing authoritative copy (a file created while running) is a no-op:
+        there is nothing to retain. Unlike :meth:`write_file`, this never mutates
+        ``current/``. Raises :class:`InvalidFilePathError` for a traversal-unsafe
+        path.
+        """
+
+    @abc.abstractmethod
     async def delete_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:

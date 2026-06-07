@@ -329,10 +329,10 @@ class WriteFile:
     ) -> None:
         """Retain the current authoritative bytes of ``rel_path`` as a version.
 
-        Re-writes the file's current bytes unchanged through the seam, which
-        retains them as a version via the same retain-before-overwrite path the
-        at-rest edit uses (FileStore.write_file, FR-FILE-3) while leaving the
-        authoritative ``current/`` content identical.
+        Retains the file's current bytes via the seam's retain-only-if-changed
+        primitive (FR-FILE-3, #344): it captures a version the same way the at-rest
+        edit's retain-before-overwrite does, while leaving the authoritative
+        ``current/`` content identical.
 
         Subtleties:
 
@@ -340,27 +340,17 @@ class WriteFile:
           (a worker holds the live set; Storage's ``current/`` is frozen until the
           next snapshot). We can only retain what Storage holds — that staleness is
           inherent, not a bug.
-        - A file created while running has no authoritative copy yet
-          (:class:`ServerFileNotFoundError`): there is nothing to retain, so the
-          edit proceeds unversioned rather than failing.
-        - Each running edit snapshots again, so repeated running edits to the same
-          path retain a version per edit (of the same frozen authoritative bytes).
-          This mirrors the at-rest edit (one version per edit) and is kept simple;
-          deduping would need a retain-only-if-changed primitive the seam does not
-          expose.
+        - A file created while running has no authoritative copy yet: there is
+          nothing to retain, so the edit proceeds unversioned rather than failing
+          (the seam treats a missing copy as a no-op).
+        - Repeated running edits to the same path snapshot the same frozen
+          authoritative bytes each time, but the seam dedups them against the
+          newest retained version (#351), so identical snapshots do not churn the
+          bounded version ring and evict distinct at-rest versions.
         """
 
-        try:
-            current = await self.file_store.read_file(
-                community_id=community_id, server_id=server_id, rel_path=rel_path
-            )
-        except ServerFileNotFoundError:
-            return
-        await self.file_store.write_file(
-            community_id=community_id,
-            server_id=server_id,
-            rel_path=rel_path,
-            content=current,
+        await self.file_store.retain_if_changed(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
         )
 
 

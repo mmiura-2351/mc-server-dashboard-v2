@@ -876,6 +876,50 @@ class FsStorage(Storage):
         shutil.copyfile(source, versions / version_id)
         self._prune_versions(versions)
 
+    async def retain_file_version(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        await asyncio.to_thread(
+            self._retain_file_version, community_id, server_id, rel_path
+        )
+
+    def _retain_file_version(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        # Retain the current authoritative bytes as a version unless they already
+        # equal the newest retained version (issue #351): a running edit snapshots
+        # the frozen authoritative copy before each edit, and without this dedup
+        # repeated edits to one file would push identical copies into the bounded
+        # ring and evict distinct at-rest versions.
+        try:
+            current = self._current_dir(community_id, server_id)
+        except NotFoundError:
+            return  # never-published server: nothing authoritative to retain
+        target = self._safe_target(current, rel_path)
+        if not target.is_file():
+            return  # no authoritative copy yet: nothing to retain
+        versions = self._versions_dir(community_id, server_id, rel_path)
+        if self._matches_newest_version(versions, target):
+            return  # unchanged since the newest retained version: skip the churn
+        self._capture_version(community_id, server_id, rel_path, target)
+
+    def _matches_newest_version(self, versions: Path, source: Path) -> bool:
+        """True if ``source`` equals the newest retained version under ``versions``.
+
+        Compares by size first (a cheap stat reject), then by SHA-256 so two large
+        identical blobs are hashed independently rather than both held in memory.
+        """
+
+        if not versions.is_dir():
+            return False
+        names = sorted(p.name for p in versions.iterdir())
+        if not names:
+            return False
+        newest = versions / names[-1]  # ids are time-ordered (_new_version_id)
+        if source.stat().st_size != newest.stat().st_size:
+            return False
+        return _file_sha256(source) == _file_sha256(newest)
+
     def _prune_versions(self, versions: Path) -> None:
         existing = sorted(p.name for p in versions.iterdir())
         excess = len(existing) - self._version_retention
@@ -943,6 +987,16 @@ def _new_version_id() -> str:
     """
 
     return f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}"
+
+
+def _file_sha256(path: Path) -> str:
+    """SHA-256 of a file, read in bounded chunks (never the whole file in RAM)."""
+
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while chunk := handle.read(_CHUNK):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def _dir_has_entries(path: Path) -> bool:
