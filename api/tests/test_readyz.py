@@ -52,7 +52,7 @@ def ready_client() -> Iterator[TestClient]:
 
 
 def test_readyz_ok_when_all_components_ready(ready_client: TestClient) -> None:
-    resp = ready_client.get("/readyz")
+    resp = ready_client.get("/api/readyz")
     assert resp.status_code == 200
     assert resp.json() == {
         "ready": True,
@@ -62,7 +62,7 @@ def test_readyz_ok_when_all_components_ready(ready_client: TestClient) -> None:
 
 def test_readyz_503_when_database_down() -> None:
     for client in _client(db_ready=False, cp_ready=True):
-        resp = client.get("/readyz")
+        resp = client.get("/api/readyz")
         assert resp.status_code == 503
         body = resp.json()
         assert body["ready"] is False
@@ -71,6 +71,6 @@ def test_readyz_503_when_database_down() -> None:
 
 def test_readyz_503_when_control_plane_not_started() -> None:
     for client in _client(db_ready=True, cp_ready=False):
-        resp = client.get("/readyz")
+        resp = client.get("/api/readyz")
         assert resp.status_code == 503
         assert resp.json()["components"]["control_plane"] is False

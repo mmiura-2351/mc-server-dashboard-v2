@@ -11,8 +11,8 @@ import { defineConfig, devices } from "@playwright/test";
 //     clear message instead of a wall of UI timeouts.
 //   - The UI is the Vite dev server (`npm run dev`), started here as a
 //     webServer. Dev is the honest cheap option: the dev-server proxy
-//     (vite.config.ts) forwards the API path prefixes and the WebSocket event
-//     streams to the API, keeping the browser same-origin with the API exactly
+//     (vite.config.ts) forwards the /api prefix (REST + the WebSocket event
+//     streams) to the API, keeping the browser same-origin with the API exactly
 //     as production does — `vite preview` does not apply that proxy. The proxy
 //     target follows MCD_E2E_API_URL via VITE_API_PROXY_TARGET.
 //

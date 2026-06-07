@@ -83,7 +83,7 @@ function Loaded({
     queryKey: serverKey(communityId, serverId),
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/servers/{server_id}", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}", {
           community_id: communityId,
           server_id: serverId,
         }),
@@ -260,7 +260,7 @@ function Controls({
   const exportMutation = useMutation({
     mutationFn: () =>
       downloadFile(
-        apiPath("/communities/{community_id}/servers/{server_id}/export", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}/export", {
           community_id: communityId,
           server_id: server.id,
         }),
@@ -270,7 +270,7 @@ function Controls({
     onError,
   });
 
-  const base = `/communities/${communityId}/servers/${server.id}`;
+  const base = `/api/communities/${communityId}/servers/${server.id}`;
   const pending = lifecycle.isPending || exportMutation.isPending;
 
   return (
@@ -611,7 +611,7 @@ function Console({
   const send = useMutation({
     mutationFn: (line: string) =>
       api.post(
-        apiPath("/communities/{community_id}/servers/{server_id}/command", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}/command", {
           community_id: communityId,
           server_id: server.id,
         }),
@@ -861,7 +861,7 @@ function Settings({
   const save = useMutation({
     mutationFn: () =>
       api.patch(
-        apiPath("/communities/{community_id}/servers/{server_id}", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}", {
           community_id: communityId,
           server_id: server.id,
         }),
@@ -886,7 +886,7 @@ function Settings({
   const remove = useMutation({
     mutationFn: () =>
       api.delete(
-        apiPath("/communities/{community_id}/servers/{server_id}", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}", {
           community_id: communityId,
           server_id: server.id,
         }),
@@ -905,7 +905,7 @@ function Settings({
   const exportMutation = useMutation({
     mutationFn: () =>
       downloadFile(
-        apiPath("/communities/{community_id}/servers/{server_id}/export", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}/export", {
           community_id: communityId,
           server_id: server.id,
         }),
@@ -929,7 +929,7 @@ function Settings({
     }
     try {
       const result = await api.get(
-        apiPath("/ports/check/{port}", { port: String(parsed) }),
+        apiPath("/api/ports/check/{port}", { port: String(parsed) }),
       );
       if (result.in_range === false) {
         setPortHint("serverDetail.port.outOfRange");

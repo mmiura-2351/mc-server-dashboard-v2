@@ -192,7 +192,7 @@ describe("DashboardPage lifecycle actions", () => {
 
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/s1/start`,
+        `/api/communities/${CID}/servers/s1/start`,
       ),
     );
     // The list refetches after the action settles.

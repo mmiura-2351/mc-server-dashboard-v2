@@ -77,13 +77,13 @@ function routeGet(opts: {
 }) {
   lastGrantsPath = "";
   mockApi.get.mockImplementation((path: string) => {
-    if (path === `/communities/${CID}/members`) {
+    if (path === `/api/communities/${CID}/members`) {
       return Promise.resolve(opts.members ?? []);
     }
-    if (path === `/communities/${CID}/servers`) {
+    if (path === `/api/communities/${CID}/servers`) {
       return Promise.resolve(opts.servers ?? []);
     }
-    if (path.startsWith(`/communities/${CID}/grants`)) {
+    if (path.startsWith(`/api/communities/${CID}/grants`)) {
       lastGrantsPath = path;
       return Promise.resolve(opts.grants ?? []);
     }
@@ -177,7 +177,7 @@ describe("CommunityGrantsTab", () => {
     );
 
     await waitFor(() => {
-      expect(lastGrantsPath).toBe(`/communities/${CID}/grants?user_id=u2`);
+      expect(lastGrantsPath).toBe(`/api/communities/${CID}/grants?user_id=u2`);
     });
   });
 
@@ -212,14 +212,17 @@ describe("CommunityGrantsTab", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.post).toHaveBeenCalledWith(`/communities/${CID}/grants`, {
-        body: JSON.stringify({
-          user_id: "u1",
-          resource_type: "server",
-          resource_id: "s1",
-          permissions: ["server:start"],
-        }),
-      });
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/grants`,
+        {
+          body: JSON.stringify({
+            user_id: "u1",
+            resource_type: "server",
+            resource_id: "s1",
+            permissions: ["server:start"],
+          }),
+        },
+      );
     });
   });
 
@@ -277,7 +280,7 @@ describe("CommunityGrantsTab", () => {
 
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/grants/g1`,
+        `/api/communities/${CID}/grants/g1`,
       );
     });
   });

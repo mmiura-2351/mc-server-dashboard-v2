@@ -78,7 +78,7 @@ def _auth() -> dict[str, str]:
 
 
 def _url(community: uuid.UUID, server: uuid.UUID, suffix: str) -> str:
-    return f"/data-plane/communities/{community}/servers/{server}/{suffix}"
+    return f"/api/data-plane/communities/{community}/servers/{server}/{suffix}"
 
 
 def _scope() -> tuple[uuid.UUID, uuid.UUID]:

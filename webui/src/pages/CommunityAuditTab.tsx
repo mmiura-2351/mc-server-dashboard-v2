@@ -32,15 +32,15 @@ function auditUrl(
   communityId: string,
   filters: AuditFilters,
   offset: number,
-): "/communities/{community_id}/audit" {
-  const base = apiPath("/communities/{community_id}/audit", {
+): "/api/communities/{community_id}/audit" {
+  const base = apiPath("/api/communities/{community_id}/audit", {
     community_id: communityId,
   });
   const params = new URLSearchParams();
   applyAuditParams(params, filters);
   params.set("limit", String(PAGE_SIZE));
   params.set("offset", String(offset));
-  return `${base}?${params.toString()}` as "/communities/{community_id}/audit";
+  return `${base}?${params.toString()}` as "/api/communities/{community_id}/audit";
 }
 
 // Audit tab (WEBUI_SPEC.md 6.10): filterable, paged view of the community audit

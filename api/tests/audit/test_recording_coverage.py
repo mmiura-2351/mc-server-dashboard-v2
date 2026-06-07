@@ -131,7 +131,7 @@ def test_login_success_records_success_with_actor() -> None:
     )
     client = next(_client(app))
 
-    resp = client.post("/auth/login", json={"username": "alice", "password": "x"})
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "x"})
 
     assert resp.status_code == 200
     assert len(recorder.events) == 1
@@ -149,7 +149,7 @@ def test_login_failure_records_denied_without_actor() -> None:
     )
     client = next(_client(app))
 
-    resp = client.post("/auth/login", json={"username": "alice", "password": "x"})
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "x"})
 
     assert resp.status_code == 401
     assert len(recorder.events) == 1
@@ -167,7 +167,7 @@ def test_refresh_success_records_success() -> None:
     )
     client = next(_client(app))
 
-    resp = client.post("/auth/refresh", json={"refresh_token": "r1"})
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "r1"})
 
     assert resp.status_code == 200
     assert len(recorder.events) == 1
@@ -184,7 +184,7 @@ def test_refresh_reuse_records_denied_with_actor() -> None:
     )
     client = next(_client(app))
 
-    resp = client.post("/auth/refresh", json={"refresh_token": "reused"})
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "reused"})
 
     assert resp.status_code == 401
     assert len(recorder.events) == 1
@@ -203,7 +203,7 @@ def test_refresh_invalid_token_records_nothing() -> None:
     )
     client = next(_client(app))
 
-    resp = client.post("/auth/refresh", json={"refresh_token": "stale"})
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "stale"})
 
     assert resp.status_code == 401
     # A plain bad/expired token is not a security event: no row (proportionate).
@@ -225,7 +225,7 @@ def test_provision_community_records_success() -> None:
     client = next(_client(app))
 
     resp = client.post(
-        "/communities",
+        "/api/communities",
         json={"name": "guild", "owner_user_id": str(uuid.uuid4())},
     )
 
@@ -262,7 +262,7 @@ def test_create_server_records_success() -> None:
     client = next(_client(app))
 
     resp = client.post(
-        f"/communities/{_COMMUNITY}/servers",
+        f"/api/communities/{_COMMUNITY}/servers",
         json={
             "name": "survival",
             "mc_edition": "java",
@@ -290,7 +290,7 @@ def test_start_server_transition_conflict_records_denied() -> None:
     )
     client = next(_client(app))
 
-    resp = client.post(f"/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
+    resp = client.post(f"/api/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
 
     assert resp.status_code == 409
     assert len(recorder.events) == 1
@@ -310,7 +310,7 @@ def test_start_server_no_eligible_worker_records_error() -> None:
     )
     client = next(_client(app))
 
-    resp = client.post(f"/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
+    resp = client.post(f"/api/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
 
     assert resp.status_code == 503
     assert len(recorder.events) == 1
@@ -326,7 +326,7 @@ def test_set_worker_drain_records_success() -> None:
     )
     client = next(_client(app))
 
-    resp = client.put("/workers/worker-1/drain")
+    resp = client.put("/api/workers/worker-1/drain")
 
     assert resp.status_code == 204
     assert len(recorder.events) == 1
@@ -344,7 +344,7 @@ def test_set_worker_drain_unknown_worker_records_nothing() -> None:
     )
     client = next(_client(app))
 
-    resp = client.put("/workers/ghost/drain")
+    resp = client.put("/api/workers/ghost/drain")
 
     assert resp.status_code == 404
     assert recorder.events == []

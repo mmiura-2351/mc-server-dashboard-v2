@@ -53,7 +53,9 @@ export function CommunityGeneralTab({
   const rename = useMutation({
     mutationFn: () =>
       api.patch(
-        apiPath("/communities/{community_id}", { community_id: community.id }),
+        apiPath("/api/communities/{community_id}", {
+          community_id: community.id,
+        }),
         { body: JSON.stringify({ name }) },
       ),
     onSuccess: () => {
@@ -71,7 +73,9 @@ export function CommunityGeneralTab({
   const remove = useMutation({
     mutationFn: () =>
       api.delete(
-        apiPath("/communities/{community_id}", { community_id: community.id }),
+        apiPath("/api/communities/{community_id}", {
+          community_id: community.id,
+        }),
       ),
     onSuccess: () => {
       showToast(t("communitySettings.general.deleted"), "success");

@@ -56,7 +56,7 @@ vi.mock("react-router", async () => {
   return { ...actual, useNavigate: () => vi.fn() };
 });
 
-const FILES_BASE = `/communities/${CID}/servers/${SID}/files`;
+const FILES_BASE = `/api/communities/${CID}/servers/${SID}/files`;
 
 function server(overrides: Record<string, unknown> = {}) {
   return {

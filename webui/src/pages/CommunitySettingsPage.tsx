@@ -48,7 +48,9 @@ function Loaded({ communityId }: { communityId: string }) {
     queryKey: ["communities", communityId],
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}", { community_id: communityId }),
+        apiPath("/api/communities/{community_id}", {
+          community_id: communityId,
+        }),
       ),
   });
 

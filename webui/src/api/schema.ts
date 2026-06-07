@@ -4,7 +4,7 @@
  */
 
 export interface paths {
-    "/admin/communities": {
+    "/api/admin/communities": {
         parameters: {
             query?: never;
             header?: never;
@@ -12,7 +12,7 @@ export interface paths {
             cookie?: never;
         };
         /** List All Communities */
-        get: operations["list_all_communities_admin_communities_get"];
+        get: operations["list_all_communities_api_admin_communities_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -21,7 +21,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/users": {
+    "/api/admin/users": {
         parameters: {
             query?: never;
             header?: never;
@@ -31,14 +31,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Admin Create User */
-        post: operations["admin_create_user_admin_users_post"];
+        post: operations["admin_create_user_api_admin_users_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/audit": {
+    "/api/audit": {
         parameters: {
             query?: never;
             header?: never;
@@ -46,7 +46,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Audit Log */
-        get: operations["list_audit_log_audit_get"];
+        get: operations["list_audit_log_api_audit_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -55,7 +55,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/auth/login": {
+    "/api/auth/login": {
         parameters: {
             query?: never;
             header?: never;
@@ -65,14 +65,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Login */
-        post: operations["login_auth_login_post"];
+        post: operations["login_api_auth_login_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/auth/logout": {
+    "/api/auth/logout": {
         parameters: {
             query?: never;
             header?: never;
@@ -82,14 +82,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Logout */
-        post: operations["logout_auth_logout_post"];
+        post: operations["logout_api_auth_logout_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/auth/refresh": {
+    "/api/auth/refresh": {
         parameters: {
             query?: never;
             header?: never;
@@ -99,14 +99,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Refresh */
-        post: operations["refresh_auth_refresh_post"];
+        post: operations["refresh_api_auth_refresh_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/backups/statistics": {
+    "/api/backups/statistics": {
         parameters: {
             query?: never;
             header?: never;
@@ -121,7 +121,7 @@ export interface paths {
          *     NULL-size (unknown) count, and the newest/oldest timestamps across the whole
          *     platform. Gated by the platform-admin flag (non-admin -> 403), like /workers.
          */
-        get: operations["global_backup_statistics_backups_statistics_get"];
+        get: operations["global_backup_statistics_api_backups_statistics_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -130,7 +130,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities": {
+    "/api/communities": {
         parameters: {
             query?: never;
             header?: never;
@@ -138,17 +138,17 @@ export interface paths {
             cookie?: never;
         };
         /** List My Communities */
-        get: operations["list_my_communities_communities_get"];
+        get: operations["list_my_communities_api_communities_get"];
         put?: never;
         /** Provision Community */
-        post: operations["provision_community_communities_post"];
+        post: operations["provision_community_api_communities_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}": {
+    "/api/communities/{community_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -156,18 +156,18 @@ export interface paths {
             cookie?: never;
         };
         /** Read Community */
-        get: operations["read_community_communities__community_id__get"];
+        get: operations["read_community_api_communities__community_id__get"];
         put?: never;
         post?: never;
         /** Delete Community */
-        delete: operations["delete_community_communities__community_id__delete"];
+        delete: operations["delete_community_api_communities__community_id__delete"];
         options?: never;
         head?: never;
         /** Rename Community */
-        patch: operations["rename_community_communities__community_id__patch"];
+        patch: operations["rename_community_api_communities__community_id__patch"];
         trace?: never;
     };
-    "/communities/{community_id}/audit": {
+    "/api/communities/{community_id}/audit": {
         parameters: {
             query?: never;
             header?: never;
@@ -175,7 +175,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Community Audit Log */
-        get: operations["list_community_audit_log_communities__community_id__audit_get"];
+        get: operations["list_community_audit_log_api_communities__community_id__audit_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -184,7 +184,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/grants": {
+    "/api/communities/{community_id}/grants": {
         parameters: {
             query?: never;
             header?: never;
@@ -192,17 +192,17 @@ export interface paths {
             cookie?: never;
         };
         /** List Grants */
-        get: operations["list_grants_communities__community_id__grants_get"];
+        get: operations["list_grants_api_communities__community_id__grants_get"];
         put?: never;
         /** Create Grant */
-        post: operations["create_grant_communities__community_id__grants_post"];
+        post: operations["create_grant_api_communities__community_id__grants_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/grants/{grant_id}": {
+    "/api/communities/{community_id}/grants/{grant_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -213,13 +213,13 @@ export interface paths {
         put?: never;
         post?: never;
         /** Revoke Grant */
-        delete: operations["revoke_grant_communities__community_id__grants__grant_id__delete"];
+        delete: operations["revoke_grant_api_communities__community_id__grants__grant_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/groups": {
+    "/api/communities/{community_id}/groups": {
         parameters: {
             query?: never;
             header?: never;
@@ -227,17 +227,17 @@ export interface paths {
             cookie?: never;
         };
         /** List Groups */
-        get: operations["list_groups_communities__community_id__groups_get"];
+        get: operations["list_groups_api_communities__community_id__groups_get"];
         put?: never;
         /** Create Group */
-        post: operations["create_group_communities__community_id__groups_post"];
+        post: operations["create_group_api_communities__community_id__groups_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/groups/{group_id}": {
+    "/api/communities/{community_id}/groups/{group_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -245,18 +245,18 @@ export interface paths {
             cookie?: never;
         };
         /** Read Group */
-        get: operations["read_group_communities__community_id__groups__group_id__get"];
+        get: operations["read_group_api_communities__community_id__groups__group_id__get"];
         put?: never;
         post?: never;
         /** Delete Group */
-        delete: operations["delete_group_communities__community_id__groups__group_id__delete"];
+        delete: operations["delete_group_api_communities__community_id__groups__group_id__delete"];
         options?: never;
         head?: never;
         /** Rename Group */
-        patch: operations["rename_group_communities__community_id__groups__group_id__patch"];
+        patch: operations["rename_group_api_communities__community_id__groups__group_id__patch"];
         trace?: never;
     };
-    "/communities/{community_id}/groups/{group_id}/players": {
+    "/api/communities/{community_id}/groups/{group_id}/players": {
         parameters: {
             query?: never;
             header?: never;
@@ -266,14 +266,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Add Player */
-        post: operations["add_player_communities__community_id__groups__group_id__players_post"];
+        post: operations["add_player_api_communities__community_id__groups__group_id__players_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/groups/{group_id}/players/{player_uuid}": {
+    "/api/communities/{community_id}/groups/{group_id}/players/{player_uuid}": {
         parameters: {
             query?: never;
             header?: never;
@@ -284,13 +284,13 @@ export interface paths {
         put?: never;
         post?: never;
         /** Remove Player */
-        delete: operations["remove_player_communities__community_id__groups__group_id__players__player_uuid__delete"];
+        delete: operations["remove_player_api_communities__community_id__groups__group_id__players__player_uuid__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/groups/{group_id}/servers": {
+    "/api/communities/{community_id}/groups/{group_id}/servers": {
         parameters: {
             query?: never;
             header?: never;
@@ -298,7 +298,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Group Servers */
-        get: operations["list_group_servers_communities__community_id__groups__group_id__servers_get"];
+        get: operations["list_group_servers_api_communities__community_id__groups__group_id__servers_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -307,7 +307,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/groups/{group_id}/servers/{server_id}": {
+    "/api/communities/{community_id}/groups/{group_id}/servers/{server_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -316,16 +316,16 @@ export interface paths {
         };
         get?: never;
         /** Attach Group */
-        put: operations["attach_group_communities__community_id__groups__group_id__servers__server_id__put"];
+        put: operations["attach_group_api_communities__community_id__groups__group_id__servers__server_id__put"];
         post?: never;
         /** Detach Group */
-        delete: operations["detach_group_communities__community_id__groups__group_id__servers__server_id__delete"];
+        delete: operations["detach_group_api_communities__community_id__groups__group_id__servers__server_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/me/permissions": {
+    "/api/communities/{community_id}/me/permissions": {
         parameters: {
             query?: never;
             header?: never;
@@ -333,7 +333,7 @@ export interface paths {
             cookie?: never;
         };
         /** Read My Permissions */
-        get: operations["read_my_permissions_communities__community_id__me_permissions_get"];
+        get: operations["read_my_permissions_api_communities__community_id__me_permissions_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -342,7 +342,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/members": {
+    "/api/communities/{community_id}/members": {
         parameters: {
             query?: never;
             header?: never;
@@ -350,17 +350,17 @@ export interface paths {
             cookie?: never;
         };
         /** List Members */
-        get: operations["list_members_communities__community_id__members_get"];
+        get: operations["list_members_api_communities__community_id__members_get"];
         put?: never;
         /** Add Member */
-        post: operations["add_member_communities__community_id__members_post"];
+        post: operations["add_member_api_communities__community_id__members_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/members/{user_id}": {
+    "/api/communities/{community_id}/members/{user_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -371,13 +371,13 @@ export interface paths {
         put?: never;
         post?: never;
         /** Remove Member */
-        delete: operations["remove_member_communities__community_id__members__user_id__delete"];
+        delete: operations["remove_member_api_communities__community_id__members__user_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/members/{user_id}/roles": {
+    "/api/communities/{community_id}/members/{user_id}/roles": {
         parameters: {
             query?: never;
             header?: never;
@@ -387,14 +387,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Assign Role */
-        post: operations["assign_role_communities__community_id__members__user_id__roles_post"];
+        post: operations["assign_role_api_communities__community_id__members__user_id__roles_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/members/{user_id}/roles/{role_id}": {
+    "/api/communities/{community_id}/members/{user_id}/roles/{role_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -405,13 +405,13 @@ export interface paths {
         put?: never;
         post?: never;
         /** Unassign Role */
-        delete: operations["unassign_role_communities__community_id__members__user_id__roles__role_id__delete"];
+        delete: operations["unassign_role_api_communities__community_id__members__user_id__roles__role_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/roles": {
+    "/api/communities/{community_id}/roles": {
         parameters: {
             query?: never;
             header?: never;
@@ -419,17 +419,17 @@ export interface paths {
             cookie?: never;
         };
         /** List Roles */
-        get: operations["list_roles_communities__community_id__roles_get"];
+        get: operations["list_roles_api_communities__community_id__roles_get"];
         put?: never;
         /** Create Role */
-        post: operations["create_role_communities__community_id__roles_post"];
+        post: operations["create_role_api_communities__community_id__roles_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/roles/{role_id}": {
+    "/api/communities/{community_id}/roles/{role_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -437,18 +437,18 @@ export interface paths {
             cookie?: never;
         };
         /** Read Role */
-        get: operations["read_role_communities__community_id__roles__role_id__get"];
+        get: operations["read_role_api_communities__community_id__roles__role_id__get"];
         put?: never;
         post?: never;
         /** Delete Role */
-        delete: operations["delete_role_communities__community_id__roles__role_id__delete"];
+        delete: operations["delete_role_api_communities__community_id__roles__role_id__delete"];
         options?: never;
         head?: never;
         /** Update Role */
-        patch: operations["update_role_communities__community_id__roles__role_id__patch"];
+        patch: operations["update_role_api_communities__community_id__roles__role_id__patch"];
         trace?: never;
     };
-    "/communities/{community_id}/servers": {
+    "/api/communities/{community_id}/servers": {
         parameters: {
             query?: never;
             header?: never;
@@ -456,17 +456,17 @@ export interface paths {
             cookie?: never;
         };
         /** List Servers */
-        get: operations["list_servers_communities__community_id__servers_get"];
+        get: operations["list_servers_api_communities__community_id__servers_get"];
         put?: never;
         /** Create Server */
-        post: operations["create_server_communities__community_id__servers_post"];
+        post: operations["create_server_api_communities__community_id__servers_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/import": {
+    "/api/communities/{community_id}/servers/import": {
         parameters: {
             query?: never;
             header?: never;
@@ -490,14 +490,14 @@ export interface paths {
          *     caps -> 413 / 422). A publish failure after the row commits is 503
          *     ``seed_failed`` (the row is repairable via the files API).
          */
-        post: operations["import_server_communities__community_id__servers_import_post"];
+        post: operations["import_server_api_communities__community_id__servers_import_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}": {
+    "/api/communities/{community_id}/servers/{server_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -505,11 +505,11 @@ export interface paths {
             cookie?: never;
         };
         /** Read Server */
-        get: operations["read_server_communities__community_id__servers__server_id__get"];
+        get: operations["read_server_api_communities__community_id__servers__server_id__get"];
         put?: never;
         post?: never;
         /** Delete Server */
-        delete: operations["delete_server_communities__community_id__servers__server_id__delete"];
+        delete: operations["delete_server_api_communities__community_id__servers__server_id__delete"];
         options?: never;
         head?: never;
         /**
@@ -538,10 +538,10 @@ export interface paths {
          *     stay in sync. A storage failure during that rewrite is 503 ``seed_failed`` and
          *     leaves the row unchanged.
          */
-        patch: operations["update_server_communities__community_id__servers__server_id__patch"];
+        patch: operations["update_server_api_communities__community_id__servers__server_id__patch"];
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/backups": {
+    "/api/communities/{community_id}/servers/{server_id}/backups": {
         parameters: {
             query?: never;
             header?: never;
@@ -552,20 +552,20 @@ export interface paths {
          * List Backups
          * @description List a server's backups newest-first (backup:read).
          */
-        get: operations["list_backups_communities__community_id__servers__server_id__backups_get"];
+        get: operations["list_backups_api_communities__community_id__servers__server_id__backups_get"];
         put?: never;
         /**
          * Create Backup
          * @description Create a backup, branching on server state (Section 6.9, FR-BAK-2).
          */
-        post: operations["create_backup_communities__community_id__servers__server_id__backups_post"];
+        post: operations["create_backup_api_communities__community_id__servers__server_id__backups_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/backups/statistics": {
+    "/api/communities/{community_id}/servers/{server_id}/backups/statistics": {
         parameters: {
             query?: never;
             header?: never;
@@ -576,7 +576,7 @@ export interface paths {
          * Server Backup Statistics
          * @description A server's backup usage: count, bytes, newest/oldest (backup:read, #281).
          */
-        get: operations["server_backup_statistics_communities__community_id__servers__server_id__backups_statistics_get"];
+        get: operations["server_backup_statistics_api_communities__community_id__servers__server_id__backups_statistics_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -585,7 +585,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/backups/upload": {
+    "/api/communities/{community_id}/servers/{server_id}/backups/upload": {
         parameters: {
             query?: never;
             header?: never;
@@ -603,14 +603,14 @@ export interface paths {
          *     (opens + traversal-safe entries) before storing it. A non-archive / unsafe
          *     member is 422; an over-cap archive is 413.
          */
-        post: operations["upload_backup_communities__community_id__servers__server_id__backups_upload_post"];
+        post: operations["upload_backup_api_communities__community_id__servers__server_id__backups_upload_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/backups/{backup_id}": {
+    "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -624,13 +624,13 @@ export interface paths {
          * Delete Backup
          * @description Delete a backup's archive then its metadata row (backup:delete).
          */
-        delete: operations["delete_backup_communities__community_id__servers__server_id__backups__backup_id__delete"];
+        delete: operations["delete_backup_api_communities__community_id__servers__server_id__backups__backup_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download": {
+    "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download": {
         parameters: {
             query?: never;
             header?: never;
@@ -644,7 +644,7 @@ export interface paths {
          *     No recompression: the exact stored bytes stream out with a ``.tar.gz``
          *     attachment. An unknown / cross-community backup is 404 (no existence signal).
          */
-        get: operations["download_backup_communities__community_id__servers__server_id__backups__backup_id__download_get"];
+        get: operations["download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -653,7 +653,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/restore": {
+    "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/restore": {
         parameters: {
             query?: never;
             header?: never;
@@ -666,14 +666,14 @@ export interface paths {
          * Restore Backup
          * @description Restore a backup; requires the server stopped (FR-BAK-4 -> 409 if running).
          */
-        post: operations["restore_backup_communities__community_id__servers__server_id__backups__backup_id__restore_post"];
+        post: operations["restore_backup_api_communities__community_id__servers__server_id__backups__backup_id__restore_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/command": {
+    "/api/communities/{community_id}/servers/{server_id}/command": {
         parameters: {
             query?: never;
             header?: never;
@@ -683,14 +683,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Send Server Command */
-        post: operations["send_server_command_communities__community_id__servers__server_id__command_post"];
+        post: operations["send_server_command_api_communities__community_id__servers__server_id__command_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/export": {
+    "/api/communities/{community_id}/servers/{server_id}/export": {
         parameters: {
             query?: never;
             header?: never;
@@ -708,7 +708,7 @@ export interface paths {
          *     copy is only well-defined at rest). The zip carries the working set plus an
          *     ``export_metadata.json`` descriptor. Recorded under ``server:export``.
          */
-        get: operations["export_server_communities__community_id__servers__server_id__export_get"];
+        get: operations["export_server_api_communities__community_id__servers__server_id__export_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -717,7 +717,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/files": {
+    "/api/communities/{community_id}/servers/{server_id}/files": {
         parameters: {
             query?: never;
             header?: never;
@@ -732,7 +732,7 @@ export interface paths {
          *     server is served from the Worker's live working set, a server at rest from
          *     the authoritative copy.
          */
-        get: operations["read_or_list_files_communities__community_id__servers__server_id__files_get"];
+        get: operations["read_or_list_files_api_communities__community_id__servers__server_id__files_get"];
         /**
          * Write File
          * @description Edit a file, branching on server state (Section 6.9).
@@ -741,7 +741,7 @@ export interface paths {
          *     server is unsettled is recorded DENIED, matching the upload posture (issue
          *     #263).
          */
-        put: operations["write_file_communities__community_id__servers__server_id__files_put"];
+        put: operations["write_file_api_communities__community_id__servers__server_id__files_put"];
         post?: never;
         /**
          * Delete File
@@ -752,13 +752,13 @@ export interface paths {
          *     traversal-unsafe one is 422. A file delete retains the prior content (rollback
          *     can resurrect it); a directory delete does not (backups cover whole subtrees).
          */
-        delete: operations["delete_file_communities__community_id__servers__server_id__files_delete"];
+        delete: operations["delete_file_api_communities__community_id__servers__server_id__files_delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/files/directories": {
+    "/api/communities/{community_id}/servers/{server_id}/files/directories": {
         parameters: {
             query?: never;
             header?: never;
@@ -776,14 +776,14 @@ export interface paths {
          *     represent an empty directory (the seam is a no-op there) — the directory
          *     becomes observable once a file is written under it.
          */
-        post: operations["make_directory_communities__community_id__servers__server_id__files_directories_post"];
+        post: operations["make_directory_api_communities__community_id__servers__server_id__files_directories_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/files/download": {
+    "/api/communities/{community_id}/servers/{server_id}/files/download": {
         parameters: {
             query?: never;
             header?: never;
@@ -798,7 +798,7 @@ export interface paths {
          *     directory streams as a zip built incrementally over the Storage read stream
          *     (bounded memory); a file streams its bytes with an attachment disposition.
          */
-        get: operations["download_file_communities__community_id__servers__server_id__files_download_get"];
+        get: operations["download_file_api_communities__community_id__servers__server_id__files_download_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -807,7 +807,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/files/history": {
+    "/api/communities/{community_id}/servers/{server_id}/files/history": {
         parameters: {
             query?: never;
             header?: never;
@@ -818,7 +818,7 @@ export interface paths {
          * List File History
          * @description List retained prior versions of a file (file:history).
          */
-        get: operations["list_file_history_communities__community_id__servers__server_id__files_history_get"];
+        get: operations["list_file_history_api_communities__community_id__servers__server_id__files_history_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -827,7 +827,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/files/rename": {
+    "/api/communities/{community_id}/servers/{server_id}/files/rename": {
         parameters: {
             query?: never;
             header?: never;
@@ -844,14 +844,14 @@ export interface paths {
          *     paths are traversal-validated (422 on a bad path); a missing source is 404 and
          *     an existing destination is 409 ``destination_exists`` (rename never clobbers).
          */
-        post: operations["rename_file_communities__community_id__servers__server_id__files_rename_post"];
+        post: operations["rename_file_api_communities__community_id__servers__server_id__files_rename_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/files/rollback": {
+    "/api/communities/{community_id}/servers/{server_id}/files/rollback": {
         parameters: {
             query?: never;
             header?: never;
@@ -869,14 +869,14 @@ export interface paths {
          *     audited (``file:rollback``); a rollback refused because the server is not
          *     stopped is recorded DENIED (issue #263).
          */
-        post: operations["rollback_file_communities__community_id__servers__server_id__files_rollback_post"];
+        post: operations["rollback_file_api_communities__community_id__servers__server_id__files_rollback_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/files/search": {
+    "/api/communities/{community_id}/servers/{server_id}/files/search": {
         parameters: {
             query?: never;
             header?: never;
@@ -895,14 +895,14 @@ export interface paths {
          *     ``content`` (else 422). Results are bounded; ``truncated`` flags a clipped
          *     result.
          */
-        post: operations["search_files_communities__community_id__servers__server_id__files_search_post"];
+        post: operations["search_files_api_communities__community_id__servers__server_id__files_search_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/files/upload": {
+    "/api/communities/{community_id}/servers/{server_id}/files/upload": {
         parameters: {
             query?: never;
             header?: never;
@@ -920,14 +920,14 @@ export interface paths {
          *     ``extract=true`` a zip / tar.gz is expanded under ``path`` with per-entry
          *     traversal validation (zip-slip defence) and a total-extracted-size cap.
          */
-        post: operations["upload_file_communities__community_id__servers__server_id__files_upload_post"];
+        post: operations["upload_file_api_communities__community_id__servers__server_id__files_upload_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/groups": {
+    "/api/communities/{community_id}/servers/{server_id}/groups": {
         parameters: {
             query?: never;
             header?: never;
@@ -935,7 +935,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Server Groups */
-        get: operations["list_server_groups_communities__community_id__servers__server_id__groups_get"];
+        get: operations["list_server_groups_api_communities__community_id__servers__server_id__groups_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -944,7 +944,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/restart": {
+    "/api/communities/{community_id}/servers/{server_id}/restart": {
         parameters: {
             query?: never;
             header?: never;
@@ -954,14 +954,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Restart Server */
-        post: operations["restart_server_communities__community_id__servers__server_id__restart_post"];
+        post: operations["restart_server_api_communities__community_id__servers__server_id__restart_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/start": {
+    "/api/communities/{community_id}/servers/{server_id}/start": {
         parameters: {
             query?: never;
             header?: never;
@@ -971,14 +971,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Start Server */
-        post: operations["start_server_communities__community_id__servers__server_id__start_post"];
+        post: operations["start_server_api_communities__community_id__servers__server_id__start_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/communities/{community_id}/servers/{server_id}/stop": {
+    "/api/communities/{community_id}/servers/{server_id}/stop": {
         parameters: {
             query?: never;
             header?: never;
@@ -988,14 +988,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Stop Server */
-        post: operations["stop_server_communities__community_id__servers__server_id__stop_post"];
+        post: operations["stop_server_api_communities__community_id__servers__server_id__stop_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/data-plane/communities/{community_id}/servers/{server_id}/snapshot": {
+    "/api/data-plane/communities/{community_id}/servers/{server_id}/snapshot": {
         parameters: {
             query?: never;
             header?: never;
@@ -1020,14 +1020,14 @@ export interface paths {
          *     cross the boundary, so a misdeclared length cannot spool the whole body to disk
          *     before the mismatch is caught.
          */
-        post: operations["publish_snapshot_data_plane_communities__community_id__servers__server_id__snapshot_post"];
+        post: operations["publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/data-plane/communities/{community_id}/servers/{server_id}/working-set": {
+    "/api/data-plane/communities/{community_id}/servers/{server_id}/working-set": {
         parameters: {
             query?: never;
             header?: never;
@@ -1051,7 +1051,7 @@ export interface paths {
          *     (e.g. a never-started-then-started fresh server), the body is a tar carrying
          *     just ``server.jar`` so the Worker can still launch.
          */
-        get: operations["hydrate_working_set_data_plane_communities__community_id__servers__server_id__working_set_get"];
+        get: operations["hydrate_working_set_api_data_plane_communities__community_id__servers__server_id__working_set_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1060,7 +1060,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/healthz": {
+    "/api/healthz": {
         parameters: {
             query?: never;
             header?: never;
@@ -1068,7 +1068,7 @@ export interface paths {
             cookie?: never;
         };
         /** Healthz */
-        get: operations["healthz_healthz_get"];
+        get: operations["healthz_api_healthz_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1077,7 +1077,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/metrics": {
+    "/api/metrics": {
         parameters: {
             query?: never;
             header?: never;
@@ -1085,7 +1085,7 @@ export interface paths {
             cookie?: never;
         };
         /** Metrics */
-        get: operations["metrics_metrics_get"];
+        get: operations["metrics_api_metrics_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1094,7 +1094,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/ports/available": {
+    "/api/ports/available": {
         parameters: {
             query?: never;
             header?: never;
@@ -1105,7 +1105,7 @@ export interface paths {
          * Available Ports
          * @description Return the next ``count`` free in-range ports (issue #243).
          */
-        get: operations["available_ports_ports_available_get"];
+        get: operations["available_ports_api_ports_available_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1114,7 +1114,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/ports/check/{port}": {
+    "/api/ports/check/{port}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1125,7 +1125,7 @@ export interface paths {
          * Check Port
          * @description Report whether ``port`` is in range and currently free (issue #243).
          */
-        get: operations["check_port_ports_check__port__get"];
+        get: operations["check_port_api_ports_check__port__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1134,7 +1134,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/readyz": {
+    "/api/readyz": {
         parameters: {
             query?: never;
             header?: never;
@@ -1142,7 +1142,7 @@ export interface paths {
             cookie?: never;
         };
         /** Readyz */
-        get: operations["readyz_readyz_get"];
+        get: operations["readyz_api_readyz_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1151,7 +1151,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/users": {
+    "/api/users": {
         parameters: {
             query?: never;
             header?: never;
@@ -1159,17 +1159,17 @@ export interface paths {
             cookie?: never;
         };
         /** List Users */
-        get: operations["list_users_users_get"];
+        get: operations["list_users_api_users_get"];
         put?: never;
         /** Register User */
-        post: operations["register_user_users_post"];
+        post: operations["register_user_api_users_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/users/me": {
+    "/api/users/me": {
         parameters: {
             query?: never;
             header?: never;
@@ -1180,18 +1180,18 @@ export interface paths {
          * Read Current User
          * @description Return the authenticated user — the trivially protected endpoint.
          */
-        get: operations["read_current_user_users_me_get"];
+        get: operations["read_current_user_api_users_me_get"];
         put?: never;
         post?: never;
         /** Delete Account */
-        delete: operations["delete_account_users_me_delete"];
+        delete: operations["delete_account_api_users_me_delete"];
         options?: never;
         head?: never;
         /** Update Profile */
-        patch: operations["update_profile_users_me_patch"];
+        patch: operations["update_profile_api_users_me_patch"];
         trace?: never;
     };
-    "/users/me/password": {
+    "/api/users/me/password": {
         parameters: {
             query?: never;
             header?: never;
@@ -1200,7 +1200,7 @@ export interface paths {
         };
         get?: never;
         /** Change Password */
-        put: operations["change_password_users_me_password_put"];
+        put: operations["change_password_api_users_me_password_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -1208,7 +1208,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/users/{user_id}": {
+    "/api/users/{user_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1219,13 +1219,13 @@ export interface paths {
         put?: never;
         post?: never;
         /** Delete User */
-        delete: operations["delete_user_users__user_id__delete"];
+        delete: operations["delete_user_api_users__user_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/users/{user_id}/deactivate": {
+    "/api/users/{user_id}/deactivate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1235,14 +1235,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Deactivate User */
-        post: operations["deactivate_user_users__user_id__deactivate_post"];
+        post: operations["deactivate_user_api_users__user_id__deactivate_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/users/{user_id}/platform-admin": {
+    "/api/users/{user_id}/platform-admin": {
         parameters: {
             query?: never;
             header?: never;
@@ -1251,7 +1251,7 @@ export interface paths {
         };
         get?: never;
         /** Set Platform Admin */
-        put: operations["set_platform_admin_users__user_id__platform_admin_put"];
+        put: operations["set_platform_admin_api_users__user_id__platform_admin_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -1259,7 +1259,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/users/{user_id}/reactivate": {
+    "/api/users/{user_id}/reactivate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1269,14 +1269,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Reactivate User */
-        post: operations["reactivate_user_users__user_id__reactivate_post"];
+        post: operations["reactivate_user_api_users__user_id__reactivate_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/versions": {
+    "/api/versions": {
         parameters: {
             query?: never;
             header?: never;
@@ -1287,7 +1287,7 @@ export interface paths {
          * List Server Types
          * @description List the server types the catalog can resolve at M1.
          */
-        get: operations["list_server_types_versions_get"];
+        get: operations["list_server_types_api_versions_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1296,7 +1296,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/versions/jar-pool/gc": {
+    "/api/versions/jar-pool/gc": {
         parameters: {
             query?: never;
             header?: never;
@@ -1313,14 +1313,14 @@ export interface paths {
          *     inside the safety window; returns what it scanned and freed. Audited like the
          *     catalog refresh.
          */
-        post: operations["jar_pool_gc_versions_jar_pool_gc_post"];
+        post: operations["jar_pool_gc_api_versions_jar_pool_gc_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/versions/jar-pool/stats": {
+    "/api/versions/jar-pool/stats": {
         parameters: {
             query?: never;
             header?: never;
@@ -1331,7 +1331,7 @@ export interface paths {
          * Jar Pool Stats
          * @description Count + total bytes of the pooled JARs (platform admin, issue #286).
          */
-        get: operations["jar_pool_stats_versions_jar_pool_stats_get"];
+        get: operations["jar_pool_stats_api_versions_jar_pool_stats_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1340,7 +1340,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/versions/refresh": {
+    "/api/versions/refresh": {
         parameters: {
             query?: never;
             header?: never;
@@ -1358,14 +1358,14 @@ export interface paths {
          *     filters to one catalogued type; omitting it refreshes every type. An unknown
          *     type is a 404 (mirroring the listing surface).
          */
-        post: operations["refresh_catalog_versions_refresh_post"];
+        post: operations["refresh_catalog_api_versions_refresh_post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/versions/{server_type}": {
+    "/api/versions/{server_type}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1376,7 +1376,7 @@ export interface paths {
          * List Versions
          * @description List the versions offered for ``server_type``.
          */
-        get: operations["list_versions_versions__server_type__get"];
+        get: operations["list_versions_api_versions__server_type__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1385,7 +1385,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/workers": {
+    "/api/workers": {
         parameters: {
             query?: never;
             header?: never;
@@ -1393,7 +1393,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Workers */
-        get: operations["list_workers_workers_get"];
+        get: operations["list_workers_api_workers_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1402,7 +1402,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/workers/{worker_id}/drain": {
+    "/api/workers/{worker_id}/drain": {
         parameters: {
             query?: never;
             header?: never;
@@ -1411,10 +1411,10 @@ export interface paths {
         };
         get?: never;
         /** Set Worker Drain */
-        put: operations["set_worker_drain_workers__worker_id__drain_put"];
+        put: operations["set_worker_drain_api_workers__worker_id__drain_put"];
         post?: never;
         /** Clear Worker Drain */
-        delete: operations["clear_worker_drain_workers__worker_id__drain_delete"];
+        delete: operations["clear_worker_drain_api_workers__worker_id__drain_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1591,8 +1591,8 @@ export interface components {
             /** Unknown Size Count */
             unknown_size_count: number;
         };
-        /** Body_import_server_communities__community_id__servers_import_post */
-        Body_import_server_communities__community_id__servers_import_post: {
+        /** Body_import_server_api_communities__community_id__servers_import_post */
+        Body_import_server_api_communities__community_id__servers_import_post: {
             /** Execution Backend */
             execution_backend: string;
             /** File */
@@ -1600,13 +1600,13 @@ export interface components {
             /** Name */
             name: string;
         };
-        /** Body_upload_backup_communities__community_id__servers__server_id__backups_upload_post */
-        Body_upload_backup_communities__community_id__servers__server_id__backups_upload_post: {
+        /** Body_upload_backup_api_communities__community_id__servers__server_id__backups_upload_post */
+        Body_upload_backup_api_communities__community_id__servers__server_id__backups_upload_post: {
             /** File */
             file: string;
         };
-        /** Body_upload_file_communities__community_id__servers__server_id__files_upload_post */
-        Body_upload_file_communities__community_id__servers__server_id__files_upload_post: {
+        /** Body_upload_file_api_communities__community_id__servers__server_id__files_upload_post */
+        Body_upload_file_api_communities__community_id__servers__server_id__files_upload_post: {
             /** File */
             file: string;
         };
@@ -2169,7 +2169,7 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    list_all_communities_admin_communities_get: {
+    list_all_communities_api_admin_communities_get: {
         parameters: {
             query?: {
                 limit?: number;
@@ -2201,7 +2201,7 @@ export interface operations {
             };
         };
     };
-    admin_create_user_admin_users_post: {
+    admin_create_user_api_admin_users_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2234,7 +2234,7 @@ export interface operations {
             };
         };
     };
-    list_audit_log_audit_get: {
+    list_audit_log_api_audit_get: {
         parameters: {
             query?: {
                 community?: string | null;
@@ -2271,7 +2271,7 @@ export interface operations {
             };
         };
     };
-    login_auth_login_post: {
+    login_api_auth_login_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2304,7 +2304,7 @@ export interface operations {
             };
         };
     };
-    logout_auth_logout_post: {
+    logout_api_auth_logout_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2335,7 +2335,7 @@ export interface operations {
             };
         };
     };
-    refresh_auth_refresh_post: {
+    refresh_api_auth_refresh_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2368,7 +2368,7 @@ export interface operations {
             };
         };
     };
-    global_backup_statistics_backups_statistics_get: {
+    global_backup_statistics_api_backups_statistics_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2388,7 +2388,7 @@ export interface operations {
             };
         };
     };
-    list_my_communities_communities_get: {
+    list_my_communities_api_communities_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2408,7 +2408,7 @@ export interface operations {
             };
         };
     };
-    provision_community_communities_post: {
+    provision_community_api_communities_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2441,7 +2441,7 @@ export interface operations {
             };
         };
     };
-    read_community_communities__community_id__get: {
+    read_community_api_communities__community_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2472,7 +2472,7 @@ export interface operations {
             };
         };
     };
-    delete_community_communities__community_id__delete: {
+    delete_community_api_communities__community_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -2501,7 +2501,7 @@ export interface operations {
             };
         };
     };
-    rename_community_communities__community_id__patch: {
+    rename_community_api_communities__community_id__patch: {
         parameters: {
             query?: never;
             header?: never;
@@ -2536,7 +2536,7 @@ export interface operations {
             };
         };
     };
-    list_community_audit_log_communities__community_id__audit_get: {
+    list_community_audit_log_api_communities__community_id__audit_get: {
         parameters: {
             query?: {
                 operation?: string | null;
@@ -2574,7 +2574,7 @@ export interface operations {
             };
         };
     };
-    list_grants_communities__community_id__grants_get: {
+    list_grants_api_communities__community_id__grants_get: {
         parameters: {
             query?: {
                 user_id?: string | null;
@@ -2607,7 +2607,7 @@ export interface operations {
             };
         };
     };
-    create_grant_communities__community_id__grants_post: {
+    create_grant_api_communities__community_id__grants_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2642,7 +2642,7 @@ export interface operations {
             };
         };
     };
-    revoke_grant_communities__community_id__grants__grant_id__delete: {
+    revoke_grant_api_communities__community_id__grants__grant_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -2672,7 +2672,7 @@ export interface operations {
             };
         };
     };
-    list_groups_communities__community_id__groups_get: {
+    list_groups_api_communities__community_id__groups_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2703,7 +2703,7 @@ export interface operations {
             };
         };
     };
-    create_group_communities__community_id__groups_post: {
+    create_group_api_communities__community_id__groups_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2738,7 +2738,7 @@ export interface operations {
             };
         };
     };
-    read_group_communities__community_id__groups__group_id__get: {
+    read_group_api_communities__community_id__groups__group_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2770,7 +2770,7 @@ export interface operations {
             };
         };
     };
-    delete_group_communities__community_id__groups__group_id__delete: {
+    delete_group_api_communities__community_id__groups__group_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -2800,7 +2800,7 @@ export interface operations {
             };
         };
     };
-    rename_group_communities__community_id__groups__group_id__patch: {
+    rename_group_api_communities__community_id__groups__group_id__patch: {
         parameters: {
             query?: never;
             header?: never;
@@ -2836,7 +2836,7 @@ export interface operations {
             };
         };
     };
-    add_player_communities__community_id__groups__group_id__players_post: {
+    add_player_api_communities__community_id__groups__group_id__players_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -2872,7 +2872,7 @@ export interface operations {
             };
         };
     };
-    remove_player_communities__community_id__groups__group_id__players__player_uuid__delete: {
+    remove_player_api_communities__community_id__groups__group_id__players__player_uuid__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -2905,7 +2905,7 @@ export interface operations {
             };
         };
     };
-    list_group_servers_communities__community_id__groups__group_id__servers_get: {
+    list_group_servers_api_communities__community_id__groups__group_id__servers_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2937,7 +2937,7 @@ export interface operations {
             };
         };
     };
-    attach_group_communities__community_id__groups__group_id__servers__server_id__put: {
+    attach_group_api_communities__community_id__groups__group_id__servers__server_id__put: {
         parameters: {
             query?: never;
             header?: never;
@@ -2968,7 +2968,7 @@ export interface operations {
             };
         };
     };
-    detach_group_communities__community_id__groups__group_id__servers__server_id__delete: {
+    detach_group_api_communities__community_id__groups__group_id__servers__server_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -2999,7 +2999,7 @@ export interface operations {
             };
         };
     };
-    read_my_permissions_communities__community_id__me_permissions_get: {
+    read_my_permissions_api_communities__community_id__me_permissions_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3030,7 +3030,7 @@ export interface operations {
             };
         };
     };
-    list_members_communities__community_id__members_get: {
+    list_members_api_communities__community_id__members_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3061,7 +3061,7 @@ export interface operations {
             };
         };
     };
-    add_member_communities__community_id__members_post: {
+    add_member_api_communities__community_id__members_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3096,7 +3096,7 @@ export interface operations {
             };
         };
     };
-    remove_member_communities__community_id__members__user_id__delete: {
+    remove_member_api_communities__community_id__members__user_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -3126,7 +3126,7 @@ export interface operations {
             };
         };
     };
-    assign_role_communities__community_id__members__user_id__roles_post: {
+    assign_role_api_communities__community_id__members__user_id__roles_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3160,7 +3160,7 @@ export interface operations {
             };
         };
     };
-    unassign_role_communities__community_id__members__user_id__roles__role_id__delete: {
+    unassign_role_api_communities__community_id__members__user_id__roles__role_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -3191,7 +3191,7 @@ export interface operations {
             };
         };
     };
-    list_roles_communities__community_id__roles_get: {
+    list_roles_api_communities__community_id__roles_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3222,7 +3222,7 @@ export interface operations {
             };
         };
     };
-    create_role_communities__community_id__roles_post: {
+    create_role_api_communities__community_id__roles_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3257,7 +3257,7 @@ export interface operations {
             };
         };
     };
-    read_role_communities__community_id__roles__role_id__get: {
+    read_role_api_communities__community_id__roles__role_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3289,7 +3289,7 @@ export interface operations {
             };
         };
     };
-    delete_role_communities__community_id__roles__role_id__delete: {
+    delete_role_api_communities__community_id__roles__role_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -3319,7 +3319,7 @@ export interface operations {
             };
         };
     };
-    update_role_communities__community_id__roles__role_id__patch: {
+    update_role_api_communities__community_id__roles__role_id__patch: {
         parameters: {
             query?: never;
             header?: never;
@@ -3355,7 +3355,7 @@ export interface operations {
             };
         };
     };
-    list_servers_communities__community_id__servers_get: {
+    list_servers_api_communities__community_id__servers_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3386,7 +3386,7 @@ export interface operations {
             };
         };
     };
-    create_server_communities__community_id__servers_post: {
+    create_server_api_communities__community_id__servers_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3421,7 +3421,7 @@ export interface operations {
             };
         };
     };
-    import_server_communities__community_id__servers_import_post: {
+    import_server_api_communities__community_id__servers_import_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3432,7 +3432,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "multipart/form-data": components["schemas"]["Body_import_server_communities__community_id__servers_import_post"];
+                "multipart/form-data": components["schemas"]["Body_import_server_api_communities__community_id__servers_import_post"];
             };
         };
         responses: {
@@ -3456,7 +3456,7 @@ export interface operations {
             };
         };
     };
-    read_server_communities__community_id__servers__server_id__get: {
+    read_server_api_communities__community_id__servers__server_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3488,7 +3488,7 @@ export interface operations {
             };
         };
     };
-    delete_server_communities__community_id__servers__server_id__delete: {
+    delete_server_api_communities__community_id__servers__server_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -3518,7 +3518,7 @@ export interface operations {
             };
         };
     };
-    update_server_communities__community_id__servers__server_id__patch: {
+    update_server_api_communities__community_id__servers__server_id__patch: {
         parameters: {
             query?: never;
             header?: never;
@@ -3554,7 +3554,7 @@ export interface operations {
             };
         };
     };
-    list_backups_communities__community_id__servers__server_id__backups_get: {
+    list_backups_api_communities__community_id__servers__server_id__backups_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3586,7 +3586,7 @@ export interface operations {
             };
         };
     };
-    create_backup_communities__community_id__servers__server_id__backups_post: {
+    create_backup_api_communities__community_id__servers__server_id__backups_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3618,7 +3618,7 @@ export interface operations {
             };
         };
     };
-    server_backup_statistics_communities__community_id__servers__server_id__backups_statistics_get: {
+    server_backup_statistics_api_communities__community_id__servers__server_id__backups_statistics_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3650,7 +3650,7 @@ export interface operations {
             };
         };
     };
-    upload_backup_communities__community_id__servers__server_id__backups_upload_post: {
+    upload_backup_api_communities__community_id__servers__server_id__backups_upload_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3662,7 +3662,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "multipart/form-data": components["schemas"]["Body_upload_backup_communities__community_id__servers__server_id__backups_upload_post"];
+                "multipart/form-data": components["schemas"]["Body_upload_backup_api_communities__community_id__servers__server_id__backups_upload_post"];
             };
         };
         responses: {
@@ -3686,7 +3686,7 @@ export interface operations {
             };
         };
     };
-    delete_backup_communities__community_id__servers__server_id__backups__backup_id__delete: {
+    delete_backup_api_communities__community_id__servers__server_id__backups__backup_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -3717,7 +3717,7 @@ export interface operations {
             };
         };
     };
-    download_backup_communities__community_id__servers__server_id__backups__backup_id__download_get: {
+    download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3750,7 +3750,7 @@ export interface operations {
             };
         };
     };
-    restore_backup_communities__community_id__servers__server_id__backups__backup_id__restore_post: {
+    restore_backup_api_communities__community_id__servers__server_id__backups__backup_id__restore_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3781,7 +3781,7 @@ export interface operations {
             };
         };
     };
-    send_server_command_communities__community_id__servers__server_id__command_post: {
+    send_server_command_api_communities__community_id__servers__server_id__command_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3817,7 +3817,7 @@ export interface operations {
             };
         };
     };
-    export_server_communities__community_id__servers__server_id__export_get: {
+    export_server_api_communities__community_id__servers__server_id__export_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3849,7 +3849,7 @@ export interface operations {
             };
         };
     };
-    read_or_list_files_communities__community_id__servers__server_id__files_get: {
+    read_or_list_files_api_communities__community_id__servers__server_id__files_get: {
         parameters: {
             query?: {
                 path?: string;
@@ -3884,7 +3884,7 @@ export interface operations {
             };
         };
     };
-    write_file_communities__community_id__servers__server_id__files_put: {
+    write_file_api_communities__community_id__servers__server_id__files_put: {
         parameters: {
             query?: {
                 path?: string;
@@ -3920,7 +3920,7 @@ export interface operations {
             };
         };
     };
-    delete_file_communities__community_id__servers__server_id__files_delete: {
+    delete_file_api_communities__community_id__servers__server_id__files_delete: {
         parameters: {
             query: {
                 path: string;
@@ -3952,7 +3952,7 @@ export interface operations {
             };
         };
     };
-    make_directory_communities__community_id__servers__server_id__files_directories_post: {
+    make_directory_api_communities__community_id__servers__server_id__files_directories_post: {
         parameters: {
             query: {
                 path: string;
@@ -3984,7 +3984,7 @@ export interface operations {
             };
         };
     };
-    download_file_communities__community_id__servers__server_id__files_download_get: {
+    download_file_api_communities__community_id__servers__server_id__files_download_get: {
         parameters: {
             query?: {
                 path?: string;
@@ -4018,7 +4018,7 @@ export interface operations {
             };
         };
     };
-    list_file_history_communities__community_id__servers__server_id__files_history_get: {
+    list_file_history_api_communities__community_id__servers__server_id__files_history_get: {
         parameters: {
             query: {
                 path: string;
@@ -4052,7 +4052,7 @@ export interface operations {
             };
         };
     };
-    rename_file_communities__community_id__servers__server_id__files_rename_post: {
+    rename_file_api_communities__community_id__servers__server_id__files_rename_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4086,7 +4086,7 @@ export interface operations {
             };
         };
     };
-    rollback_file_communities__community_id__servers__server_id__files_rollback_post: {
+    rollback_file_api_communities__community_id__servers__server_id__files_rollback_post: {
         parameters: {
             query: {
                 path: string;
@@ -4122,7 +4122,7 @@ export interface operations {
             };
         };
     };
-    search_files_communities__community_id__servers__server_id__files_search_post: {
+    search_files_api_communities__community_id__servers__server_id__files_search_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4158,7 +4158,7 @@ export interface operations {
             };
         };
     };
-    upload_file_communities__community_id__servers__server_id__files_upload_post: {
+    upload_file_api_communities__community_id__servers__server_id__files_upload_post: {
         parameters: {
             query?: {
                 path?: string;
@@ -4173,7 +4173,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "multipart/form-data": components["schemas"]["Body_upload_file_communities__community_id__servers__server_id__files_upload_post"];
+                "multipart/form-data": components["schemas"]["Body_upload_file_api_communities__community_id__servers__server_id__files_upload_post"];
             };
         };
         responses: {
@@ -4195,7 +4195,7 @@ export interface operations {
             };
         };
     };
-    list_server_groups_communities__community_id__servers__server_id__groups_get: {
+    list_server_groups_api_communities__community_id__servers__server_id__groups_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4227,7 +4227,7 @@ export interface operations {
             };
         };
     };
-    restart_server_communities__community_id__servers__server_id__restart_post: {
+    restart_server_api_communities__community_id__servers__server_id__restart_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4259,7 +4259,7 @@ export interface operations {
             };
         };
     };
-    start_server_communities__community_id__servers__server_id__start_post: {
+    start_server_api_communities__community_id__servers__server_id__start_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4291,7 +4291,7 @@ export interface operations {
             };
         };
     };
-    stop_server_communities__community_id__servers__server_id__stop_post: {
+    stop_server_api_communities__community_id__servers__server_id__stop_post: {
         parameters: {
             query?: {
                 force?: boolean;
@@ -4325,7 +4325,7 @@ export interface operations {
             };
         };
     };
-    publish_snapshot_data_plane_communities__community_id__servers__server_id__snapshot_post: {
+    publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post: {
         parameters: {
             query?: never;
             header?: {
@@ -4358,7 +4358,7 @@ export interface operations {
             };
         };
     };
-    hydrate_working_set_data_plane_communities__community_id__servers__server_id__working_set_get: {
+    hydrate_working_set_api_data_plane_communities__community_id__servers__server_id__working_set_get: {
         parameters: {
             query?: never;
             header?: {
@@ -4392,7 +4392,7 @@ export interface operations {
             };
         };
     };
-    healthz_healthz_get: {
+    healthz_api_healthz_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4412,7 +4412,7 @@ export interface operations {
             };
         };
     };
-    metrics_metrics_get: {
+    metrics_api_metrics_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4432,7 +4432,7 @@ export interface operations {
             };
         };
     };
-    available_ports_ports_available_get: {
+    available_ports_api_ports_available_get: {
         parameters: {
             query?: {
                 count?: number;
@@ -4463,7 +4463,7 @@ export interface operations {
             };
         };
     };
-    check_port_ports_check__port__get: {
+    check_port_api_ports_check__port__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4494,7 +4494,7 @@ export interface operations {
             };
         };
     };
-    readyz_readyz_get: {
+    readyz_api_readyz_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4514,7 +4514,7 @@ export interface operations {
             };
         };
     };
-    list_users_users_get: {
+    list_users_api_users_get: {
         parameters: {
             query?: {
                 limit?: number;
@@ -4546,7 +4546,7 @@ export interface operations {
             };
         };
     };
-    register_user_users_post: {
+    register_user_api_users_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4579,7 +4579,7 @@ export interface operations {
             };
         };
     };
-    read_current_user_users_me_get: {
+    read_current_user_api_users_me_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4599,7 +4599,7 @@ export interface operations {
             };
         };
     };
-    delete_account_users_me_delete: {
+    delete_account_api_users_me_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -4630,7 +4630,7 @@ export interface operations {
             };
         };
     };
-    update_profile_users_me_patch: {
+    update_profile_api_users_me_patch: {
         parameters: {
             query?: never;
             header?: never;
@@ -4663,7 +4663,7 @@ export interface operations {
             };
         };
     };
-    change_password_users_me_password_put: {
+    change_password_api_users_me_password_put: {
         parameters: {
             query?: never;
             header?: never;
@@ -4694,7 +4694,7 @@ export interface operations {
             };
         };
     };
-    delete_user_users__user_id__delete: {
+    delete_user_api_users__user_id__delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -4723,7 +4723,7 @@ export interface operations {
             };
         };
     };
-    deactivate_user_users__user_id__deactivate_post: {
+    deactivate_user_api_users__user_id__deactivate_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4752,7 +4752,7 @@ export interface operations {
             };
         };
     };
-    set_platform_admin_users__user_id__platform_admin_put: {
+    set_platform_admin_api_users__user_id__platform_admin_put: {
         parameters: {
             query?: never;
             header?: never;
@@ -4785,7 +4785,7 @@ export interface operations {
             };
         };
     };
-    reactivate_user_users__user_id__reactivate_post: {
+    reactivate_user_api_users__user_id__reactivate_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4814,7 +4814,7 @@ export interface operations {
             };
         };
     };
-    list_server_types_versions_get: {
+    list_server_types_api_versions_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4834,7 +4834,7 @@ export interface operations {
             };
         };
     };
-    jar_pool_gc_versions_jar_pool_gc_post: {
+    jar_pool_gc_api_versions_jar_pool_gc_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4854,7 +4854,7 @@ export interface operations {
             };
         };
     };
-    jar_pool_stats_versions_jar_pool_stats_get: {
+    jar_pool_stats_api_versions_jar_pool_stats_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4874,7 +4874,7 @@ export interface operations {
             };
         };
     };
-    refresh_catalog_versions_refresh_post: {
+    refresh_catalog_api_versions_refresh_post: {
         parameters: {
             query?: {
                 server_type?: string | null;
@@ -4905,7 +4905,7 @@ export interface operations {
             };
         };
     };
-    list_versions_versions__server_type__get: {
+    list_versions_api_versions__server_type__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4936,7 +4936,7 @@ export interface operations {
             };
         };
     };
-    list_workers_workers_get: {
+    list_workers_api_workers_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4956,7 +4956,7 @@ export interface operations {
             };
         };
     };
-    set_worker_drain_workers__worker_id__drain_put: {
+    set_worker_drain_api_workers__worker_id__drain_put: {
         parameters: {
             query?: never;
             header?: never;
@@ -4985,7 +4985,7 @@ export interface operations {
             };
         };
     };
-    clear_worker_drain_workers__worker_id__drain_delete: {
+    clear_worker_drain_api_workers__worker_id__drain_delete: {
         parameters: {
             query?: never;
             header?: never;

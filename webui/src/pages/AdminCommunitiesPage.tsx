@@ -30,12 +30,12 @@ type AdminUserResponse = components["schemas"]["AdminUserResponse"];
 // The API caps a single page at 100 and defaults to 50 (admin_communities.py).
 const PAGE_SIZE = 50;
 
-function communitiesUrl(offset: number): "/admin/communities" {
+function communitiesUrl(offset: number): "/api/admin/communities" {
   const params = new URLSearchParams({
     limit: String(PAGE_SIZE),
     offset: String(offset),
   });
-  return `/admin/communities?${params.toString()}` as "/admin/communities";
+  return `/api/admin/communities?${params.toString()}` as "/api/admin/communities";
 }
 
 export function AdminCommunitiesPage() {
@@ -60,7 +60,9 @@ export function AdminCommunitiesPage() {
 
   const remove = useMutation({
     mutationFn: (id: string) =>
-      api.delete(apiPath("/communities/{community_id}", { community_id: id })),
+      api.delete(
+        apiPath("/api/communities/{community_id}", { community_id: id }),
+      ),
     onSuccess: () => {
       showToast(t("admin.communities.deleted"), "success");
       invalidate();
@@ -268,7 +270,7 @@ function ProvisionDialog({
   // Only fetched while open.
   const users = useQuery({
     queryKey: ["users"],
-    queryFn: () => api.get("/users?limit=100&offset=0" as "/users"),
+    queryFn: () => api.get("/api/users?limit=100&offset=0" as "/api/users"),
     enabled: open,
   });
 
@@ -281,7 +283,7 @@ function ProvisionDialog({
 
   const provision = useMutation({
     mutationFn: (body: { name: string; owner_user_id: string }) =>
-      api.post("/communities", { body: JSON.stringify(body) }),
+      api.post("/api/communities", { body: JSON.stringify(body) }),
     onSuccess: () => {
       setName("");
       setOwnerId("");

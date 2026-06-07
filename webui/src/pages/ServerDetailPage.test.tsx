@@ -202,7 +202,7 @@ describe("ServerDetailPage lifecycle controls", () => {
 
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}/stop?force=true`,
+        `/api/communities/${CID}/servers/${SID}/stop?force=true`,
       ),
     );
   });
@@ -220,7 +220,7 @@ describe("ServerDetailPage lifecycle controls", () => {
 
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}/stop`,
+        `/api/communities/${CID}/servers/${SID}/stop`,
       ),
     );
   });
@@ -306,7 +306,7 @@ describe("ServerDetailPage export", () => {
 
     await waitFor(() =>
       expect(mockDownload.downloadFile).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}/export`,
+        `/api/communities/${CID}/servers/${SID}/export`,
         "survival.zip",
       ),
     );
@@ -386,7 +386,7 @@ describe("ServerDetailPage settings", () => {
     fireEvent.blur(portInput);
 
     await waitFor(() =>
-      expect(mockApi.get).toHaveBeenCalledWith("/ports/check/25570"),
+      expect(mockApi.get).toHaveBeenCalledWith("/api/ports/check/25570"),
     );
     expect(
       await screen.findByText(t("serverDetail.port.taken")),
@@ -411,7 +411,7 @@ describe("ServerDetailPage settings", () => {
 
     await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
     const [path, init] = mockApi.patch.mock.calls[0];
-    expect(path).toBe(`/communities/${CID}/servers/${SID}`);
+    expect(path).toBe(`/api/communities/${CID}/servers/${SID}`);
     expect(JSON.parse(init.body)).toEqual({
       name: "renamed",
       game_port: 25565,
@@ -603,7 +603,7 @@ describe("ServerDetailPage delete (typed confirm)", () => {
 
     await waitFor(() =>
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}`,
+        `/api/communities/${CID}/servers/${SID}`,
       ),
     );
     await waitFor(() =>
@@ -787,7 +787,7 @@ describe("ServerDetailPage Console tab", () => {
 
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}/command`,
+        `/api/communities/${CID}/servers/${SID}/command`,
         { body: JSON.stringify({ line: "list" }) },
       ),
     );

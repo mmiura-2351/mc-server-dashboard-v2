@@ -113,7 +113,7 @@ def _client(app: object) -> Iterator[TestClient]:
 
 
 def _url(community: uuid.UUID) -> str:
-    return f"/communities/{community}/events"
+    return f"/api/communities/{community}/events"
 
 
 # --- auth / authorization before the upgrade -------------------------------

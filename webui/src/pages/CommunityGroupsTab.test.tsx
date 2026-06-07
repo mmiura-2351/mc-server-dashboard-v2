@@ -65,10 +65,10 @@ function routeGet(opts: {
   groupServers?: string[];
 }) {
   mockApi.get.mockImplementation((path: string) => {
-    if (path === `/communities/${CID}/groups`) {
+    if (path === `/api/communities/${CID}/groups`) {
       return Promise.resolve(opts.groups ?? []);
     }
-    if (path === `/communities/${CID}/servers`) {
+    if (path === `/api/communities/${CID}/servers`) {
       return Promise.resolve(opts.servers ?? []);
     }
     if (/\/groups\/[^/]+\/servers$/.test(path)) {
@@ -175,9 +175,12 @@ describe("CommunityGroupsTab", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.post).toHaveBeenCalledWith(`/communities/${CID}/groups`, {
-        body: JSON.stringify({ name: "Mods", kind: "whitelist" }),
-      });
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/groups`,
+        {
+          body: JSON.stringify({ name: "Mods", kind: "whitelist" }),
+        },
+      );
     });
   });
 
@@ -204,7 +207,7 @@ describe("CommunityGroupsTab", () => {
 
     await waitFor(() => {
       expect(mockApi.patch).toHaveBeenCalledWith(
-        `/communities/${CID}/groups/g1`,
+        `/api/communities/${CID}/groups/g1`,
         { body: JSON.stringify({ name: "Owners" }) },
       );
     });
@@ -232,7 +235,7 @@ describe("CommunityGroupsTab", () => {
 
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/groups/g1`,
+        `/api/communities/${CID}/groups/g1`,
       );
     });
   });
@@ -264,7 +267,7 @@ describe("CommunityGroupsTab", () => {
 
     await waitFor(() => {
       expect(mockApi.post).toHaveBeenCalledWith(
-        `/communities/${CID}/groups/g1/players`,
+        `/api/communities/${CID}/groups/g1/players`,
         { body: JSON.stringify({ uuid: "uuid-1", username: "steve" }) },
       );
     });
@@ -292,7 +295,7 @@ describe("CommunityGroupsTab", () => {
 
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/groups/g1/players/uuid-1`,
+        `/api/communities/${CID}/groups/g1/players/uuid-1`,
       );
     });
   });
@@ -336,7 +339,7 @@ describe("CommunityGroupsTab", () => {
 
     await waitFor(() => {
       expect(mockApi.put).toHaveBeenCalledWith(
-        `/communities/${CID}/groups/g1/servers/s2`,
+        `/api/communities/${CID}/groups/g1/servers/s2`,
       );
     });
   });
@@ -364,7 +367,7 @@ describe("CommunityGroupsTab", () => {
 
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/groups/g1/servers/s1`,
+        `/api/communities/${CID}/groups/g1/servers/s1`,
       );
     });
   });

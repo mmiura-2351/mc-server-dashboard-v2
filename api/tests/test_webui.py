@@ -56,16 +56,37 @@ def test_deep_link_falls_back_to_index(webui_client: TestClient) -> None:
     assert "spa" in resp.text
 
 
+@pytest.mark.parametrize(
+    "deep_link",
+    [
+        "/communities/11111111-1111-1111-1111-111111111111",
+        "/communities/11111111-1111-1111-1111-111111111111"
+        "/servers/22222222-2222-2222-2222-222222222222",
+        "/communities/11111111-1111-1111-1111-111111111111/servers/new",
+    ],
+)
+def test_colliding_deep_links_reload_to_spa(
+    webui_client: TestClient, deep_link: str
+) -> None:
+    # Regression for issue #498: these three SPA routes used to collide with API
+    # GET routes on a hard reload and return JSON. With the API namespaced under
+    # /api, a non-/api browser navigation (Accept: text/html, no auth) now falls
+    # through to the SPA index.
+    resp = webui_client.get(deep_link, headers={"Accept": "text/html"})
+    assert resp.status_code == 200
+    assert "spa" in resp.text
+
+
 def test_api_route_takes_precedence(webui_client: TestClient) -> None:
-    # /healthz is a real API route and must NOT be shadowed by the SPA mount.
-    resp = webui_client.get("/healthz")
+    # /api/healthz is a real API route and must NOT be shadowed by the SPA mount.
+    resp = webui_client.get("/api/healthz")
     assert resp.status_code == 200
     assert resp.json()["database_reachable"] in (True, False)
 
 
 def test_openapi_takes_precedence(webui_client: TestClient) -> None:
     # The generated schema must keep its real JSON, not the SPA fallback.
-    resp = webui_client.get("/openapi.json")
+    resp = webui_client.get("/api/openapi.json")
     assert resp.status_code == 200
     assert resp.json()["openapi"].startswith("3.")
 

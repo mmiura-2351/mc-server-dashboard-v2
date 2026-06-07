@@ -15,9 +15,9 @@ a non-browser client never asked for (issue #372). The body still carries the
 refresh token even for cookie clients, so the body-based contract is unchanged
 (non-breaking).
 
-CSRF posture: the cookie is ``HttpOnly; Secure; SameSite=Strict; Path=/auth`` —
-SameSite=Strict keeps the browser from attaching it to cross-site requests and
-Path=/auth confines it to the auth endpoints. Refresh returns the rotated tokens
+CSRF posture: the cookie is ``HttpOnly; Secure; SameSite=Strict; Path=/api/auth``
+— SameSite=Strict keeps the browser from attaching it to cross-site requests and
+Path=/api/auth confines it to the auth endpoints. Refresh returns the rotated tokens
 in the response body and performs no state change on behalf of an ambient
 session, so it is not a useful CSRF target; the residual surface is a
 logout-by-forced-request, whose only effect is to end the victim's own session.
@@ -59,7 +59,7 @@ router = APIRouter()
 
 # Fixed cookie attributes (the security posture, not operator knobs): confine the
 # cookie to the auth endpoints and forbid cross-site attachment. See module docstring.
-_COOKIE_PATH = "/auth"
+_COOKIE_PATH = "/api/auth"
 _COOKIE_SAMESITE: Literal["strict"] = "strict"
 
 

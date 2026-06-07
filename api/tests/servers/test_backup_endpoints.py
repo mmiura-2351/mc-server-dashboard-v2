@@ -173,7 +173,7 @@ def _stats() -> BackupStatistics:
 
 
 def _url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> str:
-    return f"/communities/{community}/servers/{server}/backups{suffix}"
+    return f"/api/communities/{community}/servers/{server}/backups{suffix}"
 
 
 # --- two-layer gate --------------------------------------------------------
@@ -436,7 +436,7 @@ def test_global_statistics_requires_platform_admin() -> None:
     use_case = _FakeUseCase(result=_stats())
     app = _app(member=True, allow=True, global_statistics=use_case, is_admin=False)
     client = next(_client(app))
-    resp = client.get("/backups/statistics")
+    resp = client.get("/api/backups/statistics")
     assert resp.status_code == 403
 
 
@@ -444,6 +444,6 @@ def test_global_statistics_admin_returns_aggregate() -> None:
     use_case = _FakeUseCase(result=_stats())
     app = _app(member=True, allow=True, global_statistics=use_case, is_admin=True)
     client = next(_client(app))
-    resp = client.get("/backups/statistics")
+    resp = client.get("/api/backups/statistics")
     assert resp.status_code == 200
     assert resp.json()["count"] == 2

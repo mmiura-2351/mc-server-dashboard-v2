@@ -144,7 +144,7 @@ def test_non_member_gets_404_on_create() -> None:
     app = _app(member=False, allow=True, create=_FakeUseCase())
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/groups", json={"name": "ops", "kind": "op"}
+        f"/api/communities/{uuid.uuid4()}/groups", json={"name": "ops", "kind": "op"}
     )
     assert resp.status_code == 404
 
@@ -153,7 +153,7 @@ def test_member_without_permission_gets_403_on_create() -> None:
     app = _app(member=True, allow=False, create=_FakeUseCase())
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/groups", json={"name": "ops", "kind": "op"}
+        f"/api/communities/{uuid.uuid4()}/groups", json={"name": "ops", "kind": "op"}
     )
     assert resp.status_code == 403
 
@@ -170,7 +170,7 @@ def test_authorized_member_creates_group_and_audits() -> None:
     )
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{community}/groups", json={"name": "admins", "kind": "op"}
+        f"/api/communities/{community}/groups", json={"name": "admins", "kind": "op"}
     )
     assert resp.status_code == 201
     assert resp.json()["kind"] == "op"
@@ -188,7 +188,7 @@ def test_create_unknown_kind_is_422() -> None:
     )
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/groups", json={"name": "x", "kind": "banned"}
+        f"/api/communities/{uuid.uuid4()}/groups", json={"name": "x", "kind": "banned"}
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_group_kind"
@@ -202,7 +202,7 @@ def test_create_duplicate_name_is_409() -> None:
     )
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/groups", json={"name": "admins", "kind": "op"}
+        f"/api/communities/{uuid.uuid4()}/groups", json={"name": "admins", "kind": "op"}
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "group_name_exists"
@@ -215,7 +215,7 @@ def test_read_missing_group_is_404() -> None:
         read=_FakeUseCase(error=GroupNotFoundError("x")),
     )
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
@@ -228,7 +228,7 @@ def test_attach_missing_server_is_404() -> None:
     )
     client = next(_client(app))
     resp = client.put(
-        f"/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}/servers/{uuid.uuid4()}"
+        f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}/servers/{uuid.uuid4()}"
     )
     assert resp.status_code == 404
 
@@ -241,5 +241,5 @@ def test_delete_group_returns_204() -> None:
         recorder=_RecordingRecorder(),
     )
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}")
     assert resp.status_code == 204

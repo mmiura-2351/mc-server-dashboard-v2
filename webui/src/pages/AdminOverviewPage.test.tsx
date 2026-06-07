@@ -81,15 +81,15 @@ const JAR_POOL = { count: 14, total_bytes: 2_040_109_466 };
 function signedInAs(user: typeof ADMIN) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/users/me") return Promise.resolve(jsonResponse(user));
-    if (url === "/communities")
+    if (url === "/api/users/me") return Promise.resolve(jsonResponse(user));
+    if (url === "/api/communities")
       return Promise.resolve(jsonResponse([{ id: "c1", name: "Alpha" }]));
     if (url.endsWith("/me/permissions"))
       return Promise.resolve(jsonResponse({}));
-    if (url === "/workers") return Promise.resolve(jsonResponse(WORKERS));
-    if (url === "/backups/statistics")
+    if (url === "/api/workers") return Promise.resolve(jsonResponse(WORKERS));
+    if (url === "/api/backups/statistics")
       return Promise.resolve(jsonResponse(BACKUP_STATS));
-    if (url === "/versions/jar-pool/stats")
+    if (url === "/api/versions/jar-pool/stats")
       return Promise.resolve(jsonResponse(JAR_POOL));
     return Promise.resolve(tokenResponse());
   });
@@ -187,12 +187,12 @@ describe("admin overview stats", () => {
   it("shows the error state when a stats endpoint fails", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url === "/users/me") return Promise.resolve(jsonResponse(ADMIN));
-      if (url === "/communities")
+      if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/api/communities")
         return Promise.resolve(jsonResponse([{ id: "c1", name: "Alpha" }]));
       if (url.endsWith("/me/permissions"))
         return Promise.resolve(jsonResponse({}));
-      if (url === "/workers")
+      if (url === "/api/workers")
         return Promise.resolve(
           new Response("nope", {
             status: 503,

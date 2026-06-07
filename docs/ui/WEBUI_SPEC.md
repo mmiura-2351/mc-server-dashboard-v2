@@ -42,6 +42,14 @@
 Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 `[A]` = platform-admin axis; everything else is community-permission-gated.
 
+> **`/api` prefix (issue #498).** The entire HTTP API — every path in the tables
+> below, the WebSocket endpoints in 2.5, and the OpenAPI schema/docs — is
+> namespaced under `/api` so it can never collide with an SPA client-side route
+> (see 7.7). Paths are written here without the prefix for brevity; the real path
+> is `/api` + the listed path (e.g. `/api/auth/login`,
+> `/api/communities/{id}`). The typed client carries the prefix automatically:
+> the generated schema paths already include `/api`.
+
 ### 2.1 Identity & auth
 
 | Method | Path | Notes |
@@ -149,7 +157,7 @@ unauthenticated, 4403 forbidden, 4404 not found / not a member. Authorization
 is re-checked every 60 s mid-stream. Delivery is best-effort; REST keeps
 working if the socket dies (FR-MON-4).
 
-Note: the data-plane endpoints (`/data-plane/...`) are Worker-credential-only
+Note: the data-plane endpoints (`/api/data-plane/...`) are Worker-credential-only
 transfer endpoints — not part of the UI surface.
 
 ## 3. Personas and capability scoping
@@ -367,10 +375,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   [`AUTH_API.md`](../app/AUTH_API.md).
 - Access token (short-lived; ~900 s in the live deployment) kept in memory
   only. Refresh token in an **httpOnly cookie** set by the API on login
-  (`Secure; SameSite=Strict; Path=/auth`) — never readable by JS; requires the
+  (`Secure; SameSite=Strict; Path=/api/auth`) — never readable by JS; requires the
   API-side cookie transport (issue #363). Transparent refresh on 401 +
   single-flight refresh mutex; hard logout on refresh failure. Page reload
-  re-establishes the session via the cookie-based `POST /auth/refresh`.
+  re-establishes the session via the cookie-based `POST /api/auth/refresh`.
 - WS connections carry `?token=`; on token rotation, sockets are reconnected
   (or left until the 60 s re-auth closes them — reconnect-on-rotate chosen).
 
@@ -418,20 +426,29 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 7.7 Serving & origin
 - **Same-origin by design.** The API ships **no CORS middleware**, on purpose.
-  The refresh cookie is `Secure; SameSite=Strict; Path=/auth` (see 7.1 and
+  The refresh cookie is `Secure; SameSite=Strict; Path=/api/auth` (see 7.1 and
   [`AUTH_API.md`](../app/AUTH_API.md) Section 5 for the cookie attributes), so a
   cross-origin SPA cannot authenticate — the browser would not attach the cookie
   to the refresh request. Every deployment posture below keeps the UI and the API
   on the same origin; do not add CORS to work around a split origin.
-- **Development.** The Vite dev server proxies the API paths *and* the WebSocket
-  paths to a local API instance, so the browser sees a single origin (the dev
-  server). No CORS is added anywhere (#378 Phase 1).
+- **`/api` namespace (issue #498).** The entire HTTP API (REST, WebSocket, and
+  the OpenAPI schema/docs) lives under `/api`, so it can never share a path with
+  an SPA client-side route. This makes the production fallback an absolute rule:
+  `/api/*` is the API, *everything else* is the SPA. It replaced the earlier
+  posture where three deep-links (`/communities/{cid}`,
+  `/communities/{cid}/servers/{sid}`, `/communities/{cid}/servers/new`) collided
+  with API GET routes and returned JSON on a hard reload.
+- **Development.** The Vite dev server proxies the single `/api` prefix (REST
+  *and* the WebSocket event streams) to a local API instance, so the browser sees
+  a single origin (the dev server). Because `/api` is never an SPA route, the
+  proxy needs no Accept-header bypass for deep-links. No CORS is added anywhere
+  (#378 Phase 1).
 - **Production.** The API container serves the built SPA (`webui/dist`) via
   FastAPI `StaticFiles` with an SPA fallback, on the same origin as the API. No
-  reverse proxy and no new Compose service. API routes (`/auth`, `/communities`,
-  `/users`, the WS paths, etc.) take precedence; every other path falls back to
-  the SPA's `index.html` so client-side routing works on deep links and reloads
-  (#378 Phase 8).
+  reverse proxy and no new Compose service. The `/api/*` routes (including the WS
+  paths and the health/readiness/metrics probes) take precedence; every other
+  path falls back to the SPA's `index.html` so client-side routing works on deep
+  links and reloads (#378 Phase 8, #498).
 
 ## 8. Out of scope for the first UI cut
 

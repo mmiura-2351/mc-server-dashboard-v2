@@ -58,7 +58,8 @@ export interface ServerEventsCallbacks {
 }
 
 /**
- * Build the `wss?://…/communities/{cid}/servers/{sid}/events?streams=…&token=…`
+ * Build the
+ * `wss?://…/api/communities/{cid}/servers/{sid}/events?streams=…&token=…`
  * URL. `streams` is the comma list the API's `_parse_streams` expects.
  */
 export function serverEventsUrl(
@@ -67,7 +68,7 @@ export function serverEventsUrl(
   streams: readonly Stream[],
   token: string,
 ): string {
-  const path = `/communities/${encodeURIComponent(communityId)}/servers/${encodeURIComponent(serverId)}/events`;
+  const path = `/api/communities/${encodeURIComponent(communityId)}/servers/${encodeURIComponent(serverId)}/events`;
   const query = `?streams=${encodeURIComponent(streams.join(","))}&token=${encodeURIComponent(token)}`;
   return `${wsOrigin()}${path}${query}`;
 }

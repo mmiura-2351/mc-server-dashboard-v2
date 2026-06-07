@@ -73,7 +73,7 @@ def _client() -> TestClient:
 def test_versions_endpoint_is_503_when_source_down_cold_cache() -> None:
     client = _client()
     with client:
-        resp = client.get("/versions/vanilla")
+        resp = client.get("/api/versions/vanilla")
     assert resp.status_code == 503
     assert resp.json()["reason"] == "catalog_unavailable"
 

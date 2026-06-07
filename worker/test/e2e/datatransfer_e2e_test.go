@@ -40,10 +40,11 @@ func env(t *testing.T, name string) string {
 }
 
 // scopeURL builds a data-plane endpoint URL for a (community, server) scope. The
-// path shape mirrors the API router prefix
-// (dataplane/api/transfers.py: /data-plane/communities/{c}/servers/{s}/...).
+// path shape mirrors the API router prefix (the whole HTTP API is namespaced
+// under /api, issue #498 — dataplane/api/transfers.py:
+// /api/data-plane/communities/{c}/servers/{s}/...).
 func scopeURL(base, community, server, suffix string) string {
-	return base + "/data-plane/communities/" + community + "/servers/" + server + "/" + suffix
+	return base + "/api/data-plane/communities/" + community + "/servers/" + server + "/" + suffix
 }
 
 // TestSnapshotThenHydrateRoundTrip is the honest end-to-end flow: the client

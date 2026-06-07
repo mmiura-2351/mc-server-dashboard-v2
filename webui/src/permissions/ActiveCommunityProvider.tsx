@@ -43,7 +43,7 @@ const ActiveCommunityContext = createContext<ActiveCommunityValue | null>(null);
 function useCommunities(signedIn: boolean) {
   return useQuery({
     queryKey: ["communities"],
-    queryFn: () => api.get("/communities"),
+    queryFn: () => api.get("/api/communities"),
     enabled: signedIn,
   });
 }

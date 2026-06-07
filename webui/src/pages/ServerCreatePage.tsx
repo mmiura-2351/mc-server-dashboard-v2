@@ -147,7 +147,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 
   const typesQuery = useQuery({
     queryKey: ["versions"],
-    queryFn: () => api.get("/versions"),
+    queryFn: () => api.get("/api/versions"),
   });
   const catalogTypes = typesQuery.data?.server_types ?? [];
 
@@ -155,7 +155,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     queryKey: ["versions", type],
     queryFn: () =>
       api.get(
-        apiPath("/versions/{server_type}", { server_type: type as string }),
+        apiPath("/api/versions/{server_type}", { server_type: type as string }),
       ),
     enabled: type !== null,
   });
@@ -181,7 +181,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     let cancelled = false;
     void (async () => {
       try {
-        const result = await api.get("/ports/available");
+        const result = await api.get("/api/ports/available");
         const next = result.ports?.[0];
         if (!cancelled && !portTouched && typeof next === "number") {
           setPort(String(next));
@@ -207,7 +207,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     }
     try {
       const server = await api.post(
-        apiPath("/communities/{community_id}/servers", {
+        apiPath("/api/communities/{community_id}/servers", {
           community_id: communityId,
         }),
         {
@@ -528,7 +528,9 @@ function usePortCheck(port: string) {
     }
     setState({ kind: "checking" });
     try {
-      const result = await api.get(apiPath("/ports/check/{port}", { port }));
+      const result = await api.get(
+        apiPath("/api/ports/check/{port}", { port }),
+      );
       if (result.in_range === false) {
         setState({ kind: "out_of_range" });
       } else if (result.available === true) {
@@ -598,7 +600,7 @@ function ImportForm({ communityId }: { communityId: string }) {
     form.append("execution_backend", backend);
     try {
       const server = await api.postForm(
-        apiPath("/communities/{community_id}/servers/import", {
+        apiPath("/api/communities/{community_id}/servers/import", {
           community_id: communityId,
         }),
         form,

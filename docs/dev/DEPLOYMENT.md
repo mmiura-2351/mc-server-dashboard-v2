@@ -89,7 +89,8 @@ docker compose logs -f api worker
 ```
 
 The API HTTP surface is then on `http://<host>:${API_HTTP_PORT}` (default 8000);
-`GET /healthz` returns the liveness + database-reachability probe.
+the entire HTTP API is namespaced under `/api` (issue #498), so `GET
+/api/healthz` returns the liveness + database-reachability probe.
 
 ### How the Web UI ships
 
@@ -101,10 +102,12 @@ stage copies that build in. `compose.yaml` points the API at it with
 `MCD_API_WEBUI__DIST_DIR=/app/webui/dist`, so the SPA is served on the **same
 origin** as the API at `http://<host>:${API_HTTP_PORT}/`.
 
-API routes and the WebSocket endpoints take strict precedence; every other path
-falls back to the SPA's `index.html`, so client-side routing works on deep links
-and reloads. Same-origin serving is why the API ships **no CORS** and the refresh
-cookie is `SameSite=Strict` — do not add CORS or split the origin (WEBUI_SPEC
+The entire HTTP API is namespaced under `/api` (issue #498), so `/api/*` is the
+API (REST, WebSocket, the OpenAPI schema/docs, and the health/readiness/metrics
+probes) and *every other path* falls back to the SPA's `index.html` — client-side
+routing works on deep links and reloads with no path ever colliding. Same-origin
+serving is why the API ships **no CORS** and the refresh cookie is
+`SameSite=Strict; Path=/api/auth` — do not add CORS or split the origin (WEBUI_SPEC
 7.7). The build context for the `api` image is therefore the repo **root** (so the
 build can reach `webui/`), not `api/` — see `compose.yaml` and `api/Dockerfile`.
 
@@ -119,13 +122,13 @@ platform admin directly in the database. This `psql` step is the only out-of-ban
 bootstrap and is needed **only for the very first admin** — once one platform
 admin exists, all further admin management (granting/revoking the admin flag,
 deactivating/reactivating, deleting, and listing users) is done through the
-authenticated, audited admin API (`PUT /users/{id}/platform-admin`,
-`POST /users/{id}/deactivate` and friends; issue #278), never `psql`.
+authenticated, audited admin API (`PUT /api/users/{id}/platform-admin`,
+`POST /api/users/{id}/deactivate` and friends; issue #278), never `psql`.
 
 1. Register the user:
 
    ```sh
-   curl -X POST http://localhost:8000/users \
+   curl -X POST http://localhost:8000/api/users \
      -H 'Content-Type: application/json' \
      -d '{"username": "admin", "password": "<a-strong-password>"}'
    ```
@@ -145,7 +148,7 @@ From here on, that admin promotes additional admins through the API rather than
 the database:
 
 ```sh
-curl -X PUT http://localhost:8000/users/<user-id>/platform-admin \
+curl -X PUT http://localhost:8000/api/users/<user-id>/platform-admin \
   -H 'Authorization: Bearer <admin-access-token>' \
   -H 'Content-Type: application/json' \
   -d '{"grant": true}'
@@ -155,7 +158,7 @@ curl -X PUT http://localhost:8000/users/<user-id>/platform-admin \
 
 Mojang's server refuses to start until you accept its EULA: a fresh server writes
 `eula.txt` with `eula=false` and exits. The primary path is to accept the EULA at
-creation — pass `accept_eula: true` on `POST /communities/{cid}/servers`, which
+creation — pass `accept_eula: true` on `POST /api/communities/{cid}/servers`, which
 seeds `eula.txt` with `eula=true` into the server's initial working set so the
 first start does not crash. Acceptance is recorded as part of the audited create.
 
@@ -195,7 +198,7 @@ host-port collisions. An operator may still pass an explicit `game_port` at crea
 (rejected 422 out of range, 409 taken); a delete frees the port for reuse.
 
 **Changing a server's port after create.** A stopped server can be re-ported via
-`PATCH /communities/{id}/servers/{id}` with a `game_port` field (issue #311). It
+`PATCH /api/communities/{id}/servers/{id}` with a `game_port` field (issue #311). It
 validates the new port like create (422 out of range, 409 taken), rewrites
 `server-port` in the at-rest `server.properties`, and updates `server.game_port`
 together, so under normal operation the DB and the real bind port stay in sync.
@@ -341,11 +344,11 @@ need backing up beyond the persisted `worker-id`.
 
 A whole server moves in and out as a single ZIP archive:
 
-- **Export** — `GET /communities/{community_id}/servers/{server_id}/export`
+- **Export** — `GET /api/communities/{community_id}/servers/{server_id}/export`
   streams a ZIP of the server's authoritative working set plus an
   `export_metadata.json` descriptor. Export is at-rest only: a running server is
   refused (409) because the authoritative copy is only well-defined when stopped.
-- **Import** — `POST /communities/{community_id}/servers/import` takes a multipart
+- **Import** — `POST /api/communities/{community_id}/servers/import` takes a multipart
   ZIP upload, creates a fresh server (auto-assigned game port; EULA is **not**
   implied — the imported working set carries its own `eula.txt` if any), and
   publishes the archive contents as the new server's initial working set. The new

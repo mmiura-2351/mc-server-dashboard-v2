@@ -57,8 +57,8 @@ beforeEach(() => {
   mockLogout.mockReset();
   // Default: /users/me then /communities.
   mockApi.get.mockImplementation((path: string) => {
-    if (path === "/users/me") return Promise.resolve(me);
-    if (path === "/communities")
+    if (path === "/api/users/me") return Promise.resolve(me);
+    if (path === "/api/communities")
       return Promise.resolve([
         { id: "c1", name: "Sakura SMP" },
         { id: "c2", name: "Dev Playground" },
@@ -89,8 +89,8 @@ describe("AccountPage profile", () => {
 
   it("surfaces a memberships load failure instead of the empty state", async () => {
     mockApi.get.mockImplementation((path: string) => {
-      if (path === "/users/me") return Promise.resolve(me);
-      if (path === "/communities")
+      if (path === "/api/users/me") return Promise.resolve(me);
+      if (path === "/api/communities")
         return Promise.reject(new ApiError(500, { reason: "server_error" }));
       return Promise.reject(new Error(`unexpected GET ${path}`));
     });
@@ -118,7 +118,7 @@ describe("AccountPage profile", () => {
     );
 
     await waitFor(() =>
-      expect(mockApi.patch).toHaveBeenCalledWith("/users/me", {
+      expect(mockApi.patch).toHaveBeenCalledWith("/api/users/me", {
         body: JSON.stringify({
           username: "miura2",
           email: "miura@example.com",
@@ -190,7 +190,7 @@ describe("AccountPage password", () => {
     );
 
     await waitFor(() =>
-      expect(mockApi.put).toHaveBeenCalledWith("/users/me/password", {
+      expect(mockApi.put).toHaveBeenCalledWith("/api/users/me/password", {
         body: JSON.stringify({
           current_password: "OldPass123!",
           new_password: "NewPass123!",
@@ -256,7 +256,7 @@ describe("AccountPage deletion", () => {
     fireEvent.click(confirmButton);
 
     await waitFor(() =>
-      expect(mockApi.delete).toHaveBeenCalledWith("/users/me", {
+      expect(mockApi.delete).toHaveBeenCalledWith("/api/users/me", {
         body: JSON.stringify({ password: "MyPass123!" }),
       }),
     );

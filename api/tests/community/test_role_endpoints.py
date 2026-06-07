@@ -135,7 +135,7 @@ def test_list_roles_authorized_returns_200() -> None:
     community = CommunityId.new()
     app = _app(member=True, allow=True, list_uc=_FakeUseCase(result=[_role(community)]))
     client = next(_client(app))
-    resp = client.get(f"/communities/{community.value}/roles")
+    resp = client.get(f"/api/communities/{community.value}/roles")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
 
@@ -143,14 +143,14 @@ def test_list_roles_authorized_returns_200() -> None:
 def test_list_roles_non_member_gets_404() -> None:
     app = _app(member=False, allow=True, list_uc=_FakeUseCase(result=[]))
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/roles")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/roles")
     assert resp.status_code == 404
 
 
 def test_list_roles_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, list_uc=_FakeUseCase(result=[]))
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/roles")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/roles")
     assert resp.status_code == 403
 
 
@@ -159,7 +159,7 @@ def test_read_role_cross_community_gets_404() -> None:
         member=True, allow=True, read_uc=_FakeUseCase(error=RoleNotFoundError("x"))
     )
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
@@ -171,7 +171,7 @@ def test_create_role_authorized_returns_201() -> None:
     app = _app(member=True, allow=True, create_uc=_FakeUseCase(result=_role(community)))
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{community.value}/roles",
+        f"/api/communities/{community.value}/roles",
         json={"name": "Editor", "permissions": ["server:read"]},
     )
     assert resp.status_code == 201
@@ -182,7 +182,7 @@ def test_create_role_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, create_uc=_FakeUseCase())
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/roles",
+        f"/api/communities/{uuid.uuid4()}/roles",
         json={"name": "Editor", "permissions": []},
     )
     assert resp.status_code == 403
@@ -196,7 +196,7 @@ def test_create_role_duplicate_name_returns_409() -> None:
     )
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/roles",
+        f"/api/communities/{uuid.uuid4()}/roles",
         json={"name": "Editor", "permissions": []},
     )
     assert resp.status_code == 409
@@ -211,7 +211,7 @@ def test_create_role_unknown_permission_returns_422() -> None:
     )
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/roles",
+        f"/api/communities/{uuid.uuid4()}/roles",
         json={"name": "Editor", "permissions": ["server:read"]},
     )
     assert resp.status_code == 422
@@ -223,7 +223,7 @@ def test_create_role_malformed_permission_returns_422() -> None:
     app = _app(member=True, allow=True, create_uc=_FakeUseCase())
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/roles",
+        f"/api/communities/{uuid.uuid4()}/roles",
         json={"name": "Editor", "permissions": ["not-a-permission"]},
     )
     assert resp.status_code == 422
@@ -241,7 +241,7 @@ def test_update_role_preset_returns_409() -> None:
     )
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}",
         json={"name": "X"},
     )
     assert resp.status_code == 409
@@ -254,7 +254,7 @@ def test_update_role_cross_community_gets_404() -> None:
     )
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}",
         json={"name": "X"},
     )
     assert resp.status_code == 404
@@ -266,7 +266,7 @@ def test_update_role_cross_community_gets_404() -> None:
 def test_delete_role_authorized_returns_204() -> None:
     app = _app(member=True, allow=True, delete_uc=_FakeUseCase())
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
     assert resp.status_code == 204
 
 
@@ -277,7 +277,7 @@ def test_delete_role_preset_returns_409() -> None:
         delete_uc=_FakeUseCase(error=PresetRoleNotEditableError("x")),
     )
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "preset_role"
 
@@ -287,12 +287,12 @@ def test_delete_role_cross_community_gets_404() -> None:
         member=True, allow=True, delete_uc=_FakeUseCase(error=RoleNotFoundError("x"))
     )
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
 def test_delete_role_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, delete_uc=_FakeUseCase())
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}")
     assert resp.status_code == 403

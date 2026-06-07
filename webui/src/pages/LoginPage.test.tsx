@@ -34,7 +34,7 @@ const fetchMock = vi.fn();
 // per-test login response is queued via mockResolvedValueOnce after mount.
 function bootstrapSignedOut() {
   fetchMock.mockImplementation(async (url: string) => {
-    if (url === "/auth/refresh") {
+    if (url === "/api/auth/refresh") {
       return new Response("", { status: 401 });
     }
     throw new Error(`unexpected fetch ${url}`);
@@ -111,7 +111,10 @@ describe("LoginPage", () => {
   it("returns to the stashed deep link (path + query) after login", async () => {
     bootstrapSignedOut();
     renderLogin({
-      from: { pathname: "/communities/demo/servers/s1", search: "?tab=logs" },
+      from: {
+        pathname: "/api/communities/demo/servers/s1",
+        search: "?tab=logs",
+      },
     });
 
     fetchMock.mockResolvedValueOnce(
@@ -128,7 +131,7 @@ describe("LoginPage", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("path").textContent).toBe(
-        "/communities/demo/servers/s1?tab=logs",
+        "/api/communities/demo/servers/s1?tab=logs",
       ),
     );
   });

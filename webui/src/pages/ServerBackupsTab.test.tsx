@@ -197,7 +197,7 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
     );
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}/backups`,
+        `/api/communities/${CID}/servers/${SID}/backups`,
       ),
     );
   });
@@ -215,7 +215,7 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
 
     await waitFor(() => expect(mockApi.postForm).toHaveBeenCalled());
     const [path, form] = mockApi.postForm.mock.calls[0];
-    expect(path).toBe(`/communities/${CID}/servers/${SID}/backups/upload`);
+    expect(path).toBe(`/api/communities/${CID}/servers/${SID}/backups/upload`);
     expect(form).toBeInstanceOf(FormData);
     expect((form as FormData).get("file")).toBe(file);
   });
@@ -230,7 +230,7 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
     );
     await waitFor(() =>
       expect(mockDownload.downloadFile).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}/backups/${BID}/download`,
+        `/api/communities/${CID}/servers/${SID}/backups/${BID}/download`,
         `${BID}.tar.gz`,
       ),
     );
@@ -256,7 +256,7 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
 
     await waitFor(() =>
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}/backups/${BID}`,
+        `/api/communities/${CID}/servers/${SID}/backups/${BID}`,
       ),
     );
   });
@@ -285,7 +285,7 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     );
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}/stop`,
+        `/api/communities/${CID}/servers/${SID}/stop`,
       ),
     );
   });
@@ -310,7 +310,7 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
 
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
-        `/communities/${CID}/servers/${SID}/backups/${BID}/restore`,
+        `/api/communities/${CID}/servers/${SID}/backups/${BID}/restore`,
       ),
     );
   });
@@ -373,7 +373,7 @@ describe("ServerBackupsTab schedule field", () => {
 
     await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
     const [path, init] = mockApi.patch.mock.calls[0];
-    expect(path).toBe(`/communities/${CID}/servers/${SID}`);
+    expect(path).toBe(`/api/communities/${CID}/servers/${SID}`);
     const config = JSON.parse(init.body).config;
     // Existing keys round-trip; the new key saves as a number, not "24".
     expect(config).toEqual({ motd: "hi", backup_interval_hours: 24 });

@@ -41,7 +41,9 @@ describe("ApiError", () => {
       }),
     );
 
-    const error = await api.post("/auth/login", { body: "{}" }).catch((e) => e);
+    const error = await api
+      .post("/api/auth/login", { body: "{}" })
+      .catch((e) => e);
 
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(401);
@@ -51,7 +53,7 @@ describe("ApiError", () => {
   it("leaves reason undefined for a non-problem body", async () => {
     fetchMock.mockResolvedValue(jsonResponse(500, { message: "boom" }));
 
-    const error = await api.get("/communities").catch((e) => e);
+    const error = await api.get("/api/communities").catch((e) => e);
 
     expect(error).toBeInstanceOf(ApiError);
     expect(error.reason).toBeUndefined();
@@ -65,7 +67,7 @@ describe("ApiError", () => {
       }),
     );
 
-    const error = await api.get("/communities").catch((e) => e);
+    const error = await api.get("/api/communities").catch((e) => e);
 
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(429);
@@ -77,7 +79,7 @@ describe("ApiError", () => {
       htmlResponse(502, "<html><body>502 Bad Gateway</body></html>"),
     );
 
-    const error = await api.get("/communities").catch((e) => e);
+    const error = await api.get("/api/communities").catch((e) => e);
 
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(502);
@@ -89,7 +91,7 @@ describe("ApiError", () => {
       htmlResponse(200, "<html><body>not json</body></html>"),
     );
 
-    const error = await api.get("/communities").catch((e) => e);
+    const error = await api.get("/api/communities").catch((e) => e);
 
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(200);
@@ -101,7 +103,7 @@ describe("request", () => {
     setAccessToken("tok");
     fetchMock.mockResolvedValue(jsonResponse(200, []));
 
-    await api.get("/communities");
+    await api.get("/api/communities");
 
     const headers = fetchMock.mock.calls[0][1].headers as Record<
       string,
@@ -113,7 +115,7 @@ describe("request", () => {
   it("omits the authorization header when there is no token", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, []));
 
-    await api.get("/communities");
+    await api.get("/api/communities");
 
     const headers = fetchMock.mock.calls[0][1].headers as Record<
       string,
@@ -125,7 +127,7 @@ describe("request", () => {
   it("sends credentials so the session cookie rides along", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, []));
 
-    await api.get("/communities");
+    await api.get("/api/communities");
 
     expect(fetchMock.mock.calls[0][1].credentials).toBe("same-origin");
   });
@@ -139,7 +141,7 @@ describe("transparent 401 refresh", () => {
     const refresher = vi.fn(() => Promise.resolve(true));
     setRefresher(refresher);
 
-    const result = await api.get("/communities");
+    const result = await api.get("/api/communities");
 
     expect(refresher).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -151,7 +153,7 @@ describe("transparent 401 refresh", () => {
     const refresher = vi.fn(() => Promise.resolve(false));
     setRefresher(refresher);
 
-    const error = await api.get("/communities").catch((e) => e);
+    const error = await api.get("/api/communities").catch((e) => e);
 
     expect(refresher).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -164,7 +166,7 @@ describe("transparent 401 refresh", () => {
     const refresher = vi.fn(() => Promise.resolve(true));
     setRefresher(refresher);
 
-    await api.post("/auth/login", { body: "{}" }).catch(() => {});
+    await api.post("/api/auth/login", { body: "{}" }).catch(() => {});
 
     expect(refresher).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -175,7 +177,7 @@ describe("transparent 401 refresh", () => {
     const refresher = vi.fn(() => Promise.resolve(true));
     setRefresher(refresher);
 
-    const error = await api.get("/communities").catch((e) => e);
+    const error = await api.get("/api/communities").catch((e) => e);
 
     expect(refresher).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);

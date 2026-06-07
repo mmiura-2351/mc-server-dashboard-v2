@@ -53,7 +53,7 @@ export function CommunityGrantsTab({
     queryKey: ["communities", communityId, "members"] as const,
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/members", {
+        apiPath("/api/communities/{community_id}/members", {
           community_id: communityId,
         }),
       ),
@@ -62,7 +62,7 @@ export function CommunityGrantsTab({
     queryKey: ["communities", communityId, "servers"] as const,
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/servers", {
+        apiPath("/api/communities/{community_id}/servers", {
           community_id: communityId,
         }),
       ),
@@ -71,7 +71,7 @@ export function CommunityGrantsTab({
   const grants = useQuery({
     queryKey: grantsKey(communityId, filterUserId),
     queryFn: () => {
-      const base = apiPath("/communities/{community_id}/grants", {
+      const base = apiPath("/api/communities/{community_id}/grants", {
         community_id: communityId,
       });
       // `?user_id=` is a schema query param, not part of the path key; append it
@@ -91,7 +91,7 @@ export function CommunityGrantsTab({
   const revoke = useMutation({
     mutationFn: (grant: GrantResponse) =>
       api.delete(
-        apiPath("/communities/{community_id}/grants/{grant_id}", {
+        apiPath("/api/communities/{community_id}/grants/{grant_id}", {
           community_id: communityId,
           grant_id: grant.id,
         }),
@@ -270,7 +270,7 @@ function CreateGrantDialog({
   const create = useMutation({
     mutationFn: () =>
       api.post(
-        apiPath("/communities/{community_id}/grants", {
+        apiPath("/api/communities/{community_id}/grants", {
           community_id: communityId,
         }),
         {

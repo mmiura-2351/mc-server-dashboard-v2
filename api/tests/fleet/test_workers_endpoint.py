@@ -49,13 +49,13 @@ def _app(
 def test_requires_platform_admin() -> None:
     app, _ = _app(platform_admin=False)
     client = next(_client(app))
-    assert client.get("/workers").status_code == 403
+    assert client.get("/api/workers").status_code == 403
 
 
 def test_lists_registered_worker_with_liveness() -> None:
     app, _ = _app(platform_admin=True)
     client = next(_client(app))
-    resp = client.get("/workers")
+    resp = client.get("/api/workers")
     assert resp.status_code == 200
     body = resp.json()
     assert len(body["workers"]) == 1
@@ -70,7 +70,7 @@ def test_lists_registered_worker_with_liveness() -> None:
 def test_empty_when_no_workers() -> None:
     app, _ = _app(platform_admin=True, seed=False)
     client = next(_client(app))
-    resp = client.get("/workers")
+    resp = client.get("/api/workers")
     assert resp.status_code == 200
     assert resp.json() == {"workers": []}
 
@@ -78,22 +78,22 @@ def test_empty_when_no_workers() -> None:
 def test_set_drain_requires_platform_admin() -> None:
     app, _ = _app(platform_admin=False)
     client = next(_client(app))
-    assert client.put("/workers/worker-1/drain").status_code == 403
+    assert client.put("/api/workers/worker-1/drain").status_code == 403
 
 
 def test_clear_drain_requires_platform_admin() -> None:
     app, _ = _app(platform_admin=False)
     client = next(_client(app))
-    assert client.delete("/workers/worker-1/drain").status_code == 403
+    assert client.delete("/api/workers/worker-1/drain").status_code == 403
 
 
 def test_set_drain_marks_worker_draining_in_listing() -> None:
     app, _ = _app(platform_admin=True)
     client = next(_client(app))
 
-    assert client.put("/workers/worker-1/drain").status_code == 204
+    assert client.put("/api/workers/worker-1/drain").status_code == 204
 
-    worker = client.get("/workers").json()["workers"][0]
+    worker = client.get("/api/workers").json()["workers"][0]
     assert worker["status"] == "draining"
 
 
@@ -102,19 +102,19 @@ def test_clear_drain_returns_worker_to_online() -> None:
     registry.set_draining(make_worker(at=_T0).id, True)
     client = next(_client(app))
 
-    assert client.delete("/workers/worker-1/drain").status_code == 204
+    assert client.delete("/api/workers/worker-1/drain").status_code == 204
 
-    worker = client.get("/workers").json()["workers"][0]
+    worker = client.get("/api/workers").json()["workers"][0]
     assert worker["status"] == "online"
 
 
 def test_set_drain_unknown_worker_is_404() -> None:
     app, _ = _app(platform_admin=True, seed=False)
     client = next(_client(app))
-    assert client.put("/workers/ghost/drain").status_code == 404
+    assert client.put("/api/workers/ghost/drain").status_code == 404
 
 
 def test_clear_drain_unknown_worker_is_404() -> None:
     app, _ = _app(platform_admin=True, seed=False)
     client = next(_client(app))
-    assert client.delete("/workers/ghost/drain").status_code == 404
+    assert client.delete("/api/workers/ghost/drain").status_code == 404

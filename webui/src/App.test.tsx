@@ -31,7 +31,7 @@ function jsonResponse(body: unknown): Response {
 function signedInWith(communities: Array<{ id: string; name: string }>) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/communities") {
+    if (url === "/api/communities") {
       return Promise.resolve(jsonResponse(communities));
     }
     if (url.endsWith("/me/permissions")) {
@@ -150,10 +150,10 @@ describe("App route guards", () => {
     // resolve so the shell can render the originally requested route.
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url === "/auth/refresh") {
+      if (url === "/api/auth/refresh") {
         return Promise.resolve(new Response("", { status: 401 }));
       }
-      if (url === "/communities") {
+      if (url === "/api/communities") {
         return Promise.resolve(jsonResponse([{ id: "demo", name: "Demo" }]));
       }
       if (url.endsWith("/me/permissions")) {

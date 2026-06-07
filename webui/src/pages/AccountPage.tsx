@@ -52,7 +52,7 @@ export function AccountPage() {
   const userQuery = useCurrentUser();
   const communitiesQuery = useQuery({
     queryKey: ["communities"],
-    queryFn: () => api.get("/communities"),
+    queryFn: () => api.get("/api/communities"),
   });
 
   if (userQuery.isPending) {
@@ -140,7 +140,7 @@ function ProfileSection({ user, showToast, onSaved }: ProfileSectionProps) {
 
   const mutation = useMutation({
     mutationFn: () =>
-      api.patch("/users/me", { body: JSON.stringify({ username, email }) }),
+      api.patch("/api/users/me", { body: JSON.stringify({ username, email }) }),
     onSuccess: () => {
       setFieldError(null);
       showToast(t("account.profile.saved"), "success");
@@ -201,7 +201,7 @@ function PasswordSection({
 
   const mutation = useMutation({
     mutationFn: () =>
-      api.put("/users/me/password", {
+      api.put("/api/users/me/password", {
         body: JSON.stringify({
           current_password: current,
           new_password: next,
@@ -319,7 +319,7 @@ function DangerZone({ user, showToast, onDeleted }: DangerZoneProps) {
     // Re-auth: the API verifies the current password before deleting the account
     // (WEBUI_SPEC.md 6.11). A wrong password is a 401 invalid_credentials.
     mutationFn: (password: string) =>
-      api.delete("/users/me", { body: JSON.stringify({ password }) }),
+      api.delete("/api/users/me", { body: JSON.stringify({ password }) }),
     onSuccess: () => {
       setOpen(false);
       // Hard logout: the account is gone, so reset the local session and route

@@ -63,23 +63,23 @@ function signedIn(overrides: MockOverrides = {}) {
       const method = (init?.method ?? "GET").toUpperCase();
       calls.push({ url, method });
 
-      if (url === "/users/me") return Promise.resolve(jsonResponse(ADMIN));
-      if (url === "/communities")
+      if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/api/communities")
         return Promise.resolve(jsonResponse([{ id: "c1", name: "Alpha" }]));
       if (url.endsWith("/me/permissions"))
         return Promise.resolve(jsonResponse({}));
 
-      if (url === "/versions" && method === "GET") {
+      if (url === "/api/versions" && method === "GET") {
         return Promise.resolve(
           overrides.versionsError ? errorResponse(503) : jsonResponse(TYPES),
         );
       }
-      if (url === "/versions/vanilla")
+      if (url === "/api/versions/vanilla")
         return Promise.resolve(jsonResponse(VANILLA));
-      if (url === "/versions/paper")
+      if (url === "/api/versions/paper")
         return Promise.resolve(jsonResponse(PAPER));
 
-      if (url.startsWith("/versions/refresh")) {
+      if (url.startsWith("/api/versions/refresh")) {
         return Promise.resolve(
           overrides.refreshError
             ? errorResponse(500)
@@ -87,12 +87,12 @@ function signedIn(overrides: MockOverrides = {}) {
         );
       }
 
-      if (url === "/versions/jar-pool/stats") {
+      if (url === "/api/versions/jar-pool/stats") {
         return Promise.resolve(
           overrides.jarStatsError ? errorResponse(503) : jsonResponse(JAR_POOL),
         );
       }
-      if (url === "/versions/jar-pool/gc") {
+      if (url === "/api/versions/jar-pool/gc") {
         return Promise.resolve(
           overrides.gcError ? errorResponse(500) : jsonResponse(GC_RESULT),
         );
@@ -143,7 +143,9 @@ describe("admin versions catalog", () => {
 
     await waitFor(() => {
       expect(
-        calls.some((c) => c.method === "POST" && c.url === "/versions/refresh"),
+        calls.some(
+          (c) => c.method === "POST" && c.url === "/api/versions/refresh",
+        ),
       ).toBe(true);
     });
     expect(
@@ -169,7 +171,7 @@ describe("admin versions catalog", () => {
         calls.some(
           (c) =>
             c.method === "POST" &&
-            c.url === "/versions/refresh?server_type=paper",
+            c.url === "/api/versions/refresh?server_type=paper",
         ),
       ).toBe(true);
     });
@@ -242,7 +244,7 @@ describe("admin versions JAR pool", () => {
     await waitFor(() => {
       expect(
         calls.some(
-          (c) => c.method === "POST" && c.url === "/versions/jar-pool/gc",
+          (c) => c.method === "POST" && c.url === "/api/versions/jar-pool/gc",
         ),
       ).toBe(true);
     });

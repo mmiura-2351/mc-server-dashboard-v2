@@ -45,16 +45,16 @@ vi.mock("../permissions/useCan.ts", () => ({
 // Route api.get by path so the wizard's parallel catalog/version/port reads each
 // resolve to their endpoint's shape.
 function defaultGet(path: string) {
-  if (path === "/versions") {
+  if (path === "/api/versions") {
     return Promise.resolve({ server_types: ["vanilla", "paper", "fabric"] });
   }
-  if (path.startsWith("/versions/")) {
+  if (path.startsWith("/api/versions/")) {
     return Promise.resolve({ versions: ["1.21.6", "1.21.5"] });
   }
-  if (path.startsWith("/ports/check/")) {
+  if (path.startsWith("/api/ports/check/")) {
     return Promise.resolve({ port: 25565, in_range: true, available: true });
   }
-  if (path === "/ports/available") {
+  if (path === "/api/ports/available") {
     return Promise.resolve({ ports: [25570] });
   }
   return Promise.reject(new Error(`unexpected GET ${path}`));
@@ -158,7 +158,7 @@ describe("Step 2 — runtime port check", () => {
     fireEvent.click(screen.getByText(t("serverCreate.next")));
 
     expect(await screen.findByDisplayValue("25570")).toBeInTheDocument();
-    expect(mockApi.get).toHaveBeenCalledWith("/ports/available");
+    expect(mockApi.get).toHaveBeenCalledWith("/api/ports/available");
   });
 
   it("does not clobber a user-typed port with the suggestion", async () => {
@@ -166,7 +166,7 @@ describe("Step 2 — runtime port check", () => {
     // user's value must win.
     let resolveAvailable: (v: unknown) => void = () => {};
     mockApi.get.mockImplementation((path: string) => {
-      if (path === "/ports/available") {
+      if (path === "/api/ports/available") {
         return new Promise((resolve) => {
           resolveAvailable = resolve;
         });
@@ -204,7 +204,7 @@ describe("Step 2 — runtime port check", () => {
 
   it("flags a taken port on blur", async () => {
     mockApi.get.mockImplementation((path: string) => {
-      if (path.startsWith("/ports/check/")) {
+      if (path.startsWith("/api/ports/check/")) {
         return Promise.resolve({ in_range: true, available: false });
       }
       return defaultGet(path);

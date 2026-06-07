@@ -57,7 +57,7 @@ function role(over: Record<string, unknown> = {}) {
 
 function routeGet(roles: unknown[]) {
   mockApi.get.mockImplementation((path: string) => {
-    if (path === `/communities/${CID}/roles`) {
+    if (path === `/api/communities/${CID}/roles`) {
       return Promise.resolve(roles);
     }
     return Promise.resolve(community());
@@ -197,9 +197,15 @@ describe("CommunityRolesTab", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.post).toHaveBeenCalledWith(`/communities/${CID}/roles`, {
-        body: JSON.stringify({ name: "Builder", permissions: ["server:read"] }),
-      });
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/roles`,
+        {
+          body: JSON.stringify({
+            name: "Builder",
+            permissions: ["server:read"],
+          }),
+        },
+      );
     });
   });
 
@@ -230,7 +236,7 @@ describe("CommunityRolesTab", () => {
 
     await waitFor(() => {
       expect(mockApi.patch).toHaveBeenCalledWith(
-        `/communities/${CID}/roles/r1`,
+        `/api/communities/${CID}/roles/r1`,
         {
           body: JSON.stringify({ name: "Mod2", permissions: ["server:read"] }),
         },
@@ -260,7 +266,7 @@ describe("CommunityRolesTab", () => {
 
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/roles/r1`,
+        `/api/communities/${CID}/roles/r1`,
       );
     });
   });

@@ -69,7 +69,7 @@ function Loaded({ communityId }: { communityId: string }) {
     queryKey: serversKey(communityId),
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/servers", {
+        apiPath("/api/communities/{community_id}/servers", {
           community_id: communityId,
         }),
       ),
@@ -144,10 +144,13 @@ function ServerCard({ server, communityId, can }: ServerCardProps) {
   const mutation = useMutation({
     mutationFn: (action: LifecycleAction) =>
       api.post(
-        apiPath(`/communities/{community_id}/servers/{server_id}/${action}`, {
-          community_id: communityId,
-          server_id: server.id,
-        }),
+        apiPath(
+          `/api/communities/{community_id}/servers/{server_id}/${action}`,
+          {
+            community_id: communityId,
+            server_id: server.id,
+          },
+        ),
       ),
     // Always re-fetch the list once the request settles (no polling loop here).
     onSettled: () => {

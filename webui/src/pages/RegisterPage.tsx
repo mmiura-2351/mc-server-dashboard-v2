@@ -93,7 +93,7 @@ export function RegisterPage() {
     setErrors({});
     setSubmitting(true);
     try {
-      await api.post("/users", {
+      await api.post("/api/users", {
         body: JSON.stringify({ username, email, password }),
       });
       showToast(t("register.success"), "success");

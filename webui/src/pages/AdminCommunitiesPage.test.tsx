@@ -106,10 +106,10 @@ function method(input: RequestInfo | URL, init?: RequestInit): string {
 // Common dispatch for the supporting endpoints (me, switcher list, permissions,
 // users). Page-specific routes are layered on by each test before this.
 function baseRoute(url: string): Response | undefined {
-  if (url === "/users/me") return jsonResponse(ADMIN);
-  if (url === "/communities") return jsonResponse(SWITCHER_COMMUNITIES);
+  if (url === "/api/users/me") return jsonResponse(ADMIN);
+  if (url === "/api/communities") return jsonResponse(SWITCHER_COMMUNITIES);
   if (url.endsWith("/me/permissions")) return jsonResponse({});
-  if (url.startsWith("/users")) return jsonResponse(USERS);
+  if (url.startsWith("/api/users")) return jsonResponse(USERS);
   return undefined;
 }
 
@@ -127,7 +127,7 @@ describe("admin communities list", () => {
   it("lists every community (incl. non-member) with its counts, from /admin/communities", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.startsWith("/admin/communities"))
+      if (url.startsWith("/api/admin/communities"))
         return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
       return Promise.resolve(baseRoute(url) ?? tokenResponse());
     });
@@ -156,11 +156,11 @@ describe("admin communities delete", () => {
       (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
         const m = method(input, init);
-        if (url.startsWith("/admin/communities")) {
+        if (url.startsWith("/api/admin/communities")) {
           adminListCalls += 1;
           return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
         }
-        if (url.startsWith("/communities/") && m === "DELETE") {
+        if (url.startsWith("/api/communities/") && m === "DELETE") {
           deleted = url;
           return Promise.resolve(new Response(null, { status: 204 }));
         }
@@ -192,7 +192,7 @@ describe("admin communities delete", () => {
     fireEvent.click(confirm);
 
     await waitFor(() => {
-      expect(deleted).toBe("/communities/c2");
+      expect(deleted).toBe("/api/communities/c2");
     });
     await waitFor(() => {
       expect(adminListCalls).toBeGreaterThan(callsBefore);
@@ -205,11 +205,11 @@ describe("admin communities delete", () => {
       (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
         const m = method(input, init);
-        if (url.startsWith("/admin/communities")) {
+        if (url.startsWith("/api/admin/communities")) {
           adminListCalls += 1;
           return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
         }
-        if (url.startsWith("/communities/") && m === "DELETE") {
+        if (url.startsWith("/api/communities/") && m === "DELETE") {
           return Promise.resolve(problemResponse("not_found", 404));
         }
         return Promise.resolve(baseRoute(url) ?? tokenResponse());
@@ -255,9 +255,9 @@ describe("admin communities owner picker", () => {
     let usersUrl: string | undefined;
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.startsWith("/admin/communities"))
+      if (url.startsWith("/api/admin/communities"))
         return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
-      if (url.startsWith("/users") && url !== "/users/me") {
+      if (url.startsWith("/api/users") && url !== "/api/users/me") {
         usersUrl = url;
         return Promise.resolve(jsonResponse(USERS));
       }
@@ -281,9 +281,9 @@ describe("admin communities owner picker", () => {
   it("warns that the picker is truncated when more users exist than one page", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.startsWith("/admin/communities"))
+      if (url.startsWith("/api/admin/communities"))
         return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
-      if (url.startsWith("/users") && url !== "/users/me")
+      if (url.startsWith("/api/users") && url !== "/api/users/me")
         return Promise.resolve(jsonResponse({ ...USERS, total: 150 }));
       return Promise.resolve(baseRoute(url) ?? tokenResponse());
     });
@@ -308,7 +308,7 @@ describe("admin communities owner picker", () => {
   it("does not warn when the whole user list fits in one page", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.startsWith("/admin/communities"))
+      if (url.startsWith("/api/admin/communities"))
         return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
       return Promise.resolve(baseRoute(url) ?? tokenResponse());
     });
@@ -338,11 +338,11 @@ describe("admin communities provisioning", () => {
       (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
         const m = method(input, init);
-        if (url.startsWith("/admin/communities")) {
+        if (url.startsWith("/api/admin/communities")) {
           adminListCalls += 1;
           return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
         }
-        if (url === "/communities" && m === "POST") {
+        if (url === "/api/communities" && m === "POST") {
           provisionBody = JSON.parse(init?.body as string);
           return Promise.resolve(
             jsonResponse({ id: "c3", name: "Winter 2026" }, 201),
@@ -392,9 +392,9 @@ describe("admin communities provisioning", () => {
       (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
         const m = method(input, init);
-        if (url.startsWith("/admin/communities"))
+        if (url.startsWith("/api/admin/communities"))
           return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
-        if (url === "/communities" && m === "POST")
+        if (url === "/api/communities" && m === "POST")
           return Promise.resolve(problemResponse("name_taken", 409));
         return Promise.resolve(baseRoute(url) ?? tokenResponse());
       },

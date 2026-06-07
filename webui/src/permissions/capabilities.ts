@@ -21,7 +21,7 @@ export function fetchCapabilities(
   communityId: string,
 ): Promise<EffectivePermissions> {
   return api.get(
-    apiPath("/communities/{community_id}/me/permissions", {
+    apiPath("/api/communities/{community_id}/me/permissions", {
       community_id: communityId,
     }),
   );

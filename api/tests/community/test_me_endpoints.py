@@ -92,7 +92,7 @@ def test_non_member_gets_404() -> None:
     result = EffectivePermissions(permissions=set(), grants=[])
     app = _app(member=False, result=result)
     for client in _client(app):
-        response = client.get(f"/communities/{community.value}/me/permissions")
+        response = client.get(f"/api/communities/{community.value}/me/permissions")
         assert response.status_code == 404
 
 
@@ -105,7 +105,7 @@ def test_member_sees_role_union_and_own_grants() -> None:
     )
     app = _app(member=True, result=result)
     for client in _client(app):
-        response = client.get(f"/communities/{community.value}/me/permissions")
+        response = client.get(f"/api/communities/{community.value}/me/permissions")
         assert response.status_code == 200
         body = response.json()
         assert body["permissions"] == ["file:read", "server:read"]
@@ -123,6 +123,6 @@ def test_member_with_no_permissions_gets_empty_sets() -> None:
     result = EffectivePermissions(permissions=set(), grants=[])
     app = _app(member=True, result=result)
     for client in _client(app):
-        response = client.get(f"/communities/{community.value}/me/permissions")
+        response = client.get(f"/api/communities/{community.value}/me/permissions")
         assert response.status_code == 200
         assert response.json() == {"permissions": [], "grants": []}

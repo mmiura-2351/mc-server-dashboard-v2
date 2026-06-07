@@ -106,7 +106,7 @@ export function ServerBackupsTab({
     queryFn: () =>
       api.get(
         apiPath(
-          "/communities/{community_id}/servers/{server_id}/backups/statistics",
+          "/api/communities/{community_id}/servers/{server_id}/backups/statistics",
           { community_id: communityId, server_id: serverId },
         ),
       ),
@@ -117,7 +117,7 @@ export function ServerBackupsTab({
     enabled: canRead,
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/servers/{server_id}/backups", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}/backups", {
           community_id: communityId,
           server_id: serverId,
         }),
@@ -136,7 +136,7 @@ export function ServerBackupsTab({
   const create = useMutation({
     mutationFn: () =>
       api.post(
-        apiPath("/communities/{community_id}/servers/{server_id}/backups", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}/backups", {
           community_id: communityId,
           server_id: serverId,
         }),
@@ -154,7 +154,7 @@ export function ServerBackupsTab({
       form.append("file", file);
       return api.postForm(
         apiPath(
-          "/communities/{community_id}/servers/{server_id}/backups/upload",
+          "/api/communities/{community_id}/servers/{server_id}/backups/upload",
           { community_id: communityId, server_id: serverId },
         ),
         form,
@@ -171,7 +171,7 @@ export function ServerBackupsTab({
     mutationFn: (backup: BackupResponse) =>
       downloadFile(
         apiPath(
-          "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download",
+          "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download",
           {
             community_id: communityId,
             server_id: serverId,
@@ -187,7 +187,7 @@ export function ServerBackupsTab({
     mutationFn: (backup: BackupResponse) =>
       api.delete(
         apiPath(
-          "/communities/{community_id}/servers/{server_id}/backups/{backup_id}",
+          "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}",
           {
             community_id: communityId,
             server_id: serverId,
@@ -422,7 +422,7 @@ function ScheduleField({
         next[BACKUP_INTERVAL_KEY] = Number(hours);
       }
       return api.patch(
-        apiPath("/communities/{community_id}/servers/{server_id}", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}", {
           community_id: communityId,
           server_id: server.id,
         }),
@@ -515,7 +515,7 @@ function RestoreDialog({
     mutationFn: () =>
       api.post(
         apiPath(
-          "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/restore",
+          "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/restore",
           {
             community_id: communityId,
             server_id: server.id,
@@ -544,7 +544,7 @@ function RestoreDialog({
   const stop = useMutation({
     mutationFn: () =>
       api.post(
-        apiPath("/communities/{community_id}/servers/{server_id}/stop", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}/stop", {
           community_id: communityId,
           server_id: server.id,
         }),

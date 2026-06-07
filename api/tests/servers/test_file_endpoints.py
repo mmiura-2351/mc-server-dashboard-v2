@@ -248,7 +248,7 @@ def _app(
 
 
 def _url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> str:
-    return f"/communities/{community}/servers/{server}/files{suffix}"
+    return f"/api/communities/{community}/servers/{server}/files{suffix}"
 
 
 # --- two-layer gate --------------------------------------------------------

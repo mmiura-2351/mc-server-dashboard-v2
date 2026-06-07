@@ -32,8 +32,8 @@ def test_export_writes_openapi_schema(tmp_path: Path) -> None:
 
     schema = json.loads(out.read_text(encoding="utf-8"))
     assert schema["openapi"].startswith("3.")
-    assert "/auth/login" in schema["paths"]
-    assert "/communities" in schema["paths"]
+    assert "/api/auth/login" in schema["paths"]
+    assert "/api/communities" in schema["paths"]
 
 
 def test_export_output_is_deterministic(tmp_path: Path) -> None:

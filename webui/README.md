@@ -116,16 +116,13 @@ schema hermetically — no running server, database, or network — then
 
 ## Dev-server proxy
 
-The browser only ever talks to the Vite dev server, which proxies the API paths
-**and** the WebSocket event streams to a local API — so the UI and the API share
-one origin and no CORS is added anywhere (WEBUI_SPEC.md 7.7). Start a local API
-on its `http_port` (default `8000`), then `npm run dev`; requests under the API
-roots (`/auth`, `/users`, `/admin`, `/communities`, `/workers`, `/versions`,
-`/ports`, `/audit`, `/backups`, plus the ops endpoints) reach the API, and every
-other path falls through to the SPA. A few of those roots are also SPA routes
-(e.g. `/admin/workers`, `/communities/{id}`); a hard refresh or direct load of
-one is a browser navigation (`Accept: text/html`) and is served the SPA's
-`index.html` instead of being proxied, matching the API's production SPA
-fallback — `fetch` calls and WebSocket handshakes still reach the API. Point the
+The browser only ever talks to the Vite dev server, which proxies the single
+`/api` prefix — the entire HTTP API, REST **and** the WebSocket event streams —
+to a local API, so the UI and the API share one origin and no CORS is added
+anywhere (WEBUI_SPEC.md 7.7). Start a local API on its `http_port` (default
+`8000`), then `npm run dev`; requests under `/api` reach the API, and every other
+path falls through to the SPA. Since the whole API is namespaced under `/api`
+(issue #498), no API path is ever also an SPA route, so the proxy needs no
+Accept-header bypass for deep-links — that collision class is gone. Point the
 proxy elsewhere with
 `VITE_API_PROXY_TARGET` (e.g. `VITE_API_PROXY_TARGET=http://localhost:9000 npm run dev`).
