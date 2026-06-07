@@ -17,6 +17,7 @@ import { Modal } from "../components/Modal.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
+import { useOffsetParam } from "./urlState.ts";
 
 // Platform admin Communities page (WEBUI_SPEC.md 6.12): list ALL communities and
 // provision new ones (name + initial owner). The listing reads the platform-axis
@@ -43,7 +44,8 @@ export function AdminCommunitiesPage() {
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const [provisionOpen, setProvisionOpen] = useState(false);
-  const [offset, setOffset] = useState(0);
+  // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
+  const [offset, setOffset] = useOffsetParam();
   const [deleteTarget, setDeleteTarget] =
     useState<AdminCommunityResponse | null>(null);
 
@@ -136,7 +138,7 @@ export function AdminCommunitiesPage() {
           type="button"
           className="btn sm ghost"
           disabled={offset === 0 || communities.isFetching}
-          onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+          onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
         >
           {t("admin.communities.prev")}
         </button>
@@ -150,7 +152,7 @@ export function AdminCommunitiesPage() {
           type="button"
           className="btn sm ghost"
           disabled={!hasNext || communities.isFetching}
-          onClick={() => setOffset((o) => o + PAGE_SIZE)}
+          onClick={() => setOffset(offset + PAGE_SIZE)}
         >
           {t("admin.communities.next")}
         </button>

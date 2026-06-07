@@ -6,7 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
@@ -47,11 +47,23 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
 }));
 vi.mock("../permissions/useCan.ts", () => ({ useCan: () => mockCan }));
 
+// Spy on navigate while keeping the real one working: tab switches now drive the
+// URL hash (#514), so the navigate must actually update the location, not no-op.
+// The spy records the calls (the delete test asserts the dashboard redirect).
 const navigateMock = vi.hoisted(() => vi.fn());
 vi.mock("react-router", async () => {
   const actual =
     await vi.importActual<typeof import("react-router")>("react-router");
-  return { ...actual, useNavigate: () => navigateMock };
+  return {
+    ...actual,
+    useNavigate: () => {
+      const real = actual.useNavigate();
+      return (...args: Parameters<typeof real>) => {
+        navigateMock(...args);
+        return real(...args);
+      };
+    },
+  };
 });
 
 function server(overrides: Record<string, unknown> = {}) {
@@ -73,14 +85,26 @@ function server(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage() {
+// A history probe: drives navigate(-1) so a test can simulate the Back button
+// against the in-memory router (#514 tab history).
+function BackProbe() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(-1)}>
+      router-back
+    </button>
+  );
+}
+
+function renderPage(path = `/communities/${CID}/servers/${SID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <MemoryRouter initialEntries={[`/communities/${CID}/servers/${SID}`]}>
+    <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
+          <BackProbe />
           <Routes>
             <Route
               path="/communities/:cid/servers/:sid"
@@ -147,6 +171,50 @@ describe("ServerDetailPage scaffold + header", () => {
     expect(
       await screen.findByText(t("serverDetail.loadError")),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ServerDetailPage URL-driven tabs (#514)", () => {
+  let restoreWs: () => void;
+  beforeEach(() => {
+    restoreWs = installMockWebSocket();
+  });
+  afterEach(() => restoreWs());
+
+  function activeTab(): string | null {
+    return (
+      screen
+        .getAllByRole("tab")
+        .find((el) => el.getAttribute("aria-selected") === "true")
+        ?.textContent ?? null
+    );
+  }
+
+  it("deep-links to a tab named by the URL hash", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage(`/communities/${CID}/servers/${SID}#settings`);
+
+    await screen.findByText("survival");
+    expect(activeTab()).toBe(t("serverDetail.tab.settings"));
+    expect(screen.getByDisplayValue("survival")).toBeInTheDocument();
+  });
+
+  it("Back restores the previously active tab", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+    await screen.findByText("survival");
+    expect(activeTab()).toBe(t("serverDetail.tab.overview"));
+
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    );
+    expect(activeTab()).toBe(t("serverDetail.tab.settings"));
+
+    // Simulate the browser Back button: navigate(-1) pops the pushed tab entry.
+    fireEvent.click(screen.getByText("router-back"));
+    await waitFor(() =>
+      expect(activeTab()).toBe(t("serverDetail.tab.overview")),
+    );
   });
 });
 

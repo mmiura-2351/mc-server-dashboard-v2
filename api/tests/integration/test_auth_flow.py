@@ -31,6 +31,7 @@ from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenServ
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
+from mc_server_dashboard_api.identity.application.restore_session import RestoreSession
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
@@ -149,6 +150,104 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
     # attacker auto-refreshing within the window escaped the family revoke.
     with pytest.raises(InvalidRefreshTokenError):
         await refresh(refresh_token=rotated.refresh_token)
+
+
+async def test_restore_yields_access_token_and_leaves_family_intact(
+    engine: AsyncEngine,
+) -> None:
+    # Issue #512: the non-rotating bootstrap. Restore validates the persisted
+    # refresh token and mints an access token WITHOUT rotating it, so repeated
+    # restores never touch the family and the cookie stays valid. The subsequent
+    # in-session /refresh still rotates and reuse-detection still applies there.
+    user = await _seed_user(engine)
+    factory = create_session_factory(engine)
+
+    login = Login(
+        uow=SqlAlchemyUnitOfWork(factory),
+        attempts=SqlAlchemyLoginAttemptStore(factory),
+        brute_force=make_brute_force_config(),
+        hasher=Argon2PasswordHasher(),
+        dummy_password_hash=_DUMMY_HASH,
+        tokens=_tokens(),
+        clock=SystemClock(),
+        failure_delay=FixedLoginFailureDelay(
+            delay=dt.timedelta(), sleeper=RecordingSleeper()
+        ),
+        refresh_ttl=_REFRESH_TTL,
+    )
+    pair = (await login(username="alice", password=_PASSWORD)).pair
+
+    restore = RestoreSession(
+        uow=SqlAlchemyUnitOfWork(factory), tokens=_tokens(), clock=SystemClock()
+    )
+    # Restore twice against the same live token: both succeed (idempotent, no
+    # torn-rotation race) and the access token resolves back to the same user.
+    first = await restore(refresh_token=pair.refresh_token)
+    second = await restore(refresh_token=pair.refresh_token)
+    assert _tokens().verify_access_token(first) == user.id
+    assert _tokens().verify_access_token(second) == user.id
+
+    # The refresh token was never rotated by restore, so the original still
+    # rotates normally on the in-session refresh path — the family is intact.
+    refresh = RefreshSession(
+        uow=SqlAlchemyUnitOfWork(factory),
+        tokens=_tokens(),
+        clock=SystemClock(),
+        refresh_ttl=_REFRESH_TTL,
+        reuse_grace=_REUSE_GRACE,
+    )
+    rotated = await refresh(refresh_token=pair.refresh_token)
+    assert rotated.refresh_token != pair.refresh_token
+
+
+async def test_restore_with_revoked_token_does_not_revoke_family(
+    engine: AsyncEngine,
+) -> None:
+    # A rotated predecessor re-presented to restore is rejected with the plain
+    # invalid-token error and triggers NO family revoke — restore has no rotation
+    # to disambiguate, so it never walks the theft path (issue #512). The rotated
+    # successor stays usable.
+    user = await _seed_user(engine)
+    factory = create_session_factory(engine)
+
+    login = Login(
+        uow=SqlAlchemyUnitOfWork(factory),
+        attempts=SqlAlchemyLoginAttemptStore(factory),
+        brute_force=make_brute_force_config(),
+        hasher=Argon2PasswordHasher(),
+        dummy_password_hash=_DUMMY_HASH,
+        tokens=_tokens(),
+        clock=SystemClock(),
+        failure_delay=FixedLoginFailureDelay(
+            delay=dt.timedelta(), sleeper=RecordingSleeper()
+        ),
+        refresh_ttl=_REFRESH_TTL,
+    )
+    pair = (await login(username="alice", password=_PASSWORD)).pair
+
+    refresh = RefreshSession(
+        uow=SqlAlchemyUnitOfWork(factory),
+        tokens=_tokens(),
+        clock=SystemClock(),
+        refresh_ttl=_REFRESH_TTL,
+        reuse_grace=_REUSE_GRACE,
+    )
+    rotated = await refresh(refresh_token=pair.refresh_token)
+
+    restore = RestoreSession(
+        uow=SqlAlchemyUnitOfWork(factory), tokens=_tokens(), clock=SystemClock()
+    )
+    # The original token is now rotation-revoked; restore rejects it...
+    with pytest.raises(InvalidRefreshTokenError):
+        await restore(refresh_token=pair.refresh_token)
+
+    # ...but did NOT revoke the family: the rotated successor still restores fine.
+    assert (
+        _tokens().verify_access_token(
+            await restore(refresh_token=rotated.refresh_token)
+        )
+        == user.id
+    )
 
 
 async def test_brute_force_lockout_then_backoff_growth(engine: AsyncEngine) -> None:

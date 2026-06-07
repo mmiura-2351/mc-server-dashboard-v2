@@ -13,6 +13,7 @@ import {
   isUuid,
   PAGE_SIZE,
 } from "./auditShared.tsx";
+import { useOffsetParam } from "./urlState.ts";
 
 // The global view adds a `community` filter (empty = all communities) on top of
 // the shared operation/actor/since/until filters.
@@ -71,7 +72,8 @@ export function AdminAuditPage() {
   // Applied filters (committed on Apply) and the in-progress input draft.
   const [filters, setFilters] = useState<AdminAuditFilters>(EMPTY);
   const [draft, setDraft] = useState<AdminAuditFilters>(EMPTY);
-  const [offset, setOffset] = useState(0);
+  // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
+  const [offset, setOffset] = useOffsetParam();
   const [actorError, setActorError] = useState(false);
 
   const query = useQuery({
@@ -155,8 +157,8 @@ export function AdminAuditPage() {
         offset={offset}
         hasNext={hasNext}
         isFetching={query.isFetching}
-        onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
-        onNext={() => setOffset((o) => o + PAGE_SIZE)}
+        onPrev={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+        onNext={() => setOffset(offset + PAGE_SIZE)}
       />
     </section>
   );

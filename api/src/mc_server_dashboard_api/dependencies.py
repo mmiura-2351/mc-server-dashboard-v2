@@ -153,6 +153,7 @@ from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
+from mc_server_dashboard_api.identity.application.restore_session import RestoreSession
 from mc_server_dashboard_api.identity.application.set_platform_admin import (
     SetPlatformAdmin,
 )
@@ -807,6 +808,19 @@ def get_refresh_session(request: Request) -> RefreshSession:
         reuse_grace=dt.timedelta(
             seconds=settings.auth.token.refresh_reuse_grace_seconds
         ),
+    )
+
+
+def get_restore_session(request: Request) -> RestoreSession:
+    """Assemble the :class:`RestoreSession` use case (non-rotating bootstrap, #512)."""
+
+    settings = get_settings(request)
+    clock = SystemClock()
+    session_factory = create_session_factory(get_engine(request))
+    return RestoreSession(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        tokens=_build_token_service(settings.auth.token, clock),
+        clock=clock,
     )
 
 

@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
@@ -12,6 +11,7 @@ import { CommunityGrantsTab } from "./CommunityGrantsTab.tsx";
 import { CommunityGroupsTab } from "./CommunityGroupsTab.tsx";
 import { CommunityMembersTab } from "./CommunityMembersTab.tsx";
 import { CommunityRolesTab } from "./CommunityRolesTab.tsx";
+import { useTabHash } from "./urlState.ts";
 
 // Tab order mirrors the mockup (docs/ui/mockup/community-settings.html).
 const TABS = [
@@ -43,7 +43,9 @@ export function CommunitySettingsPage() {
 
 function Loaded({ communityId }: { communityId: string }) {
   const can = useCan();
-  const [tab, setTab] = useState<Tab>("members");
+  // Active tab lives in the URL hash (#514) so Back walks the tab history;
+  // #members is the default and keeps a clean URL.
+  const [tab, setTab] = useTabHash(TABS);
   const query = useQuery({
     queryKey: ["communities", communityId],
     queryFn: () =>

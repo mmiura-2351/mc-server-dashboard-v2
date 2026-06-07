@@ -22,7 +22,7 @@ import { setRefresher } from "../api/client.ts";
 import {
   logout as logoutSession,
   refreshForRetry,
-  refreshSession,
+  restoreSession,
   setHardLogoutHandler,
 } from "./session.ts";
 import { setAccessToken } from "./tokenStore.ts";
@@ -56,10 +56,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setHardLogoutHandler(resetToSignedOut);
   }, [resetToSignedOut]);
 
-  // Bootstrap once on load: cookie refresh decides signed-in vs signed-out.
+  // Bootstrap once on load: the cookie is exchanged for an access token via the
+  // NON-rotating /api/auth/session probe (issue #512), so a page load / F5 never
+  // rotates the refresh token and can never leave a torn rotation in the jar.
+  // Rotation stays on the in-session refresh path. The probe decides
+  // signed-in vs signed-out.
   useEffect(() => {
     let active = true;
-    refreshSession().then((ok) => {
+    restoreSession().then((ok) => {
       if (active) {
         setStatus(ok ? "signed-in" : "signed-out");
       }
