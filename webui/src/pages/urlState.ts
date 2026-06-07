@@ -127,6 +127,11 @@ export function useAuditFilterParams<K extends string>(
       // to the first page (offset 0 keeps the param out of the URL).
       params.delete("offset");
       const search = params.toString();
+      // Applying the same filter set (e.g. Apply pressed twice unchanged, or an
+      // empty Apply on the first page) is a no-op: skip the navigate so it does
+      // not push a duplicate history entry (which would make Back a double
+      // press).
+      if (search === new URLSearchParams(location.search).toString()) return;
       navigate(
         `${location.pathname}${search ? `?${search}` : ""}${location.hash}`,
       );

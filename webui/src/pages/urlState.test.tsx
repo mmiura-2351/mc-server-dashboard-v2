@@ -344,6 +344,23 @@ describe("useAuditFilterParams", () => {
     expect(screen.getByTestId("hash").textContent).toBe("#audit");
   });
 
+  it("re-applying the same filter set pushes no history entry", () => {
+    render(
+      <MemoryRouter initialEntries={["/x"]}>
+        <FilterProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("apply-op"));
+    expect(screen.getByTestId("operation").textContent).toBe("member:add");
+
+    // Re-applying the already-applied filter set must not grow history: a single
+    // Back then lands on the empty initial state, not on a duplicate member:add
+    // entry.
+    fireEvent.click(screen.getByText("apply-op"));
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("operation").textContent).toBe("");
+  });
+
   it("Back restores the previous filter set", () => {
     render(
       <MemoryRouter initialEntries={["/x"]}>
