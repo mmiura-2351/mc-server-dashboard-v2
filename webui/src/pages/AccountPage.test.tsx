@@ -227,7 +227,7 @@ describe("AccountPage password", () => {
 });
 
 describe("AccountPage deletion", () => {
-  it("gates deletion behind typed confirm, then hard-logs-out on success", async () => {
+  it("gates deletion behind both the typed confirm and a password, then hard-logs-out", async () => {
     mockApi.delete.mockResolvedValue(undefined);
     renderPage();
     await waitForLoaded();
@@ -241,18 +241,68 @@ describe("AccountPage deletion", () => {
     });
     expect(confirmButton).toBeDisabled();
 
-    // Typing the username enables the destructive button.
+    // The username alone is not enough: the password is still required.
     fireEvent.change(screen.getByLabelText(t("account.delete.prompt")), {
       target: { value: "miura" },
+    });
+    expect(confirmButton).toBeDisabled();
+
+    // Both gates satisfied enables the destructive button.
+    fireEvent.change(screen.getByLabelText(t("account.delete.password")), {
+      target: { value: "MyPass123!" },
     });
     expect(confirmButton).toBeEnabled();
 
     fireEvent.click(confirmButton);
 
     await waitFor(() =>
-      expect(mockApi.delete).toHaveBeenCalledWith("/users/me"),
+      expect(mockApi.delete).toHaveBeenCalledWith("/users/me", {
+        body: JSON.stringify({ password: "MyPass123!" }),
+      }),
     );
     await waitFor(() => expect(mockLogout).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps deletion gated when only the password is entered", async () => {
+    renderPage();
+    await waitForLoaded();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("account.delete.open") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("account.delete.password")), {
+      target: { value: "MyPass123!" },
+    });
+
+    expect(
+      screen.getByRole("button", { name: t("account.delete.confirm") }),
+    ).toBeDisabled();
+  });
+
+  it("surfaces a wrong-password 401 via toast and does not log out", async () => {
+    mockApi.delete.mockRejectedValue(
+      new ApiError(401, { reason: "invalid_credentials" }),
+    );
+    renderPage();
+    await waitForLoaded();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("account.delete.open") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("account.delete.prompt")), {
+      target: { value: "miura" },
+    });
+    fireEvent.change(screen.getByLabelText(t("account.delete.password")), {
+      target: { value: "wrong" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("account.delete.confirm") }),
+    );
+
+    expect(
+      await screen.findByText(t("account.error.invalid_credentials")),
+    ).toBeInTheDocument();
+    expect(mockLogout).not.toHaveBeenCalled();
   });
 
   it("surfaces an owns_community conflict via toast and does not log out", async () => {
@@ -267,6 +317,9 @@ describe("AccountPage deletion", () => {
     );
     fireEvent.change(screen.getByLabelText(t("account.delete.prompt")), {
       target: { value: "miura" },
+    });
+    fireEvent.change(screen.getByLabelText(t("account.delete.password")), {
+      target: { value: "MyPass123!" },
     });
     fireEvent.click(
       screen.getByRole("button", { name: t("account.delete.confirm") }),

@@ -646,9 +646,11 @@ def get_delete_account(request: Request) -> DeleteAccount:
     """
 
     session_factory = create_session_factory(get_engine(request))
+    settings = get_settings(request)
     return DeleteAccount(
         uow=SqlAlchemyUnitOfWork(session_factory),
         ownership=CommunityBackedOwnership(CommunityUnitOfWork(session_factory)),
+        hasher=_build_password_hasher(settings.auth.password),
         clock=SystemClock(),
     )
 

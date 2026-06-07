@@ -1682,6 +1682,11 @@ export interface components {
             /** Server Type */
             server_type: string;
         };
+        /** DeleteAccountRequest */
+        DeleteAccountRequest: {
+            /** Password */
+            password: string;
+        };
         /** DirEntryResponse */
         DirEntryResponse: {
             /** Is Dir */
@@ -4601,7 +4606,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteAccountRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             204: {
@@ -4609,6 +4618,15 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

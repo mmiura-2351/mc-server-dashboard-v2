@@ -125,9 +125,10 @@ export const en = {
   "account.delete.open": "Delete…",
   "account.delete.dialogTitle": "Delete your account",
   "account.delete.dialogBody":
-    "This permanently deletes your account. This cannot be undone. Type your username to confirm.",
+    "This permanently deletes your account. This cannot be undone. Type your username and enter your password to confirm.",
   "account.delete.confirm": "Delete account",
   "account.delete.prompt": "Type your username to enable deletion",
+  "account.delete.password": "Confirm your password",
 
   // API reason codes (RFC 9457 `reason`) surfaced inline / via toast.
   "account.error.username_taken": "That username is already taken.",
