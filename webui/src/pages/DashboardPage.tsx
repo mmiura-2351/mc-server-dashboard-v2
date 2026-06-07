@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { Link } from "react-router";
 import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
+import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
@@ -21,6 +22,39 @@ import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type LifecycleAction = "start" | "stop" | "restart";
+
+// Dashboard server-list layout. Cards remain the default (#541); the table view
+// is the compact alternative for many servers / narrow screens.
+type ViewMode = "cards" | "table";
+const VIEW_MODE_KEY = "mcsd.dashboard.viewMode";
+
+// Persist the chosen view across reloads, mirroring the column-width persistence
+// in ResizableColumns (best-effort localStorage, never break on corrupt/blocked
+// storage; fall back to the card default).
+function loadViewMode(): ViewMode {
+  try {
+    return localStorage.getItem(VIEW_MODE_KEY) === "table" ? "table" : "cards";
+  } catch {
+    return "cards";
+  }
+}
+
+function saveViewMode(mode: ViewMode): void {
+  try {
+    localStorage.setItem(VIEW_MODE_KEY, mode);
+  } catch {
+    // Best-effort persistence; ignore quota/availability failures.
+  }
+}
+
+function useViewMode(): [ViewMode, (mode: ViewMode) => void] {
+  const [mode, setMode] = useState<ViewMode>(() => loadViewMode());
+  const select = (next: ViewMode) => {
+    setMode(next);
+    saveViewMode(next);
+  };
+  return [mode, select];
+}
 
 export function DashboardPage() {
   const { communityId } = useActiveCommunity();
@@ -40,9 +74,11 @@ export function DashboardPage() {
 function DashboardChrome({
   children,
   degraded = false,
+  toolbar,
 }: {
   children: ReactNode;
   degraded?: boolean;
+  toolbar?: ReactNode;
 }) {
   return (
     <>
@@ -56,15 +92,48 @@ function DashboardChrome({
             {t("dashboard.liveDegraded")}
           </span>
         )}
+        {toolbar && <div className="actions">{toolbar}</div>}
       </div>
       {children}
     </>
   );
 }
 
+// Card/table view switch (#541), persisted in localStorage. A segmented control
+// with `aria-pressed` so assistive tech reports the active view.
+function ViewToggle({
+  view,
+  onSelect,
+}: {
+  view: ViewMode;
+  onSelect: (view: ViewMode) => void;
+}) {
+  return (
+    <fieldset className="view-toggle" aria-label={t("dashboard.view.label")}>
+      <button
+        type="button"
+        className="btn sm"
+        aria-pressed={view === "cards"}
+        onClick={() => onSelect("cards")}
+      >
+        {t("dashboard.view.cards")}
+      </button>
+      <button
+        type="button"
+        className="btn sm"
+        aria-pressed={view === "table"}
+        onClick={() => onSelect("table")}
+      >
+        {t("dashboard.view.table")}
+      </button>
+    </fieldset>
+  );
+}
+
 function Loaded({ communityId }: { communityId: string }) {
   const can = useCan();
   const degraded = useCommunityEvents(communityId);
+  const [view, setView] = useViewMode();
   const query = useQuery({
     queryKey: serversKey(communityId),
     queryFn: () =>
@@ -100,17 +169,24 @@ function Loaded({ communityId }: { communityId: string }) {
   }
 
   return (
-    <DashboardChrome degraded={degraded}>
-      <div className="grid cols-2">
-        {servers.map((server) => (
-          <ServerCard
-            key={server.id}
-            server={server}
-            communityId={communityId}
-            can={can}
-          />
-        ))}
-      </div>
+    <DashboardChrome
+      degraded={degraded}
+      toolbar={<ViewToggle view={view} onSelect={setView} />}
+    >
+      {view === "table" ? (
+        <ServerTable servers={servers} communityId={communityId} can={can} />
+      ) : (
+        <div className="grid cols-2">
+          {servers.map((server) => (
+            <ServerCard
+              key={server.id}
+              server={server}
+              communityId={communityId}
+              can={can}
+            />
+          ))}
+        </div>
+      )}
     </DashboardChrome>
   );
 }
@@ -130,13 +206,10 @@ function EmptyState({ communityId }: { communityId: string }) {
   );
 }
 
-interface ServerCardProps {
-  server: ServerResponse;
-  communityId: string;
-  can: Can;
-}
-
-function ServerCard({ server, communityId, can }: ServerCardProps) {
+// The per-server lifecycle mutation plus the observed/optimistic state, shared by
+// the card and table rows so neither duplicates the start/stop/restart business
+// logic (#541).
+function useLifecycle(server: ServerResponse, communityId: string) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
@@ -175,7 +248,28 @@ function ServerCard({ server, communityId, can }: ServerCardProps) {
   const displayState: ObservedState = mutation.isPending
     ? requestedState(mutation.variables)
     : state;
-  const pill = statePill(displayState);
+
+  return { mutation, state, displayState };
+}
+
+// The state pill for an observed/optimistic state.
+function StatePill({ state }: { state: ObservedState }) {
+  const pill = statePill(state);
+  return (
+    <span className={`pill ${pill.className}${pill.blink ? " blink" : ""}`}>
+      {t(pill.labelKey)}
+    </span>
+  );
+}
+
+interface ServerRowProps {
+  server: ServerResponse;
+  communityId: string;
+  can: Can;
+}
+
+function ServerCard({ server, communityId, can }: ServerRowProps) {
+  const { mutation, state, displayState } = useLifecycle(server, communityId);
 
   return (
     <div className="card server-card">
@@ -185,9 +279,7 @@ function ServerCard({ server, communityId, can }: ServerCardProps) {
             {server.name}
           </Link>
         </span>
-        <span className={`pill ${pill.className}${pill.blink ? " blink" : ""}`}>
-          {t(pill.labelKey)}
-        </span>
+        <StatePill state={displayState} />
       </div>
       <div className="meta">
         <span className="badge type">
@@ -215,6 +307,84 @@ function ServerCard({ server, communityId, can }: ServerCardProps) {
         </span>
       </div>
     </div>
+  );
+}
+
+// Compact table view (#541): the same servers/data as the cards, reusing the
+// ResizableTable column affordances and the shared serverState helpers.
+function ServerTable({
+  servers,
+  communityId,
+  can,
+}: {
+  servers: ServerResponse[];
+  communityId: string;
+  can: Can;
+}) {
+  return (
+    <div className="card dashboard-table" style={{ padding: 0 }}>
+      <ResizableTable storageKey="mcsd.colw.dashboard-servers" className="data">
+        <thead>
+          <tr>
+            <th>{t("dashboard.col.name")}</th>
+            <th>{t("dashboard.col.state")}</th>
+            <th>{t("dashboard.col.type")}</th>
+            <th>{t("dashboard.col.backend")}</th>
+            <th className="num">{t("dashboard.col.port")}</th>
+            <th>{t("dashboard.col.worker")}</th>
+            <th>{t("dashboard.col.actions")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {servers.map((server) => (
+            <ServerRow
+              key={server.id}
+              server={server}
+              communityId={communityId}
+              can={can}
+            />
+          ))}
+        </tbody>
+      </ResizableTable>
+    </div>
+  );
+}
+
+function ServerRow({ server, communityId, can }: ServerRowProps) {
+  const { mutation, state, displayState } = useLifecycle(server, communityId);
+
+  return (
+    <tr>
+      <td>
+        <Link to={`${dashboardPath(communityId)}/servers/${server.id}`}>
+          {server.name}
+        </Link>
+      </td>
+      <td>
+        <StatePill state={displayState} />
+      </td>
+      <td>
+        {server.server_type} {server.mc_version}
+      </td>
+      <td>{server.execution_backend}</td>
+      <td className="num">{server.game_port ?? "—"}</td>
+      <td className="dim" title={server.assigned_worker_id ?? undefined}>
+        {server.assigned_worker_id ?? t("dashboard.noWorker")}
+      </td>
+      <td className="row-actions">
+        {(["start", "stop", "restart"] as const).map((action) => (
+          <Action
+            key={action}
+            action={action}
+            server={server}
+            state={state}
+            pending={mutation.isPending}
+            can={can}
+            onRun={mutation.mutate}
+          />
+        ))}
+      </td>
+    </tr>
   );
 }
 

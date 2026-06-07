@@ -82,6 +82,8 @@ beforeEach(() => {
   mockApi.get.mockReset();
   mockApi.post.mockReset();
   mockCan = () => true;
+  // The view toggle persists in localStorage; start each test from the default.
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -319,5 +321,82 @@ describe("DashboardPage live status", () => {
     expect(
       await screen.findByText(t("dashboard.liveDegraded")),
     ).toBeInTheDocument();
+  });
+});
+
+describe("DashboardPage view toggle (#541)", () => {
+  it("defaults to cards and switches to the table view on toggle", async () => {
+    mockApi.get.mockResolvedValue([server()]);
+    renderPage();
+
+    await screen.findByText("survival");
+    // Cards by default: no column headers rendered.
+    expect(screen.queryByText(t("dashboard.col.name"))).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    // The table view exposes column headers and the same row data.
+    expect(screen.getByText(t("dashboard.col.name"))).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+
+  it("persists the chosen view across reloads via localStorage", async () => {
+    mockApi.get.mockResolvedValue([server()]);
+    const first = renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    first.unmount();
+
+    // A fresh mount (simulating a reload) restores the table view.
+    renderPage();
+    await screen.findByText("survival");
+    expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+
+  it("shows the same servers and data in the table as the cards", async () => {
+    mockApi.get.mockResolvedValue([
+      server(),
+      server({ id: "s2", name: "creative" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    // Both servers, plus the shared card data: state pill, type/version,
+    // backend, port, worker.
+    expect(screen.getByText("survival")).toBeInTheDocument();
+    expect(screen.getByText("creative")).toBeInTheDocument();
+    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2);
+    expect(screen.getAllByText("paper 1.21.6")).toHaveLength(2);
+    expect(screen.getAllByText("container")).toHaveLength(2);
+    expect(screen.getAllByText("25565")).toHaveLength(2);
+    expect(screen.getAllByText("worker-a")).toHaveLength(2);
+  });
+
+  it("runs a quick action from the table row", async () => {
+    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.post.mockResolvedValue(server({ observed_state: "starting" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/s1/start`,
+      ),
+    );
   });
 });
