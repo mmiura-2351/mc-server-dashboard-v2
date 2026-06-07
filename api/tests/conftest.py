@@ -6,7 +6,50 @@ exercise the DB seam override the :class:`DatabasePing` Port with a fake, so the
 dummy URL is never dialed (NFR-TEST-1).
 """
 
+import os
+import uuid
+
 import pytest
+
+_SCRATCH_DB_URL: str | None = None
+"""The per-run scratch database created for this session, if any (issue #379)."""
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Redirect ``MCD_TEST_DATABASE_URL`` to a fresh per-run database (#379).
+
+    The DB-gated integration tests read ``MCD_TEST_DATABASE_URL`` at import time
+    and run ``downgrade base`` / ``upgrade head`` against it. Treating that URL
+    as a *base/maintenance* connection and creating a unique
+    ``<dbname>_<short-uuid>`` database per session makes parallel runs (e.g.
+    agent worktrees sharing one Postgres) disjoint, so they can no longer race
+    on the schema or leave orphan tables behind. Runs before collection, so the
+    test modules import the per-run URL.
+    """
+    global _SCRATCH_DB_URL
+    base_url = os.environ.get("MCD_TEST_DATABASE_URL")
+    if base_url is None:
+        return
+    from tests.integration.scratch_db import (
+        create_scratch_database,
+        derive_scratch_url,
+    )
+
+    scratch_url = derive_scratch_url(base_url, uuid.uuid4().hex[:12])
+    create_scratch_database(base_url, scratch_url)
+    os.environ["MCD_TEST_DATABASE_URL_BASE"] = base_url
+    os.environ["MCD_TEST_DATABASE_URL"] = scratch_url
+    _SCRATCH_DB_URL = scratch_url
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Drop the per-run scratch database created in ``pytest_configure`` (#379)."""
+    if _SCRATCH_DB_URL is None:
+        return
+    base_url = os.environ["MCD_TEST_DATABASE_URL_BASE"]
+    from tests.integration.scratch_db import drop_scratch_database
+
+    drop_scratch_database(base_url, _SCRATCH_DB_URL)
 
 
 @pytest.fixture(autouse=True)

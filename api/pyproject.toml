@@ -156,6 +156,14 @@ ignore_missing_imports = true
 module = ["aioboto3.*", "aiobotocore.*", "botocore.*"]
 ignore_missing_imports = true
 
+# asyncpg ships no type stubs. The integration-test scratch-database helper
+# (tests/integration/scratch_db.py) is the only module importing it directly —
+# the app reaches asyncpg via SQLAlchemy's URL driver, not a Python import — so
+# treat its imports as untyped (the grpcio / aioboto3 precedents above).
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
