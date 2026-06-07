@@ -38,6 +38,9 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     ControlPlane as FleetControlPlane,
 )
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    FileAccessReason as FleetFileAccessReason,
+)
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
 from mc_server_dashboard_api.fleet.domain.placement import place
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
@@ -48,6 +51,9 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandStatus,
     ControlPlane,
     WorkerUnavailableError,
+)
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    FileAccessReason as OutcomeFileAccessReason,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     FileEntry as OutcomeFileEntry,
@@ -84,6 +90,16 @@ _STATUS_BY_CODE: dict[CommandResultCode, CommandStatus] = {
     CommandResultCode.IMAGE_MISSING: CommandStatus.IMAGE_MISSING,
 }
 
+# Map the fleet file-access reason to the servers outcome reason (issue #548;
+# same names, distinct enums on either side of the seam).
+_REASON_BY_FLEET_REASON: dict[FleetFileAccessReason, OutcomeFileAccessReason] = {
+    FleetFileAccessReason.UNSPECIFIED: OutcomeFileAccessReason.UNSPECIFIED,
+    FleetFileAccessReason.IS_A_DIRECTORY: OutcomeFileAccessReason.IS_A_DIRECTORY,
+    FleetFileAccessReason.NOT_A_DIRECTORY: OutcomeFileAccessReason.NOT_A_DIRECTORY,
+    FleetFileAccessReason.SYMLINK_REFUSED: OutcomeFileAccessReason.SYMLINK_REFUSED,
+    FleetFileAccessReason.PAYLOAD_TOO_LARGE: OutcomeFileAccessReason.PAYLOAD_TOO_LARGE,
+}
+
 
 def _launch_mode_for(server_type: ServerType) -> LaunchMode:
     """Forge launches via the supervised installer + args file; all else via JAR.
@@ -113,6 +129,7 @@ def _to_outcome(result: CommandResult) -> CommandOutcome:
         output=result.output,
         file_content=result.file_content,
         listing=listing,
+        file_access_reason=_REASON_BY_FLEET_REASON[result.file_access_reason],
     )
 
 

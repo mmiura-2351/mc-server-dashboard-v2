@@ -17,6 +17,20 @@ via DI, runs them, and maps the servers file errors to HTTP codes (404 keeps the
 no-existence-signal posture; a traversal-unsafe path is 422; an oversized edit /
 upload is 413; a transitional server is 409; a disconnected worker is 503).
 
+Running-server file failures carry a refined reason (issue #548): the Worker
+emits one umbrella ``FILE_ACCESS_DENIED`` for several distinct conditions, so the
+read/list/write routes surface an honest 422 ``reason`` instead of collapsing
+every denial into ``invalid_path``. The file-API problem-reason catalog is:
+
+- ``invalid_path`` (422) — a genuine path-syntax rejection (absolute, ``..``, or
+  an unrefined denial / an older Worker). This is also the at-rest reason.
+- ``is_a_directory`` (422) — a read or write whose path is a directory.
+- ``not_a_directory`` (422) — a directory listing whose path is a regular file.
+- ``symlink_refused`` (422) — the Worker refused to follow a path-component
+  symlink (the FR-FILE-4 escape-vector defence).
+- ``file_too_large`` (413) — a read result or an edit payload past the
+  control-plane file cap (the edge ``MAX_EDIT_BYTES`` cap shares this reason).
+
 A write (``PUT /files``) edits a file branching on server state (Section 6.9) and
 **creates** the target when it does not exist yet — at rest or running alike
 (create-through to the live working set). ``422 invalid_path`` means the path is
@@ -202,7 +216,10 @@ async def read_or_list_files(
         except ServerFileNotFoundError as exc:
             raise _not_found() from exc
         except InvalidFilePathError as exc:
-            raise _unprocessable("invalid_path") from exc
+            # exc.reason refines a running-server file denial (issue #548): a
+            # non-path condition (not_a_directory / symlink_refused) surfaces
+            # honestly instead of a blanket invalid_path.
+            raise _unprocessable(exc.reason) from exc
         except ServerFilesUnsettledError as exc:
             raise _conflict("server_unsettled") from exc
         except WorkerUnavailableError as exc:
@@ -231,7 +248,14 @@ async def read_or_list_files(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # exc.reason refines a running-server file denial (issue #548): a
+        # non-path condition (is_a_directory / symlink_refused) surfaces honestly
+        # instead of a blanket invalid_path.
+        raise _unprocessable(exc.reason) from exc
+    except FileTooLargeError as exc:
+        # A running-server read of a file past the control-plane cap (issue #548):
+        # the Worker reports payload_too_large, mapped to 413 like an edit cap.
+        raise _too_large() from exc
     except ServerFilesUnsettledError as exc:
         raise _conflict("server_unsettled") from exc
     except WorkerUnavailableError as exc:
@@ -285,8 +309,13 @@ async def write_file(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # exc.reason refines a running-server file denial (issue #548): a non-path
+        # condition (is_a_directory / symlink_refused) surfaces honestly instead
+        # of a blanket invalid_path. An at-rest write keeps the default invalid_path.
+        raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
+        # The edge cap (MAX_EDIT_BYTES) and the Worker's payload_too_large reason
+        # (issue #548) both surface here as 413.
         raise _too_large() from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(

@@ -184,6 +184,27 @@ func TestMapErrorCodeImageMissing(t *testing.T) {
 	}
 }
 
+// mapFileAccessReason translates each domain reason onto the wire enum so the
+// API can surface an honest problem reason instead of a blanket invalid_path
+// (issue #548).
+func TestMapFileAccessReason(t *testing.T) {
+	cases := []struct {
+		reason session.FileAccessReason
+		want   controlplanev1.FileAccessReason
+	}{
+		{session.FileAccessReasonUnspecified, controlplanev1.FileAccessReason_FILE_ACCESS_REASON_UNSPECIFIED},
+		{session.FileAccessReasonIsADirectory, controlplanev1.FileAccessReason_FILE_ACCESS_REASON_IS_A_DIRECTORY},
+		{session.FileAccessReasonNotADirectory, controlplanev1.FileAccessReason_FILE_ACCESS_REASON_NOT_A_DIRECTORY},
+		{session.FileAccessReasonSymlinkRefused, controlplanev1.FileAccessReason_FILE_ACCESS_REASON_SYMLINK_REFUSED},
+		{session.FileAccessReasonPayloadTooLarge, controlplanev1.FileAccessReason_FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE},
+	}
+	for _, c := range cases {
+		if got := mapFileAccessReason(c.reason); got != c.want {
+			t.Fatalf("mapFileAccessReason(%v) = %v, want %v", c.reason, got, c.want)
+		}
+	}
+}
+
 func TestMapLogStream(t *testing.T) {
 	if got := mapLogStream(session.LogStreamStdout); got != controlplanev1.LogStream_LOG_STREAM_STDOUT {
 		t.Fatalf("stdout mapped to %v", got)

@@ -281,6 +281,65 @@ func TestReadFileOversizedIsDenied(t *testing.T) {
 	if res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ErrorCode = %v, want FileAccessDenied", res.ErrorCode)
 	}
+	// issue #548: the refined reason lets the API map it to 413, not invalid_path.
+	if res.FileAccessReason != session.FileAccessReasonPayloadTooLarge {
+		t.Fatalf("FileAccessReason = %v, want PayloadTooLarge", res.FileAccessReason)
+	}
+}
+
+func TestReadFileDirectoryReasonIsADirectory(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	// Seed a directory at the path the read targets.
+	writeWorkingFile(t, m, "s1", "config/keep.txt", []byte("x"))
+
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "config",
+	})
+	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("ReadFile of a directory result = %+v, want FileAccessDenied", res)
+	}
+	if res.FileAccessReason != session.FileAccessReasonIsADirectory {
+		t.Fatalf("FileAccessReason = %v, want IsADirectory", res.FileAccessReason)
+	}
+}
+
+func TestReadFileSymlinkReasonSymlinkRefused(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	workingDir := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(workingDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("top-secret"), 0o640); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+	if err := os.Symlink(secret, filepath.Join(workingDir, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "link",
+	})
+	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("ReadFile of a symlink result = %+v, want FileAccessDenied", res)
+	}
+	if res.FileAccessReason != session.FileAccessReasonSymlinkRefused {
+		t.Fatalf("FileAccessReason = %v, want SymlinkRefused", res.FileAccessReason)
+	}
+}
+
+func TestReadFileTraversalReasonUnspecified(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "../escape",
+	})
+	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("ReadFile traversal result = %+v, want FileAccessDenied", res)
+	}
+	// A genuine path denial carries no refined reason, so the API keeps invalid_path.
+	if res.FileAccessReason != session.FileAccessReasonUnspecified {
+		t.Fatalf("FileAccessReason = %v, want Unspecified", res.FileAccessReason)
+	}
 }
 
 func TestEditFileWritesBytes(t *testing.T) {
@@ -330,6 +389,65 @@ func TestEditFileOversizedIsDenied(t *testing.T) {
 	}
 	if res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ErrorCode = %v, want FileAccessDenied", res.ErrorCode)
+	}
+	// issue #548: the refined reason lets the API map it to 413, not invalid_path.
+	if res.FileAccessReason != session.FileAccessReasonPayloadTooLarge {
+		t.Fatalf("FileAccessReason = %v, want PayloadTooLarge", res.FileAccessReason)
+	}
+}
+
+func TestEditFileDirectoryReasonIsADirectory(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	// Seed a directory at the path the edit targets.
+	writeWorkingFile(t, m, "s1", "config/keep.txt", []byte("x"))
+
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "config", Content: []byte("x"),
+	})
+	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("EditFile of a directory result = %+v, want FileAccessDenied", res)
+	}
+	if res.FileAccessReason != session.FileAccessReasonIsADirectory {
+		t.Fatalf("FileAccessReason = %v, want IsADirectory", res.FileAccessReason)
+	}
+}
+
+func TestEditFileSymlinkReasonSymlinkRefused(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	workingDir := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(workingDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("orig"), 0o640); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workingDir, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "link", Content: []byte("pwned"),
+	})
+	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("EditFile of a symlink result = %+v, want FileAccessDenied", res)
+	}
+	if res.FileAccessReason != session.FileAccessReasonSymlinkRefused {
+		t.Fatalf("FileAccessReason = %v, want SymlinkRefused", res.FileAccessReason)
+	}
+}
+
+func TestEditFileTraversalReasonUnspecified(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "../escape", Content: []byte("x"),
+	})
+	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+		t.Fatalf("EditFile traversal result = %+v, want FileAccessDenied", res)
+	}
+	// A genuine path denial carries no refined reason, so the API keeps invalid_path.
+	if res.FileAccessReason != session.FileAccessReasonUnspecified {
+		t.Fatalf("FileAccessReason = %v, want Unspecified", res.FileAccessReason)
 	}
 }
 

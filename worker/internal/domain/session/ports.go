@@ -73,6 +73,13 @@ type CommandResult struct {
 	FileListing  *FileListing
 	ErrorCode    CommandErrorCode
 	ErrorMessage string
+	// FileAccessReason refines a CommandErrorFileAccessDenied failure into the
+	// specific condition (is-a-directory, symlink refusal, oversized payload,
+	// etc.) so the API surfaces an honest problem reason rather than collapsing
+	// every file denial into "invalid path" (issue #548). It is meaningful only
+	// when ErrorCode is CommandErrorFileAccessDenied; the zero value
+	// (FileAccessReasonUnspecified) is the generic path denial.
+	FileAccessReason FileAccessReason
 }
 
 // FileListing is a directory listing returned by a ListFiles command. Truncated
@@ -146,6 +153,47 @@ func (c CommandErrorCode) String() string {
 		return "image_missing"
 	default:
 		return fmt.Sprintf("CommandErrorCode(%d)", int(c))
+	}
+}
+
+// FileAccessReason refines a CommandErrorFileAccessDenied failure (issue #548).
+// The Worker emits FileAccessDenied for several conditions that are NOT
+// path-syntax problems; this value carries which one so the adapter sets the
+// wire FileAccessReason and the API maps each to an honest problem reason. The
+// adapter maps each value to the generated enum.
+type FileAccessReason int
+
+const (
+	// FileAccessReasonUnspecified is the zero value: a generic path denial (a
+	// traversal-unsafe path, or a resolution refusal that is not one of the
+	// refined cases below). The API maps it to 422 invalid_path.
+	FileAccessReasonUnspecified FileAccessReason = iota
+	// FileAccessReasonIsADirectory marks a read/edit whose path is a directory.
+	FileAccessReasonIsADirectory
+	// FileAccessReasonNotADirectory marks a list whose path is a regular file.
+	FileAccessReasonNotADirectory
+	// FileAccessReasonSymlinkRefused marks a refused final/intermediate symlink.
+	FileAccessReasonSymlinkRefused
+	// FileAccessReasonPayloadTooLarge marks an oversized read result or edit
+	// payload (the control-plane file cap).
+	FileAccessReasonPayloadTooLarge
+)
+
+// String renders the file-access reason as a stable name for logs.
+func (r FileAccessReason) String() string {
+	switch r {
+	case FileAccessReasonUnspecified:
+		return "unspecified"
+	case FileAccessReasonIsADirectory:
+		return "is_a_directory"
+	case FileAccessReasonNotADirectory:
+		return "not_a_directory"
+	case FileAccessReasonSymlinkRefused:
+		return "symlink_refused"
+	case FileAccessReasonPayloadTooLarge:
+		return "payload_too_large"
+	default:
+		return fmt.Sprintf("FileAccessReason(%d)", int(r))
 	}
 }
 
