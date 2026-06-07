@@ -15,7 +15,7 @@
 	webui-lint webui-format webui-test webui-build webui-e2e \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
-	bootstrap hooks-install
+	bootstrap hooks-install hooks-check
 
 # golangci-lint is not part of the Go distribution; it is installed into a
 # module-local, gitignored ./.bin (see worker/README.md).
@@ -42,7 +42,7 @@ PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
-check: lint test webui-build openapi-check proto-check docs-check
+check: hooks-check lint test webui-build openapi-check proto-check docs-check
 
 lint: api-lint worker-lint webui-lint proto-lint
 
@@ -177,6 +177,24 @@ bootstrap: $(GOLANGCI)
 hooks-install:
 	git config core.hooksPath .githooks
 	@echo "git hooks installed (core.hooksPath -> .githooks)"
+
+# Preflight for `make check`: warn (do not fail) when core.hooksPath is not
+# pointing at the checked-in .githooks, which silently disables the pre-commit /
+# pre-push / post-checkout gates for every checkout sharing this .git/config.
+# The parallel-worktree tooling has been seen resetting it (#551). This only
+# reads the config -- it never mutates it -- and warns rather than failing so it
+# stays out of the way on CI runners (which never install the hooks); it also
+# short-circuits when CI=true. Run `make hooks-install` to restore.
+hooks-check:
+	@if [ "$$CI" != "true" ] && [ "$$(git config core.hooksPath)" != ".githooks" ]; then \
+		echo "============================================================"; \
+		echo "WARNING: git core.hooksPath is not '.githooks'"; \
+		echo "  current: $$(git config core.hooksPath || echo '<unset>')"; \
+		echo "  The pre-commit / pre-push / post-checkout hooks are DISABLED"; \
+		echo "  for every checkout sharing this .git/config (see #551)."; \
+		echo "  Restore them with: make hooks-install"; \
+		echo "============================================================"; \
+	fi
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.
