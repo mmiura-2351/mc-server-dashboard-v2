@@ -449,6 +449,16 @@ equivalent to `high`. Because the policy only validates *newly set* passwords,
 existing hashes are unaffected; set `auth.password.policy=high` to keep the old
 posture.
 
+> **Breaking change (upgrading from per-rule config):** the previous per-rule
+> keys were removed in favour of the preset above. If your config still sets any
+> of `auth.password.min_length`, `auth.password.require_complexity`,
+> `auth.password.check_common_list`, `auth.password.forbid_user_info`, or
+> `auth.password.forbid_simple_patterns` (or their `MCD_API_AUTH__PASSWORD__*`
+> env forms), **remove them** and select a preset instead. The `auth.password`
+> section forbids unknown keys, so leaving any of them set fails fast with a
+> startup validation error. To keep the old strictness, choose
+> `auth.password.policy=high`, which reproduces the previous default posture.
+
 ### 7.2 Brute-force protection
 
 Per-username and per-IP failure thresholds over sliding windows, lockout with

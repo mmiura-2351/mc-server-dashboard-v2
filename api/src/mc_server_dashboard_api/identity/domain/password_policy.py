@@ -60,6 +60,8 @@ PRESETS: dict[str, PolicyPreset] = {
     "low": PolicyPreset(
         min_length=8,
         require_complexity=False,
+        # Inert when require_complexity is False: the complexity check
+        # short-circuits, so this 0 is never read.
         complexity_classes=0,
         check_common_list=True,
         forbid_user_info=True,
