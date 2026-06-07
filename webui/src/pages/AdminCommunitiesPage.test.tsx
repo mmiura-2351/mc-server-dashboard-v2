@@ -145,6 +145,11 @@ describe("admin communities list", () => {
     // Counts render in the row.
     expect(within(table).getByText("5")).toBeInTheDocument();
     expect(within(table).getByText("3")).toBeInTheDocument();
+    // The id cell carries the full id as a hover title (#519).
+    expect(within(table).getByText("c2").closest("td")).toHaveAttribute(
+      "title",
+      "c2",
+    );
   });
 });
 

@@ -211,7 +211,9 @@ function CommunityTable({
               <td>
                 <strong>{c.name}</strong>
               </td>
-              <td className="mono">{c.id}</td>
+              <td className="mono" title={c.id}>
+                {c.id}
+              </td>
               <td className="num">{c.member_count}</td>
               <td className="num">{c.server_count}</td>
               <td className="row-actions">

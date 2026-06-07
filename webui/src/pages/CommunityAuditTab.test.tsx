@@ -136,6 +136,36 @@ describe("CommunityAuditTab", () => {
     expect(screen.getByText("server:s1")).toBeInTheDocument();
   });
 
+  it("carries the full value as a hover title on the long-value cells", async () => {
+    const actor = "22222222-2222-2222-2222-222222222222";
+    routeGet({
+      records: [
+        record({
+          operation: "community.permission_grant_revoke",
+          actor_id: actor,
+          target_type: "server",
+          target_id: "s1",
+        }),
+      ],
+    });
+    renderPage();
+    await openAuditTab();
+
+    const op = await screen.findByText("community.permission_grant_revoke");
+    expect(op.closest("td")).toHaveAttribute(
+      "title",
+      "community.permission_grant_revoke",
+    );
+    expect(screen.getByText(actor).closest("td")).toHaveAttribute(
+      "title",
+      actor,
+    );
+    expect(screen.getByText("server:s1").closest("td")).toHaveAttribute(
+      "title",
+      "server:s1",
+    );
+  });
+
   it("shows the empty state when there are no records", async () => {
     routeGet({ records: [] });
     renderPage();
