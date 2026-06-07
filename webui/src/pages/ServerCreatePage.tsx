@@ -9,6 +9,7 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { useCanCode } from "../permissions/useCan.ts";
 import { dashboardPath } from "../routes.ts";
+import { useTabHash } from "./urlState.ts";
 
 // Server create wizard (WEBUI_SPEC.md 6.3). Three steps for a fresh server
 // (type & version → runtime → config & EULA) plus an "Import ZIP" tab that
@@ -86,8 +87,15 @@ function Chrome({ children }: { children: React.ReactNode }) {
   );
 }
 
+// The two modes live in the URL hash (#540, following the #514/#528 tab
+// convention): the new-server wizard is the default and keeps a clean URL,
+// while #import deep-links to the ZIP-import tab and Back walks the tab history.
+// The wizard's internal steps stay in component state — they hold form input, so
+// per-step history would make Back discard half-filled fields.
+const TABS = ["new", "import"] as const;
+
 function Wizard({ communityId }: { communityId: string }) {
-  const [tab, setTab] = useState<"new" | "import">("new");
+  const [tab, setTab] = useTabHash(TABS);
   return (
     <Chrome>
       <div className="tabs" role="tablist">

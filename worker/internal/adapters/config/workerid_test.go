@@ -11,7 +11,6 @@ import (
 func baseEnv(dir string) map[string]string {
 	return map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret",
 		"MCD_WORKER_API_TLS_INSECURE":   "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": dir,
