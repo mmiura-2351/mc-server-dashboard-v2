@@ -8,6 +8,7 @@
  * bouncing a returning user to /login.
  */
 
+import { useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   type ReactNode,
@@ -41,13 +42,20 @@ const SessionContext = createContext<SessionContextValue | null>(null);
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<SessionStatus>("bootstrapping");
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   // Reset to signed-out and send the user to /login. Used both for an explicit
   // logout and for a hard logout triggered by a failed transparent refresh.
+  // Drop every cached query so the previous user's data (user, communities,
+  // servers, members…) can never render for the next account on a shared
+  // browser, and so the next sign-in bootstraps from an empty cache (#532).
+  // Per-device prefs (language, module-level UI stores) live outside the query
+  // cache and are intentionally left untouched.
   const resetToSignedOut = useCallback(() => {
+    queryClient.clear();
     setStatus("signed-out");
     navigate("/login");
-  }, [navigate]);
+  }, [navigate, queryClient]);
 
   // Wire the framework-free session core to React: the client retries 401s
   // through the single-flight refresh, and a hard logout resets this state.
