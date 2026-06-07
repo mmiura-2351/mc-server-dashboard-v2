@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -575,21 +577,39 @@ async def test_list_is_scoped_to_the_community() -> None:
 # --- update ----------------------------------------------------------------
 
 
+async def _grant_all(_code: str) -> bool:
+    """A permissive ``authorize`` for tests that exercise non-authz behavior."""
+
+    return True
+
+
 def _updater(
     uow: FakeUnitOfWork,
     *,
     file_store: FakeFileStore | None = None,
     min_interval_seconds: int = 0,
-) -> UpdateServer:
-    """Build an :class:`UpdateServer` with the file seam + port range bound (#311)."""
+) -> Callable[..., Awaitable[Server]]:
+    """Build an :class:`UpdateServer` with the file seam + port range bound (#311).
 
-    return UpdateServer(
+    ``authorize`` is required on :class:`UpdateServer` (issue #458). Call sites that
+    do not exercise the gate omit it and get a permit-all default; gate tests pass an
+    explicit ``authorize=`` which overrides the default.
+    """
+
+    use_case = UpdateServer(
         uow=uow,
         clock=FakeClock(_LATER),
         file_store=file_store or FakeFileStore(),
         port_range=_PORTS,
         min_interval_seconds=min_interval_seconds,
     )
+
+    async def call(
+        *, authorize: Callable[..., Awaitable[bool]] = _grant_all, **kwargs: Any
+    ) -> Server:
+        return await use_case(authorize=authorize, **kwargs)
+
+    return call
 
 
 async def test_update_edits_name_and_config_while_at_rest() -> None:
@@ -829,19 +849,55 @@ async def test_update_snapshot_interval_change_requires_server_update() -> None:
     assert uow.commits == 0
 
 
-async def test_update_no_authorize_skips_gate() -> None:
-    # Omitting authorize (the use case's default) runs no gate, preserving the
-    # existing unit-test call sites that pre-date the gate.
+async def test_update_empty_body_requires_server_update() -> None:
+    # A PATCH that asserts an edit but touches nothing (empty body) must still
+    # require server:update — the conservative pre-#458 default. Otherwise a caller
+    # with no permissions could use the 200 as an info leak / state oracle.
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
     uow.servers.seed(server)
-    updated = await _updater(uow)(
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_no_op_config_requires_server_update() -> None:
+    # A config that round-trips identical to the current config has an empty
+    # changed-key set, but the PATCH still requires server:update.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            config=dict(server.config),
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_empty_body_succeeds_with_server_update() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    authorize = _grant("server:update")
+    await _updater(uow)(
         community_id=community,
         server_id=server.id,
-        name="creative",
+        authorize=authorize,
     )
-    assert updated.name == ServerName("creative")
+    assert authorize.seen == ["server:update"]
+    assert uow.commits == 1
     assert uow.commits == 1
 
 
@@ -1348,6 +1404,7 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
         community_id=community,
         server_id=server.id,
         game_port=25570,
+        authorize=_grant_all,
     )
     assert updated.game_port == 25570
 

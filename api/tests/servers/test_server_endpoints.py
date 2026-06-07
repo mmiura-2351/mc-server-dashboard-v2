@@ -46,7 +46,10 @@ from mc_server_dashboard_api.dependencies import (
     get_read_server,
     get_update_server,
 )
-from mc_server_dashboard_api.servers.application.manage_server import ReadServer
+from mc_server_dashboard_api.servers.application.manage_server import (
+    ReadServer,
+    UpdateServer,
+)
 from mc_server_dashboard_api.servers.domain.config_bounds import (
     MAX_CONFIG_BYTES,
     MAX_CONFIG_DEPTH,
@@ -67,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
 )
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
@@ -88,7 +92,7 @@ from mc_server_dashboard_api.servers.domain.version_validator import (
 )
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
-from tests.servers.fakes import FakeUnitOfWork
+from tests.servers.fakes import FakeClock, FakeFileStore, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -162,7 +166,7 @@ def _app(
     create: _FakeUseCase | None = None,
     read: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
-    update: _FakeUseCase | None = None,
+    update: _FakeUseCase | UpdateServer | None = None,
     delete: _FakeUseCase | None = None,
 ) -> object:
     app = create_app()
@@ -618,6 +622,58 @@ def test_update_permission_denied_is_403_with_permission_member() -> None:
     body = resp.json()
     assert body["reason"] == "forbidden"
     assert body["permission"] == "backup:schedule"
+
+
+def _real_update(uow: FakeUnitOfWork) -> UpdateServer:
+    return UpdateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+    )
+
+
+def test_update_empty_body_requires_server_update_403() -> None:
+    # A no-op PATCH (empty body) touches nothing, but must still require
+    # server:update (the conservative pre-#458 default). A member with no server
+    # permissions (allow=False denies every authorize call) gets 403 naming
+    # server:update — not a 200 that would leak server detail or act as a state
+    # oracle (issue #458 review finding).
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    app = _app(member=True, allow=False, update=_real_update(uow))
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{community}/servers/{server_id}",
+        json={},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "forbidden"
+    assert body["permission"] == "server:update"
+    assert uow.commits == 0
+
+
+def test_update_no_op_config_requires_server_update_403() -> None:
+    # A config that round-trips identical to the current config has an empty
+    # changed-key set, but the PATCH still requires server:update (issue #458).
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    app = _app(member=True, allow=False, update=_real_update(uow))
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{community}/servers/{server_id}",
+        json={"config": {"motd": "hi"}},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "forbidden"
+    assert body["permission"] == "server:update"
+    assert uow.commits == 0
 
 
 def test_update_non_member_gets_404() -> None:

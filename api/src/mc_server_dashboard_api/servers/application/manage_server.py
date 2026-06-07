@@ -412,7 +412,7 @@ class UpdateServer:
         config: dict[str, Any] | None = None,
         execution_backend: str | None = None,
         game_port: int | None = None,
-        authorize: Callable[[str], Awaitable[bool]] | None = None,
+        authorize: Callable[[str], Awaitable[bool]],
     ) -> Server:
         new_name = None if name is None else ServerName(name)
         if config is not None:
@@ -435,27 +435,25 @@ class UpdateServer:
             ):
                 # The backend is immutable for the server's lifetime (FR-EXE-3).
                 raise ExecutionBackendImmutableError(execution_backend)
-            # The at-rest gate applies unless this is a safe-keys-only config edit
-            # (issue #115): a config update whose changed keys are all in
-            # ``_SAFE_CONFIG_KEYS``, with no name change and no port change, may
-            # run in any state.
+            # The config diff drives two gates. The at-rest gate (issue #115)
+            # applies unless this is a safe-keys-only config edit: a config update
+            # whose changed keys are all in ``_SAFE_CONFIG_KEYS``, with no name
+            # change and no port change, may run in any state. The permission gate
+            # (issue #458) branches by the same changed-key set: scheduling-only
+            # edits need ``backup:schedule``; any other change needs
+            # ``server:update``; a mixed edit needs both. The permission gate runs
+            # after existence (a missing server is 404, no existence signal) and
+            # before the at-rest gate.
             changed_keys = (
                 set() if config is None else _changed_config_keys(server.config, config)
             )
-            # The permission gate branches by the changed-key set (issue #458):
-            # scheduling-only edits need ``backup:schedule``; any other change
-            # needs ``server:update``; a mixed edit needs both. Evaluated after
-            # existence (a missing server is 404, no existence signal) and before
-            # the at-rest gate. ``authorize`` is None in unit tests that pre-date
-            # the gate; the edge always supplies it.
-            if authorize is not None:
-                await self._authorize_update(
-                    authorize=authorize,
-                    new_name=new_name,
-                    game_port=game_port,
-                    execution_backend=execution_backend,
-                    changed_keys=changed_keys,
-                )
+            await self._authorize_update(
+                authorize=authorize,
+                new_name=new_name,
+                game_port=game_port,
+                execution_backend=execution_backend,
+                changed_keys=changed_keys,
+            )
             safe_only = (
                 new_name is None
                 and game_port is None
@@ -508,7 +506,10 @@ class UpdateServer:
         when the edit changes a scheduling key; ``server:update`` when it changes
         anything else (a name, port, backend, or any non-scheduling config key). A
         mixed edit requires both. ``server:update`` is checked first so a wholly
-        unauthorized caller is denied on the broad code.
+        unauthorized caller is denied on the broad code. A no-op PATCH that touches
+        nothing (empty body, or a config that round-trips identical) still requires
+        ``server:update`` — the conservative pre-#458 default, so a PATCH cannot
+        leak server detail or act as a state oracle without any permission.
         """
 
         scheduling_change = bool(changed_keys & _SCHEDULING_CONFIG_KEYS)
@@ -523,6 +524,8 @@ class UpdateServer:
             required.append(_SERVER_UPDATE_PERMISSION)
         if scheduling_change:
             required.append(_BACKUP_SCHEDULE_PERMISSION)
+        if not required:
+            required.append(_SERVER_UPDATE_PERMISSION)
         for code in required:
             if not await authorize(code):
                 raise PermissionDeniedError(code)
