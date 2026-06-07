@@ -26,6 +26,7 @@ from mc_server_dashboard_api.identity.adapters.password_hasher import (
     BcryptPasswordHasher,
 )
 from mc_server_dashboard_api.identity.application.login import Login, LoginResult
+from mc_server_dashboard_api.identity.application.restore_session import RestoreResult
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
@@ -299,7 +300,7 @@ def test_refresh_invalid_token_returns_401() -> None:
 def test_session_returns_access_token_only() -> None:
     # The non-rotating bootstrap path (issue #512): a valid refresh cookie is
     # exchanged for an access token. No refresh_token in the body, no rotation.
-    fake = _Fake(result="acc3")
+    fake = _Fake(result=RestoreResult(access_token="acc3", user_id=uuid.uuid4()))
     client = next(_client(restore=fake))
     client.cookies.set("mcd_refresh", "live-cookie")
     resp = client.post("/api/auth/session")
@@ -311,7 +312,7 @@ def test_session_returns_access_token_only() -> None:
 def test_session_emits_no_set_cookie() -> None:
     # Restore never rotates, so it must never re-set the refresh cookie — that is
     # the whole point: a page load can no longer leave a torn rotation in the jar.
-    fake = _Fake(result="acc3")
+    fake = _Fake(result=RestoreResult(access_token="acc3", user_id=uuid.uuid4()))
     client = next(_client(restore=fake))
     client.cookies.set("mcd_refresh", "live-cookie")
     resp = client.post("/api/auth/session")

@@ -29,6 +29,7 @@ forbids ad-hoc ``detail=`` ``HTTPException`` usage outside this module.
 from __future__ import annotations
 
 import http
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -38,6 +39,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
+
+_logger = logging.getLogger(__name__)
 
 # URN scheme for the ``type`` member: ``urn:mcsd:error:<reason>``. A URN (RFC
 # 8141) is a stable identifier that intentionally does not resolve, so we never
@@ -57,6 +60,13 @@ _STATUS_REASON: dict[int, str] = {
 # Reason for the unified validation-error response (request body / query / path
 # validation, FastAPI ``RequestValidationError``).
 VALIDATION_REASON = "validation_error"
+
+# Reason for the catch-all 500: any exception that is NOT a ProblemException /
+# HTTPException / RequestValidationError (e.g. an OSError escaping the at-rest
+# write path, issue #542). Without a handler such an exception returns a bare
+# ``text/plain`` 500 that escapes the RFC 9457 contract; this keeps one body shape
+# while logging the traceback server-side and never leaking internals to clients.
+INTERNAL_ERROR_REASON = "internal_error"
 
 
 def _title_for(status_code: int) -> str:
@@ -206,6 +216,28 @@ async def validation_exception_handler(
     )
 
 
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Render any otherwise-unhandled exception as problem+json ``internal_error``.
+
+    A route that raises something other than a :class:`ProblemException` /
+    ``HTTPException`` / ``RequestValidationError`` (e.g. an ``OSError`` escaping the
+    at-rest write path, issue #542) would otherwise return a bare ``text/plain``
+    500 that escapes the RFC 9457 contract. This last-resort handler logs the full
+    traceback server-side for diagnosis and returns a 500 whose body leaks no
+    exception internals (no message, no path), keeping one error shape (#371).
+    """
+
+    _logger.exception(
+        "unhandled exception serving %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
+    )
+    return problem_response(
+        status.HTTP_500_INTERNAL_SERVER_ERROR, INTERNAL_ERROR_REASON
+    )
+
+
 def _generic_reason(status_code: int) -> str:
     """A stable snake_case reason for a status with no explicit mapping."""
 
@@ -219,3 +251,7 @@ def install_problem_handlers(app: FastAPI) -> None:
     app.add_exception_handler(ProblemException, problem_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
+    # Last-resort catch-all so an unexpected exception (e.g. an OSError escaping a
+    # route) is normalized to problem+json instead of a bare text/plain 500 that
+    # breaks the RFC 9457 contract (issue #542).
+    app.add_exception_handler(Exception, unhandled_exception_handler)

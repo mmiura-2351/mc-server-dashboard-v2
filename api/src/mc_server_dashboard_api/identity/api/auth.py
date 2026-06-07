@@ -210,6 +210,7 @@ async def refresh(
 async def session(
     request: Request,
     use_case: Annotated[RestoreSession, Depends(get_restore_session)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AccessTokenResponse:
     # The Web UI bootstrap: turn the httpOnly refresh cookie into a fresh access
@@ -223,10 +224,25 @@ async def session(
     if cookie_token is None:
         raise _unauthorized()
     try:
-        access_token = await use_case(refresh_token=cookie_token)
+        result = await use_case(refresh_token=cookie_token)
     except InvalidRefreshTokenError as exc:
         raise _unauthorized() from exc
-    return AccessTokenResponse(access_token=access_token)
+    # Restore no longer collides with a rotation, so it raised no theft signal
+    # against an idle victim (issue #530). Record a SUCCESS row attributed to the
+    # session's user so operators can see session-restore activity per family —
+    # the explicit replacement for the incidental detection signal restore lacks.
+    # Only successes are recorded: a missing/invalid cookie stays a silent 401
+    # (no enumeration signal), matching the plain-bad-token posture on /refresh.
+    await recorder.record(
+        AuditEvent(
+            operation=ops.AUTH_SESSION_RESTORE,
+            outcome=Outcome.SUCCESS,
+            actor_id=result.user_id,
+            target_type=ops.TARGET_USER,
+            target_id=result.user_id,
+        )
+    )
+    return AccessTokenResponse(access_token=result.access_token)
 
 
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
