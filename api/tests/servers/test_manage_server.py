@@ -26,6 +26,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
     InvalidSnapshotIntervalError,
+    PermissionDeniedError,
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
@@ -662,6 +663,186 @@ async def test_update_rejects_invalid_backup_schedule_override() -> None:
             config={"backup_interval_hours": 0},
         )
     assert uow.commits == 0
+
+
+# --- update permission gate (issue #458) -----------------------------------
+#
+# A config edit that touches only the backup-scheduling key
+# (``backup_interval_hours``) requires ``backup:schedule``; any other change
+# requires ``server:update``; a mixed edit requires both. ``server:update`` no
+# longer implies scheduling. The gate keys off the *changed* set vs the current
+# config, so it sees what the edit actually alters (not the round-tripped blob).
+
+
+class _Grant:
+    """An ``authorize`` callback granting exactly ``codes`` (denying anything else).
+
+    Records the codes it was asked about in ``seen`` so tests can assert the gate
+    queried only the permissions the changed-key set requires.
+    """
+
+    def __init__(self, *codes: str) -> None:
+        self._granted = set(codes)
+        self.seen: list[str] = []
+
+    async def __call__(self, code: str) -> bool:
+        self.seen.append(code)
+        return code in self._granted
+
+
+def _grant(*codes: str) -> _Grant:
+    return _Grant(*codes)
+
+
+async def test_update_scheduling_only_requires_backup_schedule() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    authorize = _grant("backup:schedule")
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hi", "backup_interval_hours": 6},
+        authorize=authorize,
+    )
+    assert updated.config["backup_interval_hours"] == 6
+    assert authorize.seen == ["backup:schedule"]
+    assert uow.commits == 1
+
+
+async def test_update_scheduling_only_denied_without_backup_schedule() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "hi", "backup_interval_hours": 6},
+            authorize=_grant("server:update"),
+        )
+    assert exc.value.permission == "backup:schedule"
+    assert uow.commits == 0
+
+
+async def test_update_non_scheduling_change_requires_server_update() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    authorize = _grant("server:update")
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        name="creative",
+        authorize=authorize,
+    )
+    assert updated.name == ServerName("creative")
+    assert authorize.seen == ["server:update"]
+    assert uow.commits == 1
+
+
+async def test_update_non_scheduling_change_denied_without_server_update() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            name="creative",
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_mixed_change_requires_both_permissions() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        name="creative",
+        config={"motd": "hi", "backup_interval_hours": 6},
+        authorize=_grant("server:update", "backup:schedule"),
+    )
+    assert updated.name == ServerName("creative")
+    assert updated.config["backup_interval_hours"] == 6
+    assert uow.commits == 1
+
+
+async def test_update_mixed_change_denied_missing_server_update() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            name="creative",
+            config={"motd": "hi", "backup_interval_hours": 6},
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_mixed_change_denied_missing_backup_schedule() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            name="creative",
+            config={"motd": "hi", "backup_interval_hours": 6},
+            authorize=_grant("server:update"),
+        )
+    assert exc.value.permission == "backup:schedule"
+    assert uow.commits == 0
+
+
+async def test_update_snapshot_interval_change_requires_server_update() -> None:
+    # snapshot_interval_seconds has no dedicated permission code; it stays under
+    # server:update (only the backup-scheduling key maps to backup:schedule).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow, min_interval_seconds=300)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "hi", "snapshot_interval_seconds": 600},
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_no_authorize_skips_gate() -> None:
+    # Omitting authorize (the use case's default) runs no gate, preserving the
+    # existing unit-test call sites that pre-date the gate.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        name="creative",
+    )
+    assert updated.name == ServerName("creative")
+    assert uow.commits == 1
 
 
 async def test_update_rejects_backend_change_as_immutable() -> None:

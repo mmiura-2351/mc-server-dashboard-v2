@@ -50,6 +50,21 @@ class ServerNameAlreadyExistsError(ServerError):
     """Creation/rename hit the per-community server name uniqueness constraint."""
 
 
+class PermissionDeniedError(ServerError):
+    """A server update was denied because the caller lacks a required permission.
+
+    ``UpdateServer`` gates by the changed-key set (issue #458): a config edit that
+    touches only the backup-scheduling key (``backup_interval_hours``) requires
+    ``backup:schedule``; any other change requires ``server:update``; a mixed edit
+    requires both. Whichever required permission the caller is missing is named in
+    :attr:`permission` so the edge can carry it in the 403 ``permission`` member.
+    """
+
+    def __init__(self, permission: str) -> None:
+        super().__init__(permission)
+        self.permission = permission
+
+
 class ExecutionBackendImmutableError(ServerError):
     """An update attempted to change the execution backend.
 

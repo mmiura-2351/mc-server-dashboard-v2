@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +32,7 @@ from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
+    PermissionDeniedError,
     PortAlreadyTakenError,
     PortOutOfRangeError,
     ServerFileNotFoundError,
@@ -116,6 +117,22 @@ _logger = logging.getLogger(__name__)
 _SAFE_CONFIG_KEYS = frozenset(
     {SNAPSHOT_INTERVAL_CONFIG_KEY, BACKUP_INTERVAL_CONFIG_KEY}
 )
+
+# Config keys whose edit is gated by ``backup:schedule`` rather than
+# ``server:update`` (issue #458). Backup scheduling has no dedicated endpoint —
+# it rides the ``backup_interval_hours`` key on the config blob — so the gate
+# branches by the changed-key set: a config edit that touches only this key
+# requires ``backup:schedule``; any other change requires ``server:update``; a
+# mixed edit requires both. ``server:update`` no longer implies scheduling. Note
+# the snapshot cadence key is NOT here: it has no dedicated permission code and
+# stays under ``server:update``.
+_SCHEDULING_CONFIG_KEYS = frozenset({BACKUP_INTERVAL_CONFIG_KEY})
+
+# The permission codes the update gate evaluates (issue #458). Kept as bare
+# strings so this application module stays free of community-context value
+# objects; the edge maps a denial to the 403 ``permission`` member.
+_SERVER_UPDATE_PERMISSION = "server:update"
+_BACKUP_SCHEDULE_PERMISSION = "backup:schedule"
 
 
 def _changed_config_keys(current: dict[str, Any], incoming: dict[str, Any]) -> set[str]:
@@ -395,6 +412,7 @@ class UpdateServer:
         config: dict[str, Any] | None = None,
         execution_backend: str | None = None,
         game_port: int | None = None,
+        authorize: Callable[[str], Awaitable[bool]] | None = None,
     ) -> Server:
         new_name = None if name is None else ServerName(name)
         if config is not None:
@@ -424,6 +442,20 @@ class UpdateServer:
             changed_keys = (
                 set() if config is None else _changed_config_keys(server.config, config)
             )
+            # The permission gate branches by the changed-key set (issue #458):
+            # scheduling-only edits need ``backup:schedule``; any other change
+            # needs ``server:update``; a mixed edit needs both. Evaluated after
+            # existence (a missing server is 404, no existence signal) and before
+            # the at-rest gate. ``authorize`` is None in unit tests that pre-date
+            # the gate; the edge always supplies it.
+            if authorize is not None:
+                await self._authorize_update(
+                    authorize=authorize,
+                    new_name=new_name,
+                    game_port=game_port,
+                    execution_backend=execution_backend,
+                    changed_keys=changed_keys,
+                )
             safe_only = (
                 new_name is None
                 and game_port is None
@@ -459,6 +491,41 @@ class UpdateServer:
             await self.uow.servers.update(server)
             await self.uow.commit()
         return server
+
+    async def _authorize_update(
+        self,
+        *,
+        authorize: Callable[[str], Awaitable[bool]],
+        new_name: ServerName | None,
+        game_port: int | None,
+        execution_backend: str | None,
+        changed_keys: set[str],
+    ) -> None:
+        """Enforce the per-update permission gate (issue #458).
+
+        Computes the required permission codes from what the edit touches and
+        denies on the first the caller is missing. ``backup:schedule`` is required
+        when the edit changes a scheduling key; ``server:update`` when it changes
+        anything else (a name, port, backend, or any non-scheduling config key). A
+        mixed edit requires both. ``server:update`` is checked first so a wholly
+        unauthorized caller is denied on the broad code.
+        """
+
+        scheduling_change = bool(changed_keys & _SCHEDULING_CONFIG_KEYS)
+        other_change = (
+            new_name is not None
+            or game_port is not None
+            or execution_backend is not None
+            or bool(changed_keys - _SCHEDULING_CONFIG_KEYS)
+        )
+        required: list[str] = []
+        if other_change:
+            required.append(_SERVER_UPDATE_PERMISSION)
+        if scheduling_change:
+            required.append(_BACKUP_SCHEDULE_PERMISSION)
+        for code in required:
+            if not await authorize(code):
+                raise PermissionDeniedError(code)
 
     async def _rewrite_server_port(
         self,

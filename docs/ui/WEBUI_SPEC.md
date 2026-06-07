@@ -99,7 +99,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `execution_backend`, `config`, `accept_eula`, optional `game_port`). `spigot` → 422 `spigot_unsupported`. |
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
 | GET | `…/{sid}/export` | ZIP export (download). |
-| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port; backend immutable) / delete. |
+| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port; backend immutable) / delete. PATCH gate branches by changed-key set (#458): a cadence-only edit (`backup_interval_hours`) needs `backup:schedule`; any other change needs `server:update`; a mixed edit needs both. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
@@ -324,6 +324,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Schedule: per-server interval via the `backup_interval_hours` key on the
   server `config` blob (`PATCH …/servers/{sid}`) — no dedicated endpoint; the
   UI exposes it as an "every N hours" field (absent = no scheduled backups).
+  Gated by `backup:schedule`, not `server:update`: the PATCH gate branches by
+  the changed-key set (#458), so a PATCH that changes only `backup_interval_hours`
+  requires `backup:schedule`; any other change requires `server:update`; a mixed
+  PATCH requires both. `server:update` does **not** imply scheduling. The UI
+  shows the schedule field (editable) exactly when the caller holds
+  `backup:schedule`.
 
 ### 6.8 Server detail — Players
 - Attached groups (`GET …/{sid}/groups`) with kind badges; attach/detach

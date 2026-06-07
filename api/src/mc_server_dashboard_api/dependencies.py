@@ -12,7 +12,7 @@ import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, NamedTuple
 
 from fastapi import Depends, Request, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -1777,6 +1777,64 @@ def require_permission(
         ):
             raise _forbidden(operation)
         return auth_user
+
+    return _dependency
+
+
+class ServerUpdateAuthz(NamedTuple):
+    """The server-PATCH gate's resources (issue #458).
+
+    The update gate cannot be a fixed-operation :func:`require_permission`: the
+    required code depends on which keys the PATCH changes, which only the use case
+    (with the current config in hand) knows. So this dependency runs Layer-1
+    membership at the edge and hands the route the authorized :class:`AuthUser`
+    plus an ``authorize(code)`` callable bound to this server resource; the use
+    case calls it per required code and raises on the first the caller lacks.
+    """
+
+    auth_user: AuthUser
+    authorize: Callable[[str], Awaitable[bool]]
+
+
+def require_server_update_authz(
+    *, resource_type: str, resource_id_param: str
+) -> Callable[..., Awaitable[ServerUpdateAuthz]]:
+    """Build the server-PATCH authorization dependency (issue #458).
+
+    Runs the same Layer-1 membership check as :func:`require_permission`
+    (non-member -> 404, no existence signal), then returns the
+    :class:`ServerUpdateAuthz` bundle. The per-operation Layer-2 ``can`` decision
+    is deferred to the bound ``authorize`` callable so the route's use case can
+    branch the gate by the changed-key set (``server:update`` vs
+    ``backup:schedule``).
+    """
+
+    async def _dependency(
+        community_id: uuid.UUID,
+        request: Request,
+        user: Annotated[User, Depends(get_current_user)],
+        visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
+        checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
+    ) -> ServerUpdateAuthz:
+        auth_user = _to_auth_user(user)
+        community = CommunityId(community_id)
+        if not await visibility.is_member(
+            user_id=auth_user.user_id, community_id=community
+        ):
+            raise _not_found()
+        resource_id = _resource_id_from_path(request, resource_id_param)
+        resource = ResourceRef(
+            community_id=community,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+
+        async def authorize(code: str) -> bool:
+            return await checker.can(
+                user=auth_user, operation=Permission(code), resource=resource
+            )
+
+        return ServerUpdateAuthz(auth_user=auth_user, authorize=authorize)
 
     return _dependency
 

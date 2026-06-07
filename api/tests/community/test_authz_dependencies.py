@@ -28,11 +28,13 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    ServerUpdateAuthz,
     get_current_user,
     get_membership_visibility,
     get_permission_checker,
     require_permission,
     require_platform_admin,
+    require_server_update_authz,
 )
 from mc_server_dashboard_api.http_problem import install_problem_handlers
 from tests.identity.fakes import make_user
@@ -227,3 +229,66 @@ def test_missing_path_param_is_a_server_misconfiguration() -> None:
     client = TestClient(app, raise_server_exceptions=False)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/oops")
     assert resp.status_code == 500
+
+
+# --- require_server_update_authz (issue #458) ------------------------------
+#
+# The server-PATCH gate cannot pin a single operation: the required code depends
+# on which keys the PATCH changes (server:update vs backup:schedule), known only
+# in the use case. So this dependency does Layer-1 membership at the edge and
+# hands back an ``authorize(code)`` callable bound to the server resource.
+
+
+def _authz_app() -> tuple[FastAPI, _FakeChecker]:
+    app = FastAPI()
+    install_problem_handlers(app)
+    checker = _FakeChecker(allow=True)
+
+    @app.patch("/api/communities/{community_id}/servers/{server_id}")
+    async def _patch(
+        authz: ServerUpdateAuthz = Depends(
+            require_server_update_authz(
+                resource_type="server", resource_id_param="server_id"
+            )
+        ),
+    ) -> dict[str, bool]:
+        # Exercise the bound callable so the test can observe the checker call.
+        allowed = await authz.authorize("backup:schedule")
+        return {"allowed": allowed}
+
+    user = make_user()
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=True
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: checker
+    return app, checker
+
+
+def test_server_update_authz_non_member_gets_404() -> None:
+    app, _ = _authz_app()
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=False
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}", json={}
+    )
+    assert resp.status_code == 404
+
+
+def test_server_update_authz_binds_callable_to_resource() -> None:
+    app, checker = _authz_app()
+    client = next(_client(app))
+    community_id = uuid.uuid4()
+    server_id = uuid.uuid4()
+    resp = client.patch(f"/api/communities/{community_id}/servers/{server_id}", json={})
+    assert resp.status_code == 200
+    assert resp.json() == {"allowed": True}
+    # The callable delegated to the checker with the requested code and the
+    # per-server resource scope.
+    (_user, operation, resource) = checker.calls[0]
+    assert operation == Permission("backup:schedule")
+    assert resource.community_id == CommunityId(community_id)
+    assert resource.resource_type == "server"
+    assert resource.resource_id == server_id

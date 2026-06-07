@@ -56,6 +56,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
     InvalidSnapshotIntervalError,
+    PermissionDeniedError,
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
@@ -584,6 +585,51 @@ def test_update_game_port_out_of_schema_bound_is_422() -> None:
     )
     assert resp.status_code == 422
     assert update.calls == []
+
+
+def test_update_forwards_authorize_callable() -> None:
+    # The route hands the use case an ``authorize`` callable so the use case can
+    # branch the permission gate by the changed-key set (issue #458).
+    update = _FakeUseCase(result=_server_entity(community_id=uuid.uuid4()))
+    app = _app(member=True, allow=True, update=update)
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"name": "creative"},
+    )
+    assert resp.status_code == 200
+    assert callable(update.calls[0]["authorize"])
+
+
+def test_update_permission_denied_is_403_with_permission_member() -> None:
+    # A changed-key-set denial (issue #458) surfaces as 403 carrying the missing
+    # permission code in the ``permission`` member (#425/#555).
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=PermissionDeniedError("backup:schedule")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": {"backup_interval_hours": 6}},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "forbidden"
+    assert body["permission"] == "backup:schedule"
+
+
+def test_update_non_member_gets_404() -> None:
+    # Layer-1 membership is still enforced at the edge: a non-member gets 404
+    # (no existence signal) before the use-case gate (issue #458).
+    app = _app(member=False, allow=True, update=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"name": "creative"},
+    )
+    assert resp.status_code == 404
 
 
 def test_delete_while_running_is_409() -> None:

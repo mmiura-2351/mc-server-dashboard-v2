@@ -84,10 +84,11 @@ export function ServerBackupsTab({
   const canRestore = can("backup:restore", { serverId });
   const canDelete = can("backup:delete", { serverId });
   const canSchedule = can("backup:schedule", { serverId });
-  // The schedule is saved through the shared server PATCH, which the API gates on
-  // server:update. Without it a backup:schedule-only user can edit the field but
-  // the Save would 403, so the field is shown read-only.
-  const canUpdate = can("server:update", { serverId });
+  // The schedule is saved through the shared server PATCH, but the API branches
+  // the gate by the changed-key set: a PATCH touching only the
+  // backup_interval_hours key requires backup:schedule, not server:update
+  // (issue #458). So a backup:schedule holder can edit and save the field on its
+  // own — the field is editable whenever canSchedule is true.
   // The restore dialog's one-click stop hits the lifecycle stop endpoint, gated
   // on server:stop. Without it the user must ask an operator to stop the server.
   const canStop = can("server:stop", { serverId });
@@ -273,7 +274,6 @@ export function ServerBackupsTab({
           <ScheduleField
             server={server}
             communityId={communityId}
-            canEdit={canUpdate}
             onError={onError}
           />
         )}
@@ -400,12 +400,10 @@ function Stat({
 function ScheduleField({
   server,
   communityId,
-  canEdit,
   onError,
 }: {
   server: ServerResponse;
   communityId: string;
-  canEdit: boolean;
   onError: (error: unknown) => void;
 }) {
   const { showToast } = useToast();
@@ -460,21 +458,18 @@ function ScheduleField({
           min={1}
           aria-label={t("backups.schedule.label")}
           value={hours}
-          disabled={!canEdit}
           onChange={(e) => setHours(e.target.value)}
         />
         {t("backups.schedule.unit")}
       </span>
-      {canEdit && (
-        <button
-          type="button"
-          className="btn sm"
-          disabled={save.isPending}
-          onClick={() => save.mutate()}
-        >
-          {t("backups.schedule.save")}
-        </button>
-      )}
+      <button
+        type="button"
+        className="btn sm"
+        disabled={save.isPending}
+        onClick={() => save.mutate()}
+      >
+        {t("backups.schedule.save")}
+      </button>
     </span>
   );
 }
