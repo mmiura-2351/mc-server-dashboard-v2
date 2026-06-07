@@ -1,26 +1,18 @@
 import { expect, test } from "@playwright/test";
 import { uniqueUser } from "./api.ts";
-import { signIn } from "./ui.ts";
+import { register, signIn } from "./ui.ts";
 
-// register -> login -> reload keeps session -> logout, all through the UI
-// (WEBUI_SPEC.md 6.1). A fresh user per run keeps the flow independent and
-// idempotent.
-test("register, login, reload keeps the session, logout", async ({ page }) => {
+// register (auto-login) -> reload keeps session -> logout -> manual login, all
+// through the UI (WEBUI_SPEC.md 6.1, issue #537). A fresh user per run keeps the
+// flow independent and idempotent.
+test("register auto-signs-in, reload keeps the session, logout, login", async ({
+  page,
+}) => {
   const user = uniqueUser("auth");
 
-  // Register through the form; on success the app routes to /login.
-  await page.goto("/register");
-  await page.getByLabel("Username").fill(user.username);
-  await page.getByLabel("Email").fill(user.email);
-  // Two password fields (password + confirm) share the "Password" prefix; fill
-  // by exact id to keep them apart.
-  await page.locator("#register-password").fill(user.password);
-  await page.locator("#register-confirm").fill(user.password);
-  await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page).toHaveURL(/\/login/);
-
-  // Log in; the app leaves /login for the authenticated shell.
-  await signIn(page, user.username, user.password);
+  // Register through the form; on success the app auto-logs the user in and
+  // lands on the authenticated shell (not /login).
+  await register(page, user);
 
   // Reload: the httpOnly refresh cookie re-bootstraps the session, so we stay
   // signed in (not bounced to /login).
@@ -35,6 +27,10 @@ test("register, login, reload keeps the session, logout", async ({ page }) => {
   // Session is gone: a protected route bounces back to /login.
   await page.goto("/account");
   await expect(page).toHaveURL(/\/login/);
+
+  // The credentials still work through the login form: sign back in and land on
+  // the authenticated shell.
+  await signIn(page, user.username, user.password);
 });
 
 // An F5 storm must NOT cost the session (issue #512). The bootstrap exchanges
@@ -46,15 +42,8 @@ test("register, login, reload keeps the session, logout", async ({ page }) => {
 test("rapid reloads keep the session", async ({ page }) => {
   const user = uniqueUser("auth-f5");
 
-  await page.goto("/register");
-  await page.getByLabel("Username").fill(user.username);
-  await page.getByLabel("Email").fill(user.email);
-  await page.locator("#register-password").fill(user.password);
-  await page.locator("#register-confirm").fill(user.password);
-  await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page).toHaveURL(/\/login/);
-
-  await signIn(page, user.username, user.password);
+  // Registration auto-logs the user in, landing on the authenticated shell.
+  await register(page, user);
 
   // Five rapid reloads: every bootstrap is a non-rotating restore, so the
   // refresh cookie is never rotated and the family is never revoked.
@@ -77,15 +66,8 @@ test("rapid reloads keep the session", async ({ page }) => {
 test("switching the language keeps the session", async ({ page }) => {
   const user = uniqueUser("auth-lang");
 
-  await page.goto("/register");
-  await page.getByLabel("Username").fill(user.username);
-  await page.getByLabel("Email").fill(user.email);
-  await page.locator("#register-password").fill(user.password);
-  await page.locator("#register-confirm").fill(user.password);
-  await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page).toHaveURL(/\/login/);
-
-  await signIn(page, user.username, user.password);
+  // Registration auto-logs the user in, landing on the authenticated shell.
+  await register(page, user);
   const landed = page.url();
 
   // Switch to Japanese via the top-bar switcher.
