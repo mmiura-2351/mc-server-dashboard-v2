@@ -1074,9 +1074,22 @@ select.community-switcher {
   gap: 10px;
   flex-wrap: wrap;
 }
+/* The search input sits outside a `.field`, so the base `.field input` styling
+ * (background/border/padding/focus) never reaches it — give it the same
+ * tokenized treatment here so it isn't a bare browser search box. */
 .files-search-input {
   flex: 1;
   min-width: 200px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.files-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 .files-search-by {
   display: flex;
@@ -1476,4 +1489,67 @@ select.community-switcher {
   color: var(--accent);
   border-color: var(--accent-dim);
   background: rgba(77, 159, 255, 0.08);
+}
+
+/* ---------- Role chips (Members tab, reused by Grants/Groups). Ported from
+ * the community-settings mockup `.chip` (docs/ui/mockup/assets/style.css):
+ * pill-shaped tokenized chips, an inline unassign affordance, and the assign
+ * picker popover. The non-removable variant is just a chip without `.chip-x`. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.chip-x {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-faint);
+  font-weight: 700;
+  line-height: 1;
+}
+.chip-x:hover:not(:disabled) {
+  color: var(--red);
+}
+.chip-x:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.chip-assign {
+  position: relative;
+  display: inline-flex;
+}
+.chip-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+}
+.chip-menu .sub {
+  padding: 4px 6px;
 }

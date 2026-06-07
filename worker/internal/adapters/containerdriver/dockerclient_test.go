@@ -161,6 +161,27 @@ func TestEngineClientCreateOmitsNetworkWhenEmpty(t *testing.T) {
 	}
 }
 
+// Every created container carries an elevated CPU weight (CPUShares) so a game
+// server wins CPU contention against batch workloads sharing the host (issue
+// #518). The Engine translates CPUShares to cpu.weight on cgroup v2.
+func TestEngineClientCreateSetsElevatedCPUShares(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
+	})
+	c := d.client(t)
+
+	if _, err := c.Create(context.Background(), CreateSpec{Name: "mcsd-s1", Image: "img"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var body createBody
+	if err := json.Unmarshal([]byte(d.requests[0].body), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.HostConfig.CPUShares != gameServerCPUShares {
+		t.Fatalf("CPUShares = %d, want %d", body.HostConfig.CPUShares, gameServerCPUShares)
+	}
+}
+
 func TestEngineClientWaitDecodesStatusCode(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]int{"StatusCode": 137})
