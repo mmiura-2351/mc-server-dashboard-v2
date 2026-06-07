@@ -118,6 +118,12 @@
   color: var(--text);
   font-family: inherit;
   font-size: inherit;
+  /* Let the switcher shrink and truncate a long community name instead of
+   * forcing the bar wider and pushing the trailing items off-screen (#554). */
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 select.community-switcher {
   cursor: pointer;
@@ -134,6 +140,9 @@ select.community-switcher {
 }
 .lang-switcher {
   margin-right: 12px;
+  /* Keep the trailing controls at their intrinsic size; the community switcher
+   * is the flex item that absorbs the shrink so they never overflow (#554). */
+  flex-shrink: 0;
 }
 
 .nav-hint {
@@ -153,10 +162,17 @@ select.community-switcher {
   padding: 4px 8px;
   border-radius: var(--radius-sm);
   color: var(--text);
+  flex-shrink: 0;
 }
 .user-menu:hover {
   background: var(--bg-overlay);
   text-decoration: none;
+}
+.user-menu .label {
+  white-space: nowrap;
+}
+.user-menu .avatar {
+  flex-shrink: 0;
 }
 .avatar {
   width: 26px;
@@ -169,6 +185,22 @@ select.community-switcher {
   font-size: 12px;
   font-weight: 700;
   color: #fff;
+}
+
+/* Narrow-width top bar (#554): at the shell's existing 900px breakpoint the
+ * trailing items would overflow off-screen, so tighten the gap and drop the
+ * account label to its avatar (the link keeps its aria-label) while the
+ * community switcher truncates. */
+@media (max-width: 900px) {
+  .topbar {
+    gap: 8px;
+  }
+  .lang-switcher {
+    margin-right: 0;
+  }
+  .user-menu .label {
+    display: none;
+  }
 }
 
 .content {
