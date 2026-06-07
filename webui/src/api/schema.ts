@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/admin/communities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List All Communities */
+        get: operations["list_all_communities_admin_communities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/users": {
         parameters: {
             query?: never;
@@ -1429,6 +1446,33 @@ export interface components {
             /** Uuid */
             uuid: string;
         };
+        /** AdminCommunityListResponse */
+        AdminCommunityListResponse: {
+            /** Communities */
+            communities: components["schemas"]["AdminCommunityResponse"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
+        /**
+         * AdminCommunityResponse
+         * @description Admin view of a community: identity, age, and its operational counts.
+         */
+        AdminCommunityResponse: {
+            /** Created At */
+            created_at: string;
+            /** Id */
+            id: string;
+            /** Member Count */
+            member_count: number;
+            /** Name */
+            name: string;
+            /** Server Count */
+            server_count: number;
+        };
         /** AdminCreateUserRequest */
         AdminCreateUserRequest: {
             /** Email */
@@ -2125,6 +2169,38 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_all_communities_admin_communities_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminCommunityListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     admin_create_user_admin_users_post: {
         parameters: {
             query?: never;

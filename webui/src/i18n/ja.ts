@@ -856,14 +856,29 @@ export const ja: Record<TranslationKey, string> = {
   "admin.versions.gcDoneAcross": " / ",
   "admin.versions.gcDoneJars": " 個のJAR。",
   "admin.versions.gcError": "ガベージコレクションに失敗しました。",
-  // Communities (WEBUI_SPEC.md 6.12) — #476
+  // Communities (WEBUI_SPEC.md 6.12) — #476, #489
   "admin.communities.subtitle":
-    "プロビジョニングは管理者専用です。セルフサービスでの作成には対応していません。",
+    "プラットフォーム上のすべてのコミュニティ。プロビジョニングは管理者専用で、セルフサービスでの作成には対応していません。",
   "admin.communities.loading": "コミュニティを読み込んでいます…",
   "admin.communities.loadError": "コミュニティを読み込めませんでした。",
   "admin.communities.empty": "まだコミュニティがありません。",
   "admin.communities.colName": "名前",
   "admin.communities.colId": "ID",
+  "admin.communities.colMembers": "メンバー数",
+  "admin.communities.colServers": "サーバー数",
+  "admin.communities.colActions": "操作",
+  "admin.communities.delete": "削除",
+  "admin.communities.deleteTitle": "コミュニティを削除",
+  "admin.communities.deleteBody":
+    "コミュニティとその中のすべて（メンバー、ロール、サーバー）を完全に削除します。この操作は元に戻せません。",
+  "admin.communities.deletePrompt":
+    "確認のためコミュニティ名を入力してください:",
+  "admin.communities.deleteConfirm": "コミュニティを削除",
+  "admin.communities.deleted": "コミュニティを削除しました。",
+  "admin.communities.deleteError": "コミュニティを削除できませんでした。",
+  "admin.communities.prev": "前へ",
+  "admin.communities.next": "次へ",
+  "admin.communities.range": "{total} 件中 {from}–{to}",
   "admin.communities.provision": "コミュニティをプロビジョニング",
   "admin.communities.provisionSubmit": "プロビジョニング",
   "admin.communities.dialogTitle": "コミュニティをプロビジョニング",
@@ -984,6 +999,10 @@ export const ja: Record<TranslationKey, string> = {
   "admin.audit.filterCommunity": "コミュニティ",
   "admin.audit.filterCommunityAll": "すべてのコミュニティ",
   "admin.audit.colCommunity": "コミュニティ",
+  "admin.audit.communitiesTruncatedPrefix": "最初の ",
+  "admin.audit.communitiesTruncatedMid": " / ",
+  "admin.audit.communitiesTruncatedSuffix":
+    " 件のコミュニティを表示しています。",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "この操作を行う権限がありません。",

@@ -7,12 +7,18 @@ not here:
 - ``POST /communities`` requires the platform-admin axis (``require_platform_admin``
   / ``community:provision``, FR-COMM-2/FR-AUTHZ-5). The admin axis governs
   *provisioning only*, not community internals.
-- ``GET/PATCH/DELETE /communities/{community_id}`` go through ``require_permission``,
+- ``GET/PATCH /communities/{community_id}`` go through ``require_permission``,
   which applies the two-layer check (non-member -> 404 with no existence signal,
   member-without-permission -> 403; FR-COMM-3, Section 6.4). A platform admin who
   is not a member therefore gets 404 on these too — the admin axis does not pierce
   community isolation.
-- ``GET /communities`` lists only the requesting user's communities (FR-MEM-4).
+- ``DELETE /communities/{community_id}`` is the one exception: it passes
+  ``allow_platform_admin=True``, so a platform admin can delete *any* community
+  (member or not) to clean up an orphan, while a non-admin still goes through the
+  two-layer check (issue #489; WEBUI_SPEC.md Section 3).
+- ``GET /communities`` lists only the requesting user's communities (FR-MEM-4);
+  the platform-admin all-communities listing is ``GET /admin/communities``
+  (``admin_communities.py``).
 
 Domain errors are translated to HTTP codes here.
 """
@@ -190,7 +196,12 @@ async def rename_community(
 async def delete_community(
     community_id: uuid.UUID,
     authorized: Annotated[
-        AuthUser, Depends(require_permission(Permission("community:delete")))
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("community:delete"), allow_platform_admin=True
+            )
+        ),
     ],
     use_case: Annotated[DeleteCommunity, Depends(get_delete_community)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],

@@ -42,6 +42,24 @@ class Community:
     max_members: int | None = None
 
 
+@dataclass(frozen=True)
+class CommunitySummary:
+    """A community plus its operational counts, for the platform-admin listing.
+
+    The cross-context ``server_count`` is computed by the persistence adapter in
+    one grouped query (the community adapter already reaches the ``server`` table
+    for grant existence checks), so the listing carries the counts without an
+    N+1 (issue #489). ``id``/``name``/``created_at`` come from the ``community``
+    row; the counts default to ``0`` for a community with no members/servers.
+    """
+
+    id: CommunityId
+    name: CommunityName
+    created_at: dt.datetime
+    member_count: int
+    server_count: int
+
+
 @dataclass
 class Membership:
     """Row of the ``membership`` table: the (user, community) join (DATABASE.md 5).

@@ -841,14 +841,28 @@ export const en = {
   "admin.versions.gcDoneAcross": " across ",
   "admin.versions.gcDoneJars": " JARs.",
   "admin.versions.gcError": "Garbage collection failed.",
-  // Communities (WEBUI_SPEC.md 6.12) — #476
+  // Communities (WEBUI_SPEC.md 6.12) — #476, #489
   "admin.communities.subtitle":
-    "Provisioning is admin-only; self-service creation is not supported.",
+    "All communities on the platform. Provisioning is admin-only; self-service creation is not supported.",
   "admin.communities.loading": "Loading communities…",
   "admin.communities.loadError": "Could not load communities.",
   "admin.communities.empty": "No communities yet.",
   "admin.communities.colName": "Name",
   "admin.communities.colId": "ID",
+  "admin.communities.colMembers": "Members",
+  "admin.communities.colServers": "Servers",
+  "admin.communities.colActions": "Actions",
+  "admin.communities.delete": "Delete",
+  "admin.communities.deleteTitle": "Delete community",
+  "admin.communities.deleteBody":
+    "This permanently deletes the community and everything in it (members, roles, servers). This cannot be undone.",
+  "admin.communities.deletePrompt": "Type the community name to confirm:",
+  "admin.communities.deleteConfirm": "Delete community",
+  "admin.communities.deleted": "Community deleted.",
+  "admin.communities.deleteError": "Could not delete the community.",
+  "admin.communities.prev": "Previous",
+  "admin.communities.next": "Next",
+  "admin.communities.range": "{from}–{to} of {total}",
   "admin.communities.provision": "Provision community",
   "admin.communities.provisionSubmit": "Provision",
   "admin.communities.dialogTitle": "Provision community",
@@ -973,6 +987,12 @@ export const en = {
   "admin.audit.filterCommunity": "Community",
   "admin.audit.filterCommunityAll": "All communities",
   "admin.audit.colCommunity": "Community",
+  // Truncation hint composed around the loaded/total counts, e.g. "Showing the
+  // first 100 of 150 communities." The picker requests the API max page (100);
+  // when more communities exist the later ones are omitted (#476/#488).
+  "admin.audit.communitiesTruncatedPrefix": "Showing the first ",
+  "admin.audit.communitiesTruncatedMid": " of ",
+  "admin.audit.communitiesTruncatedSuffix": " communities.",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",

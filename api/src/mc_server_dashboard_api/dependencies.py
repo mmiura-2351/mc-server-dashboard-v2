@@ -39,6 +39,9 @@ from mc_server_dashboard_api.community.adapters.unit_of_work import (
 from mc_server_dashboard_api.community.adapters.user_directory import (
     IdentityUserDirectory,
 )
+from mc_server_dashboard_api.community.application.list_all_communities import (
+    ListAllCommunities,
+)
 from mc_server_dashboard_api.community.application.list_my_communities import (
     ListMyCommunities,
 )
@@ -954,6 +957,13 @@ def get_list_my_communities(request: Request) -> ListMyCommunities:
     return ListMyCommunities(uow=CommunityUnitOfWork(session_factory))
 
 
+def get_list_all_communities(request: Request) -> ListAllCommunities:
+    """Assemble the :class:`ListAllCommunities` use case (platform-admin, #489)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListAllCommunities(uow=CommunityUnitOfWork(session_factory))
+
+
 def get_read_my_effective_permissions(request: Request) -> ReadMyEffectivePermissions:
     """Assemble the :class:`ReadMyEffectivePermissions` use case (issue #354)."""
 
@@ -1668,6 +1678,7 @@ def require_permission(
     *,
     resource_type: str | None = None,
     resource_id_param: str | None = None,
+    allow_platform_admin: bool = False,
 ) -> Callable[..., Awaitable[AuthUser]]:
     """Build a dependency enforcing the two-layer check for ``operation``.
 
@@ -1683,6 +1694,13 @@ def require_permission(
     exactly one is a wiring mistake that would silently degrade a per-resource
     operation to a community-level grant lookup, so it raises here at
     dependency-construction time (fail-fast, before any request).
+
+    ``allow_platform_admin`` is the deliberate exception to the isolation posture
+    (issue #489): when set, a platform admin passes the gate for *any* community —
+    member or not — instead of getting the non-member 404. The admin axis does not
+    pierce community isolation in general (read/rename stay membership-scoped); the
+    one operation that opts in is community *deletion*, so an admin can clean up an
+    orphaned community no one is left to administer (WEBUI_SPEC.md Section 3).
 
     Route convention: the community path segment must be named ``community_id``
     (see ``_dependency`` below); #69+ routes are expected to follow this.
@@ -1705,6 +1723,9 @@ def require_permission(
     ) -> AuthUser:
         auth_user = _to_auth_user(user)
         community = CommunityId(community_id)
+
+        if allow_platform_admin and auth_user.is_platform_admin:
+            return auth_user
 
         if not await visibility.is_member(
             user_id=auth_user.user_id, community_id=community

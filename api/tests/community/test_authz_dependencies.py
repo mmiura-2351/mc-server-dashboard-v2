@@ -80,6 +80,19 @@ def _app(
     async def _admin_ping() -> dict[str, str]:
         return {"ok": "admin"}
 
+    @app.delete(
+        "/communities/{community_id}/thing",
+        dependencies=[
+            Depends(
+                require_permission(
+                    Permission("community:delete"), allow_platform_admin=True
+                )
+            )
+        ],
+    )
+    async def _thing() -> dict[str, str]:
+        return {"ok": "deleted"}
+
     user = make_user()
     user.is_platform_admin = platform_admin
     app.dependency_overrides[get_current_user] = lambda: user
@@ -135,6 +148,26 @@ def test_platform_admin_required_rejects_non_admin() -> None:
     client = next(_client(app))
     resp = client.get("/admin/ping")
     assert resp.status_code == 403
+
+
+def test_allow_platform_admin_bypasses_isolation_for_admin() -> None:
+    # A platform admin who is NOT a member passes an allow_platform_admin gate
+    # (community deletion / orphan cleanup, #489), without the two-layer check.
+    app, checker = _app(member=False, allow=False, platform_admin=True)
+    client = next(_client(app))
+    resp = client.delete(f"/communities/{uuid.uuid4()}/thing")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": "deleted"}
+    # The Layer-2 checker was never consulted (the bypass short-circuits first).
+    assert checker.calls == []
+
+
+def test_allow_platform_admin_does_not_help_non_admin() -> None:
+    # The bypass is admin-only: a non-admin non-member still gets the 404.
+    app, _ = _app(member=False, allow=True, platform_admin=False)
+    client = next(_client(app))
+    resp = client.delete(f"/communities/{uuid.uuid4()}/thing")
+    assert resp.status_code == 404
 
 
 def test_resource_type_without_id_param_is_a_construction_error() -> None:

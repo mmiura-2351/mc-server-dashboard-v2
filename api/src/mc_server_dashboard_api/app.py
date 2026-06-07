@@ -22,6 +22,7 @@ from fastapi import FastAPI
 
 from mc_server_dashboard_api.audit.api import audit
 from mc_server_dashboard_api.community.api import (
+    admin_communities,
     communities,
     grants,
     me,
@@ -601,6 +602,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_users.router)
     app.include_router(auth.router)
     app.include_router(communities.router)
+    app.include_router(admin_communities.router)
     app.include_router(me.router)
     app.include_router(members.router)
     app.include_router(roles.router)
