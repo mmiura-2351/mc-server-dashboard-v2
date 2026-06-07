@@ -171,9 +171,6 @@ select.community-switcher {
 .user-menu .label {
   white-space: nowrap;
 }
-.user-menu .avatar {
-  flex-shrink: 0;
-}
 .avatar {
   width: 26px;
   height: 26px;
@@ -185,6 +182,7 @@ select.community-switcher {
   font-size: 12px;
   font-weight: 700;
   color: #fff;
+  flex-shrink: 0;
 }
 
 /* Narrow-width top bar (#554): at the shell's existing 900px breakpoint the
