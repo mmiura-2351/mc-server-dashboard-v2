@@ -69,6 +69,7 @@ def _policy() -> PasswordPolicy:
         max_length=128,
         max_bytes=None,
         require_complexity=True,
+        complexity_classes=3,
         check_common_list=False,
         forbid_user_info=True,
         forbid_simple_patterns=True,

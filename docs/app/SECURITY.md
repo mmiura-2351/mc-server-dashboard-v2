@@ -34,23 +34,45 @@
 ## 1. Password policy
 
 On registration and password change the API rejects a password that fails any
-enabled rule. The rules and their defaults are configured under `auth.password.*`
-([`CONFIGURATION.md`](CONFIGURATION.md) Section 7.1):
+enabled rule. The strength rules are selected by a named **preset** —
+`auth.password.policy` is `low`, `middle`, or `high`
+([`CONFIGURATION.md`](CONFIGURATION.md) Section 7.1). A preset only changes
+*which* rules fire and their thresholds; the reason codes below stay identical
+across presets, so the Web UI error mapping is unaffected.
 
-- **Length** — between `min_length` and `max_length` characters. When
-  `auth.password.hash=bcrypt` the effective upper bound is the smaller of
+The candidate rules:
+
+- **Length** — at least the preset minimum and at most `max_length` characters.
+  When `auth.password.hash=bcrypt` the effective upper bound is the smaller of
   `max_length` and 72 UTF-8 bytes (bcrypt ignores bytes past 72, so a longer
   password is rejected at the policy with reason `too_long_for_bcrypt`); the
-  argon2 default has no such byte cap. The upper bound is otherwise a DoS guard.
-- **Complexity-or-length** — at least 3 of {upper, lower, digit, symbol} **or**
-  at least 16 characters (`require_complexity`). Whitespace counts toward the
-  symbol class, so passphrases with spaces get the credit.
-- **Common-password blocklist** — reject passwords on a published list
-  (`check_common_list`; legacy baseline: SecLists xato-net top-10,000).
+  argon2 default has no such byte cap. `max_length` is otherwise a DoS guard and
+  is independent of the preset.
+- **Complexity-or-length** — at least *N* of {upper, lower, digit, symbol}
+  **or** at least 16 characters, where *N* is the preset's class count (`middle`
+  = 2, `high` = 3; `low` does not enforce this rule). Whitespace counts toward
+  the symbol class, so passphrases with spaces get the credit.
+- **Common-password blocklist** — reject passwords on a published list (legacy
+  baseline: SecLists xato-net top-10,000).
 - **User-info rejection** — reject a password containing the username or the
-  email local-part (`forbid_user_info`).
+  email local-part.
 - **Simple-pattern rejection** — reject 4+ repeated characters or 4+ sequential
-  alphabet/keyboard/numeric runs (`forbid_simple_patterns`).
+  alphabet/keyboard/numeric runs.
+
+### Strength presets
+
+| Preset | Min length | Complexity-or-length | Common-list | User-info | Simple-pattern |
+|---|---|---|---|---|---|
+| `low` | 8 | off | on | on | off |
+| `middle` *(default)* | 10 | 2 of 4 (or 16+ chars) | on | on | on |
+| `high` | 12 | 3 of 4 (or 16+ chars) | on | on | on |
+
+The default is `middle`. This is a deliberate change from the historical fixed
+posture, which was equivalent to `high`. The default applies only to the
+validation of *newly set* passwords (registration and password change); existing
+password hashes are unaffected. Operators who want the stricter posture set
+`auth.password.policy=high` explicitly. (An admin-UI selector for the preset is a
+possible follow-up; today it is deployment configuration only.)
 
 Policy is pure, deterministic domain logic: it depends on no persistent state and
 sits in the domain layer, callable from the registration and password-change use
@@ -69,13 +91,13 @@ password change (`PUT /users/me/password`), and admin user creation
 
 | `reason` | Trigger |
 |---|---|
-| `too_short` | Fewer than `min_length` characters. |
+| `too_short` | Fewer than the preset's minimum length. |
 | `too_long` | More than `max_length` characters (the DoS-guard upper bound). |
 | `too_long_for_bcrypt` | More than 72 UTF-8 bytes when `auth.password.hash=bcrypt` (bcrypt ignores bytes past 72); never raised under argon2. |
-| `insufficient_complexity` | Fewer than 3 of {upper, lower, digit, symbol} **and** fewer than 16 characters (`require_complexity`). |
-| `common_password` | On the common-password blocklist (`check_common_list`), matched case-insensitively. |
-| `contains_user_info` | Contains the username or the email local-part (`forbid_user_info`), matched case-insensitively. |
-| `simple_pattern` | Contains 4+ repeated characters or a 4+-long sequential run (`forbid_simple_patterns`). |
+| `insufficient_complexity` | Fewer than the preset's class count of {upper, lower, digit, symbol} **and** fewer than 16 characters. Not raised by `low`. |
+| `common_password` | On the common-password blocklist, matched case-insensitively (every preset screens the list). |
+| `contains_user_info` | Contains the username or the email local-part, matched case-insensitively. |
+| `simple_pattern` | Contains 4+ repeated characters or a 4+-long sequential run. Not raised by `low`. |
 
 ### Re-authentication for destructive self-service actions
 

@@ -9,7 +9,10 @@ from __future__ import annotations
 import pytest
 
 from mc_server_dashboard_api.identity.domain.errors import PasswordPolicyError
-from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
+from mc_server_dashboard_api.identity.domain.password_policy import (
+    PRESETS,
+    PasswordPolicy,
+)
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     Username,
@@ -25,6 +28,7 @@ def _policy(
     max_length: int = 128,
     max_bytes: int | None = None,
     require_complexity: bool = True,
+    complexity_classes: int = 3,
     check_common_list: bool = True,
     forbid_user_info: bool = True,
     forbid_simple_patterns: bool = True,
@@ -35,6 +39,7 @@ def _policy(
         max_length=max_length,
         max_bytes=max_bytes,
         require_complexity=require_complexity,
+        complexity_classes=complexity_classes,
         check_common_list=check_common_list,
         forbid_user_info=forbid_user_info,
         forbid_simple_patterns=forbid_simple_patterns,
@@ -188,3 +193,63 @@ def test_rejects_numeric_sequential_run() -> None:
 
 def test_simple_pattern_check_disabled() -> None:
     _validate(_policy(forbid_simple_patterns=False), "Aaaaa1!xkqwp")
+
+
+def test_two_classes_satisfy_relaxed_complexity() -> None:
+    # lower + digit only is 2 classes: fails the default 3-of-4 requirement but
+    # passes when the preset relaxes the threshold to 2.
+    assert _reason(_policy(), "korvblix9zqt") == "insufficient_complexity"
+    _validate(_policy(complexity_classes=2), "korvblix9zqt")
+
+
+def _preset_policy(name: str) -> PasswordPolicy:
+    preset = PRESETS[name]
+    return _policy(
+        min_length=preset.min_length,
+        require_complexity=preset.require_complexity,
+        complexity_classes=preset.complexity_classes,
+        check_common_list=preset.check_common_list,
+        forbid_user_info=preset.forbid_user_info,
+        forbid_simple_patterns=preset.forbid_simple_patterns,
+    )
+
+
+def test_preset_thresholds_are_monotonic() -> None:
+    # Each step up tightens (or keeps) the minimum length; the presets are ordered
+    # low < middle < high in strictness.
+    assert PRESETS["low"].min_length < PRESETS["middle"].min_length
+    assert PRESETS["middle"].min_length < PRESETS["high"].min_length
+
+
+def test_low_preset_is_length_only() -> None:
+    policy = _preset_policy("low")
+    # An 8-char single-class password passes (no complexity / pattern screen),
+    # but the 7-char one is too short and the common-list screen still bites.
+    _validate(policy, "korvblix")
+    assert _reason(policy, "korvbl") == "too_short"
+    assert _reason(policy, "password") == "common_password"
+
+
+def test_middle_preset_accepts_mixed_case_and_digit() -> None:
+    policy = _preset_policy("middle")
+    # 10 chars, upper + lower + digit (and even just two classes) is enough.
+    _validate(policy, "Korvblix9z")
+    # 9 chars is one below the middle floor.
+    assert _reason(policy, "Korvblix9") == "too_short"
+    # Single class under 16 chars still fails the relaxed complexity rule.
+    assert _reason(policy, "korvblixmz") == "insufficient_complexity"
+
+
+def test_high_preset_matches_legacy_fixed_posture() -> None:
+    # The high preset reproduces the historical fixed knobs exactly.
+    assert PRESETS["high"].min_length == 12
+    assert PRESETS["high"].require_complexity is True
+    assert PRESETS["high"].complexity_classes == 3
+    assert PRESETS["high"].check_common_list is True
+    assert PRESETS["high"].forbid_user_info is True
+    assert PRESETS["high"].forbid_simple_patterns is True
+    policy = _preset_policy("high")
+    _validate(policy, "Wm7!qz#Lp2vT")
+    # 11 chars below the 12 floor; two classes under 16 chars fails 3-of-4.
+    assert _reason(policy, "Wm7!qz#Lp2v") == "too_short"
+    assert _reason(policy, "korvblix9zqt") == "insufficient_complexity"
