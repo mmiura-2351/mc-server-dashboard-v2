@@ -95,7 +95,9 @@ jobs:
       - name: Test (pytest)
         # MCD_TEST_DATABASE_URL enables the DB-touching integration tests
         # (tests/integration) against the Postgres service; the unit suite is
-        # hermetic and ignores it.
+        # hermetic and ignores it. The test session treats this as a base URL
+        # and creates a fresh per-run `<dbname>_<uuid>` database off it (#379),
+        # so the service's fresh `mcsd_test` is just the maintenance connection.
         env:
           MCD_TEST_DATABASE_URL: postgresql+asyncpg://mcsd:mcsd@localhost:5432/mcsd_test
         # Coverage is CI-only (#325): local `uv run pytest` / `make api-test`
