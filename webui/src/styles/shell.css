@@ -380,6 +380,67 @@ body.col-resizing {
   color: var(--text-faint);
 }
 
+/* Card/table view toggle (#541): a segmented control of two .btn that read as
+ * one group; the active view is highlighted via aria-pressed. A <fieldset>
+ * carries the group semantics, so reset its default chrome. */
+.view-toggle {
+  display: inline-flex;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.view-toggle .btn:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.view-toggle .btn:last-child {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  margin-left: -1px;
+}
+.view-toggle .btn[aria-pressed="true"] {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+/* Compact table view (#541). Reuses the shared table.data styling pattern from
+ * the admin tables; long worker ids ellipsize with the title-on-hover
+ * affordance under table-layout: fixed. */
+.dashboard-table table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.dashboard-table table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.dashboard-table table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+.dashboard-table table.data td.num {
+  font-variant-numeric: tabular-nums;
+}
+.dashboard-table table.data td.dim {
+  color: var(--text-dim);
+}
+.dashboard-table table.data td.dim[title] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dashboard-table .row-actions {
+  display: flex;
+  gap: 6px;
+}
+
 .btn.sm {
   padding: 3px 10px;
   font-size: 12px;

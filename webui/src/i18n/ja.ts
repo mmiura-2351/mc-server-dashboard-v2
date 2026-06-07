@@ -174,6 +174,18 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.start": "起動",
   "dashboard.stop": "停止",
   "dashboard.restart": "再起動",
+  // Card/table view toggle (#541); cards remain the default.
+  "dashboard.view.label": "サーバー一覧の表示",
+  "dashboard.view.cards": "カード",
+  "dashboard.view.table": "テーブル",
+  // Table-view column headers (#541): the same data as the cards.
+  "dashboard.col.name": "名前",
+  "dashboard.col.state": "状態",
+  "dashboard.col.type": "種類 / バージョン",
+  "dashboard.col.backend": "バックエンド",
+  "dashboard.col.port": "ポート",
+  "dashboard.col.worker": "Worker",
+  "dashboard.col.actions": "操作",
   // Observed-state pill labels (WEBUI_SPEC.md 2.3).
   "dashboard.state.starting": "起動中",
   "dashboard.state.running": "稼働中",
