@@ -85,7 +85,6 @@ services:
     restart: unless-stopped
     environment:
       MCD_WORKER_API_GRPC_ENDPOINT: api:50051
-      MCD_WORKER_API_DATA_PLANE_URL: http://api:8000
       MCD_WORKER_API_CREDENTIAL: ${MCD_API_CONTROL__WORKER_CREDENTIAL}
       # Plaintext control + data-plane dial on the private compose network.
       MCD_WORKER_API_TLS_INSECURE: "true"

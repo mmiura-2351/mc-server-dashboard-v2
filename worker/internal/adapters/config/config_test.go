@@ -19,7 +19,6 @@ func mapEnv(m map[string]string) func(string) string {
 func TestLoadAppliesDefaults(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret-token",
 		"MCD_WORKER_API_TLS_INSECURE":   "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": t.TempDir(),
@@ -55,7 +54,7 @@ func TestLoadFailsFastOnMissingRequired(t *testing.T) {
 	if err == nil {
 		t.Fatal("Load() with no required keys: want error, got nil")
 	}
-	for _, key := range []string{"api.grpc_endpoint", "api.data_plane_url", "api.credential", "worker.scratch_dir"} {
+	for _, key := range []string{"api.grpc_endpoint", "api.credential", "worker.scratch_dir"} {
 		if !contains(err.Error(), key) {
 			t.Errorf("error %q does not mention missing key %q", err.Error(), key)
 		}
@@ -69,7 +68,6 @@ func TestLoadPrecedenceFileThenEnv(t *testing.T) {
 	body := `
 [api]
 grpc_endpoint = "file-endpoint:50051"
-data_plane_url = "https://file/data"
 credential = "file-credential"
 
 [api.tls]
@@ -108,9 +106,6 @@ level = "debug"
 	if cfg.API.Credential != "env-credential" {
 		t.Errorf("Credential = %q, want env override", cfg.API.Credential)
 	}
-	if cfg.API.DataPlaneURL != "https://file/data" {
-		t.Errorf("DataPlaneURL = %q, want file value", cfg.API.DataPlaneURL)
-	}
 	if cfg.Worker.ScratchDir != scratch {
 		t.Errorf("ScratchDir = %q, want file value %q", cfg.Worker.ScratchDir, scratch)
 	}
@@ -134,7 +129,6 @@ level = "debug"
 func TestLoadRejectsUnknownDriver(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret",
 		"MCD_WORKER_API_TLS_INSECURE":   "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
@@ -153,7 +147,6 @@ func TestLoadRejectsUnknownDriver(t *testing.T) {
 func TestLoadRejectsMalformedMaxServers(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret",
 		"MCD_WORKER_API_TLS_INSECURE":   "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
@@ -168,7 +161,6 @@ func TestLoadRejectsMalformedMaxServers(t *testing.T) {
 func TestLoadRejectsMalformedMetricsInterval(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":               "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL":              "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":                  "secret",
 		"MCD_WORKER_API_TLS_INSECURE":                "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR":              "/scratch",
@@ -183,7 +175,6 @@ func TestLoadRejectsMalformedMetricsInterval(t *testing.T) {
 func TestLoadFailsFastWhenTLSNeitherCAFileNorInsecure(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
 		// Neither api.tls.ca_file nor api.tls.insecure set.
@@ -201,7 +192,6 @@ func TestLoadFailsFastWhenTLSNeitherCAFileNorInsecure(t *testing.T) {
 func TestLoadAcceptsCAFileWithoutInsecure(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret",
 		"MCD_WORKER_API_TLS_CA_FILE":    "/etc/ssl/ca.pem",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": t.TempDir(),
@@ -225,7 +215,6 @@ func TestLoadJavaRuntimesFromFile(t *testing.T) {
 	body := `
 [api]
 grpc_endpoint = "api:50051"
-data_plane_url = "https://api/data"
 credential = "secret"
 
 [api.tls]
@@ -254,7 +243,6 @@ scratch_dir = "` + t.TempDir() + `"
 func TestLoadJavaRuntimesFromEnv(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":    "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL":   "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":       "secret",
 		"MCD_WORKER_API_TLS_INSECURE":     "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR":   t.TempDir(),
@@ -273,7 +261,6 @@ func TestLoadJavaRuntimesFromEnv(t *testing.T) {
 func TestLoadRejectsMalformedJavaRuntimesEnv(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":    "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL":   "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":       "secret",
 		"MCD_WORKER_API_TLS_INSECURE":     "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR":   "/scratch",
@@ -291,7 +278,6 @@ func TestLoadContainerImagesFromFile(t *testing.T) {
 	body := `
 [api]
 grpc_endpoint = "api:50051"
-data_plane_url = "https://api/data"
 credential = "secret"
 
 [api.tls]
@@ -327,7 +313,6 @@ docker_host = "unix:///run/docker.sock"
 func TestLoadContainerImagesFromEnv(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":            "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL":           "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":               "secret",
 		"MCD_WORKER_API_TLS_INSECURE":             "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR":           t.TempDir(),
@@ -354,7 +339,6 @@ func TestLoadGameBindIPFromFile(t *testing.T) {
 	body := `
 [api]
 grpc_endpoint = "api:50051"
-data_plane_url = "https://api/data"
 credential = "secret"
 
 [api.tls]
@@ -386,7 +370,6 @@ game_bind_ip = "0.0.0.0"
 func TestLoadGameBindIPFromEnv(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":             "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL":            "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":                "secret",
 		"MCD_WORKER_API_TLS_INSECURE":              "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR":            t.TempDir(),
@@ -410,7 +393,6 @@ func TestLoadNetworkFromFile(t *testing.T) {
 	body := `
 [api]
 grpc_endpoint = "api:50051"
-data_plane_url = "https://api/data"
 credential = "secret"
 
 [api.tls]
@@ -442,7 +424,6 @@ network = "mcsd"
 func TestLoadNetworkFromEnv(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":        "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL":       "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":           "secret",
 		"MCD_WORKER_API_TLS_INSECURE":         "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR":       t.TempDir(),
@@ -463,7 +444,6 @@ func TestLoadNetworkFromEnv(t *testing.T) {
 func TestLoadRejectsMalformedGameBindIP(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":             "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL":            "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":                "secret",
 		"MCD_WORKER_API_TLS_INSECURE":              "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR":            "/scratch",
@@ -482,7 +462,6 @@ func TestLoadRejectsMalformedGameBindIP(t *testing.T) {
 func TestLoadRejectsContainerWithoutImages(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_DATA_PLANE_URL": "https://api/data",
 		"MCD_WORKER_API_CREDENTIAL":     "secret",
 		"MCD_WORKER_API_TLS_INSECURE":   "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
