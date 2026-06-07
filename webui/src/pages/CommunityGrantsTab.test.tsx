@@ -326,7 +326,7 @@ describe("CommunityGrantsTab", () => {
       grants: [grant({ id: "g1" })],
     });
     mockApi.delete.mockRejectedValue(
-      new ApiError(403, { reason: "grant:manage" }),
+      new ApiError(403, { reason: "forbidden", permission: "grant:manage" }),
     );
     renderPage();
     await openGrants();

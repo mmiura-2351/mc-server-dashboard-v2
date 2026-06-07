@@ -326,7 +326,9 @@ describe("CommunityAuditTab", () => {
   it("routes a 403 from the list through onForbidden", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.startsWith(`/api/communities/${CID}/audit`)) {
-        return Promise.reject(new ApiError(403, { reason: "audit:read" }));
+        return Promise.reject(
+          new ApiError(403, { reason: "forbidden", permission: "audit:read" }),
+        );
       }
       return Promise.resolve(community());
     });

@@ -4,6 +4,7 @@ import { useNavigate } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
+import { FilePicker } from "../components/FilePicker.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
@@ -660,11 +661,11 @@ function ImportForm({ communityId }: { communityId: string }) {
         <label htmlFor="import-file">
           {t("serverCreate.import.fileLabel")}
         </label>
-        <input
+        <FilePicker
           id="import-file"
-          type="file"
           accept=".zip"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          file={file}
+          onSelect={setFile}
         />
       </div>
       <div className="wizard-foot">

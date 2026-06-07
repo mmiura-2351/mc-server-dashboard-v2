@@ -3,8 +3,8 @@
  *
  * Later phases pass any caught error through `onForbidden(error)` in their
  * mutation/error handlers. On a 403 `ApiError` it:
- *   1. toasts the missing permission (named when the `reason` is a permission
- *      code, generic otherwise), and
+ *   1. toasts the missing permission (named when the body carries the
+ *      `permission` extension member, generic otherwise), and
  *   2. re-fetches the active community's capabilities, since a 403 means the
  *      cached set may be stale.
  * Non-403 errors pass through untouched so callers keep their own handling.
@@ -21,11 +21,6 @@ import { t } from "../i18n/index.ts";
 import { useActiveCommunity } from "./ActiveCommunityProvider.tsx";
 import { refetchCapabilities } from "./capabilities.ts";
 
-/** A permission code looks like `family:action` (WEBUI_SPEC.md 2.2). */
-function isPermissionCode(reason: string | undefined): reason is string {
-  return reason !== undefined && /^[a-z]+:[a-z]+$/.test(reason);
-}
-
 export type OnForbidden = (error: unknown) => boolean;
 
 export function useOnForbidden(): OnForbidden {
@@ -38,9 +33,10 @@ export function useOnForbidden(): OnForbidden {
       if (!(error instanceof ApiError) || error.status !== 403) {
         return false;
       }
-      const message = isPermissionCode(error.reason)
-        ? t("permissions.deniedNamed") + error.reason
-        : t("permissions.denied");
+      const message =
+        error.permission !== undefined
+          ? t("permissions.deniedNamed") + error.permission
+          : t("permissions.denied");
       showToast(message, "error");
       if (communityId !== null) {
         void refetchCapabilities(queryClient, communityId);
