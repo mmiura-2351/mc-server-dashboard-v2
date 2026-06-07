@@ -318,6 +318,12 @@ async def test_list_ids_missing_game_port_finds_only_legacy_rows(
     assert tracked.game_port in taken
 
 
+async def _grant_all(_code: str) -> bool:
+    """A permissive ``authorize`` for tests that exercise non-authz behavior."""
+
+    return True
+
+
 def _updater(factory: object) -> UpdateServer:
     return UpdateServer(
         uow=ServersUnitOfWork(factory),  # type: ignore[arg-type]
@@ -351,6 +357,7 @@ async def test_update_game_port_persists_to_row(engine: AsyncEngine) -> None:
         community_id=CommunityId(community_id),
         server_id=server.id,
         game_port=25570,
+        authorize=_grant_all,
     )
 
     async with ServersUnitOfWork(factory) as uow:
@@ -406,6 +413,7 @@ async def test_update_game_port_rejects_taken_against_real_db(
             community_id=CommunityId(community_id),
             server_id=server.id,
             game_port=25570,
+            authorize=_grant_all,
         )
 
     async with ServersUnitOfWork(factory) as uow:
