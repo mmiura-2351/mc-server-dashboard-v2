@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { NavLink, Outlet, useNavigate, useParams } from "react-router";
+import { Link, NavLink, Outlet, useNavigate, useParams } from "react-router";
 import { useCurrentUser } from "../auth/useCurrentUser.ts";
 import {
   getLanguage,
@@ -9,7 +9,7 @@ import {
   t,
 } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
-import { dashboardPath } from "../routes.ts";
+import { dashboardPath, LANDING_PATH } from "../routes.ts";
 
 // Authenticated shell chrome: left nav (community scope + admin group) and a
 // top bar (community switcher + user menu) (WEBUI_SPEC.md Section 5). The
@@ -145,10 +145,10 @@ export function AppShell() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand">
+        <Link className="brand" to={LANDING_PATH}>
           <span className="cube" aria-hidden="true" />
           {t("shell.brand")}
-        </div>
+        </Link>
         <nav className="nav-group">
           <div className="nav-label">{t("nav.community")}</div>
           {communityId === null ? (

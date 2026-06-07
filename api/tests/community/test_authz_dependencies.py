@@ -34,6 +34,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_problem import install_problem_handlers
 from tests.identity.fakes import make_user
 
 
@@ -64,6 +65,7 @@ def _app(
     platform_admin: bool = False,
 ) -> tuple[FastAPI, _FakeChecker]:
     app = FastAPI()
+    install_problem_handlers(app)
     checker = _FakeChecker(allow=allow)
 
     @app.get(
@@ -120,6 +122,19 @@ def test_member_without_permission_gets_403() -> None:
     client = next(_client(app))
     resp = client.get(f"/api/communities/{uuid.uuid4()}/ping")
     assert resp.status_code == 403
+
+
+def test_403_body_names_the_required_permission() -> None:
+    # The 403 problem body carries the checked operation as the ``permission``
+    # extension member so the Web UI can name it in the denial toast (#425),
+    # while ``reason`` stays the stable ``"forbidden"`` code.
+    app, _ = _app(member=True, allow=False)
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/ping")
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "forbidden"
+    assert body["permission"] == "server:read"
 
 
 def test_authorized_member_gets_200() -> None:

@@ -132,12 +132,15 @@ export function ResizableTable({
     (c): c is ReactElement<{ children?: ReactNode }> =>
       isValidElement(c) && c.type === "thead",
   );
-  const headerRow = thead
-    ? Children.toArray(thead.props.children).find(
-        (c): c is ReactElement<{ children?: ReactNode }> =>
-          isValidElement(c) && c.type === "tr",
-      )
-    : undefined;
+  // Normalize the <thead> children once and reuse the same array below: each
+  // Children.toArray call clones its inputs, so a second call would yield fresh
+  // elements that no longer reference-match `headerRow`, leaking the original
+  // header row back into `rest` and rendering the header twice (#534).
+  const theadChildren = thead ? Children.toArray(thead.props.children) : [];
+  const headerRow = theadChildren.find(
+    (c): c is ReactElement<{ children?: ReactNode }> =>
+      isValidElement(c) && c.type === "tr",
+  );
   const headerCells = headerRow
     ? Children.toArray(headerRow.props.children).filter(isValidElement)
     : [];
@@ -237,9 +240,7 @@ export function ResizableTable({
               );
             }),
           ),
-          ...Children.toArray(thead.props.children).filter(
-            (c) => c !== headerRow,
-          ),
+          ...theadChildren.filter((c) => c !== headerRow),
         ])
       : thead;
 

@@ -50,6 +50,33 @@ describe("ApiError", () => {
     expect(error.reason).toBe("invalid_credentials");
   });
 
+  it("exposes the permission extension member on a 403 denial", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(403, {
+        type: "urn:mcsd:error:forbidden",
+        title: "Forbidden",
+        status: 403,
+        reason: "forbidden",
+        permission: "server:start",
+      }),
+    );
+
+    const error = await api.get("/api/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.reason).toBe("forbidden");
+    expect(error.permission).toBe("server:start");
+  });
+
+  it("leaves permission undefined when the body omits it", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { reason: "forbidden" }));
+
+    const error = await api.get("/api/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.permission).toBeUndefined();
+  });
+
   it("leaves reason undefined for a non-problem body", async () => {
     fetchMock.mockResolvedValue(jsonResponse(500, { message: "boom" }));
 

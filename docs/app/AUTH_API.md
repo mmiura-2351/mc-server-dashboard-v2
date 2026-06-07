@@ -96,6 +96,12 @@ branches on exactly one contract:
   extension member, so clients switch on `reason` without parsing the URI.
 - A `422` validation failure adds an `errors` extension member (the per-field
   list) and uses `reason: "validation_error"`.
+- A `403` permission denial (the membership permission gate) keeps the stable
+  `reason: "forbidden"` and adds a `permission` extension member naming the
+  required permission code (e.g. `"permission": "server:start"`), so the Web UI
+  can name the missing permission in its denial toast (WEBUI_SPEC.md Section 7.4,
+  issue #425). This exposes only which permission a known endpoint requires —
+  static catalog data (WEBUI_SPEC.md Section 2.2) — not resource existence.
 
 Reason codes the `/auth/*` endpoints emit:
 
