@@ -110,9 +110,15 @@
 select.community-switcher {
   cursor: pointer;
 }
-.community-switcher.empty {
+/* No-community label in the switcher slot. Its own class (not the generic
+ * `.empty` CTA, which sets `padding: 48px 20px` and would overflow the top
+ * bar — #533). */
+.community-switcher.no-community {
   color: var(--text-faint);
   font-weight: 400;
+  /* Stay a single line like the populated `<select>`: when the bar is narrow
+   * the label keeps the bar's height instead of wrapping and overflowing it. */
+  white-space: nowrap;
 }
 .lang-switcher {
   margin-right: 12px;
