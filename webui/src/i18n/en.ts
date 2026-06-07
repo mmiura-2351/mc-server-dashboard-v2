@@ -210,6 +210,9 @@ export const en = {
   "serverDetail.metric.players": "Players",
   "serverDetail.metric.cores": "cores",
   "serverDetail.metric.mib": "MiB",
+  // Before the first metrics frame arrives, vs. no stream while not running.
+  "serverDetail.metric.collecting": "Collecting…",
+  "serverDetail.metric.idle": "No metrics while stopped",
   "serverDetail.logTailHeading": "Recent log",
   "serverDetail.openConsole": "Open Console",
   "serverDetail.logTailEmpty": "No log output yet.",

@@ -101,6 +101,40 @@ describe("useServerEvents", () => {
     expect(state.metrics.at(-1)?.cpuMillis).toBe(METRICS_WINDOW + 4);
   });
 
+  it("clears windowed metrics when a status frame settles at rest", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("metrics", { cpu_millis: 1, memory_bytes: 2, player_count: 3 }),
+      );
+    });
+    expect(state.metrics).toHaveLength(1);
+
+    // The server stops mid-view: drop the stale samples so the strip can fall
+    // back to the idle copy instead of showing frozen numbers forever.
+    act(() => {
+      MockWebSocket.last().message(
+        frame("status", { state: "stopped", detail: "" }),
+      );
+    });
+    expect(state.metrics).toEqual([]);
+  });
+
+  it("keeps windowed metrics while a status frame is still live", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("metrics", { cpu_millis: 1, memory_bytes: 2, player_count: 3 }),
+      );
+      MockWebSocket.last().message(
+        frame("status", { state: "running", detail: "" }),
+      );
+    });
+    expect(state.metrics).toHaveLength(1);
+  });
+
   it("patches the detail query observed_state on a status frame", () => {
     const { queryClient } = setup();
     queryClient.setQueryData(serverKey(CID, SID), {

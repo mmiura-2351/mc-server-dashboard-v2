@@ -22,6 +22,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { components } from "../api/schema";
 import { ServerEventsClient, type ServerFrame } from "./serverEvents.ts";
 import { serverKey } from "./serverKey.ts";
+import { atRest, normalizeState } from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
@@ -98,6 +99,12 @@ export function useServerEvents(
               ? current
               : { ...current, observed_state: frame.state },
         );
+        // Once the server settles at rest there is no metrics stream (SPEC
+        // 7.2); drop the windowed samples so the strip falls back to the idle
+        // copy instead of freezing the last numbers forever.
+        if (atRest(normalizeState(frame.state))) {
+          setMetrics([]);
+        }
         return;
       }
       if (frame.kind === "metrics") {
