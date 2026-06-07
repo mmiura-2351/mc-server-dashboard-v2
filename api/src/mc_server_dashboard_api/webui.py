@@ -25,13 +25,25 @@ class SpaStaticFiles(StaticFiles):
     under a directory that the SPA would never own, e.g. a fingerprinted file
     that is gone) also resolves to ``index.html`` — acceptable for an SPA, and
     the precedent FastAPI pattern.
+
+    The one carve-out is ``/api`` (issue #567): the whole HTTP API lives under
+    that prefix (issue #498), so an unmatched ``/api/*`` GET is a wrong/removed
+    route, not a client-side SPA route. Letting it fall back to ``index.html``
+    returns a misleading 200 + HTML to an API client; re-raising the 404 lets
+    the app-level problem handler render an honest ``application/problem+json``
+    response instead. The contract stays "everything non-``/api`` serves the
+    SPA".
     """
 
     async def get_response(self, path: str, scope):  # type: ignore[no-untyped-def]
         try:
             return await super().get_response(path, scope)
         except HTTPException as exc:
-            if exc.status_code == 404:
+            # ``path`` is relative to the ``/`` mount, so ``/api/users`` arrives
+            # as ``api/users``; never shadow an unmatched /api path with the SPA.
+            if exc.status_code == 404 and not (
+                path == "api" or path.startswith("api/")
+            ):
                 return await super().get_response("index.html", scope)
             raise
 
