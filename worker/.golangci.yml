@@ -13,6 +13,14 @@ linters:
     - unused
     - misspell
     - revive
+  exclusions:
+    # Agent worktrees are created inside the repo at .claude/worktrees/<agent>/,
+    # so a sibling checkout's worker/ is a full, mid-edit Go tree. golangci-lint
+    # does not respect .gitignore, so exclude .claude explicitly to keep a walk
+    # that ever resolves from the repo root (rather than this module's dir) from
+    # reporting another in-flight worktree's transient findings (#347).
+    paths:
+      - .claude
 
 formatters:
   enable:

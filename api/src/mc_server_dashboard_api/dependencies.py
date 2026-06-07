@@ -1775,7 +1775,7 @@ def require_permission(
         if not await checker.can(
             user=auth_user, operation=operation, resource=resource
         ):
-            raise _forbidden()
+            raise _forbidden(operation)
         return auth_user
 
     return _dependency
@@ -1816,5 +1816,11 @@ def _not_found() -> ProblemException:
     return problem(status.HTTP_404_NOT_FOUND, "not_found")
 
 
-def _forbidden() -> ProblemException:
-    return problem(status.HTTP_403_FORBIDDEN, "forbidden")
+def _forbidden(operation: Permission | None = None) -> ProblemException:
+    # ``reason`` stays the stable ``"forbidden"`` code; when the denial is gated
+    # on a specific operation, carry its code as the ``permission`` extension
+    # member so the Web UI can name the missing permission in its toast (#425).
+    # This leaks only which permission a known endpoint requires — static,
+    # documented catalog data (WEBUI_SPEC.md 2.2) — not resource existence.
+    extensions = {"permission": operation.value} if operation is not None else None
+    return problem(status.HTTP_403_FORBIDDEN, "forbidden", extensions=extensions)

@@ -24,12 +24,12 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 describe("useOnForbidden", () => {
-  it("toasts the named permission on a 403 with a permission-code reason", () => {
+  it("toasts the named permission on a 403 carrying the permission member", () => {
     showToast.mockReset();
     const { result } = renderHook(() => useOnForbidden(), { wrapper });
 
     const handled = result.current(
-      new ApiError(403, { reason: "server:start" }),
+      new ApiError(403, { reason: "forbidden", permission: "server:start" }),
     );
 
     expect(handled).toBe(true);
@@ -39,7 +39,7 @@ describe("useOnForbidden", () => {
     );
   });
 
-  it("toasts a generic message when the 403 reason is not a permission code", () => {
+  it("toasts a generic message when the 403 carries no permission member", () => {
     showToast.mockReset();
     const { result } = renderHook(() => useOnForbidden(), { wrapper });
 

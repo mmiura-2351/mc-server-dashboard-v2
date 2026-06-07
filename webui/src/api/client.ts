@@ -47,18 +47,22 @@ type Op<P extends keyof paths, M extends string> = M extends keyof paths[P]
 /** Shape of an RFC 9457 `application/problem+json` body (AUTH_API.md 2). */
 interface ProblemDetails {
   reason?: string;
+  permission?: string;
 }
 
 /**
- * Pull the machine-readable `reason` out of a problem+json body. The UI
- * branches on exactly this one field (AUTH_API.md 2); anything that is not a
- * problem+json object yields `undefined`.
+ * Pull a string-valued member out of a problem+json body. The UI branches on
+ * `reason` and (for 403 denials) `permission` (AUTH_API.md 2); anything that is
+ * not a problem+json object yields `undefined`.
  */
-function readReason(body: unknown): string | undefined {
+function readProblemString(
+  body: unknown,
+  key: keyof ProblemDetails,
+): string | undefined {
   if (typeof body === "object" && body !== null) {
-    const reason = (body as ProblemDetails).reason;
-    if (typeof reason === "string") {
-      return reason;
+    const value = (body as ProblemDetails)[key];
+    if (typeof value === "string") {
+      return value;
     }
   }
   return undefined;
@@ -67,6 +71,11 @@ function readReason(body: unknown): string | undefined {
 export class ApiError extends Error {
   /** RFC 9457 `reason` extension member, when the body is problem+json. */
   readonly reason: string | undefined;
+  /**
+   * The `permission` extension member naming the missing permission code on a
+   * 403 denial (AUTH_API.md 2, issue #425); undefined on other responses.
+   */
+  readonly permission: string | undefined;
 
   constructor(
     readonly status: number,
@@ -74,7 +83,8 @@ export class ApiError extends Error {
   ) {
     super(`API request failed with status ${status}`);
     this.name = "ApiError";
-    this.reason = readReason(body);
+    this.reason = readProblemString(body, "reason");
+    this.permission = readProblemString(body, "permission");
   }
 }
 

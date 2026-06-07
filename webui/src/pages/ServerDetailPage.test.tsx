@@ -328,7 +328,7 @@ describe("ServerDetailPage lifecycle controls", () => {
   it("routes a lifecycle 403 through the permission glue", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
     mockApi.post.mockRejectedValue(
-      new ApiError(403, { reason: "server:restart" }),
+      new ApiError(403, { reason: "forbidden", permission: "server:restart" }),
     );
     renderPage();
 

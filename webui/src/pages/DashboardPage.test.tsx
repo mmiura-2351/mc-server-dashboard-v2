@@ -202,7 +202,7 @@ describe("DashboardPage lifecycle actions", () => {
   it("routes a 403 through the permission glue, not a generic toast", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
     mockApi.post.mockRejectedValue(
-      new ApiError(403, { reason: "server:stop" }),
+      new ApiError(403, { reason: "forbidden", permission: "server:stop" }),
     );
     renderPage();
 

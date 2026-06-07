@@ -351,7 +351,7 @@ describe("CommunityRolesTab", () => {
   it("routes a 403 on create through onForbidden (named-permission toast)", async () => {
     await openEditor([]);
     mockApi.post.mockRejectedValue(
-      new ApiError(403, { reason: "role:manage" }),
+      new ApiError(403, { reason: "forbidden", permission: "role:manage" }),
     );
 
     fireEvent.change(
