@@ -183,6 +183,23 @@ describe("AppShell community switcher", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("wraps the account link label so it can collapse at narrow widths", async () => {
+    signedInWith([ALPHA, BETA]);
+
+    renderAt("/");
+
+    // The account link keeps its always-visible avatar but carries its text in a
+    // dedicated `.label` span, which the narrow-width topbar rule hides so the
+    // trailing items stop overflowing off-screen (#554). The accessible name
+    // still resolves from the avatar's text, so the link stays labelled.
+    const account = await screen.findByRole("link", {
+      name: t("shell.account"),
+    });
+    const label = account.querySelector(".label");
+    expect(label).not.toBeNull();
+    expect(label).toHaveTextContent(t("shell.account"));
+  });
+
   it("clicking the brand navigates to the landing page", async () => {
     signedInWith([ALPHA, BETA]);
 
