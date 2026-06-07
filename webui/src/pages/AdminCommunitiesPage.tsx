@@ -22,7 +22,8 @@ import { useOffsetParam } from "./urlState.ts";
 // Platform admin Communities page (WEBUI_SPEC.md 6.12): list ALL communities and
 // provision new ones (name + initial owner). The listing reads the platform-axis
 // endpoint GET /admin/communities (#489) — admin sees every community with its
-// member/server counts, regardless of membership — paginated like GET /users.
+// member/server counts, regardless of membership — paginated like
+// GET /admin/users.
 // Provision (and delete) invalidate both this admin list and the membership-
 // scoped ["communities"] query the community switcher reuses.
 
@@ -267,15 +268,16 @@ function ProvisionDialog({
   const [ownerId, setOwnerId] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  // Owner picker source: GET /users is the only listing endpoint (admin-only,
-  // paginated; max limit=100, default 50 — admin_users.py). The provision API
-  // takes a user UUID, so the picker shows username/email and submits the
-  // selected user's id. Request the max page so deployments with >50 accounts
-  // are not silently truncated; when total exceeds it we surface a hint below.
-  // Only fetched while open.
+  // Owner picker source: GET /admin/users is the only listing endpoint
+  // (admin-only, paginated; max limit=100, default 50 — admin_users.py). The
+  // provision API takes a user UUID, so the picker shows username/email and
+  // submits the selected user's id. Request the max page so deployments with
+  // >50 accounts are not silently truncated; when total exceeds it we surface a
+  // hint below. Only fetched while open.
   const users = useQuery({
     queryKey: ["users"],
-    queryFn: () => api.get("/api/users?limit=100&offset=0" as "/api/users"),
+    queryFn: () =>
+      api.get("/api/admin/users?limit=100&offset=0" as "/api/admin/users"),
     enabled: open,
   });
 

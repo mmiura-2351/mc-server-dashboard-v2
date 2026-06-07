@@ -134,7 +134,7 @@ async def admin_create_user(
     return UserResponse.from_entity(user)
 
 
-@router.get("/users", dependencies=[Depends(require_platform_admin)])
+@router.get("/admin/users", dependencies=[Depends(require_platform_admin)])
 async def list_users(
     use_case: Annotated[ListUsers, Depends(get_list_users)],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -149,7 +149,9 @@ async def list_users(
     )
 
 
-@router.post("/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/admin/users/{user_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT
+)
 async def deactivate_user(
     user_id: uuid.UUID,
     admin: Annotated[User, Depends(require_platform_admin)],
@@ -168,7 +170,9 @@ async def deactivate_user(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/users/{user_id}/reactivate", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/admin/users/{user_id}/reactivate", status_code=status.HTTP_204_NO_CONTENT
+)
 async def reactivate_user(
     user_id: uuid.UUID,
     admin: Annotated[User, Depends(require_platform_admin)],
@@ -183,7 +187,7 @@ async def reactivate_user(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
     user_id: uuid.UUID,
     admin: Annotated[User, Depends(require_platform_admin)],
@@ -204,7 +208,9 @@ async def delete_user(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.put("/users/{user_id}/platform-admin", status_code=status.HTTP_204_NO_CONTENT)
+@router.put(
+    "/admin/users/{user_id}/platform-admin", status_code=status.HTTP_204_NO_CONTENT
+)
 async def set_platform_admin(
     user_id: uuid.UUID,
     body: PlatformAdminRequest,
