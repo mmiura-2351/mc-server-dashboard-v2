@@ -1,0 +1,63 @@
+name: openapi
+
+# Drift gate for the committed webui OpenAPI client artifacts
+# (webui/openapi.json + webui/src/api/schema.ts). They are generated from the
+# api/ route table but committed by hand, so a route change that lands without
+# regenerating them leaves the webui contract silently stale. This regenerates
+# and fails on any diff (mirrors the proto drift gate). It needs both
+# toolchains: uv to dump app.openapi(), Node to run openapi-typescript — so the
+# trigger covers both api/ and webui/ changes (and the generator's pinned deps).
+
+on:
+  pull_request:
+    paths:
+      - "api/**"
+      - "webui/**"
+      - "Makefile"
+      - ".github/workflows/openapi.yml"
+  push:
+    branches: [main]
+    paths:
+      - "api/**"
+      - "webui/**"
+      - "Makefile"
+      - ".github/workflows/openapi.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up uv (for the in-process app.openapi() export)
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: api/uv.lock
+
+      - name: Sync api (pinned Python + dev toolchain from uv.lock)
+        working-directory: api
+        run: uv sync --locked
+
+      - name: Set up Node (caches npm via the lockfile)
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: webui/.nvmrc
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Pin npm (matches engines.npm so lockfiles stay deterministic)
+        run: npm install -g npm@11.13.0
+
+      - name: Install webui (reproducible, from lockfile)
+        working-directory: webui
+        run: npm ci
+
+      - name: Drift check (regenerate and diff)
+        run: make openapi-check

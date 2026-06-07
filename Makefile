@@ -13,6 +13,7 @@
 	api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race \
 	webui-lint webui-format webui-test webui-build webui-e2e \
+	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
 	bootstrap hooks-install
 
@@ -41,7 +42,7 @@ PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
-check: lint test webui-build proto-check docs-check
+check: lint test webui-build openapi-check proto-check docs-check
 
 lint: api-lint worker-lint webui-lint proto-lint
 
@@ -133,6 +134,29 @@ webui-build:
 # installed once: `cd webui && npx playwright install chromium`.
 webui-e2e:
 	scripts/run_webui_e2e.sh $(ARGS)
+
+# ---------------------------------------------------------------------------
+# webui OpenAPI client artifacts (webui/openapi.json + webui/src/api/schema.ts)
+#
+# Both are generated from the api/ route table but committed by hand. The
+# `openapi` npm script chains the two generators: `openapi:export` dumps
+# `app.openapi()` to webui/openapi.json (deterministic — sorted keys, stable
+# formatting; see api/src/.../export_openapi.py and its determinism test), then
+# `openapi:generate` runs openapi-typescript over that JSON to webui/src/api/
+# schema.ts. Mirrors the proto-gen / proto-check pair.
+# ---------------------------------------------------------------------------
+
+openapi-gen:
+	cd webui && npm run openapi
+
+# Drift gate: regenerate the client artifacts and fail if they differ from the
+# committed copies (CI + `make check`). Catches an api route change that landed
+# without regenerating the webui contract.
+openapi-check: openapi-gen
+	@if ! git diff --exit-code -- webui/openapi.json webui/src/api/schema.ts; then \
+		echo "webui OpenAPI artifacts are stale; run 'make openapi-gen' and commit the result."; \
+		exit 1; \
+	fi
 
 # Install the pinned golangci-lint into worker/.bin if it is missing.
 $(GOLANGCI):
