@@ -136,6 +136,71 @@ async def test_edit_history_rollback_round_trip(tmp_path: Path) -> None:
     assert rolled == b"motd=original"
 
 
+async def test_edit_round_trips_against_populated_snapshot(tmp_path: Path) -> None:
+    """An at-rest edit on a populated snapshot persists and reads back (issue #542).
+
+    Live verification found that an at-rest write against a real populated
+    snapshot store crashed; this exercises the same path end-to-end (write the
+    edited bytes, read them back unchanged) so a regression to the IsADirectoryError
+    crash is caught.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    await adapter.write_file(
+        community_id=cid,
+        server_id=sid,
+        rel_path="server.properties",
+        content=b"motd=edited",
+    )
+    out = await adapter.read_file(
+        community_id=cid, server_id=sid, rel_path="server.properties"
+    )
+    assert out == b"motd=edited"
+
+    # A brand-new file under the populated snapshot also lands and reads back.
+    await adapter.write_file(
+        community_id=cid, server_id=sid, rel_path="marker.txt", content=b"hi"
+    )
+    assert (
+        await adapter.read_file(community_id=cid, server_id=sid, rel_path="marker.txt")
+        == b"hi"
+    )
+
+
+async def test_write_to_root_is_invalid_path(tmp_path: Path) -> None:
+    """Writing the working-set root (``path="."``) is a clean InvalidFilePathError.
+
+    The file route's ``path`` defaults to ``"."`` (the working-set root, a
+    directory). An at-rest write there used to reach the atomic rename and raise an
+    unhandled IsADirectoryError (the bare-500, issue #542); the seam now surfaces a
+    mapped InvalidFilePathError (422 invalid_path) and leaves the snapshot intact.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    for root in (".", ""):
+        with pytest.raises(InvalidFilePathError):
+            await adapter.write_file(
+                community_id=cid, server_id=sid, rel_path=root, content=b"x"
+            )
+    # The published copy is untouched by the refused write.
+    assert (
+        await adapter.read_file(
+            community_id=cid, server_id=sid, rel_path="server.properties"
+        )
+        == b"motd=original"
+    )
+
+
 async def test_write_on_never_snapshotted_server_succeeds(tmp_path: Path) -> None:
     """An at-rest edit before any snapshot initializes the first version (issue #205).
 
