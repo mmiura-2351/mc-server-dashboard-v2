@@ -16,6 +16,13 @@ directory as a zip (``file:read``); both are at-rest only (running -> 409
 via DI, runs them, and maps the servers file errors to HTTP codes (404 keeps the
 no-existence-signal posture; a traversal-unsafe path is 422; an oversized edit /
 upload is 413; a transitional server is 409; a disconnected worker is 503).
+
+A write (``PUT /files``) edits a file branching on server state (Section 6.9) and
+**creates** the target when it does not exist yet — at rest or running alike
+(create-through to the live working set). ``422 invalid_path`` means the path is
+genuinely malformed (absolute, or contains ``..``); it never means "this file
+does not exist yet", so creating a new file on a running server with a valid
+relative path succeeds (204) rather than 422.
 """
 
 from __future__ import annotations

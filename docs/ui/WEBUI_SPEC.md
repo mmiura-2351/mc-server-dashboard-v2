@@ -309,7 +309,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   delete; search box (`files/search`).
 - History drawer per file: version list → rollback with confirm.
 - Edits against a running server show "live working set — may need restart"
-  notice (Section 6.9 semantics).
+  notice (Section 6.9 semantics). Creating a new file works while running too
+  (create-through to the live working set); a `422 invalid_path` means the path
+  itself is malformed, not that the file is new.
 
 ### 6.7 Server detail — Backups
 - Stats header (count, total size, newest/oldest).
