@@ -301,6 +301,39 @@ describe("AdminAuditPage", () => {
     expect(auditCalls().length).toBe(before);
   });
 
+  it("restores filters from the URL query string on load (deep link / reload)", async () => {
+    signedInAs(ADMIN, [record()]);
+    const ACTOR = "22222222-2222-2222-2222-222222222222";
+
+    renderApp({
+      path: `/admin/audit?community=${COMMUNITY.id}&operation=member%3Aadd&actor=${ACTOR}`,
+    });
+    await screen.findByText("server:start");
+
+    // The persisted filters drive the first request without any Apply click.
+    await waitFor(() => {
+      const url = new URL(auditCalls().at(-1) as string, "http://x");
+      expect(url.searchParams.get("community")).toBe(COMMUNITY.id);
+      expect(url.searchParams.get("operation")).toBe("member:add");
+      expect(url.searchParams.get("actor")).toBe(ACTOR);
+    });
+    // The inputs reflect the restored filters.
+    expect(
+      (
+        screen.getByLabelText(
+          t("communitySettings.audit.filterOperation"),
+        ) as HTMLInputElement
+      ).value,
+    ).toBe("member:add");
+    expect(
+      (
+        screen.getByLabelText(
+          t("admin.audit.filterCommunity"),
+        ) as HTMLSelectElement
+      ).value,
+    ).toBe(COMMUNITY.id);
+  });
+
   it("pages forward with an increased offset", async () => {
     // A full page (50) signals there may be a next page.
     signedInAs(

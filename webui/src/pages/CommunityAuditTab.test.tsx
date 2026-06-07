@@ -67,12 +67,12 @@ function routeGet(opts: { records?: unknown[] }) {
   });
 }
 
-function renderPage() {
+function renderPage(entry = `/communities/${CID}/settings`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <MemoryRouter initialEntries={[`/communities/${CID}/settings`]}>
+    <MemoryRouter initialEntries={[entry]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
           <Routes>
@@ -237,6 +237,31 @@ describe("CommunityAuditTab", () => {
       );
       expect(url.searchParams.get("offset")).toBe("0");
     });
+  });
+
+  it("restores filters from the URL query string on load (deep link / reload)", async () => {
+    routeGet({ records: [record()] });
+    const ACTOR = "11111111-1111-1111-1111-111111111111";
+    // Deep-link straight to the Audit tab (#audit) with persisted filters.
+    renderPage(
+      `/communities/${CID}/settings?operation=member%3Aadd&actor=${ACTOR}#audit`,
+    );
+    await screen.findByText("server:start");
+
+    // The persisted filters drive the first request without any Apply click.
+    await waitFor(() => {
+      const url = new URL(auditCalls().at(-1) as string, "http://x");
+      expect(url.searchParams.get("operation")).toBe("member:add");
+      expect(url.searchParams.get("actor")).toBe(ACTOR);
+    });
+    // The inputs reflect the restored filters.
+    expect(
+      (
+        screen.getByLabelText(
+          t("communitySettings.audit.filterOperation"),
+        ) as HTMLInputElement
+      ).value,
+    ).toBe("member:add");
   });
 
   it("rejects a non-UUID actor inline without issuing a request", async () => {

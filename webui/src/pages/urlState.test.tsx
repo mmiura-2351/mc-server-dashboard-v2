@@ -7,7 +7,11 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { describe, expect, it } from "vitest";
-import { useOffsetParam, useTabHash } from "./urlState.ts";
+import {
+  useAuditFilterParams,
+  useOffsetParam,
+  useTabHash,
+} from "./urlState.ts";
 
 const TABS = ["overview", "console", "settings"] as const;
 
@@ -46,6 +50,47 @@ function OffsetProbe() {
       </button>
       <button type="button" onClick={() => setOffset(Math.max(0, offset - 50))}>
         prev
+      </button>
+      <button type="button" onClick={() => navigate(-1)}>
+        back
+      </button>
+    </div>
+  );
+}
+
+const FILTER_KEYS = ["operation", "actor", "since", "until"] as const;
+
+function FilterProbe() {
+  const [filters, applyFilters] = useAuditFilterParams(FILTER_KEYS);
+  const loc = useLocation();
+  const navigate = useNavigate();
+  return (
+    <div>
+      <span data-testid="operation">{filters.operation}</span>
+      <span data-testid="actor">{filters.actor}</span>
+      <span data-testid="since">{filters.since}</span>
+      <span data-testid="until">{filters.until}</span>
+      <span data-testid="search">{loc.search}</span>
+      <span data-testid="hash">{loc.hash}</span>
+      <button
+        type="button"
+        onClick={() => applyFilters({ ...filters, operation: "member:add" })}
+      >
+        apply-op
+      </button>
+      <button
+        type="button"
+        onClick={() => applyFilters({ ...filters, actor: "alice" })}
+      >
+        apply-actor
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          applyFilters({ operation: "", actor: "", since: "", until: "" })
+        }
+      >
+        clear
       </button>
       <button type="button" onClick={() => navigate(-1)}>
         back
@@ -224,5 +269,98 @@ describe("useOffsetParam", () => {
     fireEvent.click(screen.getByText("next"));
     expect(screen.getByTestId("hash").textContent).toBe("#audit");
     expect(screen.getByTestId("search").textContent).toBe("?offset=50");
+  });
+});
+
+describe("useAuditFilterParams", () => {
+  it("defaults to empty filters with a clean (param-less) URL", () => {
+    render(
+      <MemoryRouter initialEntries={["/x"]}>
+        <FilterProbe />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("operation").textContent).toBe("");
+    expect(screen.getByTestId("actor").textContent).toBe("");
+    expect(screen.getByTestId("search").textContent).toBe("");
+  });
+
+  it("derives the applied filters from the query string (deep link / reload)", () => {
+    render(
+      <MemoryRouter initialEntries={["/x?operation=member%3Aadd&actor=alice"]}>
+        <FilterProbe />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("operation").textContent).toBe("member:add");
+    expect(screen.getByTestId("actor").textContent).toBe("alice");
+  });
+
+  it("applying writes the non-empty filters as params; the URL round-trips", () => {
+    render(
+      <MemoryRouter initialEntries={["/x"]}>
+        <FilterProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("apply-op"));
+    expect(screen.getByTestId("operation").textContent).toBe("member:add");
+    const params = new URLSearchParams(
+      screen.getByTestId("search").textContent ?? "",
+    );
+    expect(params.get("operation")).toBe("member:add");
+    expect(params.get("actor")).toBeNull();
+  });
+
+  it("clearing all filters returns to a clean URL", () => {
+    render(
+      <MemoryRouter initialEntries={["/x?operation=member%3Aadd"]}>
+        <FilterProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("clear"));
+    expect(screen.getByTestId("operation").textContent).toBe("");
+    expect(screen.getByTestId("search").textContent).toBe("");
+  });
+
+  it("applying filters resets the offset to 0 (drops the offset param)", () => {
+    render(
+      <MemoryRouter initialEntries={["/x?offset=100"]}>
+        <FilterProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("apply-op"));
+    const params = new URLSearchParams(
+      screen.getByTestId("search").textContent ?? "",
+    );
+    expect(params.get("operation")).toBe("member:add");
+    expect(params.get("offset")).toBeNull();
+  });
+
+  it("preserves the hash when applying filters", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#audit"]}>
+        <FilterProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("apply-op"));
+    expect(screen.getByTestId("hash").textContent).toBe("#audit");
+  });
+
+  it("Back restores the previous filter set", () => {
+    render(
+      <MemoryRouter initialEntries={["/x"]}>
+        <FilterProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("apply-op"));
+    fireEvent.click(screen.getByText("apply-actor"));
+    expect(screen.getByTestId("operation").textContent).toBe("member:add");
+    expect(screen.getByTestId("actor").textContent).toBe("alice");
+
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("operation").textContent).toBe("member:add");
+    expect(screen.getByTestId("actor").textContent).toBe("");
+
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("operation").textContent).toBe("");
+    expect(screen.getByTestId("actor").textContent).toBe("");
   });
 });
