@@ -38,6 +38,7 @@ All three endpoints accept and return JSON. Success and failure status codes:
 | Endpoint | Success | Body | Failure |
 |---|---|---|---|
 | `POST /api/auth/login` | `200` | access + refresh pair + `Set-Cookie` (always) | `401` invalid credentials |
+| `POST /api/auth/session` | `200` | access token only; **no `Set-Cookie`** (does not rotate) | `401` invalid/expired/revoked cookie, **or** no cookie |
 | `POST /api/auth/refresh` | `200` | rotated access + refresh pair; `Set-Cookie` only if the request carried the cookie | `401` invalid/expired/revoked token, **or** no token in either transport |
 | `POST /api/auth/logout` | `204` | empty; clearing `Set-Cookie` only if the request carried the cookie | — (idempotent; see below) |
 
@@ -49,6 +50,18 @@ Notable contract points, each verifiable in the router:
   unknown user and wrong password — collapse to a single `401` with no detail
   that distinguishes them (username-enumeration defence,
   [`SECURITY.md`](SECURITY.md) Section 2).
+- **`POST /auth/session`** (issue #512) is the Web UI **bootstrap** path: it turns
+  the httpOnly refresh cookie into a fresh **access token** and nothing more. It
+  is cookie-only (no request body) and **does not rotate** — it emits no
+  `Set-Cookie` and never mints a new refresh secret, so a page load / F5 can no
+  longer race an in-flight rotation and leave a revoked predecessor cookie in the
+  jar (the torn-rotation race that revoked the token family and bounced the user
+  to `/login`). A missing cookie, or an unknown / expired / revoked one, returns
+  the uniform `401`. Because restore never rotates, a re-presented rotated
+  predecessor is just an invalid token here — it does **not** trip
+  reuse-detection and does **not** revoke the family (that responsibility stays on
+  `/auth/refresh`; see Section 4). Worker / CLI clients do not use this endpoint;
+  they use `/auth/refresh`, which rotates the refresh token they hold.
 - **`POST /auth/refresh`** with an empty / `{}` body **and** no cookie returns
   `401` *without invoking the use case* — a uniform `401`, not the `422` a missing
   required field would otherwise produce (changed in issue #365). An
@@ -88,7 +101,7 @@ Reason codes the `/auth/*` endpoints emit:
 
 | Status | `reason` | When |
 |---|---|---|
-| `401` | `invalid_credentials` | login failure, **and** every refresh failure (missing / unknown / expired / revoked / reused token) — the router raises one uniform `401` for all of them, so the reason does not distinguish login from refresh |
+| `401` | `invalid_credentials` | login failure, every refresh failure (missing / unknown / expired / revoked / reused token), **and** every session-restore failure (missing / unknown / expired / revoked cookie) — the router raises one uniform `401` for all of them, so the reason does not distinguish login from refresh from restore |
 | `422` | `validation_error` | a malformed request body (e.g. login with a blank `username`/`password`, or a present-but-empty `refresh_token`) |
 
 Note the refresh failure path deliberately reuses the `invalid_credentials`
@@ -160,6 +173,21 @@ logout is never graced — re-presenting it stays on the theft path regardless o
 how recent the revocation is. The grace-window predecessor is **not** re-revoked,
 so repeated reuse cannot roll the window forward and keep a leaked token alive.
 
+**`/auth/session` does not rotate, and does not weaken this model** (issue #512).
+Restore validates the cookie and mints an access token without revoking or
+re-issuing the refresh token, so it can never create a torn rotation in the
+first place — which is exactly why the Web UI bootstrap uses it instead of
+`/auth/refresh`. Rotation and reuse-detection remain entirely on `/auth/refresh`,
+the periodic in-session path: a stolen refresh token is still invalidated the
+moment the legitimate holder's next *refresh* rotates it, and re-presenting a
+rotated token to `/auth/refresh` still trips the family revoke above. Restore
+deliberately does **not** trip reuse-detection: it has no rotation to
+disambiguate, so a revoked/rotated cookie is simply an invalid token there (plain
+`401`, no family action). Its read-only, no-rotation shape means a stolen cookie
+replayed against `/auth/session` yields nothing the access-token TTL does not
+already bound; it does not warrant rate-limiting beyond what `/auth/refresh`
+carries.
+
 ### Guidance for the Web UI session layer
 
 The httpOnly cookie is attached to refresh requests automatically, so concurrent
@@ -201,7 +229,9 @@ status code returned to the client:
 | logout (token presented) | `auth:logout` | `SUCCESS` | — |
 
 A plain unknown / expired refresh token is **not** audited — it is not a
-token-theft signal, so auditing it would be noise.
+token-theft signal, so auditing it would be noise. `/auth/session` is likewise
+not audited: it is a read-only restore that neither mutates state nor carries a
+theft signal (a revoked cookie there is just an invalid token, issue #512).
 
 ## 7. Related documents
 

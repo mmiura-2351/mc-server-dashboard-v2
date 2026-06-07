@@ -78,6 +78,9 @@ describe("SessionProvider bootstrap", () => {
     await waitFor(() =>
       expect(screen.getByTestId("status")).toHaveTextContent("signed-in"),
     );
+    // Bootstrap uses the non-rotating restore endpoint, never the rotating
+    // /api/auth/refresh, so a page load can no longer rotate the cookie (#512).
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/auth/session");
   });
 
   it("signs out without navigating when the cookie refresh fails", async () => {

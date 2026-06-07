@@ -150,7 +150,7 @@ describe("App route guards", () => {
     // resolve so the shell can render the originally requested route.
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url === "/api/auth/refresh") {
+      if (url === "/api/auth/session") {
         return Promise.resolve(new Response("", { status: 401 }));
       }
       if (url === "/api/communities") {
