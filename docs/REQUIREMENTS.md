@@ -415,7 +415,7 @@ branch on server state. This policy is shared by 6.10 (File Management) and
 | Operation | Stopped server | Running server |
 |---|---|---|
 | File read | Authoritative Storage copy | Read-through to the Worker's live working set |
-| File edit | Authoritative Storage copy | Applied to the Worker's live working set (effect may require a restart) |
+| File edit | Authoritative Storage copy | Applied to the Worker's live working set (effect may require a restart). A file edit **creates** the target if it does not exist yet (create-through), the same as an at-rest edit — a valid relative path to a not-yet-existing file is never rejected as a bad path. |
 | Backup | Archive directly from the authoritative Storage copy | `save-all` via RCON → on-demand snapshot → archive (no stop required) |
 | Restore | Replace the authoritative working set | **Stop required** (hot replacement of a live working set is unsafe) |
 

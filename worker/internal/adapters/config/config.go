@@ -43,8 +43,6 @@ type Config struct {
 type APIConfig struct {
 	// GRPCEndpoint is the API control-plane gRPC address the Worker dials.
 	GRPCEndpoint string
-	// DataPlaneURL is the API HTTP data-plane base URL (hydrate/snapshot).
-	DataPlaneURL string
 	// Credential authenticates the Worker to the API. Secret: never logged.
 	Credential string
 	// TLS holds the control-channel TLS material.
@@ -141,7 +139,6 @@ type LogConfig struct {
 type fileConfig struct {
 	API struct {
 		GRPCEndpoint *string `toml:"grpc_endpoint"`
-		DataPlaneURL *string `toml:"data_plane_url"`
 		Credential   *string `toml:"credential"`
 		TLS          struct {
 			CAFile         *string `toml:"ca_file"`
@@ -243,7 +240,6 @@ func applyFile(cfg *Config, path string) error {
 	}
 
 	setString(&cfg.API.GRPCEndpoint, fc.API.GRPCEndpoint)
-	setString(&cfg.API.DataPlaneURL, fc.API.DataPlaneURL)
 	setString(&cfg.API.Credential, fc.API.Credential)
 	setString(&cfg.API.TLS.CAFile, fc.API.TLS.CAFile)
 	if fc.API.TLS.Insecure != nil {
@@ -289,7 +285,6 @@ func applyFile(cfg *Config, path string) error {
 // precedence). Each known key reads its prefixed, upper-cased name.
 func applyEnv(cfg *Config, getenv func(string) string) error {
 	setEnvString(&cfg.API.GRPCEndpoint, getenv, "API_GRPC_ENDPOINT")
-	setEnvString(&cfg.API.DataPlaneURL, getenv, "API_DATA_PLANE_URL")
 	setEnvString(&cfg.API.Credential, getenv, "API_CREDENTIAL")
 	setEnvString(&cfg.API.TLS.CAFile, getenv, "API_TLS_CA_FILE")
 	if v := getenv(EnvPrefix + "API_TLS_INSECURE"); v != "" {
@@ -396,9 +391,6 @@ func (c Config) validate() error {
 	var missing []string
 	if c.API.GRPCEndpoint == "" {
 		missing = append(missing, "api.grpc_endpoint")
-	}
-	if c.API.DataPlaneURL == "" {
-		missing = append(missing, "api.data_plane_url")
 	}
 	if c.API.Credential == "" {
 		missing = append(missing, "api.credential")

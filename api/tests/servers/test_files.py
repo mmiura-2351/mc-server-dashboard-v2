@@ -750,6 +750,37 @@ async def test_write_running_absent_authoritative_file_skips_snapshot() -> None:
     assert store.writes == []  # nothing to snapshot, no version churned
 
 
+async def test_write_running_new_file_creates_through_to_working_set() -> None:
+    # Regression for #544: creating a *new* file on a RUNNING server (a valid
+    # relative path with no authoritative copy yet) is create-through to the live
+    # working set — it dispatches edit_file and succeeds, NOT a misleading
+    # invalid_path rejection. invalid_path (InvalidFilePathError) is reserved for a
+    # genuinely malformed / traversal path, never "this file does not exist yet".
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    store = FakeFileStore()  # no authoritative copy of the new file
+    cp = FakeControlPlane()  # the worker creates the file and reports OK
+
+    await WriteFile(uow=uow, control_plane=cp, file_store=store)(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="pentest_running.txt",
+        content=b"hello",
+    )
+
+    assert [d[0] for d in cp.dispatched] == ["edit_file"]
+
+
 async def test_write_over_cap_is_rejected_before_dispatch() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     uow = FakeUnitOfWork()
