@@ -34,12 +34,12 @@ type AdminUserResponse = components["schemas"]["AdminUserResponse"];
 // The API caps a single page at 100 and defaults to 50 (admin_users.py).
 const PAGE_SIZE = 50;
 
-function usersUrl(offset: number): "/api/users" {
+function usersUrl(offset: number): "/api/admin/users" {
   const params = new URLSearchParams({
     limit: String(PAGE_SIZE),
     offset: String(offset),
   });
-  return `/api/users?${params.toString()}` as "/api/users";
+  return `/api/admin/users?${params.toString()}` as "/api/admin/users";
 }
 
 // Map an admin-create problem `reason` to the inline message + field. Password
@@ -147,8 +147,8 @@ export function AdminUsersPage() {
   const setActive = (user: AdminUserResponse, active: boolean) => {
     const path = apiPath(
       active
-        ? "/api/users/{user_id}/reactivate"
-        : "/api/users/{user_id}/deactivate",
+        ? "/api/admin/users/{user_id}/reactivate"
+        : "/api/admin/users/{user_id}/deactivate",
       { user_id: user.id },
     );
     runLifecycle(
@@ -163,7 +163,9 @@ export function AdminUsersPage() {
       user.id,
       () =>
         api.put(
-          apiPath("/api/users/{user_id}/platform-admin", { user_id: user.id }),
+          apiPath("/api/admin/users/{user_id}/platform-admin", {
+            user_id: user.id,
+          }),
           { body: JSON.stringify({ grant }) },
         ),
       grant ? "admin.users.adminGranted" : "admin.users.adminRevoked",
@@ -188,7 +190,10 @@ export function AdminUsersPage() {
     setDeleteTarget(null);
     runLifecycle(
       target.id,
-      () => api.delete(apiPath("/api/users/{user_id}", { user_id: target.id })),
+      () =>
+        api.delete(
+          apiPath("/api/admin/users/{user_id}", { user_id: target.id }),
+        ),
       "admin.users.deleted",
     );
   };

@@ -8,7 +8,7 @@ import { renderApp } from "../test/render.tsx";
 // router and providers via renderApp; a fetch mock dispatches on URL + method so
 // a single test can stand up /users/me, the membership-scoped switcher list
 // (GET /communities), the admin-wide page list (GET /admin/communities), the
-// user picker (GET /users), and the provision/delete calls.
+// user picker (GET /admin/users), and the provision/delete calls.
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -109,7 +109,7 @@ function baseRoute(url: string): Response | undefined {
   if (url === "/api/users/me") return jsonResponse(ADMIN);
   if (url === "/api/communities") return jsonResponse(SWITCHER_COMMUNITIES);
   if (url.endsWith("/me/permissions")) return jsonResponse({});
-  if (url.startsWith("/api/users")) return jsonResponse(USERS);
+  if (url.startsWith("/api/admin/users")) return jsonResponse(USERS);
   return undefined;
 }
 
@@ -262,7 +262,7 @@ describe("admin communities owner picker", () => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.startsWith("/api/admin/communities"))
         return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
-      if (url.startsWith("/api/users") && url !== "/api/users/me") {
+      if (url.startsWith("/api/admin/users")) {
         usersUrl = url;
         return Promise.resolve(jsonResponse(USERS));
       }
@@ -288,7 +288,7 @@ describe("admin communities owner picker", () => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.startsWith("/api/admin/communities"))
         return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
-      if (url.startsWith("/api/users") && url !== "/api/users/me")
+      if (url.startsWith("/api/admin/users"))
         return Promise.resolve(jsonResponse({ ...USERS, total: 150 }));
       return Promise.resolve(baseRoute(url) ?? tokenResponse());
     });

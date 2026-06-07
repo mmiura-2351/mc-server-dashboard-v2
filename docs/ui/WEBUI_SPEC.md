@@ -61,11 +61,11 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 | POST | `/auth/logout` | invalidates the refresh token. |
 | GET / PATCH / DELETE | `/users/me` | Profile read / update (username, email) / account deletion. |
 | PUT | `/users/me/password` | Change password (current + new). |
-| GET | `/users` `[A]` | Paginated user list (`limit`/`offset`, returns `total`, `active`, `created_at`). |
+| GET | `/admin/users` `[A]` | Paginated user list (`limit`/`offset`, returns `total`, `active`, `created_at`). |
 | POST | `/admin/users` `[A]` | Create a user (username, email, password); exempt from the open-registration switch and per-IP cap. |
-| POST | `/users/{id}/deactivate` · `/reactivate` `[A]` | Suspend / restore login. |
-| PUT | `/users/{id}/platform-admin` `[A]` | Grant/revoke the admin flag. |
-| DELETE | `/users/{id}` `[A]` | Delete a user. |
+| POST | `/admin/users/{id}/deactivate` · `/reactivate` `[A]` | Suspend / restore login. |
+| PUT | `/admin/users/{id}/platform-admin` `[A]` | Grant/revoke the admin flag. |
+| DELETE | `/admin/users/{id}` `[A]` | Delete a user. |
 
 ### 2.2 Communities, members, roles, grants
 
