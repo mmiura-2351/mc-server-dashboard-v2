@@ -138,6 +138,17 @@ class StorageFileStoreAdapter(FileStore):
         except PathTraversalError as exc:
             raise InvalidFilePathError(rel_path) from exc
 
+    async def retain_if_changed(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        community, server = _scope(community_id, server_id)
+        try:
+            await self._storage.retain_file_version(
+                community, server, _rel_path(rel_path)
+            )
+        except PathTraversalError as exc:
+            raise InvalidFilePathError(rel_path) from exc
+
     async def delete_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:

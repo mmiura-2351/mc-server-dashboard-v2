@@ -935,6 +935,50 @@ class ObjectStorage(Storage):
         for obj in objs[:excess] if excess > 0 else []:
             await client.delete_object(obj.key)
 
+    async def retain_file_version(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        # Retain the current authoritative object as a version unless it already
+        # equals the newest retained version (issue #351): a running edit snapshots
+        # the frozen authoritative copy before each edit, and without this dedup
+        # repeated edits to one file would push identical copies into the bounded
+        # ring and evict distinct at-rest versions.
+        sub = self._safe_subkey(rel_path)
+        async with self._client_factory() as client:
+            snapshot_prefix = await self._read_pointer(
+                client, self._server_prefix(community_id, server_id)
+            )
+            if snapshot_prefix is None:
+                return  # never-published server: nothing authoritative to retain
+            key = snapshot_prefix + sub
+            if await client.head_object(key) is None:
+                return  # no authoritative copy yet: nothing to retain
+            versions = self._versions_prefix(community_id, server_id, rel_path)
+            if await self._matches_newest_version(client, versions, key):
+                return  # unchanged since the newest retained version: skip churn
+            await self._capture_version(client, community_id, server_id, rel_path, key)
+
+    async def _matches_newest_version(
+        self, client: S3Client, versions: str, source_key: str
+    ) -> bool:
+        """True if ``source_key`` equals the newest retained version under ``versions``.
+
+        Compares by size first (a cheap HEAD reject), then by SHA-256 of the
+        streamed bodies so two large identical objects are hashed independently
+        rather than both held in memory.
+        """
+
+        objs = sorted(await client.list_objects(versions), key=lambda o: o.key)
+        if not objs:
+            return False
+        newest = objs[-1].key  # ids are time-ordered (_new_version_id)
+        source_size = await client.head_object(source_key)
+        if source_size is None or source_size != objs[-1].size:
+            return False
+        return await _stream_sha256(client, source_key) == await _stream_sha256(
+            client, newest
+        )
+
     async def list_file_versions(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> list[VersionId]:
@@ -1014,6 +1058,15 @@ def _group_by_server(objs: list[S3Object]) -> dict[str, list[str]]:
 
 async def _read_all(client: S3Client, key: str) -> bytes:
     return b"".join([chunk async for chunk in await client.get_object(key)])
+
+
+async def _stream_sha256(client: S3Client, key: str) -> str:
+    """SHA-256 of an object, hashed over its streamed body (never buffered whole)."""
+
+    hasher = hashlib.sha256()
+    async for chunk in await client.get_object(key):
+        hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 async def _delete_prefix(client: S3Client, prefix: str) -> None:

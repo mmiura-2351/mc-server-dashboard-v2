@@ -94,6 +94,10 @@ class FakeFileStore(FileStore):
         self.version_bytes: dict[tuple[str, str], bytes] = {}
         self._version_seq = 0
         self.writes: list[tuple[str, bytes]] = []
+        # Authoritative bytes retained via retain_if_changed (the running-edit
+        # snapshot dedup, #351), so a test can assert N identical snapshots retain
+        # exactly one version.
+        self.retained: list[tuple[str, bytes]] = []
         self.rollbacks: list[tuple[str, str]] = []
         self.deleted_files: list[str] = []
         self.deleted_dirs: list[str] = []
@@ -171,6 +175,28 @@ class FakeFileStore(FileStore):
             self.versions.setdefault(rel_path, []).insert(0, version_id)
         self.files[rel_path] = content
         self.writes.append((rel_path, content))
+
+    async def retain_if_changed(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        if self.bad_path:
+            raise InvalidFilePathError(rel_path)
+        # Mirror Storage.retain_file_version: retain the current authoritative
+        # bytes as a version unless they equal the newest retained version, and
+        # treat a missing authoritative copy as a no-op (#351). Never mutates
+        # ``current/``.
+        if rel_path not in self.files:
+            return
+        existing = self.versions.get(rel_path)
+        if existing:
+            newest = existing[0]
+            if self.version_bytes.get((rel_path, newest)) == self.files[rel_path]:
+                return
+        self._version_seq += 1
+        version_id = f"v{self._version_seq}"
+        self.version_bytes[(rel_path, version_id)] = self.files[rel_path]
+        self.versions.setdefault(rel_path, []).insert(0, version_id)
+        self.retained.append((rel_path, self.files[rel_path]))
 
     async def delete_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -742,10 +768,13 @@ async def test_write_running_edits_control_plane() -> None:
         content=b"[]",
     )
     assert [d[0] for d in cp.dispatched] == ["edit_file"]
-    # The pre-edit authoritative bytes are snapshotted (re-written unchanged) so
+    # The pre-edit authoritative bytes are snapshotted (retained as a version) so
     # a version is retained before the worker overwrites the live working set; the
-    # authoritative current/ content is otherwise unchanged (FR-FILE-3, #344).
-    assert store.writes == [("ops.json", b"[]-seed")]
+    # authoritative current/ content is otherwise unchanged (FR-FILE-3, #344). The
+    # snapshot rides retain_if_changed, not write_file, so current/ is never
+    # re-written (#351).
+    assert store.retained == [("ops.json", b"[]-seed")]
+    assert store.writes == []
     assert store.files["ops.json"] == b"[]-seed"
 
 
@@ -800,6 +829,48 @@ async def test_write_running_versions_prior_authoritative_content() -> None:
     assert store.files["server.properties"] == b"rcon=old"
 
 
+async def test_write_running_repeated_edits_retain_one_authoritative_version() -> None:
+    # Regression for #351: N running edits to the same file all snapshot the SAME
+    # frozen authoritative bytes (current/ stays put until the next stop-snapshot),
+    # so the dedup must retain exactly ONE version, not N — otherwise repeated edits
+    # would evict distinct at-rest versions from the bounded ring.
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker=worker,
+        ),
+    )
+    store = FakeFileStore()
+    store.files["server.properties"] = b"rcon=old"  # the frozen at-rest seed
+    cp = FakeControlPlane()
+    use_case = WriteFile(uow=uow, control_plane=cp, file_store=store)
+
+    for i in range(15):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            content=f"rcon=new-{i}".encode(),
+        )
+
+    # Every edit dispatched to the worker, but only the FIRST snapshot retained a
+    # version — the rest were deduped against it.
+    assert [d[0] for d in cp.dispatched] == ["edit_file"] * 15
+    assert store.retained == [("server.properties", b"rcon=old")]
+    versions = await ListFileVersions(uow=uow, file_store=store)(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+    )
+    assert len(versions) == 1
+
+
 async def test_write_running_absent_authoritative_file_skips_snapshot() -> None:
     # A file created while running has no authoritative copy to snapshot, so the
     # edit must not fail trying to version nothing (#344).
@@ -826,7 +897,8 @@ async def test_write_running_absent_authoritative_file_skips_snapshot() -> None:
     )
 
     assert [d[0] for d in cp.dispatched] == ["edit_file"]
-    assert store.writes == []  # nothing to snapshot, no version churned
+    assert store.retained == []  # nothing to snapshot, no version churned
+    assert store.writes == []
 
 
 async def test_write_running_new_file_creates_through_to_working_set() -> None:
