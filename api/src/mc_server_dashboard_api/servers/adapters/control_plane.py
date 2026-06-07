@@ -275,13 +275,13 @@ class FleetControlPlaneAdapter(ControlPlane):
 
     def _working_set_url(self, community_id: CommunityId, server_id: ServerId) -> str:
         return (
-            f"{self._base()}/data-plane/communities/{community_id.value}"
+            f"{self._base()}/api/data-plane/communities/{community_id.value}"
             f"/servers/{server_id.value}/working-set"
         )
 
     def _snapshot_url(self, community_id: CommunityId, server_id: ServerId) -> str:
         return (
-            f"{self._base()}/data-plane/communities/{community_id.value}"
+            f"{self._base()}/api/data-plane/communities/{community_id.value}"
             f"/servers/{server_id.value}/snapshot"
         )
 

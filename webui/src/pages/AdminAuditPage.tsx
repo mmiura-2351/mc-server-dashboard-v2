@@ -33,7 +33,7 @@ const PICKER_PAGE_SIZE = 100;
 // (community/operation/actor/since/until/limit/offset — schema.ts
 // list_audit_log). Blank filters are omitted. The result is cast back to the
 // path literal so the typed response stays AuditLogResponse.
-function auditUrl(filters: AdminAuditFilters, offset: number): "/audit" {
+function auditUrl(filters: AdminAuditFilters, offset: number): "/api/audit" {
   const params = new URLSearchParams();
   if (filters.community !== "") {
     params.set("community", filters.community);
@@ -41,7 +41,7 @@ function auditUrl(filters: AdminAuditFilters, offset: number): "/audit" {
   applyAuditParams(params, filters);
   params.set("limit", String(PAGE_SIZE));
   params.set("offset", String(offset));
-  return `/audit?${params.toString()}` as "/audit";
+  return `/api/audit?${params.toString()}` as "/api/audit";
 }
 
 // Platform-admin global Audit page (WEBUI_SPEC.md 6.12): the global audit log
@@ -59,7 +59,7 @@ export function AdminAuditPage() {
     queryKey: adminCommunitiesPickerKey(PICKER_PAGE_SIZE),
     queryFn: () =>
       api.get(
-        `/admin/communities?limit=${PICKER_PAGE_SIZE}&offset=0` as "/admin/communities",
+        `/api/admin/communities?limit=${PICKER_PAGE_SIZE}&offset=0` as "/api/admin/communities",
       ),
   });
   const communities = communitiesQuery.data?.communities;

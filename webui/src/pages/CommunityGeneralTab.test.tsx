@@ -47,7 +47,7 @@ function LocationProbe() {
 
 function routeGet() {
   mockApi.get.mockImplementation((path: string) => {
-    if (path === `/communities/${CID}/members`) {
+    if (path === `/api/communities/${CID}/members`) {
       return Promise.resolve([]);
     }
     return Promise.resolve({ id: CID, name: "Sakura" });
@@ -114,7 +114,7 @@ describe("CommunityGeneralTab", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.patch).toHaveBeenCalledWith(`/communities/${CID}`, {
+      expect(mockApi.patch).toHaveBeenCalledWith(`/api/communities/${CID}`, {
         body: JSON.stringify({ name: "Sakura SMP" }),
       });
     });
@@ -161,7 +161,7 @@ describe("CommunityGeneralTab", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.delete).toHaveBeenCalledWith(`/communities/${CID}`);
+      expect(mockApi.delete).toHaveBeenCalledWith(`/api/communities/${CID}`);
     });
     // The deleted community must not stay active, and the user lands on "/".
     await waitFor(() => expect(setCommunityId).toHaveBeenCalledWith(null));

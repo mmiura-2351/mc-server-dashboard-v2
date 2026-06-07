@@ -50,7 +50,7 @@ export function ServerPlayersTab({
     queryKey: serverGroupsKey(communityId, serverId),
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/servers/{server_id}/groups", {
+        apiPath("/api/communities/{community_id}/servers/{server_id}/groups", {
           community_id: communityId,
           server_id: serverId,
         }),
@@ -62,7 +62,7 @@ export function ServerPlayersTab({
     queryKey: communityGroupsKey(communityId),
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/groups", {
+        apiPath("/api/communities/{community_id}/groups", {
           community_id: communityId,
         }),
       ),
@@ -84,7 +84,7 @@ export function ServerPlayersTab({
     mutationFn: (groupId: string) =>
       api.put(
         apiPath(
-          "/communities/{community_id}/groups/{group_id}/servers/{server_id}",
+          "/api/communities/{community_id}/groups/{group_id}/servers/{server_id}",
           {
             community_id: communityId,
             group_id: groupId,
@@ -101,7 +101,7 @@ export function ServerPlayersTab({
     mutationFn: (groupId: string) =>
       api.delete(
         apiPath(
-          "/communities/{community_id}/groups/{group_id}/servers/{server_id}",
+          "/api/communities/{community_id}/groups/{group_id}/servers/{server_id}",
           {
             community_id: communityId,
             group_id: groupId,

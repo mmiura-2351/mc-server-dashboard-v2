@@ -501,12 +501,15 @@ credential as their `transfer_token` and the full endpoint URL as
 format `open_hydrate_source` / `write_snapshot` already produce/consume,
 Section 7.1). No compression at M1.
 
-**Endpoints** (scoped by `(community_id, server_id)`):
+**Endpoints** (scoped by `(community_id, server_id)`). Like the rest of the HTTP
+API these are namespaced under `/api` (issue #498); the API builds the full
+`transfer_url` it hands the Worker over the control plane, so the Worker follows
+whatever path the API emits:
 
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
-| `GET /data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present, #118). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir); `401` |
-| `POST /data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `411` no `Content-Length`; `413` over the size cap; `401` |
+| `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present, #118). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir); `401` |
+| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `411` no `Content-Length`; `413` over the size cap; `401` |
 
 **JAR posture (M1).** ARCHITECTURE.md Section 7.3 says the resolved server JAR
 reaches the Worker as part of hydrate. As of issue #118 (version catalog + JAR

@@ -239,23 +239,25 @@ thereby evade or poison the per-IP brute-force counter.
 ## 5. Observability endpoints
 
 The API exposes three unauthenticated operational endpoints for orchestrators
-and monitoring (issue #282):
+and monitoring (issue #282). Like the rest of the HTTP API they are namespaced
+under `/api` (issue #498) — the probes share the `/api` prefix rather than
+carving a root-level exception out of the SPA fallback (WEBUI_SPEC 7.7):
 
-- `GET /healthz` — liveness; reports the database-connectivity readiness inline.
-- `GET /readyz` — readiness; 200 with per-component booleans when every critical
+- `GET /api/healthz` — liveness; reports the database-connectivity readiness inline.
+- `GET /api/readyz` — readiness; 200 with per-component booleans when every critical
   component is ready, 503 with the same shape otherwise.
-- `GET /metrics` — Prometheus exposition of aggregate metrics.
+- `GET /api/metrics` — Prometheus exposition of aggregate metrics.
 
 These endpoints are **deliberately unauthenticated** so a probe or scraper need
-no credential, and they are **safe-by-content**: `/healthz` and `/readyz` return
-only component booleans, and `/metrics` returns only aggregates (counts,
-latencies, gauges) — never per-user or per-server identifying data. `/metrics`
+no credential, and they are **safe-by-content**: `/api/healthz` and `/api/readyz`
+return only component booleans, and `/api/metrics` returns only aggregates (counts,
+latencies, gauges) — never per-user or per-server identifying data. `/api/metrics`
 should nonetheless be **firewalled on an internet-facing deployment**: the
 aggregate counts (server/worker totals, request rates) are operational signal an
 external party has no need to see. The bundled Compose deployment publishes only
-the API port and does not expose `/metrics` to any separate listener, so no
+the API port and does not expose `/api/metrics` to any separate listener, so no
 additional change is needed there; an operator fronting the API with a reverse
-proxy should block `/metrics` (and may also restrict `/readyz`) at the proxy.
+proxy should block `/api/metrics` (and may also restrict `/api/readyz`) at the proxy.
 
 ---
 

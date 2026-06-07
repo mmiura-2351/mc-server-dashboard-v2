@@ -15,7 +15,7 @@ export default async function globalSetup(): Promise<void> {
   let lastError = "";
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`${API_URL}/healthz`);
+      const res = await fetch(`${API_URL}/api/healthz`);
       const body = await res.json();
       if (res.ok && body.ok === true) {
         return;

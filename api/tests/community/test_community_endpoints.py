@@ -125,7 +125,7 @@ def test_provision_requires_platform_admin() -> None:
     app = _provision_app(platform_admin=False, use_case=_FakeUseCase())
     client = next(_client(app))
     resp = client.post(
-        "/communities",
+        "/api/communities",
         json={"name": "guild", "owner_user_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 403
@@ -137,7 +137,7 @@ def test_provision_returns_201() -> None:
     app = _provision_app(platform_admin=True, use_case=use_case)
     client = next(_client(app))
     resp = client.post(
-        "/communities",
+        "/api/communities",
         json={"name": "guild", "owner_user_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 201
@@ -149,7 +149,7 @@ def test_provision_unknown_owner_returns_422() -> None:
     app = _provision_app(platform_admin=True, use_case=use_case)
     client = next(_client(app))
     resp = client.post(
-        "/communities",
+        "/api/communities",
         json={"name": "guild", "owner_user_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 422
@@ -161,7 +161,7 @@ def test_provision_duplicate_name_returns_409() -> None:
     app = _provision_app(platform_admin=True, use_case=use_case)
     client = next(_client(app))
     resp = client.post(
-        "/communities",
+        "/api/communities",
         json={"name": "guild", "owner_user_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 409
@@ -171,7 +171,7 @@ def test_provision_invalid_owner_id_returns_422() -> None:
     app = _provision_app(platform_admin=True, use_case=_FakeUseCase())
     client = next(_client(app))
     resp = client.post(
-        "/communities",
+        "/api/communities",
         json={"name": "guild", "owner_user_id": "not-a-uuid"},
     )
     assert resp.status_code == 422
@@ -209,14 +209,14 @@ def _managed_app(
 def test_read_non_member_gets_404() -> None:
     app = _managed_app(member=False, allow=True, read_uc=_FakeUseCase())
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
 def test_read_member_without_permission_gets_403() -> None:
     app = _managed_app(member=True, allow=False, read_uc=_FakeUseCase())
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}")
     assert resp.status_code == 403
 
 
@@ -224,7 +224,7 @@ def test_read_authorized_member_gets_200() -> None:
     community = _community()
     app = _managed_app(member=True, allow=True, read_uc=_FakeUseCase(result=community))
     client = next(_client(app))
-    resp = client.get(f"/communities/{community.id.value}")
+    resp = client.get(f"/api/communities/{community.id.value}")
     assert resp.status_code == 200
     assert resp.json()["name"] == "guild"
 
@@ -238,7 +238,7 @@ def test_read_concurrent_delete_gets_404() -> None:
         read_uc=_FakeUseCase(error=CommunityNotFoundError("gone")),
     )
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
@@ -248,7 +248,7 @@ def test_read_platform_admin_non_member_still_gets_404() -> None:
         member=False, allow=True, platform_admin=True, read_uc=_FakeUseCase()
     )
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
@@ -258,7 +258,7 @@ def test_rename_authorized_returns_200() -> None:
         member=True, allow=True, rename_uc=_FakeUseCase(result=community)
     )
     client = next(_client(app))
-    resp = client.patch(f"/communities/{community.id.value}", json={"name": "new"})
+    resp = client.patch(f"/api/communities/{community.id.value}", json={"name": "new"})
     assert resp.status_code == 200
     assert resp.json()["name"] == "new"
 
@@ -266,21 +266,21 @@ def test_rename_authorized_returns_200() -> None:
 def test_rename_member_without_permission_gets_403() -> None:
     app = _managed_app(member=True, allow=False, rename_uc=_FakeUseCase())
     client = next(_client(app))
-    resp = client.patch(f"/communities/{uuid.uuid4()}", json={"name": "new"})
+    resp = client.patch(f"/api/communities/{uuid.uuid4()}", json={"name": "new"})
     assert resp.status_code == 403
 
 
 def test_delete_authorized_returns_204() -> None:
     app = _managed_app(member=True, allow=True, delete_uc=_FakeUseCase())
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}")
     assert resp.status_code == 204
 
 
 def test_delete_non_member_gets_404() -> None:
     app = _managed_app(member=False, allow=True, delete_uc=_FakeUseCase())
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
@@ -294,7 +294,7 @@ def test_list_my_communities_returns_user_communities() -> None:
     app.dependency_overrides[get_current_user] = lambda: make_user()
     app.dependency_overrides[get_list_my_communities] = lambda: use_case
     client = next(_client(app))
-    resp = client.get("/communities")
+    resp = client.get("/api/communities")
     assert resp.status_code == 200
     assert resp.json() == [{"id": str(community.id.value), "name": "guild"}]
 
@@ -309,7 +309,7 @@ def test_delete_platform_admin_non_member_returns_204() -> None:
         member=False, allow=False, platform_admin=True, delete_uc=_FakeUseCase()
     )
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}")
     assert resp.status_code == 204
 
 
@@ -317,7 +317,7 @@ def test_delete_non_admin_non_member_still_gets_404() -> None:
     # The bypass is admin-only; a non-admin non-member keeps the no-signal 404.
     app = _managed_app(member=False, allow=True, delete_uc=_FakeUseCase())
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
@@ -347,7 +347,7 @@ def test_list_all_communities_requires_platform_admin() -> None:
     use_case = _FakeUseCase(result=CommunityPage(communities=[], total=0))
     app = _admin_list_app(platform_admin=False, use_case=use_case)
     client = next(_client(app))
-    assert client.get("/admin/communities").status_code == 403
+    assert client.get("/api/admin/communities").status_code == 403
 
 
 def test_list_all_communities_returns_page_with_counts() -> None:
@@ -355,7 +355,7 @@ def test_list_all_communities_returns_page_with_counts() -> None:
     use_case = _FakeUseCase(result=CommunityPage(communities=[summary], total=1))
     app = _admin_list_app(platform_admin=True, use_case=use_case)
     client = next(_client(app))
-    resp = client.get("/admin/communities?limit=10&offset=0")
+    resp = client.get("/api/admin/communities?limit=10&offset=0")
     assert resp.status_code == 200
     body = resp.json()
     assert body["total"] == 1
@@ -374,7 +374,7 @@ def test_list_all_communities_default_pagination() -> None:
     use_case = _FakeUseCase(result=CommunityPage(communities=[], total=0))
     app = _admin_list_app(platform_admin=True, use_case=use_case)
     client = next(_client(app))
-    assert client.get("/admin/communities").status_code == 200
+    assert client.get("/api/admin/communities").status_code == 200
     assert use_case.calls == [{"limit": 50, "offset": 0}]
 
 
@@ -382,8 +382,8 @@ def test_list_all_communities_rejects_out_of_range_limit() -> None:
     use_case = _FakeUseCase(result=CommunityPage(communities=[], total=0))
     app = _admin_list_app(platform_admin=True, use_case=use_case)
     client = next(_client(app))
-    assert client.get("/admin/communities?limit=0").status_code == 422
-    assert client.get("/admin/communities?limit=101").status_code == 422
+    assert client.get("/api/admin/communities?limit=0").status_code == 422
+    assert client.get("/api/admin/communities?limit=101").status_code == 422
 
 
 # --- cross-community isolation ---------------------------------------------
@@ -416,6 +416,6 @@ def test_grant_in_one_community_does_not_open_another() -> None:
     client = next(_client(app))
 
     # Member of A -> 200.
-    assert client.get(f"/communities/{community_a.id.value}").status_code == 200
+    assert client.get(f"/api/communities/{community_a.id.value}").status_code == 200
     # Not a member of B -> 404, despite full permission in A.
-    assert client.get(f"/communities/{community_b.id.value}").status_code == 404
+    assert client.get(f"/api/communities/{community_b.id.value}").status_code == 404

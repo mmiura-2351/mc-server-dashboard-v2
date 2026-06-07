@@ -68,14 +68,14 @@ def _client(catalog: VersionCatalog, *, authed: bool = True) -> TestClient:
 def test_requires_authentication() -> None:
     client = _client(_FakeCatalog(), authed=False)
     with client:
-        resp = client.get("/versions/vanilla")
+        resp = client.get("/api/versions/vanilla")
     assert resp.status_code == 401
 
 
 def test_lists_server_types() -> None:
     client = _client(_FakeCatalog())
     with client:
-        resp = client.get("/versions")
+        resp = client.get("/api/versions")
     assert resp.status_code == 200
     assert resp.json() == {"server_types": ["vanilla", "paper", "fabric", "forge"]}
 
@@ -83,7 +83,7 @@ def test_lists_server_types() -> None:
 def test_lists_versions_for_type() -> None:
     client = _client(_FakeCatalog())
     with client:
-        resp = client.get("/versions/vanilla")
+        resp = client.get("/api/versions/vanilla")
     assert resp.status_code == 200
     assert resp.json() == {"versions": ["1.21.1"]}
 
@@ -91,7 +91,7 @@ def test_lists_versions_for_type() -> None:
 def test_lists_versions_for_forge() -> None:
     client = _client(_FakeCatalog())
     with client:
-        resp = client.get("/versions/forge")
+        resp = client.get("/api/versions/forge")
     assert resp.status_code == 200
     assert resp.json() == {"versions": ["1.21.1"]}
 
@@ -99,7 +99,7 @@ def test_lists_versions_for_forge() -> None:
 def test_unknown_type_spigot_is_404() -> None:
     client = _client(_FakeCatalog())
     with client:
-        resp = client.get("/versions/spigot")
+        resp = client.get("/api/versions/spigot")
     assert resp.status_code == 404
     assert resp.json()["reason"] == "unknown_server_type"
 
@@ -107,6 +107,6 @@ def test_unknown_type_spigot_is_404() -> None:
 def test_source_down_is_503() -> None:
     client = _client(_FakeCatalog(down=True))
     with client:
-        resp = client.get("/versions/vanilla")
+        resp = client.get("/api/versions/vanilla")
     assert resp.status_code == 503
     assert resp.json()["reason"] == "catalog_unavailable"

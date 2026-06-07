@@ -36,9 +36,9 @@ export interface CommunityEventsCallbacks {
   onDown: () => void;
 }
 
-/** Build the `wss?://…/communities/{cid}/events?token=…` URL for `cid`. */
+/** Build the `wss?://…/api/communities/{cid}/events?token=…` URL for `cid`. */
 function eventsUrl(communityId: string, token: string): string {
-  const path = `/communities/${encodeURIComponent(communityId)}/events`;
+  const path = `/api/communities/${encodeURIComponent(communityId)}/events`;
   const query = `?token=${encodeURIComponent(token)}`;
   return `${wsOrigin()}${path}${query}`;
 }

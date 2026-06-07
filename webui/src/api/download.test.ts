@@ -33,10 +33,10 @@ describe("downloadFile", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    await downloadFile("/communities/c1/servers/s1/export", "survival.zip");
+    await downloadFile("/api/communities/c1/servers/s1/export", "survival.zip");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/communities/c1/servers/s1/export",
+      "/api/communities/c1/servers/s1/export",
       expect.objectContaining({
         method: "GET",
         headers: { authorization: "Bearer tok-1" },
@@ -58,7 +58,10 @@ describe("downloadFile", () => {
           ),
       );
 
-      await downloadFile("/communities/c1/servers/s1/export", "survival.zip");
+      await downloadFile(
+        "/api/communities/c1/servers/s1/export",
+        "survival.zip",
+      );
 
       // The revoke is scheduled, not run synchronously, so the click-initiated
       // download still has a live object URL.
@@ -82,10 +85,10 @@ describe("downloadFile", () => {
     );
 
     await expect(
-      downloadFile("/communities/c1/servers/s1/export", "x.zip"),
+      downloadFile("/api/communities/c1/servers/s1/export", "x.zip"),
     ).rejects.toMatchObject({ status: 409, reason: "server_unsettled" });
     await expect(
-      downloadFile("/communities/c1/servers/s1/export", "x.zip"),
+      downloadFile("/api/communities/c1/servers/s1/export", "x.zip"),
     ).rejects.toBeInstanceOf(ApiError);
     expect(clicks).toHaveLength(0);
   });

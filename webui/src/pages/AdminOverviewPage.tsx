@@ -14,15 +14,15 @@ type WorkerResponse = components["schemas"]["WorkerResponse"];
 export function AdminOverviewPage() {
   const workersQuery = useQuery({
     queryKey: ["workers"],
-    queryFn: () => api.get("/workers"),
+    queryFn: () => api.get("/api/workers"),
   });
   const backupsQuery = useQuery({
     queryKey: ["backups", "statistics"],
-    queryFn: () => api.get("/backups/statistics"),
+    queryFn: () => api.get("/api/backups/statistics"),
   });
   const jarPoolQuery = useQuery({
     queryKey: ["versions", "jar-pool", "stats"],
-    queryFn: () => api.get("/versions/jar-pool/stats"),
+    queryFn: () => api.get("/api/versions/jar-pool/stats"),
   });
 
   const isPending =

@@ -29,13 +29,17 @@
 
 ## 1. Endpoints at a glance
 
+The entire HTTP API is namespaced under `/api` (issue #498), so the auth
+endpoints are `/api/auth/*`. The reason codes and `/users` / `/admin/users`
+paths referenced below carry the same prefix.
+
 All three endpoints accept and return JSON. Success and failure status codes:
 
 | Endpoint | Success | Body | Failure |
 |---|---|---|---|
-| `POST /auth/login` | `200` | access + refresh pair + `Set-Cookie` (always) | `401` invalid credentials |
-| `POST /auth/refresh` | `200` | rotated access + refresh pair; `Set-Cookie` only if the request carried the cookie | `401` invalid/expired/revoked token, **or** no token in either transport |
-| `POST /auth/logout` | `204` | empty; clearing `Set-Cookie` only if the request carried the cookie | — (idempotent; see below) |
+| `POST /api/auth/login` | `200` | access + refresh pair + `Set-Cookie` (always) | `401` invalid credentials |
+| `POST /api/auth/refresh` | `200` | rotated access + refresh pair; `Set-Cookie` only if the request carried the cookie | `401` invalid/expired/revoked token, **or** no token in either transport |
+| `POST /api/auth/logout` | `204` | empty; clearing `Set-Cookie` only if the request carried the cookie | — (idempotent; see below) |
 
 Notable contract points, each verifiable in the router:
 
@@ -110,14 +114,14 @@ refresh token even for cookie clients, so the body-based contract is unchanged
 **Cookie attributes** (set on login):
 
 ```
-Set-Cookie: <name>=<token>; HttpOnly; Secure; SameSite=Strict; Path=/auth; Max-Age=<refresh TTL>
+Set-Cookie: <name>=<token>; HttpOnly; Secure; SameSite=Strict; Path=/api/auth; Max-Age=<refresh TTL>
 ```
 
 The cookie name (`mcd_refresh` by default) and the `Secure` flag are operator
 knobs (`auth.token.refresh_cookie_name`, `auth.token.refresh_cookie_secure`;
 [`CONFIGURATION.md`](CONFIGURATION.md) Section 5.3). `Max-Age` tracks
-`refresh_ttl_seconds`. `Path=/auth` and `SameSite=Strict` are fixed in the router
-— the security posture, not knobs.
+`refresh_ttl_seconds`. `Path=/api/auth` and `SameSite=Strict` are fixed in the
+router — the security posture, not knobs.
 
 **Precedence and Set-Cookie emission** are two separate rules:
 
@@ -173,9 +177,9 @@ refreshes are easy to trigger. Within the grace window they are safe:
 
 ## 5. CSRF posture
 
-Baseline: `SameSite=Strict` + `Path=/auth` on the refresh cookie (issues
+Baseline: `SameSite=Strict` + `Path=/api/auth` on the refresh cookie (issues
 #363, #365). `SameSite=Strict` keeps the browser from attaching the cookie to
-cross-site requests; `Path=/auth` confines it to the auth endpoints. Refresh
+cross-site requests; `Path=/api/auth` confines it to the auth endpoints. Refresh
 returns the rotated tokens in the response body and performs no state change on
 behalf of an ambient session, so it is not a useful CSRF target. The residual
 surface is logout-by-forced-request, whose only effect is to end the victim's own

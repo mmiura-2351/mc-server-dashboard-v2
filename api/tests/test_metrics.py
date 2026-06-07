@@ -84,7 +84,7 @@ def client() -> Iterator[TestClient]:
 
 
 def test_metrics_renders_prometheus_text(client: TestClient) -> None:
-    resp = client.get("/metrics")
+    resp = client.get("/api/metrics")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/plain")
     # The body parses as valid Prometheus exposition.
@@ -97,7 +97,7 @@ def test_metrics_renders_prometheus_text(client: TestClient) -> None:
 
 def test_metrics_db_down_still_serves_and_counts_failure(client: TestClient) -> None:
     before = _scrape_failures(client)
-    resp = client.get("/metrics")
+    resp = client.get("/api/metrics")
     assert resp.status_code == 200
     after = _scrape_failures(client)
     # The DB-down scrape was swallowed (200) and the failure counter advanced.
@@ -106,8 +106,8 @@ def test_metrics_db_down_still_serves_and_counts_failure(client: TestClient) -> 
 
 def test_metrics_labels_by_route_template_not_raw_path(client: TestClient) -> None:
     # Hit a templated route with a concrete id; the label must be the template.
-    client.get("/communities/123e4567-e89b-12d3-a456-426614174000")
-    resp = client.get("/metrics")
+    client.get("/api/communities/123e4567-e89b-12d3-a456-426614174000")
+    resp = client.get("/api/metrics")
     samples = [
         sample
         for family in text_string_to_metric_families(resp.text)
@@ -123,7 +123,7 @@ def test_metrics_labels_by_route_template_not_raw_path(client: TestClient) -> No
 
 
 def _scrape_failures(client: TestClient) -> float:
-    resp = client.get("/metrics")
+    resp = client.get("/api/metrics")
     for family in text_string_to_metric_families(resp.text):
         if family.name == "servers_by_state_scrape_failures":
             for sample in family.samples:

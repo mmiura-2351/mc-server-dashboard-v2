@@ -87,7 +87,7 @@ describe("AdminUsersPage", () => {
     renderPage();
     expect(await screen.findByText("alice")).toBeInTheDocument();
     expect(screen.getByText("alice@example.com")).toBeInTheDocument();
-    expect(mockApi.get).toHaveBeenCalledWith("/users?limit=50&offset=0");
+    expect(mockApi.get).toHaveBeenCalledWith("/api/users?limit=50&offset=0");
   });
 
   it("pages forward with a new offset when there are more users", async () => {
@@ -102,7 +102,7 @@ describe("AdminUsersPage", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.get).toHaveBeenCalledWith("/users?limit=50&offset=50");
+      expect(mockApi.get).toHaveBeenCalledWith("/api/users?limit=50&offset=50");
     });
   });
 
@@ -116,7 +116,7 @@ describe("AdminUsersPage", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.post).toHaveBeenCalledWith("/users/u1/deactivate");
+      expect(mockApi.post).toHaveBeenCalledWith("/api/users/u1/deactivate");
     });
   });
 
@@ -133,7 +133,7 @@ describe("AdminUsersPage", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.post).toHaveBeenCalledWith("/users/u1/reactivate");
+      expect(mockApi.post).toHaveBeenCalledWith("/api/users/u1/reactivate");
     });
   });
 
@@ -147,7 +147,7 @@ describe("AdminUsersPage", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.put).toHaveBeenCalledWith("/users/u1/platform-admin", {
+      expect(mockApi.put).toHaveBeenCalledWith("/api/users/u1/platform-admin", {
         body: JSON.stringify({ grant: true }),
       });
     });
@@ -166,7 +166,7 @@ describe("AdminUsersPage", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.put).toHaveBeenCalledWith("/users/u1/platform-admin", {
+      expect(mockApi.put).toHaveBeenCalledWith("/api/users/u1/platform-admin", {
         body: JSON.stringify({ grant: false }),
       });
     });
@@ -196,7 +196,7 @@ describe("AdminUsersPage", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.put).toHaveBeenCalledWith("/users/u1/platform-admin", {
+      expect(mockApi.put).toHaveBeenCalledWith("/api/users/u1/platform-admin", {
         body: JSON.stringify({ grant: false }),
       });
     });
@@ -237,7 +237,7 @@ describe("AdminUsersPage", () => {
     fireEvent.click(confirmBtn);
 
     await waitFor(() => {
-      expect(mockApi.delete).toHaveBeenCalledWith("/users/u1");
+      expect(mockApi.delete).toHaveBeenCalledWith("/api/users/u1");
     });
   });
 
@@ -318,7 +318,7 @@ describe("AdminUsersPage", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.post).toHaveBeenCalledWith("/admin/users", {
+      expect(mockApi.post).toHaveBeenCalledWith("/api/admin/users", {
         body: JSON.stringify({
           username: "bob",
           email: "bob@example.com",

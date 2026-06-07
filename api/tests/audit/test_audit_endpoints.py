@@ -99,7 +99,7 @@ def _app(
 def test_platform_audit_requires_platform_admin() -> None:
     app = _app(CapturingAuditQuery(), platform_admin=False)
     client = next(_client(app))
-    assert client.get("/audit").status_code == 403
+    assert client.get("/api/audit").status_code == 403
 
 
 def test_platform_audit_lists_records() -> None:
@@ -107,7 +107,7 @@ def test_platform_audit_lists_records() -> None:
     app = _app(query, platform_admin=True)
     client = next(_client(app))
 
-    resp = client.get("/audit")
+    resp = client.get("/api/audit")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -123,7 +123,7 @@ def test_platform_audit_passes_filters_through() -> None:
     actor = uuid.uuid4()
 
     resp = client.get(
-        "/audit",
+        "/api/audit",
         params={
             "community": str(_COMMUNITY),
             "operation": "server:create",
@@ -147,7 +147,7 @@ def test_platform_audit_passes_filters_through() -> None:
 def test_platform_audit_rejects_oversized_limit() -> None:
     app = _app(CapturingAuditQuery(), platform_admin=True)
     client = next(_client(app))
-    assert client.get("/audit", params={"limit": 9999}).status_code == 422
+    assert client.get("/api/audit", params={"limit": 9999}).status_code == 422
 
 
 # --- community-scoped view -------------------------------------------------
@@ -156,13 +156,13 @@ def test_platform_audit_rejects_oversized_limit() -> None:
 def test_community_audit_non_member_is_404() -> None:
     app = _app(CapturingAuditQuery(), member=False)
     client = next(_client(app))
-    assert client.get(f"/communities/{_COMMUNITY}/audit").status_code == 404
+    assert client.get(f"/api/communities/{_COMMUNITY}/audit").status_code == 404
 
 
 def test_community_audit_member_without_permission_is_403() -> None:
     app = _app(CapturingAuditQuery(), member=True, allow=False)
     client = next(_client(app))
-    assert client.get(f"/communities/{_COMMUNITY}/audit").status_code == 403
+    assert client.get(f"/api/communities/{_COMMUNITY}/audit").status_code == 403
 
 
 def test_community_audit_authorized_member_lists_records() -> None:
@@ -170,7 +170,7 @@ def test_community_audit_authorized_member_lists_records() -> None:
     app = _app(query, member=True, allow=True)
     client = next(_client(app))
 
-    resp = client.get(f"/communities/{_COMMUNITY}/audit")
+    resp = client.get(f"/api/communities/{_COMMUNITY}/audit")
 
     assert resp.status_code == 200
     assert len(resp.json()["records"]) == 1
@@ -185,7 +185,7 @@ def test_community_audit_forces_path_community_onto_filter() -> None:
     # A member cannot read another Community's trail even by passing filters: the
     # path Community is forced onto the query, and there is no community filter param.
     resp = client.get(
-        f"/communities/{_COMMUNITY}/audit",
+        f"/api/communities/{_COMMUNITY}/audit",
         params={"operation": "server:create", "community": str(other_community)},
     )
 

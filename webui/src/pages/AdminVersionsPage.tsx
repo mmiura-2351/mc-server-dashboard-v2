@@ -22,7 +22,7 @@ import { t } from "../i18n/index.ts";
 export function AdminVersionsPage() {
   const typesQuery = useQuery({
     queryKey: ["versions", "types"],
-    queryFn: () => api.get("/versions"),
+    queryFn: () => api.get("/api/versions"),
   });
 
   const types = typesQuery.data?.server_types ?? [];
@@ -63,7 +63,7 @@ function Catalog({ types }: { types: string[] }) {
     queries: types.map((type) => ({
       queryKey: ["versions", type],
       queryFn: () =>
-        api.get(apiPath("/versions/{server_type}", { server_type: type })),
+        api.get(apiPath("/api/versions/{server_type}", { server_type: type })),
     })),
   });
 
@@ -71,8 +71,8 @@ function Catalog({ types }: { types: string[] }) {
     mutationFn: (serverType: string | null) =>
       api.post(
         (serverType === null
-          ? "/versions/refresh"
-          : `/versions/refresh?server_type=${encodeURIComponent(serverType)}`) as never,
+          ? "/api/versions/refresh"
+          : `/api/versions/refresh?server_type=${encodeURIComponent(serverType)}`) as never,
       ),
     onSuccess: (_data, serverType) => {
       // The catalog cache is invalidated server-side; drop the local copies so the
@@ -182,11 +182,11 @@ function JarPool() {
 
   const statsQuery = useQuery({
     queryKey: ["versions", "jar-pool", "stats"],
-    queryFn: () => api.get("/versions/jar-pool/stats"),
+    queryFn: () => api.get("/api/versions/jar-pool/stats"),
   });
 
   const gc = useMutation({
-    mutationFn: () => api.post("/versions/jar-pool/gc"),
+    mutationFn: () => api.post("/api/versions/jar-pool/gc"),
     onSuccess: (data) => {
       void queryClient.invalidateQueries({
         queryKey: ["versions", "jar-pool", "stats"],

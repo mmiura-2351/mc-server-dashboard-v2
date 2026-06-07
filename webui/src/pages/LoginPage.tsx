@@ -24,7 +24,7 @@ export function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      const tokens = await api.post("/auth/login", {
+      const tokens = await api.post("/api/auth/login", {
         body: JSON.stringify({ username, password }),
       });
       signIn(tokens.access_token);

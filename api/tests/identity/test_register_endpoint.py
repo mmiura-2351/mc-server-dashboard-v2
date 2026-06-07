@@ -73,7 +73,7 @@ def test_register_returns_201_and_user_without_hash() -> None:
     fake = _FakeRegisterUser(result=user)
     client = next(_client(fake))
     resp = client.post(
-        "/users",
+        "/api/users",
         json={
             "username": "alice",
             "email": "alice@example.com",
@@ -97,7 +97,7 @@ def test_register_duplicate_username_returns_409() -> None:
     fake = _FakeRegisterUser(error=UsernameAlreadyExistsError("alice"))
     client = next(_client(fake))
     resp = client.post(
-        "/users",
+        "/api/users",
         json={
             "username": "alice",
             "email": "alice@example.com",
@@ -111,7 +111,7 @@ def test_register_duplicate_email_returns_409() -> None:
     fake = _FakeRegisterUser(error=EmailAlreadyExistsError("alice@example.com"))
     client = next(_client(fake))
     resp = client.post(
-        "/users",
+        "/api/users",
         json={
             "username": "alice",
             "email": "alice@example.com",
@@ -125,7 +125,7 @@ def test_register_disabled_returns_403() -> None:
     fake = _FakeRegisterUser(error=RegistrationDisabledError())
     client = next(_client(fake))
     resp = client.post(
-        "/users",
+        "/api/users",
         json={
             "username": "alice",
             "email": "alice@example.com",
@@ -140,7 +140,7 @@ def test_register_throttled_returns_429() -> None:
     fake = _FakeRegisterUser(error=RegistrationThrottledError())
     client = next(_client(fake))
     resp = client.post(
-        "/users",
+        "/api/users",
         json={
             "username": "alice",
             "email": "alice@example.com",
@@ -156,7 +156,7 @@ def test_register_weak_password_returns_422_with_reason_no_echo() -> None:
     client = next(_client(fake))
     weak = "Qz9!secretpw"
     resp = client.post(
-        "/users",
+        "/api/users",
         json={"username": "alice", "email": "alice@example.com", "password": weak},
     )
     assert resp.status_code == 422
@@ -172,7 +172,7 @@ def test_register_password_over_schema_bound_returns_422() -> None:
     fake = _FakeRegisterUser(result=_user())
     client = next(_client(fake))
     resp = client.post(
-        "/users",
+        "/api/users",
         json={
             "username": "alice",
             "email": "alice@example.com",
@@ -193,5 +193,5 @@ def test_register_missing_field_returns_422(missing: str) -> None:
         "password": _VALID_PASSWORD,
     }
     del payload[missing]
-    resp = client.post("/users", json=payload)
+    resp = client.post("/api/users", json=payload)
     assert resp.status_code == 422

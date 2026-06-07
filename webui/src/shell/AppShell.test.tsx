@@ -28,7 +28,7 @@ const fetchMock = vi.fn();
 function signedInWith(communities: Array<{ id: string; name: string }>) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/communities") {
+    if (url === "/api/communities") {
       return Promise.resolve(jsonResponse(communities));
     }
     if (url.endsWith("/me/permissions")) {

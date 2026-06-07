@@ -11,6 +11,6 @@ import { api } from "../api/client.ts";
 export function useCurrentUser() {
   return useQuery({
     queryKey: ["users", "me"],
-    queryFn: () => api.get("/users/me"),
+    queryFn: () => api.get("/api/users/me"),
   });
 }

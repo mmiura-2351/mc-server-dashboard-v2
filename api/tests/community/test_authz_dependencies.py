@@ -67,21 +67,21 @@ def _app(
     checker = _FakeChecker(allow=allow)
 
     @app.get(
-        "/communities/{community_id}/ping",
+        "/api/communities/{community_id}/ping",
         dependencies=[Depends(require_permission(Permission("server:read")))],
     )
     async def _ping() -> dict[str, str]:
         return {"ok": "yes"}
 
     @app.get(
-        "/admin/ping",
+        "/api/admin/ping",
         dependencies=[Depends(require_platform_admin)],
     )
     async def _admin_ping() -> dict[str, str]:
         return {"ok": "admin"}
 
     @app.delete(
-        "/communities/{community_id}/thing",
+        "/api/communities/{community_id}/thing",
         dependencies=[
             Depends(
                 require_permission(
@@ -111,14 +111,14 @@ def _client(app: FastAPI) -> Iterator[TestClient]:
 def test_non_member_gets_404() -> None:
     app, _ = _app(member=False, allow=True)
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/ping")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/ping")
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403() -> None:
     app, _ = _app(member=True, allow=False)
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/ping")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/ping")
     assert resp.status_code == 403
 
 
@@ -126,7 +126,7 @@ def test_authorized_member_gets_200() -> None:
     app, checker = _app(member=True, allow=True)
     client = next(_client(app))
     community_id = uuid.uuid4()
-    resp = client.get(f"/communities/{community_id}/ping")
+    resp = client.get(f"/api/communities/{community_id}/ping")
     assert resp.status_code == 200
     assert resp.json() == {"ok": "yes"}
     # The checker received the path community id and the configured operation.
@@ -138,7 +138,7 @@ def test_authorized_member_gets_200() -> None:
 def test_platform_admin_required_allows_admin() -> None:
     app, _ = _app(member=False, allow=False, platform_admin=True)
     client = next(_client(app))
-    resp = client.get("/admin/ping")
+    resp = client.get("/api/admin/ping")
     assert resp.status_code == 200
     assert resp.json() == {"ok": "admin"}
 
@@ -146,7 +146,7 @@ def test_platform_admin_required_allows_admin() -> None:
 def test_platform_admin_required_rejects_non_admin() -> None:
     app, _ = _app(member=False, allow=False, platform_admin=False)
     client = next(_client(app))
-    resp = client.get("/admin/ping")
+    resp = client.get("/api/admin/ping")
     assert resp.status_code == 403
 
 
@@ -155,7 +155,7 @@ def test_allow_platform_admin_bypasses_isolation_for_admin() -> None:
     # (community deletion / orphan cleanup, #489), without the two-layer check.
     app, checker = _app(member=False, allow=False, platform_admin=True)
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/thing")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/thing")
     assert resp.status_code == 200
     assert resp.json() == {"ok": "deleted"}
     # The Layer-2 checker was never consulted (the bypass short-circuits first).
@@ -166,7 +166,7 @@ def test_allow_platform_admin_does_not_help_non_admin() -> None:
     # The bypass is admin-only: a non-admin non-member still gets the 404.
     app, _ = _app(member=False, allow=True, platform_admin=False)
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/thing")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/thing")
     assert resp.status_code == 404
 
 
@@ -188,7 +188,7 @@ def test_missing_path_param_is_a_server_misconfiguration() -> None:
     checker = _FakeChecker(allow=True)
 
     @app.get(
-        "/communities/{community_id}/oops",
+        "/api/communities/{community_id}/oops",
         dependencies=[
             Depends(
                 require_permission(
@@ -210,5 +210,5 @@ def test_missing_path_param_is_a_server_misconfiguration() -> None:
     app.dependency_overrides[get_permission_checker] = lambda: checker
 
     client = TestClient(app, raise_server_exceptions=False)
-    resp = client.get(f"/communities/{uuid.uuid4()}/oops")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/oops")
     assert resp.status_code == 500

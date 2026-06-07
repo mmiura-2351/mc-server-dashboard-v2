@@ -41,7 +41,7 @@ export function CommunityRolesTab({
     queryKey: rolesKey(communityId),
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/roles", {
+        apiPath("/api/communities/{community_id}/roles", {
           community_id: communityId,
         }),
       ),
@@ -50,7 +50,7 @@ export function CommunityRolesTab({
   const remove = useMutation({
     mutationFn: (role: RoleResponse) =>
       api.delete(
-        apiPath("/communities/{community_id}/roles/{role_id}", {
+        apiPath("/api/communities/{community_id}/roles/{role_id}", {
           community_id: communityId,
           role_id: role.id,
         }),
@@ -199,13 +199,13 @@ function RoleEditor({
     mutationFn: (body: { name: string; permissions: string[] }) =>
       role === null
         ? api.post(
-            apiPath("/communities/{community_id}/roles", {
+            apiPath("/api/communities/{community_id}/roles", {
               community_id: communityId,
             }),
             { body: JSON.stringify(body) },
           )
         : api.patch(
-            apiPath("/communities/{community_id}/roles/{role_id}", {
+            apiPath("/api/communities/{community_id}/roles/{role_id}", {
               community_id: communityId,
               role_id: role.id,
             }),

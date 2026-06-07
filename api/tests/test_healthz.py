@@ -41,17 +41,17 @@ def degraded_client() -> Iterator[TestClient]:
 
 
 def test_healthz_ok_when_database_reachable(healthy_client: TestClient) -> None:
-    resp = healthy_client.get("/healthz")
+    resp = healthy_client.get("/api/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "database_reachable": True}
 
 
 def test_healthz_degraded_when_database_down(degraded_client: TestClient) -> None:
-    resp = degraded_client.get("/healthz")
+    resp = degraded_client.get("/api/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"ok": False, "database_reachable": False}
 
 
 def test_healthz_sets_correlation_id_header(healthy_client: TestClient) -> None:
-    resp = healthy_client.get("/healthz")
+    resp = healthy_client.get("/api/healthz")
     assert resp.headers.get("X-Correlation-ID")

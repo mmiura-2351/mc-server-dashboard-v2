@@ -82,7 +82,7 @@ function routeGet(opts: {
       }
       return Promise.resolve(opts.attached ?? []);
     }
-    if (path === `/communities/${CID}/groups`) {
+    if (path === `/api/communities/${CID}/groups`) {
       return Promise.resolve(opts.community ?? []);
     }
     // Bare server detail fetch.
@@ -201,7 +201,7 @@ describe("ServerPlayersTab", () => {
     );
     await waitFor(() => {
       expect(mockApi.put).toHaveBeenCalledWith(
-        `/communities/${CID}/groups/g2/servers/${SID}`,
+        `/api/communities/${CID}/groups/g2/servers/${SID}`,
       );
     });
   });
@@ -220,7 +220,7 @@ describe("ServerPlayersTab", () => {
     );
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/groups/g1/servers/${SID}`,
+        `/api/communities/${CID}/groups/g1/servers/${SID}`,
       );
     });
   });

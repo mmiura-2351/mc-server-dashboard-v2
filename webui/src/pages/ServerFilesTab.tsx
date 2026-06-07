@@ -53,7 +53,7 @@ type FileVersions = components["schemas"]["FileVersionsResponse"];
 
 /** Base `/communities/{cid}/servers/{sid}/files` path for `server`. */
 function filesBase(communityId: string, serverId: string): string {
-  return apiPath("/communities/{community_id}/servers/{server_id}/files", {
+  return apiPath("/api/communities/{community_id}/servers/{server_id}/files", {
     community_id: communityId,
     server_id: serverId,
   });
@@ -261,7 +261,7 @@ function SearchBox({
     mutationFn: () =>
       api.post(
         apiPath(
-          "/communities/{community_id}/servers/{server_id}/files/search",
+          "/api/communities/{community_id}/servers/{server_id}/files/search",
           { community_id: communityId, server_id: serverId },
         ),
         {
@@ -392,7 +392,7 @@ function Listing({
     mutationFn: (entry: DirEntry) =>
       downloadFile(
         `${apiPath(
-          "/communities/{community_id}/servers/{server_id}/files/download",
+          "/api/communities/{community_id}/servers/{server_id}/files/download",
           { community_id: communityId, server_id: serverId },
         )}?path=${encodeURIComponent(joinPath(dir, entry.name))}`,
         entry.name,
@@ -558,7 +558,7 @@ function Viewer({
             onClick={() =>
               void downloadFile(
                 `${apiPath(
-                  "/communities/{community_id}/servers/{server_id}/files/download",
+                  "/api/communities/{community_id}/servers/{server_id}/files/download",
                   { community_id: communityId, server_id: serverId },
                 )}?path=${encodeURIComponent(path)}`,
                 downloadName,
@@ -770,7 +770,7 @@ function Toolbar({
       form.append("file", file);
       return api.postForm(
         `${apiPath(
-          "/communities/{community_id}/servers/{server_id}/files/upload",
+          "/api/communities/{community_id}/servers/{server_id}/files/upload",
           { community_id: communityId, server_id: serverId },
         )}?path=${encodeURIComponent(dir)}&extract=${extract}` as never,
         form,
@@ -860,7 +860,7 @@ function MkdirDialog({
     mutationFn: () =>
       api.post(
         `${apiPath(
-          "/communities/{community_id}/servers/{server_id}/files/directories",
+          "/api/communities/{community_id}/servers/{server_id}/files/directories",
           { community_id: communityId, server_id: serverId },
         )}?path=${encodeURIComponent(joinPath(dir, name.trim()))}` as never,
       ),
@@ -911,7 +911,7 @@ function RenameDialog({
     mutationFn: () =>
       api.post(
         apiPath(
-          "/communities/{community_id}/servers/{server_id}/files/rename",
+          "/api/communities/{community_id}/servers/{server_id}/files/rename",
           { community_id: communityId, server_id: serverId },
         ),
         {

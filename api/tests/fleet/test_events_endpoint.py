@@ -112,7 +112,7 @@ def _client(app: object) -> Iterator[TestClient]:
 def _url(
     community: uuid.UUID, server: uuid.UUID, streams: str = "status,log,metrics"
 ) -> str:
-    return f"/communities/{community}/servers/{server}/events?streams={streams}"
+    return f"/api/communities/{community}/servers/{server}/events?streams={streams}"
 
 
 # --- auth / authorization before the upgrade -------------------------------
@@ -287,7 +287,7 @@ def test_omitted_streams_subscribes_to_all() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
     client = next(_client(app))
-    url = f"/communities/{community}/servers/{server}/events"
+    url = f"/api/communities/{community}/servers/{server}/events"
     cases: list[tuple[EventStream, dict[str, object]]] = [
         (EventStream.STATUS, {"state": "running"}),
         (EventStream.LOG, {"line": "hi"}),

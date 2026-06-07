@@ -111,7 +111,7 @@ def test_login_returns_token_pair() -> None:
         )
     )
     client = next(_client(login=fake))
-    resp = client.post("/auth/login", json={"username": "alice", "password": "pw"})
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
     assert resp.status_code == 200
     assert resp.json() == {
         "access_token": "acc",
@@ -130,14 +130,14 @@ def test_login_sets_refresh_cookie_with_security_attributes() -> None:
         )
     )
     client = next(_client(login=fake))
-    resp = client.post("/auth/login", json={"username": "alice", "password": "pw"})
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
     cookie = _set_cookie_header(resp, "mcd_refresh")
     assert "mcd_refresh=ref" in cookie
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
     # Starlette renders the SameSite value lowercase.
     assert "SameSite=strict" in cookie
-    assert "Path=/auth" in cookie
+    assert "Path=/api/auth" in cookie
     assert "Max-Age=1209600" in cookie
 
 
@@ -151,7 +151,7 @@ def test_login_body_still_carries_refresh_token() -> None:
         )
     )
     client = next(_client(login=fake))
-    resp = client.post("/auth/login", json={"username": "alice", "password": "pw"})
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
     assert resp.json()["refresh_token"] == "ref"
 
 
@@ -165,14 +165,14 @@ def test_login_passes_resolved_client_ip_to_use_case() -> None:
         )
     )
     client = next(_client(login=fake))
-    client.post("/auth/login", json={"username": "alice", "password": "pw"})
+    client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
     assert fake.calls == [{"username": "alice", "password": "pw", "ip": "testclient"}]
 
 
 def test_login_invalid_credentials_returns_401() -> None:
     fake = _Fake(error=InvalidCredentialsError())
     client = next(_client(login=fake))
-    resp = client.post("/auth/login", json={"username": "alice", "password": "bad"})
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "bad"})
     assert resp.status_code == 401
     # RFC 9457 problem+json end-to-end through the real app factory (issue #371):
     # the content type and type URI are part of the contract, and the 401 still
@@ -215,7 +215,7 @@ def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
     client = next(_client(login=login))
 
     resp = client.post(
-        "/auth/login", json={"username": "alice", "password": "A1!" + "x" * 100}
+        "/api/auth/login", json={"username": "alice", "password": "A1!" + "x" * 100}
     )
 
     assert resp.status_code == 401
@@ -225,7 +225,7 @@ def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
 def test_refresh_returns_new_pair() -> None:
     fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
     client = next(_client(refresh=fake))
-    resp = client.post("/auth/refresh", json={"refresh_token": "ref1"})
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "ref1"})
     assert resp.status_code == 200
     assert resp.json()["access_token"] == "acc2"
 
@@ -236,7 +236,7 @@ def test_refresh_reads_token_from_cookie_when_body_omits_it() -> None:
     fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
     client = next(_client(refresh=fake))
     client.cookies.set("mcd_refresh", "ref1")
-    resp = client.post("/auth/refresh", json={})
+    resp = client.post("/api/auth/refresh", json={})
     assert resp.status_code == 200
     assert fake.calls == [{"refresh_token": "ref1"}]
     cookie = _set_cookie_header(resp, "mcd_refresh")
@@ -249,7 +249,7 @@ def test_refresh_prefers_body_token_over_cookie() -> None:
     fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
     client = next(_client(refresh=fake))
     client.cookies.set("mcd_refresh", "cookie-token")
-    resp = client.post("/auth/refresh", json={"refresh_token": "body-token"})
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "body-token"})
     assert resp.status_code == 200
     assert fake.calls == [{"refresh_token": "body-token"}]
 
@@ -259,7 +259,7 @@ def test_refresh_body_only_emits_no_set_cookie() -> None:
     # not ride a Set-Cookie they never asked for (issue #372).
     fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
     client = next(_client(refresh=fake))
-    resp = client.post("/auth/refresh", json={"refresh_token": "ref1"})
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "ref1"})
     assert resp.status_code == 200
     _assert_no_set_cookie(resp, "mcd_refresh")
 
@@ -271,7 +271,7 @@ def test_refresh_with_cookie_rotates_cookie_even_when_body_token_wins() -> None:
     fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
     client = next(_client(refresh=fake))
     client.cookies.set("mcd_refresh", "cookie-token")
-    resp = client.post("/auth/refresh", json={"refresh_token": "body-token"})
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "body-token"})
     assert resp.status_code == 200
     assert fake.calls == [{"refresh_token": "body-token"}]
     cookie = _set_cookie_header(resp, "mcd_refresh")
@@ -282,7 +282,7 @@ def test_refresh_without_body_or_cookie_returns_401() -> None:
     # No transport carries a token: uniform 401, use case not invoked.
     fake = _Fake(result=TokenPair(access_token="x", refresh_token="y"))
     client = next(_client(refresh=fake))
-    resp = client.post("/auth/refresh", json={})
+    resp = client.post("/api/auth/refresh", json={})
     assert resp.status_code == 401
     assert fake.calls == []
 
@@ -290,14 +290,14 @@ def test_refresh_without_body_or_cookie_returns_401() -> None:
 def test_refresh_invalid_token_returns_401() -> None:
     fake = _Fake(error=InvalidRefreshTokenError())
     client = next(_client(refresh=fake))
-    resp = client.post("/auth/refresh", json={"refresh_token": "stale"})
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "stale"})
     assert resp.status_code == 401
 
 
 def test_logout_returns_204() -> None:
     fake = _Fake(result=None)
     client = next(_client(logout=fake))
-    resp = client.post("/auth/logout", json={"refresh_token": "ref"})
+    resp = client.post("/api/auth/logout", json={"refresh_token": "ref"})
     assert resp.status_code == 204
     assert fake.calls == [{"refresh_token": "ref"}]
 
@@ -306,13 +306,13 @@ def test_logout_reads_token_from_cookie_and_clears_it() -> None:
     fake = _Fake(result=None)
     client = next(_client(logout=fake))
     client.cookies.set("mcd_refresh", "ref")
-    resp = client.post("/auth/logout", json={})
+    resp = client.post("/api/auth/logout", json={})
     assert resp.status_code == 204
     assert fake.calls == [{"refresh_token": "ref"}]
     cookie = _set_cookie_header(resp, "mcd_refresh")
     # Cleared: empty value plus an immediate expiry.
     assert 'mcd_refresh=""' in cookie or "mcd_refresh=;" in cookie
-    assert "Path=/auth" in cookie
+    assert "Path=/api/auth" in cookie
 
 
 def test_logout_body_only_emits_no_clearing_set_cookie() -> None:
@@ -320,7 +320,7 @@ def test_logout_body_only_emits_no_clearing_set_cookie() -> None:
     # clearing Set-Cookie they never asked for (issue #372).
     fake = _Fake(result=None)
     client = next(_client(logout=fake))
-    resp = client.post("/auth/logout", json={"refresh_token": "ref"})
+    resp = client.post("/api/auth/logout", json={"refresh_token": "ref"})
     assert resp.status_code == 204
     assert fake.calls == [{"refresh_token": "ref"}]
     _assert_no_set_cookie(resp, "mcd_refresh")
@@ -330,7 +330,7 @@ def test_logout_without_body_or_cookie_returns_204() -> None:
     # Idempotent: nothing to revoke, still a clean 204, use case not invoked.
     fake = _Fake(result=None)
     client = next(_client(logout=fake))
-    resp = client.post("/auth/logout", json={})
+    resp = client.post("/api/auth/logout", json={})
     assert resp.status_code == 204
     assert fake.calls == []
     # No cookie was carried, so none is cleared (issue #372).
@@ -341,7 +341,7 @@ def test_me_returns_user_with_valid_bearer() -> None:
     user = make_user()
     fake = _Fake(result=user)
     client = next(_client(authenticate=fake))
-    resp = client.get("/users/me", headers={"Authorization": "Bearer good-token"})
+    resp = client.get("/api/users/me", headers={"Authorization": "Bearer good-token"})
     assert resp.status_code == 200
     assert resp.json()["username"] == "alice"
     assert fake.calls == [{"access_token": "good-token"}]
@@ -350,13 +350,13 @@ def test_me_returns_user_with_valid_bearer() -> None:
 def test_me_without_bearer_returns_401() -> None:
     fake = _Fake(result=make_user())
     client = next(_client(authenticate=fake))
-    resp = client.get("/users/me")
+    resp = client.get("/api/users/me")
     assert resp.status_code == 401
 
 
 def test_me_with_invalid_token_returns_401() -> None:
     fake = _Fake(error=InvalidAccessTokenError())
     client = next(_client(authenticate=fake))
-    resp = client.get("/users/me", headers={"Authorization": "Bearer bad"})
+    resp = client.get("/api/users/me", headers={"Authorization": "Bearer bad"})
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_token"

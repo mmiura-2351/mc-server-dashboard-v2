@@ -66,10 +66,10 @@ function role(over: Record<string, unknown> = {}) {
 // the member list and (when the picker is shown) the role list.
 function routeGet(opts: { members?: unknown[]; roles?: unknown[] }) {
   mockApi.get.mockImplementation((path: string) => {
-    if (path === `/communities/${CID}/members`) {
+    if (path === `/api/communities/${CID}/members`) {
       return Promise.resolve(opts.members ?? []);
     }
-    if (path === `/communities/${CID}/roles`) {
+    if (path === `/api/communities/${CID}/roles`) {
       return Promise.resolve(opts.roles ?? []);
     }
     // Bare community fetch.
@@ -173,9 +173,12 @@ describe("CommunityMembersTab", () => {
     );
 
     await waitFor(() => {
-      expect(mockApi.post).toHaveBeenCalledWith(`/communities/${CID}/members`, {
-        body: JSON.stringify({ username: "carol" }),
-      });
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/members`,
+        {
+          body: JSON.stringify({ username: "carol" }),
+        },
+      );
     });
   });
 
@@ -254,7 +257,7 @@ describe("CommunityMembersTab", () => {
 
     await waitFor(() => {
       expect(mockApi.post).toHaveBeenCalledWith(
-        `/communities/${CID}/members/u1/roles`,
+        `/api/communities/${CID}/members/u1/roles`,
         { body: JSON.stringify({ role_id: "r1" }) },
       );
     });
@@ -278,7 +281,7 @@ describe("CommunityMembersTab", () => {
 
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/members/u1/roles/r1`,
+        `/api/communities/${CID}/members/u1/roles/r1`,
       );
     });
   });
@@ -310,7 +313,7 @@ describe("CommunityMembersTab", () => {
 
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(
-        `/communities/${CID}/members/u1`,
+        `/api/communities/${CID}/members/u1`,
       );
     });
   });

@@ -189,14 +189,14 @@ def _zip_upload() -> tuple[dict[str, tuple[str, bytes, str]], dict[str, str]]:
 def test_non_member_gets_404_on_export() -> None:
     app = _app(member=False, allow=True, export=_FakeExport())
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_export() -> None:
     app = _app(member=True, allow=False, export=_FakeExport())
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
     assert resp.status_code == 403
 
 
@@ -209,7 +209,7 @@ def test_export_streams_zip_and_audits() -> None:
         recorder=recorder,
     )
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
     assert resp.content == b"zip-bytes"
@@ -227,7 +227,7 @@ def test_export_running_is_409_and_audits_denied() -> None:
         recorder=recorder,
     )
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
     assert [e.operation for e in recorder.events] == [ops.SERVER_EXPORT]
@@ -242,7 +242,7 @@ def test_non_member_gets_404_on_import() -> None:
     client = next(_client(app))
     files, data = _zip_upload()
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers/import",
+        f"/api/communities/{uuid.uuid4()}/servers/import",
         files=files,
         data=data,
     )
@@ -254,7 +254,7 @@ def test_member_without_permission_gets_403_on_import() -> None:
     client = next(_client(app))
     files, data = _zip_upload()
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers/import",
+        f"/api/communities/{uuid.uuid4()}/servers/import",
         files=files,
         data=data,
     )
@@ -269,7 +269,7 @@ def test_import_creates_server_and_audits() -> None:
     client = next(_client(app))
     files, data = _zip_upload()
     resp = client.post(
-        f"/communities/{community}/servers/import",
+        f"/api/communities/{community}/servers/import",
         files=files,
         data=data,
     )
@@ -294,7 +294,7 @@ def test_import_invalid_metadata_is_422() -> None:
     client = next(_client(app))
     files, data = _zip_upload()
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers/import",
+        f"/api/communities/{uuid.uuid4()}/servers/import",
         files=files,
         data=data,
     )
@@ -311,7 +311,7 @@ def test_import_spigot_metadata_is_422() -> None:
     client = next(_client(app))
     files, data = _zip_upload()
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers/import",
+        f"/api/communities/{uuid.uuid4()}/servers/import",
         files=files,
         data=data,
     )
@@ -328,7 +328,7 @@ def test_import_name_conflict_is_409() -> None:
     client = next(_client(app))
     files, data = _zip_upload()
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers/import",
+        f"/api/communities/{uuid.uuid4()}/servers/import",
         files=files,
         data=data,
     )
@@ -345,7 +345,7 @@ def test_import_oversized_is_413() -> None:
     client = next(_client(app))
     files, data = _zip_upload()
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers/import",
+        f"/api/communities/{uuid.uuid4()}/servers/import",
         files=files,
         data=data,
     )
@@ -361,7 +361,7 @@ def test_import_seed_failure_is_503() -> None:
     client = next(_client(app))
     files, data = _zip_upload()
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers/import",
+        f"/api/communities/{uuid.uuid4()}/servers/import",
         files=files,
         data=data,
     )

@@ -101,7 +101,7 @@ uvicorn_pid=$!
 echo "==> waiting for the API to be ready"
 ready=
 for _ in $(seq 1 60); do
-  if curl -fsS "$API_URL/healthz" 2>/dev/null | grep -q '"ok":true'; then
+  if curl -fsS "$API_URL/api/healthz" 2>/dev/null | grep -q '"ok":true'; then
     ready=1
     break
   fi

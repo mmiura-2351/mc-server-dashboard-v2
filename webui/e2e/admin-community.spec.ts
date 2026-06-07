@@ -34,7 +34,7 @@ test("admin provisions a community an owner can see", async ({
   // (GET /communities is membership-scoped, so the owner — not the admin —
   // sees it).
   const token = await login(request, owner.username, owner.password);
-  const res = await request.get(`${API_URL}/communities`, {
+  const res = await request.get(`${API_URL}/api/communities`, {
     headers: { authorization: `Bearer ${token}` },
   });
   expect(res.ok()).toBeTruthy();

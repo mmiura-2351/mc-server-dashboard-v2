@@ -42,7 +42,7 @@ export function CommunityMembersTab({
     queryKey: membersKey(communityId),
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/members", {
+        apiPath("/api/communities/{community_id}/members", {
           community_id: communityId,
         }),
       ),
@@ -54,7 +54,7 @@ export function CommunityMembersTab({
     queryKey: rolesKey(communityId),
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/roles", {
+        apiPath("/api/communities/{community_id}/roles", {
           community_id: communityId,
         }),
       ),
@@ -70,7 +70,7 @@ export function CommunityMembersTab({
   const remove = useMutation({
     mutationFn: (member: MemberResponse) =>
       api.delete(
-        apiPath("/communities/{community_id}/members/{user_id}", {
+        apiPath("/api/communities/{community_id}/members/{user_id}", {
           community_id: communityId,
           user_id: member.user_id,
         }),
@@ -199,7 +199,7 @@ function MemberRow({
   const assign = useMutation({
     mutationFn: (roleId: string) =>
       api.post(
-        apiPath("/communities/{community_id}/members/{user_id}/roles", {
+        apiPath("/api/communities/{community_id}/members/{user_id}/roles", {
           community_id: communityId,
           user_id: member.user_id,
         }),
@@ -213,7 +213,7 @@ function MemberRow({
     mutationFn: (roleId: string) =>
       api.delete(
         apiPath(
-          "/communities/{community_id}/members/{user_id}/roles/{role_id}",
+          "/api/communities/{community_id}/members/{user_id}/roles/{role_id}",
           {
             community_id: communityId,
             user_id: member.user_id,
@@ -348,7 +348,7 @@ function AddMemberDialog({
   const add = useMutation({
     mutationFn: (name: string) =>
       api.post(
-        apiPath("/communities/{community_id}/members", {
+        apiPath("/api/communities/{community_id}/members", {
           community_id: communityId,
         }),
         { body: JSON.stringify({ username: name }) },

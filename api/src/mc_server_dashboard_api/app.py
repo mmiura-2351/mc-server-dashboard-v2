@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 
 from mc_server_dashboard_api.audit.api import audit
 from mc_server_dashboard_api.community.api import (
@@ -584,7 +584,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await grpc_server.stop(grace=None)
             await engine.dispose()
 
-    app = FastAPI(title="mc-server-dashboard API", lifespan=lifespan)
+    # The entire HTTP API is namespaced under ``/api`` (issue #498) so it can
+    # never collide with an SPA client-side route: the SPA is served from this
+    # same origin (WEBUI_SPEC 7.7), and three of its deep-links shared paths
+    # with API GET routes, returning JSON on a hard reload. With every route
+    # (REST, WebSocket, and the OpenAPI schema + docs) under ``/api``, the rule
+    # becomes absolute — any non-``/api`` path falls through to the SPA. Health
+    # and readiness probes and the Prometheus ``/metrics`` endpoint move under
+    # ``/api`` too so there is no carve-out in the fallback (DEPLOYMENT.md,
+    # SECURITY.md).
+    app = FastAPI(
+        title="mc-server-dashboard API",
+        lifespan=lifespan,
+        openapi_url="/api/openapi.json",
+        docs_url="/api/docs",
+        redoc_url="/api/redoc",
+    )
     # Render every error response as RFC 9457 problem+json (issue #371): one body
     # shape for application errors, framework HTTPExceptions, and 422 validation.
     install_problem_handlers(app)
@@ -593,34 +608,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # handling and labels by route template (issue #282).
     app.middleware("http")(correlation_id_middleware)
     app.middleware("http")(metrics_middleware)
-    app.include_router(health.router)
-    app.include_router(readiness.router)
-    app.include_router(metrics.router)
-    app.include_router(users.router)
-    # Registered after users.router so the exact ``/users/me`` self-service paths
-    # still match before this router's templated ``/users/{user_id}`` paths.
-    app.include_router(admin_users.router)
-    app.include_router(auth.router)
-    app.include_router(communities.router)
-    app.include_router(admin_communities.router)
-    app.include_router(me.router)
-    app.include_router(members.router)
-    app.include_router(roles.router)
-    app.include_router(grants.router)
-    app.include_router(servers.router)
-    app.include_router(server_ports.router)
-    app.include_router(server_files.router)
-    app.include_router(server_backups.router)
-    app.include_router(server_groups.router)
-    app.include_router(workers.router)
-    app.include_router(server_events.router)
-    app.include_router(transfers.router)
-    app.include_router(versions_api.router)
-    app.include_router(audit.router)
+    # One ``/api`` prefix carried by a parent router that includes every other
+    # router, so the prefix lives in one place and the generated openapi.json
+    # paths are honest (issue #498). Sub-router order is preserved (e.g. the
+    # exact ``/users/me`` paths still register before templated
+    # ``/users/{user_id}``).
+    api_router = APIRouter(prefix="/api")
+    api_router.include_router(health.router)
+    api_router.include_router(readiness.router)
+    api_router.include_router(metrics.router)
+    api_router.include_router(users.router)
+    api_router.include_router(admin_users.router)
+    api_router.include_router(auth.router)
+    api_router.include_router(communities.router)
+    api_router.include_router(admin_communities.router)
+    api_router.include_router(me.router)
+    api_router.include_router(members.router)
+    api_router.include_router(roles.router)
+    api_router.include_router(grants.router)
+    api_router.include_router(servers.router)
+    api_router.include_router(server_ports.router)
+    api_router.include_router(server_files.router)
+    api_router.include_router(server_backups.router)
+    api_router.include_router(server_groups.router)
+    api_router.include_router(workers.router)
+    api_router.include_router(server_events.router)
+    api_router.include_router(transfers.router)
+    api_router.include_router(versions_api.router)
+    api_router.include_router(audit.router)
+    app.include_router(api_router)
     # Serve the built Web UI from the same origin when a dist dir is configured
-    # (WEBUI_SPEC 7.7, issue #490). Mounted last so every router and WebSocket
-    # endpoint above takes strict precedence; the SPA fallback covers only paths
-    # no route matched. Unset (dev + tests) → no mount.
+    # (WEBUI_SPEC 7.7, issue #490). Mounted last so the ``/api`` router and the
+    # WebSocket endpoints above take strict precedence; the SPA fallback covers
+    # every other path. Unset (dev + tests) → no mount.
     if settings.webui.dist_dir is not None:
         mount_webui(app, settings.webui.dist_dir)
     return app

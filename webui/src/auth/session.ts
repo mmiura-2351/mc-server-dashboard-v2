@@ -2,13 +2,13 @@
  * Session core (WEBUI_SPEC.md 7.1, AUTH_API.md).
  *
  * Owns the refresh/logout HTTP calls and the single-flight refresh mutex that
- * the API client retries 401s through. These talk to `/auth/*` directly rather
- * than through the typed `api` wrapper: the wrapper retries 401s via refresh,
- * which would recurse, and the cookie-based refresh has no useful typed body
- * for cookie clients (it ignores the body's refresh_token, AUTH_API.md 3).
+ * the API client retries 401s through. These talk to `/api/auth/*` directly
+ * rather than through the typed `api` wrapper: the wrapper retries 401s via
+ * refresh, which would recurse, and the cookie-based refresh has no useful typed
+ * body for cookie clients (it ignores the body's refresh_token, AUTH_API.md 3).
  *
- * The refresh cookie is httpOnly with `Path=/auth`, so the browser only sends
- * it to these endpoints, and only when `credentials` are included.
+ * The refresh cookie is httpOnly with `Path=/api/auth`, so the browser only
+ * sends it to these endpoints, and only when `credentials` are included.
  */
 
 import { clearAccessToken, setAccessToken } from "./tokenStore.ts";
@@ -35,13 +35,14 @@ export function setHardLogoutHandler(fn: LogoutHandler): void {
 let inFlightRefresh: Promise<boolean> | null = null;
 
 /**
- * POST /auth/refresh riding the httpOnly cookie (empty JSON body). 200 stores
- * the rotated access token and resolves true; 401 (signed out) resolves false.
+ * POST /api/auth/refresh riding the httpOnly cookie (empty JSON body). 200
+ * stores the rotated access token and resolves true; 401 (signed out) resolves
+ * false.
  */
 async function doRefresh(): Promise<boolean> {
   let response: Response;
   try {
-    response = await fetch("/auth/refresh", {
+    response = await fetch("/api/auth/refresh", {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
@@ -68,7 +69,7 @@ async function doRefresh(): Promise<boolean> {
 
 /**
  * Single-flight refresh: all concurrent callers (e.g. several requests that
- * 401ed at once) share one in-flight `/auth/refresh`, so the client never
+ * 401ed at once) share one in-flight `/api/auth/refresh`, so the client never
  * replays a stale predecessor past the API's reuse grace window (AUTH_API.md
  * 4). Resolves true when the session was re-established, false otherwise.
  */
@@ -101,7 +102,7 @@ export async function refreshForRetry(): Promise<boolean> {
  */
 export async function logout(): Promise<void> {
   try {
-    await fetch("/auth/logout", {
+    await fetch("/api/auth/logout", {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },

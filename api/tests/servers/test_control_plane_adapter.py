@@ -90,7 +90,7 @@ async def test_hydrate_builds_working_set_url_and_token() -> None:
     assert outcome.success
     assert isinstance(fleet.last, HydrateCommand)
     assert fleet.last.transfer_url == (
-        f"https://api.example/data-plane/communities/{community}"
+        f"https://api.example/api/data-plane/communities/{community}"
         f"/servers/{server}/working-set"
     )
     assert fleet.last.transfer_token == "shhh"
@@ -110,7 +110,7 @@ async def test_snapshot_builds_snapshot_url() -> None:
 
     assert isinstance(fleet.last, SnapshotCommand)
     assert fleet.last.transfer_url == (
-        f"https://api.example/data-plane/communities/{community}"
+        f"https://api.example/api/data-plane/communities/{community}"
         f"/servers/{server}/snapshot"
     )
 

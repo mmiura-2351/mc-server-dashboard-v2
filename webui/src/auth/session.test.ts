@@ -47,7 +47,7 @@ describe("refreshSession", () => {
     expect(ok).toBe(true);
     expect(getAccessToken()).toBe("fresh");
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("/auth/refresh");
+    expect(url).toBe("/api/auth/refresh");
     expect(init.credentials).toBe("same-origin");
     expect(init.body).toBe("{}");
   });
@@ -153,7 +153,7 @@ describe("logout", () => {
 
     await logout();
 
-    expect(fetchMock.mock.calls[0][0]).toBe("/auth/logout");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/auth/logout");
     expect(getAccessToken()).toBeNull();
     expect(onLogout).toHaveBeenCalledTimes(1);
   });

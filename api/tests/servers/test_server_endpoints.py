@@ -200,14 +200,14 @@ def _create_body() -> dict[str, object]:
 def test_non_member_gets_404_on_create() -> None:
     app = _app(member=False, allow=True, create=_FakeUseCase())
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_create() -> None:
     app = _app(member=True, allow=False, create=_FakeUseCase())
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 403
 
 
@@ -217,7 +217,7 @@ def test_authorized_member_creates_server() -> None:
     use_case = _FakeUseCase(result=server)
     app = _app(member=True, allow=True, create=use_case)
     client = next(_client(app))
-    resp = client.post(f"/communities/{community}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{community}/servers", json=_create_body())
     assert resp.status_code == 201
     assert resp.json()["desired_state"] == "stopped"
     assert resp.json()["execution_backend"] == "host_process"
@@ -230,7 +230,7 @@ def test_create_defaults_accept_eula_to_false() -> None:
     use_case = _FakeUseCase(result=_server_entity(community_id=community))
     app = _app(member=True, allow=True, create=use_case)
     client = next(_client(app))
-    resp = client.post(f"/communities/{community}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{community}/servers", json=_create_body())
     assert resp.status_code == 201
     assert use_case.calls[0]["accept_eula"] is False
 
@@ -242,7 +242,7 @@ def test_create_forwards_accept_eula_true() -> None:
     app = _app(member=True, allow=True, create=use_case)
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{community}/servers",
+        f"/api/communities/{community}/servers",
         json={**_create_body(), "accept_eula": True},
     )
     assert resp.status_code == 201
@@ -252,14 +252,14 @@ def test_create_forwards_accept_eula_true() -> None:
 def test_non_member_gets_404_on_read() -> None:
     app = _app(member=False, allow=True, read=_FakeUseCase())
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_delete() -> None:
     app = _app(member=True, allow=False, delete=_FakeUseCase())
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
     assert resp.status_code == 403
 
 
@@ -273,7 +273,7 @@ def test_create_unknown_server_type_is_422() -> None:
         create=_FakeUseCase(error=UnknownServerTypeError("x")),
     )
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_server_type"
 
@@ -285,7 +285,7 @@ def test_create_unknown_backend_is_422() -> None:
         create=_FakeUseCase(error=UnknownExecutionBackendError("x")),
     )
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_execution_backend"
 
@@ -297,7 +297,7 @@ def test_create_unsupported_type_forge_is_422() -> None:
         create=_FakeUseCase(error=UnsupportedServerTypeError("forge")),
     )
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "unsupported_server_type"
 
@@ -309,7 +309,7 @@ def test_create_spigot_is_422_spigot_unsupported() -> None:
         create=_FakeUseCase(error=SpigotUnsupportedError("use paper")),
     )
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "spigot_unsupported"
 
@@ -321,7 +321,7 @@ def test_create_unknown_version_is_422() -> None:
         create=_FakeUseCase(error=CatalogUnknownVersionError("vanilla 9.9.9")),
     )
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "unknown_version"
 
@@ -333,7 +333,7 @@ def test_create_unsupported_edition_is_422() -> None:
         create=_FakeUseCase(error=UnsupportedEditionError("bedrock")),
     )
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "unsupported_edition"
 
@@ -345,7 +345,7 @@ def test_create_catalog_unavailable_is_503() -> None:
         create=_FakeUseCase(error=CatalogUnavailableError("source down")),
     )
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 503
     assert resp.json()["reason"] == "catalog_unavailable"
 
@@ -356,7 +356,7 @@ def test_create_defaults_game_port_to_none() -> None:
     use_case = _FakeUseCase(result=_server_entity(community_id=community))
     app = _app(member=True, allow=True, create=use_case)
     client = next(_client(app))
-    resp = client.post(f"/communities/{community}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{community}/servers", json=_create_body())
     assert resp.status_code == 201
     assert use_case.calls[0]["game_port"] is None
 
@@ -367,7 +367,7 @@ def test_create_forwards_explicit_game_port() -> None:
     app = _app(member=True, allow=True, create=use_case)
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{community}/servers",
+        f"/api/communities/{community}/servers",
         json={**_create_body(), "game_port": 25570},
     )
     assert resp.status_code == 201
@@ -382,7 +382,7 @@ def test_create_port_out_of_range_is_422() -> None:
     )
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers",
+        f"/api/communities/{uuid.uuid4()}/servers",
         json={**_create_body(), "game_port": 25570},
     )
     assert resp.status_code == 422
@@ -397,7 +397,7 @@ def test_create_port_taken_is_409() -> None:
     )
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers",
+        f"/api/communities/{uuid.uuid4()}/servers",
         json={**_create_body(), "game_port": 25565},
     )
     assert resp.status_code == 409
@@ -411,7 +411,7 @@ def test_create_port_range_exhausted_is_503() -> None:
         create=_FakeUseCase(error=PortRangeExhaustedError("25565-25664")),
     )
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 503
     assert resp.json()["reason"] == "port_range_exhausted"
 
@@ -423,7 +423,7 @@ def test_create_seed_failed_is_503() -> None:
         create=_FakeUseCase(error=WorkingSetSeedFailedError("server-id")),
     )
     client = next(_client(app))
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
 
@@ -435,7 +435,7 @@ def test_create_game_port_out_of_schema_bound_is_422() -> None:
     app = _app(member=True, allow=True, create=use_case)
     client = next(_client(app))
     resp = client.post(
-        f"/communities/{uuid.uuid4()}/servers",
+        f"/api/communities/{uuid.uuid4()}/servers",
         json={**_create_body(), "game_port": 70000},
     )
     assert resp.status_code == 422
@@ -450,7 +450,7 @@ def test_update_backend_immutable_is_409() -> None:
     )
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"execution_backend": "container"},
     )
     assert resp.status_code == 409
@@ -465,7 +465,7 @@ def test_update_while_running_is_409() -> None:
     )
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"name": "creative"},
     )
     assert resp.status_code == 409
@@ -480,7 +480,7 @@ def test_update_snapshot_interval_below_floor_is_422() -> None:
     )
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"config": {"snapshot_interval_seconds": 60}},
     )
     assert resp.status_code == 422
@@ -495,7 +495,7 @@ def test_update_backup_interval_invalid_is_422() -> None:
     )
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"config": {"backup_interval_hours": 0}},
     )
     assert resp.status_code == 422
@@ -508,7 +508,7 @@ def test_update_forwards_game_port() -> None:
     app = _app(member=True, allow=True, update=update)
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"game_port": 25570},
     )
     assert resp.status_code == 200
@@ -520,7 +520,7 @@ def test_update_omitting_game_port_forwards_none() -> None:
     app = _app(member=True, allow=True, update=update)
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"name": "creative"},
     )
     assert resp.status_code == 200
@@ -535,7 +535,7 @@ def test_update_game_port_out_of_range_is_422() -> None:
     )
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"game_port": 25570},
     )
     assert resp.status_code == 422
@@ -550,7 +550,7 @@ def test_update_game_port_taken_is_409() -> None:
     )
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"game_port": 25570},
     )
     assert resp.status_code == 409
@@ -565,7 +565,7 @@ def test_update_game_port_seed_failure_is_503() -> None:
     )
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"game_port": 25570},
     )
     assert resp.status_code == 503
@@ -579,7 +579,7 @@ def test_update_game_port_out_of_schema_bound_is_422() -> None:
     app = _app(member=True, allow=True, update=update)
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"game_port": 70000},
     )
     assert resp.status_code == 422
@@ -593,7 +593,7 @@ def test_delete_while_running_is_409() -> None:
         delete=_FakeUseCase(error=ServerNotStoppedError("x")),
     )
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_not_stopped"
 
@@ -603,14 +603,14 @@ def test_read_missing_server_is_404() -> None:
         member=True, allow=True, read=_FakeUseCase(error=ServerNotFoundError("x"))
     )
     client = next(_client(app))
-    resp = client.get(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
 def test_delete_success_is_204() -> None:
     app = _app(member=True, allow=True, delete=_FakeUseCase())
     client = next(_client(app))
-    resp = client.delete(f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
     assert resp.status_code == 204
 
 
@@ -625,7 +625,7 @@ def test_create_at_size_bound_is_accepted() -> None:
     overhead = len('{"k": ""}')
     body = _create_body()
     body["config"] = {"k": "a" * (MAX_CONFIG_BYTES - overhead)}
-    resp = client.post(f"/communities/{community}/servers", json=body)
+    resp = client.post(f"/api/communities/{community}/servers", json=body)
     assert resp.status_code == 201
 
 
@@ -634,7 +634,7 @@ def test_create_over_size_bound_is_422_too_large() -> None:
     client = next(_client(app))
     body = _create_body()
     body["config"] = {"k": "a" * (MAX_CONFIG_BYTES + 1)}
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=body)
     assert resp.status_code == 422
     assert resp.json()["reason"] == "config_too_large"
 
@@ -647,7 +647,7 @@ def test_create_deeply_nested_config_is_422_invalid_shape() -> None:
         node = {"nested": node}
     body = _create_body()
     body["config"] = node
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=body)
     assert resp.status_code == 422
     assert resp.json()["reason"] == "config_invalid_shape"
 
@@ -657,7 +657,7 @@ def test_create_non_object_config_is_422_invalid_shape() -> None:
     client = next(_client(app))
     body = _create_body()
     body["config"] = ["not", "an", "object"]
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=body)
     assert resp.status_code == 422
     assert resp.json()["reason"] == "config_invalid_shape"
 
@@ -667,7 +667,7 @@ def test_create_null_config_value_is_422_null_value() -> None:
     client = next(_client(app))
     body = _create_body()
     body["config"] = {"motd": None}
-    resp = client.post(f"/communities/{uuid.uuid4()}/servers", json=body)
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=body)
     assert resp.status_code == 422
     assert resp.json()["reason"] == "config_null_value"
 
@@ -676,7 +676,7 @@ def test_update_over_size_bound_is_422_too_large() -> None:
     app = _app(member=True, allow=True, update=_FakeUseCase())
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"config": {"k": "a" * (MAX_CONFIG_BYTES + 1)}},
     )
     assert resp.status_code == 422
@@ -690,7 +690,7 @@ def test_update_deeply_nested_config_is_422_invalid_shape() -> None:
     for _ in range(MAX_CONFIG_DEPTH):
         node = {"nested": node}
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"config": node},
     )
     assert resp.status_code == 422
@@ -701,7 +701,7 @@ def test_update_non_object_config_is_422_invalid_shape() -> None:
     app = _app(member=True, allow=True, update=_FakeUseCase())
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"config": "not-an-object"},
     )
     assert resp.status_code == 422
@@ -712,7 +712,7 @@ def test_update_null_config_value_is_422_null_value() -> None:
     app = _app(member=True, allow=True, update=_FakeUseCase())
     client = next(_client(app))
     resp = client.patch(
-        f"/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"config": {"motd": None}},
     )
     assert resp.status_code == 422
@@ -726,7 +726,7 @@ def test_update_at_size_bound_is_accepted() -> None:
     client = next(_client(app))
     overhead = len('{"k": ""}')
     resp = client.patch(
-        f"/communities/{community}/servers/{uuid.uuid4()}",
+        f"/api/communities/{community}/servers/{uuid.uuid4()}",
         json={"config": {"k": "a" * (MAX_CONFIG_BYTES - overhead)}},
     )
     assert resp.status_code == 200
@@ -779,11 +779,11 @@ def test_grant_on_one_server_opens_exactly_that_server() -> None:
     app = _real_authz_app(user_id=user_id, authz_uow=authz_uow, read_uow=read_uow)
     client = next(_client(app))
 
-    opened = client.get(f"/communities/{community}/servers/{server_x}")
+    opened = client.get(f"/api/communities/{community}/servers/{server_x}")
     assert opened.status_code == 200
     assert opened.json()["id"] == str(server_x)
 
-    blocked = client.get(f"/communities/{community}/servers/{server_y}")
+    blocked = client.get(f"/api/communities/{community}/servers/{server_y}")
     assert blocked.status_code == 403
 
 
@@ -807,9 +807,9 @@ def test_server_in_community_a_is_invisible_through_community_b() -> None:
     client = next(_client(app))
 
     # Through B's route (the user is a member there) the A server does not exist.
-    resp = client.get(f"/communities/{community_b}/servers/{server_in_a}")
+    resp = client.get(f"/api/communities/{community_b}/servers/{server_in_a}")
     assert resp.status_code == 404
 
     # Through A's route the user is a non-member -> 404 (no existence signal).
-    resp = client.get(f"/communities/{community_a}/servers/{server_in_a}")
+    resp = client.get(f"/api/communities/{community_a}/servers/{server_in_a}")
     assert resp.status_code == 404

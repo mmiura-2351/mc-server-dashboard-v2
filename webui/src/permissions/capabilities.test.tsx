@@ -75,7 +75,7 @@ function CanProbe() {
 describe("default-community selection", () => {
   it("defaults the active community to the first from GET /communities", async () => {
     fetchMock.mockImplementation((url: string) => {
-      if (url === "/communities") {
+      if (url === "/api/communities") {
         return Promise.resolve(
           jsonResponse([
             { id: "c1", name: "First" },
@@ -111,7 +111,7 @@ describe("default-community selection", () => {
 describe("can() resolution against the fetched set", () => {
   it("resolves community codes and matching resource grants for the active community", async () => {
     fetchMock.mockImplementation((url: string) => {
-      if (url === "/communities") {
+      if (url === "/api/communities") {
         return Promise.resolve(jsonResponse([{ id: "c1", name: "First" }]));
       }
       return Promise.resolve(
@@ -155,7 +155,7 @@ describe("per-community cache isolation", () => {
 
   it("fetches and caches each community's set separately", async () => {
     fetchMock.mockImplementation((url: string) => {
-      if (url === "/communities") {
+      if (url === "/api/communities") {
         return Promise.resolve(
           jsonResponse([
             { id: "c1", name: "First" },
@@ -163,7 +163,7 @@ describe("per-community cache isolation", () => {
           ]),
         );
       }
-      if (url.includes("/communities/c1/")) {
+      if (url.includes("/api/communities/c1/")) {
         return Promise.resolve(
           jsonResponse({ permissions: ["server:start"], grants: [] }),
         );
@@ -193,8 +193,8 @@ describe("per-community cache isolation", () => {
       urlOf(c).includes("/me/permissions"),
     );
     expect(permCalls.map(urlOf)).toEqual([
-      "/communities/c1/me/permissions",
-      "/communities/c2/me/permissions",
+      "/api/communities/c1/me/permissions",
+      "/api/communities/c2/me/permissions",
     ]);
   });
 });
@@ -223,7 +223,7 @@ describe("re-fetch on 403", () => {
   it("re-fetches the active community's capabilities after a 403", async () => {
     let permCallCount = 0;
     fetchMock.mockImplementation((url: string) => {
-      if (url === "/communities") {
+      if (url === "/api/communities") {
         return Promise.resolve(jsonResponse([{ id: "c1", name: "First" }]));
       }
       permCallCount += 1;

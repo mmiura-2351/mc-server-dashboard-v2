@@ -24,7 +24,7 @@ const EMAIL = process.env.MCD_E2E_ADMIN_EMAIL ?? "e2e-admin@example.com";
 const PROMOTE_CMD = process.env.MCD_E2E_PROMOTE_CMD;
 
 async function main() {
-  const res = await fetch(`${API_URL}/users`, {
+  const res = await fetch(`${API_URL}/api/users`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -44,7 +44,7 @@ async function main() {
 
   // Confirm the admin can authenticate and is platform admin, so a botched
   // promotion fails the setup loudly rather than the first admin-only test.
-  const login = await fetch(`${API_URL}/auth/login`, {
+  const login = await fetch(`${API_URL}/api/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ username: USERNAME, password: PASSWORD }),
@@ -55,7 +55,7 @@ async function main() {
     );
   }
   const { access_token } = await login.json();
-  const me = await fetch(`${API_URL}/users/me`, {
+  const me = await fetch(`${API_URL}/api/users/me`, {
     headers: { authorization: `Bearer ${access_token}` },
   });
   const body = await me.json();

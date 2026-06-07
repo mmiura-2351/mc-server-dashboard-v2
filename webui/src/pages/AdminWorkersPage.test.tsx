@@ -76,14 +76,14 @@ function signedIn(
   fetchMock.mockImplementation(
     (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url === "/users/me") return Promise.resolve(jsonResponse(ADMIN));
-      if (url === "/communities")
+      if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/api/communities")
         return Promise.resolve(jsonResponse([{ id: "c1", name: "Alpha" }]));
       if (url.endsWith("/me/permissions"))
         return Promise.resolve(jsonResponse({}));
-      if (url === "/workers" && methodOf(init) === "GET")
+      if (url === "/api/workers" && methodOf(init) === "GET")
         return Promise.resolve(jsonResponse(WORKERS));
-      if (/^\/workers\/[^/]+\/drain$/.test(url) && onDrain !== undefined)
+      if (/^\/api\/workers\/[^/]+\/drain$/.test(url) && onDrain !== undefined)
         return Promise.resolve(onDrain(url, init));
       return Promise.resolve(tokenResponse());
     },
@@ -148,7 +148,7 @@ describe("admin workers page", () => {
 
     await waitFor(() => {
       expect(calls).toContainEqual({
-        url: "/workers/worker-a/drain",
+        url: "/api/workers/worker-a/drain",
         method: "PUT",
       });
     });
@@ -175,7 +175,7 @@ describe("admin workers page", () => {
 
     await waitFor(() => {
       expect(calls).toContainEqual({
-        url: "/workers/worker-b/drain",
+        url: "/api/workers/worker-b/drain",
         method: "DELETE",
       });
     });
@@ -227,12 +227,12 @@ describe("admin workers page", () => {
   it("shows the error state when the fleet list fails", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url === "/users/me") return Promise.resolve(jsonResponse(ADMIN));
-      if (url === "/communities")
+      if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/api/communities")
         return Promise.resolve(jsonResponse([{ id: "c1", name: "Alpha" }]));
       if (url.endsWith("/me/permissions"))
         return Promise.resolve(jsonResponse({}));
-      if (url === "/workers")
+      if (url === "/api/workers")
         return Promise.resolve(
           new Response("nope", {
             status: 503,

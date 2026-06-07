@@ -113,7 +113,9 @@ describe("CommunityEventsClient", () => {
   it("connects with the access token in the ?token= query", () => {
     const { client } = makeClient();
     client.start();
-    expect(MockWebSocket.last().url).toContain(`/communities/${CID}/events`);
+    expect(MockWebSocket.last().url).toContain(
+      `/api/communities/${CID}/events`,
+    );
     expect(MockWebSocket.last().url).toContain("token=tok-1");
     client.close();
   });

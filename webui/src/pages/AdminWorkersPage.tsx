@@ -24,7 +24,7 @@ const REFRESH_INTERVAL_MS = 12_000;
 export function AdminWorkersPage() {
   const workersQuery = useQuery({
     queryKey: ["workers"],
-    queryFn: () => api.get("/workers"),
+    queryFn: () => api.get("/api/workers"),
     refetchInterval: REFRESH_INTERVAL_MS,
   });
 
@@ -62,7 +62,9 @@ function Loaded({ workers }: { workers: WorkerResponse[] }) {
 
   const drain = useMutation({
     mutationFn: (worker: WorkerResponse) =>
-      api.put(apiPath("/workers/{worker_id}/drain", { worker_id: worker.id })),
+      api.put(
+        apiPath("/api/workers/{worker_id}/drain", { worker_id: worker.id }),
+      ),
     onSuccess: () => {
       showToast(t("admin.workers.drained"), "success");
       queryClient.invalidateQueries({ queryKey: ["workers"] });
@@ -79,7 +81,7 @@ function Loaded({ workers }: { workers: WorkerResponse[] }) {
   const undrain = useMutation({
     mutationFn: (worker: WorkerResponse) =>
       api.delete(
-        apiPath("/workers/{worker_id}/drain", { worker_id: worker.id }),
+        apiPath("/api/workers/{worker_id}/drain", { worker_id: worker.id }),
       ),
     onSuccess: () => {
       showToast(t("admin.workers.undrained"), "success");

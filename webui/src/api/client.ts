@@ -101,7 +101,7 @@ export function resetForTesting(): void {
 }
 
 function isAuthPath(path: string): boolean {
-  return path.startsWith("/auth/");
+  return path.startsWith("/api/auth/");
 }
 
 /**
@@ -148,8 +148,9 @@ async function request<P extends keyof paths, M extends string>(
   let response = await rawRequest(httpMethod, url, init);
 
   // Transparent refresh: a 401 from a non-auth endpoint means the access token
-  // expired. Run the shared single-flight refresh and retry once. The /auth/*
-  // endpoints surface their own 401s untouched (no refresh on the refresh).
+  // expired. Run the shared single-flight refresh and retry once. The
+  // /api/auth/* endpoints surface their own 401s untouched (no refresh on the
+  // refresh).
   if (response.status === 401 && refresher !== null && !isAuthPath(url)) {
     const refreshed = await refresher();
     if (refreshed) {

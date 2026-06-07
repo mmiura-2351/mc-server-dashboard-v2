@@ -65,7 +65,7 @@ export function CommunityGroupsTab({
     queryKey: groupsKey(communityId),
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/groups", {
+        apiPath("/api/communities/{community_id}/groups", {
           community_id: communityId,
         }),
       ),
@@ -76,7 +76,7 @@ export function CommunityGroupsTab({
     queryKey: ["communities", communityId, "servers"],
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/servers", {
+        apiPath("/api/communities/{community_id}/servers", {
           community_id: communityId,
         }),
       ),
@@ -89,7 +89,7 @@ export function CommunityGroupsTab({
   const remove = useMutation({
     mutationFn: (group: GroupResponse) =>
       api.delete(
-        apiPath("/communities/{community_id}/groups/{group_id}", {
+        apiPath("/api/communities/{community_id}/groups/{group_id}", {
           community_id: communityId,
           group_id: group.id,
         }),
@@ -251,7 +251,7 @@ function GroupDetail({
     queryKey: groupServersKey(communityId, group.id),
     queryFn: () =>
       api.get(
-        apiPath("/communities/{community_id}/groups/{group_id}/servers", {
+        apiPath("/api/communities/{community_id}/groups/{group_id}/servers", {
           community_id: communityId,
           group_id: group.id,
         }),
@@ -262,7 +262,7 @@ function GroupDetail({
     mutationFn: (uuid: string) =>
       api.delete(
         apiPath(
-          "/communities/{community_id}/groups/{group_id}/players/{player_uuid}",
+          "/api/communities/{community_id}/groups/{group_id}/players/{player_uuid}",
           {
             community_id: communityId,
             group_id: group.id,
@@ -285,7 +285,7 @@ function GroupDetail({
     mutationFn: (serverId: string) =>
       api.put(
         apiPath(
-          "/communities/{community_id}/groups/{group_id}/servers/{server_id}",
+          "/api/communities/{community_id}/groups/{group_id}/servers/{server_id}",
           {
             community_id: communityId,
             group_id: group.id,
@@ -303,7 +303,7 @@ function GroupDetail({
     mutationFn: (serverId: string) =>
       api.delete(
         apiPath(
-          "/communities/{community_id}/groups/{group_id}/servers/{server_id}",
+          "/api/communities/{community_id}/groups/{group_id}/servers/{server_id}",
           {
             community_id: communityId,
             group_id: group.id,
@@ -452,7 +452,7 @@ function AddPlayerForm({
   const add = useMutation({
     mutationFn: (body: { uuid: string; username: string }) =>
       api.post(
-        apiPath("/communities/{community_id}/groups/{group_id}/players", {
+        apiPath("/api/communities/{community_id}/groups/{group_id}/players", {
           community_id: communityId,
           group_id: groupId,
         }),
@@ -543,7 +543,7 @@ function CreateGroupDialog({
   const create = useMutation({
     mutationFn: (body: { name: string; kind: string }) =>
       api.post(
-        apiPath("/communities/{community_id}/groups", {
+        apiPath("/api/communities/{community_id}/groups", {
           community_id: communityId,
         }),
         { body: JSON.stringify(body) },
@@ -634,7 +634,7 @@ function RenameGroupDialog({
   const rename = useMutation({
     mutationFn: (newName: string) =>
       api.patch(
-        apiPath("/communities/{community_id}/groups/{group_id}", {
+        apiPath("/api/communities/{community_id}/groups/{group_id}", {
           community_id: communityId,
           group_id: group.id,
         }),

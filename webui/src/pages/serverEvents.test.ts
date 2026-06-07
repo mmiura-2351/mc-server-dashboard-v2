@@ -17,7 +17,7 @@ function frame(stream: string, payload: unknown) {
 describe("serverEventsUrl", () => {
   it("builds the events path with the streams comma list and token", () => {
     const url = serverEventsUrl(CID, SID, ["status", "log", "metrics"], "tok");
-    expect(url).toContain(`/communities/${CID}/servers/${SID}/events`);
+    expect(url).toContain(`/api/communities/${CID}/servers/${SID}/events`);
     expect(url).toContain("streams=status%2Clog%2Cmetrics");
     expect(url).toContain("token=tok");
   });
@@ -115,7 +115,7 @@ describe("ServerEventsClient", () => {
     const { client } = makeClient();
     client.start();
     const url = MockWebSocket.last().url;
-    expect(url).toContain(`/communities/${CID}/servers/${SID}/events`);
+    expect(url).toContain(`/api/communities/${CID}/servers/${SID}/events`);
     expect(url).toContain("streams=status%2Clog%2Cmetrics");
     expect(url).toContain("token=tok-1");
     client.close();

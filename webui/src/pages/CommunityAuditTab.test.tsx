@@ -60,7 +60,7 @@ function record(over: Record<string, unknown> = {}) {
 // reads the community audit endpoint (path + query string).
 function routeGet(opts: { records?: unknown[] }) {
   mockApi.get.mockImplementation((path: string) => {
-    if (path.startsWith(`/communities/${CID}/audit`)) {
+    if (path.startsWith(`/api/communities/${CID}/audit`)) {
       return Promise.resolve({ records: opts.records ?? [] });
     }
     return Promise.resolve(community());
@@ -99,7 +99,7 @@ async function openAuditTab() {
 function auditCalls(): string[] {
   return mockApi.get.mock.calls
     .map((c) => c[0] as string)
-    .filter((p) => p.startsWith(`/communities/${CID}/audit`));
+    .filter((p) => p.startsWith(`/api/communities/${CID}/audit`));
 }
 
 describe("CommunityAuditTab", () => {
@@ -153,7 +153,7 @@ describe("CommunityAuditTab", () => {
 
     await waitFor(() => expect(auditCalls().length).toBeGreaterThan(0));
     const url = new URL(auditCalls()[0], "http://x");
-    expect(url.pathname).toBe(`/communities/${CID}/audit`);
+    expect(url.pathname).toBe(`/api/communities/${CID}/audit`);
     expect(url.searchParams.get("limit")).toBe("50");
     expect(url.searchParams.get("offset")).toBe("0");
     expect(url.searchParams.get("operation")).toBeNull();
@@ -268,7 +268,7 @@ describe("CommunityAuditTab", () => {
 
   it("shows the error state when the list fails", async () => {
     mockApi.get.mockImplementation((path: string) => {
-      if (path.startsWith(`/communities/${CID}/audit`)) {
+      if (path.startsWith(`/api/communities/${CID}/audit`)) {
         return Promise.reject(new ApiError(500, undefined));
       }
       return Promise.resolve(community());
@@ -295,7 +295,7 @@ describe("CommunityAuditTab", () => {
 
   it("routes a 403 from the list through onForbidden", async () => {
     mockApi.get.mockImplementation((path: string) => {
-      if (path.startsWith(`/communities/${CID}/audit`)) {
+      if (path.startsWith(`/api/communities/${CID}/audit`)) {
         return Promise.reject(new ApiError(403, { reason: "audit:read" }));
       }
       return Promise.resolve(community());

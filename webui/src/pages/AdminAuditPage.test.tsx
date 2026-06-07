@@ -6,7 +6,7 @@ import { renderApp } from "../test/render.tsx";
 
 // Global admin Audit page (#479). Driven through the real router and providers
 // via renderApp; a fetch mock dispatches on URL so a single test can stand up
-// /users/me, the community list, and the platform-admin global `/audit`
+// /users/me, the community list, and the platform-admin global `/api/audit`
 // endpoint (path carries the query string).
 
 const COMMUNITY = { id: "11111111-1111-1111-1111-111111111111", name: "Alpha" };
@@ -77,10 +77,10 @@ function signedInAs(
 ) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/users/me") return Promise.resolve(jsonResponse(user));
-    if (url === "/communities")
+    if (url === "/api/users/me") return Promise.resolve(jsonResponse(user));
+    if (url === "/api/communities")
       return Promise.resolve(jsonResponse([COMMUNITY]));
-    if (url.startsWith("/admin/communities"))
+    if (url.startsWith("/api/admin/communities"))
       return Promise.resolve(
         jsonResponse({
           total: adminCommunities.length,
@@ -91,7 +91,7 @@ function signedInAs(
       );
     if (url.endsWith("/me/permissions"))
       return Promise.resolve(jsonResponse({}));
-    if (url.startsWith("/audit"))
+    if (url.startsWith("/api/audit"))
       return Promise.resolve(jsonResponse({ records }));
     return Promise.resolve(tokenResponse());
   });
@@ -101,7 +101,7 @@ function signedInAs(
 function auditCalls(): string[] {
   return fetchMock.mock.calls
     .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
-    .filter((p) => p.startsWith("/audit"));
+    .filter((p) => p.startsWith("/api/audit"));
 }
 
 beforeEach(() => {
@@ -143,10 +143,10 @@ describe("AdminAuditPage", () => {
     // hint surfaces, mirroring the Provision owner picker (#476/#488).
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url === "/users/me") return Promise.resolve(jsonResponse(ADMIN));
-      if (url === "/communities")
+      if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/api/communities")
         return Promise.resolve(jsonResponse([COMMUNITY]));
-      if (url.startsWith("/admin/communities"))
+      if (url.startsWith("/api/admin/communities"))
         return Promise.resolve(
           jsonResponse({
             total: 150,
@@ -157,7 +157,7 @@ describe("AdminAuditPage", () => {
         );
       if (url.endsWith("/me/permissions"))
         return Promise.resolve(jsonResponse({}));
-      if (url.startsWith("/audit"))
+      if (url.startsWith("/api/audit"))
         return Promise.resolve(jsonResponse({ records: [record()] }));
       return Promise.resolve(tokenResponse());
     });
@@ -214,7 +214,7 @@ describe("AdminAuditPage", () => {
 
     await waitFor(() => expect(auditCalls().length).toBeGreaterThan(0));
     const url = new URL(auditCalls()[0], "http://x");
-    expect(url.pathname).toBe("/audit");
+    expect(url.pathname).toBe("/api/audit");
     expect(url.searchParams.get("limit")).toBe("50");
     expect(url.searchParams.get("offset")).toBe("0");
     expect(url.searchParams.get("community")).toBeNull();

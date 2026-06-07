@@ -42,7 +42,7 @@ export async function registerUser(
   request: APIRequestContext,
   user: TestUser,
 ): Promise<{ id: string }> {
-  const res = await request.post(`${API_URL}/users`, { data: user });
+  const res = await request.post(`${API_URL}/api/users`, { data: user });
   expect(res.status(), await res.text()).toBe(201);
   return res.json();
 }
@@ -52,7 +52,7 @@ async function login(
   username: string,
   password: string,
 ): Promise<string> {
-  const res = await request.post(`${API_URL}/auth/login`, {
+  const res = await request.post(`${API_URL}/api/auth/login`, {
     data: { username, password },
   });
   expect(res.ok(), await res.text()).toBeTruthy();
@@ -73,7 +73,7 @@ export async function provisionCommunity(
   name: string,
 ): Promise<{ id: string }> {
   const token = await adminToken(request);
-  const res = await request.post(`${API_URL}/communities`, {
+  const res = await request.post(`${API_URL}/api/communities`, {
     headers: { authorization: `Bearer ${token}` },
     data: { name, owner_user_id: ownerUserId },
   });
@@ -91,7 +91,7 @@ export async function createRole(
   permissions: string[] = ["server:read"],
 ): Promise<{ id: string; name: string }> {
   const res = await request.post(
-    `${API_URL}/communities/${communityId}/roles`,
+    `${API_URL}/api/communities/${communityId}/roles`,
     {
       headers: { authorization: `Bearer ${token}` },
       data: { name, permissions },
@@ -107,7 +107,7 @@ export async function listServers(
   communityId: string,
 ): Promise<Array<{ id: string; name: string }>> {
   const res = await request.get(
-    `${API_URL}/communities/${communityId}/servers`,
+    `${API_URL}/api/communities/${communityId}/servers`,
     { headers: { authorization: `Bearer ${token}` } },
   );
   expect(res.ok(), await res.text()).toBeTruthy();
@@ -120,7 +120,7 @@ export async function listMembers(
   communityId: string,
 ): Promise<Array<{ user_id: string; username: string; role_names: string[] }>> {
   const res = await request.get(
-    `${API_URL}/communities/${communityId}/members`,
+    `${API_URL}/api/communities/${communityId}/members`,
     { headers: { authorization: `Bearer ${token}` } },
   );
   expect(res.ok(), await res.text()).toBeTruthy();
