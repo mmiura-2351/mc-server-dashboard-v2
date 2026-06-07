@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { en } from "./en.ts";
-import { getLanguage, initLanguage, setLanguage, t } from "./index.ts";
+import {
+  getLanguage,
+  initLanguage,
+  setLanguage,
+  subscribeLanguage,
+  t,
+} from "./index.ts";
 import { ja } from "./ja.ts";
 
 describe("dictionaries", () => {
@@ -47,20 +53,33 @@ describe("language detection and override", () => {
     expect(getLanguage()).toBe("en");
   });
 
-  it("setLanguage persists the choice and applies it on the next boot", () => {
-    // Stub reload so setLanguage does not blow up jsdom.
-    const reload = vi.fn();
-    vi.spyOn(window, "location", "get").mockReturnValue({
-      ...window.location,
-      reload,
-    } as Location);
+  it("setLanguage persists the choice, applies it live, and notifies", () => {
+    const notified = vi.fn();
+    const unsubscribe = subscribeLanguage(notified);
 
     setLanguage("ja");
-    expect(reload).toHaveBeenCalledOnce();
+
+    // Applied in place (no reload) and persisted, and subscribers are notified
+    // so the app re-renders against the new dictionary (issues #515, #512).
+    expect(getLanguage()).toBe("ja");
+    expect(t("shell.account")).toBe(ja["shell.account"]);
     expect(localStorage.getItem("mcsd.lang")).toBe("ja");
+    expect(notified).toHaveBeenCalledOnce();
 
     // A fresh boot reads the persisted override.
     initLanguage();
     expect(getLanguage()).toBe("ja");
+
+    unsubscribe();
+  });
+
+  it("setLanguage to the current language is a no-op (no notify)", () => {
+    const notified = vi.fn();
+    const unsubscribe = subscribeLanguage(notified);
+
+    setLanguage("en"); // already en
+    expect(notified).not.toHaveBeenCalled();
+
+    unsubscribe();
   });
 });

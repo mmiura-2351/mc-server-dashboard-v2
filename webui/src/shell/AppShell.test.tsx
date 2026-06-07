@@ -127,7 +127,7 @@ describe("AppShell community switcher", () => {
     initLanguage();
   });
 
-  it("switching the language persists the choice and reloads", async () => {
+  it("switching the language persists the choice without reloading", async () => {
     signedInWith([ALPHA, BETA]);
 
     renderAt("/");
@@ -144,8 +144,12 @@ describe("AppShell community switcher", () => {
 
     fireEvent.change(langSwitcher, { target: { value: "ja" } });
 
+    // The choice is persisted and applied in place — no full reload, which
+    // would tear down an in-flight refresh rotation and could sign the user
+    // out (issues #515, #512). The live re-render is covered by the i18n unit
+    // test and the auth E2E.
     expect(localStorage.getItem("mcsd.lang")).toBe("ja");
-    expect(reload).toHaveBeenCalledOnce();
+    expect(reload).not.toHaveBeenCalled();
 
     localStorage.clear();
     initLanguage();
