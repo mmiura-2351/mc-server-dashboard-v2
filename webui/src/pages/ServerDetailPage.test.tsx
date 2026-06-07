@@ -669,6 +669,43 @@ describe("ServerDetailPage Overview live streams", () => {
     expect(screen.getByText("starting up")).toBeInTheDocument();
   });
 
+  it("shows a collecting state until the first metrics frame", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    // No metrics frame yet: a clear collecting state, not an empty/zero value.
+    expect(
+      screen.getByText(t("serverDetail.metric.collecting")),
+    ).toBeInTheDocument();
+
+    act(() => {
+      MockWebSocket.last().message(
+        serverFrame("metrics", {
+          cpu_millis: 1500,
+          memory_bytes: 2 * 1024 * 1024,
+          player_count: 4,
+        }),
+      );
+    });
+    // First frame renders the value immediately (no N-sample gate).
+    expect(screen.getByText("1.5")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.metric.collecting")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says metrics are unavailable while the server is stopped", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    expect(screen.getByText(t("serverDetail.metric.idle"))).toBeInTheDocument();
+  });
+
   it("switches to the Console tab via the tail link", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
     renderPage();

@@ -216,6 +216,9 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.metric.players": "プレイヤー",
   "serverDetail.metric.cores": "コア",
   "serverDetail.metric.mib": "MiB",
+  // Before the first metrics frame arrives, vs. no stream while not running.
+  "serverDetail.metric.collecting": "収集中…",
+  "serverDetail.metric.idle": "停止中はメトリクスがありません",
   "serverDetail.logTailHeading": "最近のログ",
   "serverDetail.openConsole": "コンソールを開く",
   "serverDetail.logTailEmpty": "まだログ出力がありません。",

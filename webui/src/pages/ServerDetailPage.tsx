@@ -418,7 +418,10 @@ function Overview({
     .slice(-TAIL_LINES);
   return (
     <section>
-      <MetricsStrip samples={events.metrics} />
+      <MetricsStrip
+        samples={events.metrics}
+        running={normalizeState(server.observed_state) === "running"}
+      />
       <div className="card log-tail">
         <div className="log-tail-head">
           <span className="log-tail-title">
@@ -446,8 +449,30 @@ function Overview({
 
 // ── Metrics strip (WEBUI_SPEC.md 6.4) ───────────────────────────────────────
 
-function MetricsStrip({ samples }: { samples: MetricsSample[] }) {
+function MetricsStrip({
+  samples,
+  running,
+}: {
+  samples: MetricsSample[];
+  running: boolean;
+}) {
   const latest = samples.at(-1);
+  // Until the first frame arrives, say so honestly: "collecting" while the
+  // server is running (frames are sparse, ~10-15s), else "no metrics while
+  // stopped" since SPEC 7.2 has no metrics stream when not running.
+  if (latest === undefined) {
+    return (
+      <div className="card metrics-strip metrics-strip-empty">
+        <p className="sub">
+          {t(
+            running
+              ? "serverDetail.metric.collecting"
+              : "serverDetail.metric.idle",
+          )}
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="card metrics-strip">
       <Sparkline
