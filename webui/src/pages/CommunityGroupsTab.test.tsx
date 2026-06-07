@@ -431,7 +431,7 @@ describe("CommunityGroupsTab", () => {
   it("routes a 403 on create through onForbidden (named-permission toast)", async () => {
     routeGet({ groups: [] });
     mockApi.post.mockRejectedValue(
-      new ApiError(403, { reason: "group:manage" }),
+      new ApiError(403, { reason: "forbidden", permission: "group:manage" }),
     );
     renderPage();
     await openGroupsTab();
