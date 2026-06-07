@@ -165,7 +165,6 @@ underscores, e.g. `api.grpc_endpoint` → `MCD_WORKER_API_GRPC_ENDPOINT`.
 | Key | Env var | Required | Meaning |
 |---|---|---|---|
 | `api.grpc_endpoint` | `MCD_WORKER_API_GRPC_ENDPOINT` | yes | API control-plane gRPC address to dial. |
-| `api.data_plane_url` | `MCD_WORKER_API_DATA_PLANE_URL` | yes | API HTTP data-plane base URL. |
 | `api.credential` | `MCD_WORKER_API_CREDENTIAL` | yes (secret) | Worker credential, sent as stream metadata. |
 | `api.tls.ca_file` | `MCD_WORKER_API_TLS_CA_FILE` | yes¹ | CA bundle verifying the API's TLS. |
 | `api.tls.insecure` | `MCD_WORKER_API_TLS_INSECURE` | no | `true` opts in to a plaintext (no-TLS) dial for local dev; default `false`. |
@@ -188,7 +187,6 @@ run the Worker pointing at it. For local development without TLS, set
 
 ```sh
 MCD_WORKER_API_GRPC_ENDPOINT=localhost:50051 \
-MCD_WORKER_API_DATA_PLANE_URL=http://localhost:8000/data \
 MCD_WORKER_API_CREDENTIAL=dev-secret \
 MCD_WORKER_API_TLS_INSECURE=true \
 MCD_WORKER_WORKER_SCRATCH_DIR=/tmp/mcsd-worker \
@@ -207,7 +205,6 @@ go run ./cmd/worker
 # worker.toml
 [api]
 grpc_endpoint = "localhost:50051"
-data_plane_url = "http://localhost:8000/data"
 
 [api.tls]
 insecure = true  # local dev only; set ca_file instead in production
