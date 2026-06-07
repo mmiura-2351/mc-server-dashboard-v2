@@ -1,3 +1,7 @@
 # Local deployment environment: holds secrets and host-specific values.
 # Only the committed template (.env.example) is tracked.
 .env
+
+# Python bytecode left behind by running scripts/*.py directly.
+scripts/__pycache__/
+scripts/*.py[cod]
