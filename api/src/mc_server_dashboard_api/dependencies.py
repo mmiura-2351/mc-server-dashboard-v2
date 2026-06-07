@@ -17,6 +17,7 @@ from typing import Annotated
 from fastapi import Depends, Request, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from starlette.requests import HTTPConnection
 
 from mc_server_dashboard_api.audit.adapters.clock import (
     SystemClock as AuditSystemClock,
@@ -280,10 +281,16 @@ from mc_server_dashboard_api.versions.domain.value_objects import (
 )
 
 
-def get_engine(request: Request) -> AsyncEngine:
-    """Return the async engine the app factory stored on application state."""
+def get_engine(connection: HTTPConnection) -> AsyncEngine:
+    """Return the async engine the app factory stored on application state.
 
-    engine: AsyncEngine = request.app.state.engine
+    Typed as :class:`HTTPConnection` (the shared base of ``Request`` and
+    ``WebSocket``) so the same dependency injects on both HTTP and WebSocket
+    routes: the engine lives on ``app.state``, which is connection-scoped and
+    reachable identically over either transport (issue #509).
+    """
+
+    engine: AsyncEngine = connection.app.state.engine
     return engine
 
 
@@ -901,17 +908,25 @@ async def get_current_user_ws(websocket: WebSocket) -> User | None:
 # --- authorization (community context, Section 6.4) ------------------------
 
 
-def get_membership_visibility(request: Request) -> MembershipVisibility:
-    """Bind the Layer-1 :class:`MembershipVisibility` Port to its evaluator."""
+def get_membership_visibility(connection: HTTPConnection) -> MembershipVisibility:
+    """Bind the Layer-1 :class:`MembershipVisibility` Port to its evaluator.
 
-    session_factory = create_session_factory(get_engine(request))
+    Typed as :class:`HTTPConnection` so it injects on both HTTP and WebSocket
+    routes; the WebSocket events endpoints gate on this Port (issue #509).
+    """
+
+    session_factory = create_session_factory(get_engine(connection))
     return RepositoryMembershipVisibility(CommunityUnitOfWork(session_factory))
 
 
-def get_permission_checker(request: Request) -> PermissionChecker:
-    """Bind the Layer-2 :class:`PermissionChecker` Port to the role+grant evaluator."""
+def get_permission_checker(connection: HTTPConnection) -> PermissionChecker:
+    """Bind the Layer-2 :class:`PermissionChecker` Port to the role+grant evaluator.
 
-    session_factory = create_session_factory(get_engine(request))
+    Typed as :class:`HTTPConnection` so it injects on both HTTP and WebSocket
+    routes; the WebSocket events endpoints gate on this Port (issue #509).
+    """
+
+    session_factory = create_session_factory(get_engine(connection))
     return RoleGrantPermissionChecker(CommunityUnitOfWork(session_factory))
 
 
@@ -1107,10 +1122,15 @@ def get_create_server(
     )
 
 
-def get_read_server(request: Request) -> ReadServer:
-    """Assemble the :class:`ReadServer` use case (server:read)."""
+def get_read_server(connection: HTTPConnection) -> ReadServer:
+    """Assemble the :class:`ReadServer` use case (server:read).
 
-    session_factory = create_session_factory(get_engine(request))
+    Typed as :class:`HTTPConnection` so it injects on both HTTP and WebSocket
+    routes; the per-server WebSocket events endpoint uses it to enforce the
+    no-cross-community-existence-signal posture (issue #509).
+    """
+
+    session_factory = create_session_factory(get_engine(connection))
     return ReadServer(uow=ServersUnitOfWork(session_factory))
 
 
