@@ -19,6 +19,7 @@ function TabProbe() {
     <div>
       <span data-testid="tab">{tab}</span>
       <span data-testid="hash">{loc.hash}</span>
+      <span data-testid="search">{loc.search}</span>
       {TABS.map((name) => (
         <button key={name} type="button" onClick={() => setTab(name)}>
           {`go-${name}`}
@@ -113,6 +114,42 @@ describe("useTabHash", () => {
     fireEvent.click(screen.getByText("back"));
     expect(screen.getByTestId("tab").textContent).toBe("overview");
   });
+
+  it("re-clicking the active tab pushes no history entry", () => {
+    render(
+      <MemoryRouter initialEntries={["/x"]}>
+        <TabProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("go-console"));
+    expect(screen.getByTestId("tab").textContent).toBe("console");
+
+    // Re-clicking the already-active tab must not grow history: a single Back
+    // then lands back on the default, not on a duplicate console entry.
+    fireEvent.click(screen.getByText("go-console"));
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("tab").textContent).toBe("overview");
+  });
+
+  it("switching tabs drops a lingering offset; Back restores it", () => {
+    render(
+      <MemoryRouter initialEntries={["/x?offset=50#console"]}>
+        <TabProbe />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("tab").textContent).toBe("console");
+
+    // Each tab's pagination is independent state, so switching tabs drops the
+    // offset param, leaving the new tab on a clean URL.
+    fireEvent.click(screen.getByText("go-settings"));
+    expect(screen.getByTestId("tab").textContent).toBe("settings");
+    expect(screen.getByTestId("search").textContent).toBe("");
+
+    // Back returns to the paginated tab with its offset intact (via history).
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("tab").textContent).toBe("console");
+    expect(screen.getByTestId("search").textContent).toBe("?offset=50");
+  });
 });
 
 describe("useOffsetParam", () => {
@@ -161,6 +198,21 @@ describe("useOffsetParam", () => {
     fireEvent.click(screen.getByText("prev"));
     expect(screen.getByTestId("offset").textContent).toBe("0");
     expect(screen.getByTestId("search").textContent).toBe("");
+  });
+
+  it("setting the same offset pushes no history entry", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#audit"]}>
+        <OffsetProbe />
+      </MemoryRouter>,
+    );
+    // At offset 0 the "prev" button calls setOffset(0): a no-op that must not
+    // grow history, so a later Back from a real page lands on offset 0, not on
+    // a duplicate entry.
+    fireEvent.click(screen.getByText("prev"));
+    fireEvent.click(screen.getByText("next"));
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("offset").textContent).toBe("0");
   });
 
   it("preserves the hash when changing the offset", () => {

@@ -35,13 +35,17 @@ export function useTabHash<T extends string>(
 
   const setTab = useCallback(
     (tab: T) => {
+      // Re-selecting the active tab is a no-op: skip the navigate so it does not
+      // push a duplicate history entry (which would make Back a double press).
+      if (tab === active) return;
       // The default tab is the clean (hash-less) URL; other tabs carry their
-      // hash. Preserve the current search/path so a tab switch keeps query
-      // params (e.g. a pagination offset) intact.
+      // hash. Each tab's pagination is independent state, so drop any offset
+      // param when switching tabs — a Back to the paginated tab restores it
+      // through history.
       const hash = tab === tabs[0] ? "" : `#${tab}`;
-      navigate(`${location.pathname}${location.search}${hash}`);
+      navigate(`${location.pathname}${hash}`);
     },
-    [navigate, location.pathname, location.search, tabs],
+    [navigate, location.pathname, active, tabs],
   );
 
   return [active, setTab];
@@ -60,6 +64,10 @@ export function useOffsetParam(): [number, (offset: number) => void] {
 
   const setOffset = useCallback(
     (next: number) => {
+      // Setting the current offset is a no-op: skip the navigate so it does not
+      // push a duplicate history entry (which would make Back a double press).
+      const target = next > 0 ? next : 0;
+      if (target === offset) return;
       const params = new URLSearchParams(location.search);
       if (next <= 0) {
         params.delete("offset");
@@ -73,7 +81,7 @@ export function useOffsetParam(): [number, (offset: number) => void] {
         `${location.pathname}${search ? `?${search}` : ""}${location.hash}`,
       );
     },
-    [navigate, location.pathname, location.search, location.hash],
+    [navigate, location.pathname, location.search, location.hash, offset],
   );
 
   return [offset, setOffset];
