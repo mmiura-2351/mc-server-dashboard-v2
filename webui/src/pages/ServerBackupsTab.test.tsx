@@ -172,7 +172,11 @@ describe("ServerBackupsTab stats + table", () => {
     // "1.5 GiB" appears for both the total-size stat and the single row.
     expect((await screen.findAllByText("1.5 GiB")).length).toBe(2);
     expect(screen.getByText("manual")).toBeInTheDocument();
-    expect(screen.getByText("miura")).toBeInTheDocument();
+    // The creator cell carries the full value as a hover title (#519).
+    expect(screen.getByText("miura").closest("td")).toHaveAttribute(
+      "title",
+      "miura",
+    );
     // The stats header labels render (count uses "Backups", scoped to the strip).
     expect(screen.getByText(t("backups.stat.totalSize"))).toBeInTheDocument();
     expect(screen.getByText(t("backups.stat.newest"))).toBeInTheDocument();

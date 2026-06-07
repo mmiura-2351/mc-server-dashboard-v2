@@ -420,6 +420,7 @@ function Listing({
               <button
                 type="button"
                 className="file-name"
+                title={entry.name}
                 onClick={() => onEnter(entry)}
               >
                 <span aria-hidden="true">{entry.is_dir ? "📁 " : "📄 "}</span>

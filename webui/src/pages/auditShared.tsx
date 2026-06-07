@@ -167,14 +167,23 @@ function AuditRow({
   const target = [entry.target_type, entry.target_id]
     .filter((part) => part !== null)
     .join(":");
+  const actor = entry.actor_id ?? t("communitySettings.audit.systemActor");
+  const targetText = target === "" ? "—" : target;
+  // `title` reveals the full value on hover for the long, often-ellipsizable
+  // id/operation/target columns (#519). Hover-only (no keyboard affordance);
+  // see #496's a11y posture.
   return (
     <tr>
       <td>{new Date(entry.created_at).toLocaleString()}</td>
-      {showCommunity ? <td>{entry.community_id ?? "—"}</td> : null}
-      <td>{entry.actor_id ?? t("communitySettings.audit.systemActor")}</td>
-      <td>{entry.operation}</td>
+      {showCommunity ? (
+        <td title={entry.community_id ?? undefined}>
+          {entry.community_id ?? "—"}
+        </td>
+      ) : null}
+      <td title={actor}>{actor}</td>
+      <td title={entry.operation}>{entry.operation}</td>
       <td>{entry.outcome}</td>
-      <td>{target === "" ? "—" : target}</td>
+      <td title={target === "" ? undefined : target}>{targetText}</td>
     </tr>
   );
 }
