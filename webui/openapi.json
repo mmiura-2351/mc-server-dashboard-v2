@@ -1,6 +1,25 @@
 {
   "components": {
     "schemas": {
+      "AccessTokenResponse": {
+        "description": "Just an access token \u2014 the non-rotating session-restore response (#512).\n\nNo ``refresh_token``: restore does not rotate, so there is no new refresh\nsecret to hand back, and the existing httpOnly cookie is left untouched.",
+        "properties": {
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
+          "token_type": {
+            "default": "bearer",
+            "title": "Token Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "access_token"
+        ],
+        "title": "AccessTokenResponse",
+        "type": "object"
+      },
       "AddMemberRequest": {
         "description": "Identify the user to add by *exactly one* of id or exact username.\n\n``user_id`` is the original contract; ``username`` (issue #355) lets a\ncommunity owner who lacks the platform-admin user listing name the account\ndirectly. Supplying both or neither is a 422 validation error, so the caller\nmust choose one unambiguous identifier.",
         "properties": {
@@ -2218,6 +2237,24 @@
           }
         },
         "summary": "Refresh"
+      }
+    },
+    "/api/auth/session": {
+      "post": {
+        "operationId": "session_api_auth_session_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Session"
       }
     },
     "/api/backups/statistics": {

@@ -20,6 +20,7 @@ from mc_server_dashboard_api.dependencies import (
     get_login,
     get_logout,
     get_refresh_session,
+    get_restore_session,
 )
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     BcryptPasswordHasher,
@@ -98,6 +99,7 @@ def _client(**overrides: object) -> Iterator[TestClient]:
 _PROVIDERS = {
     "login": get_login,
     "refresh": get_refresh_session,
+    "restore": get_restore_session,
     "logout": get_logout,
     "authenticate": get_authenticate_request,
 }
@@ -292,6 +294,53 @@ def test_refresh_invalid_token_returns_401() -> None:
     client = next(_client(refresh=fake))
     resp = client.post("/api/auth/refresh", json={"refresh_token": "stale"})
     assert resp.status_code == 401
+
+
+def test_session_returns_access_token_only() -> None:
+    # The non-rotating bootstrap path (issue #512): a valid refresh cookie is
+    # exchanged for an access token. No refresh_token in the body, no rotation.
+    fake = _Fake(result="acc3")
+    client = next(_client(restore=fake))
+    client.cookies.set("mcd_refresh", "live-cookie")
+    resp = client.post("/api/auth/session")
+    assert resp.status_code == 200
+    assert resp.json() == {"access_token": "acc3", "token_type": "bearer"}
+    assert fake.calls == [{"refresh_token": "live-cookie"}]
+
+
+def test_session_emits_no_set_cookie() -> None:
+    # Restore never rotates, so it must never re-set the refresh cookie — that is
+    # the whole point: a page load can no longer leave a torn rotation in the jar.
+    fake = _Fake(result="acc3")
+    client = next(_client(restore=fake))
+    client.cookies.set("mcd_refresh", "live-cookie")
+    resp = client.post("/api/auth/session")
+    assert resp.status_code == 200
+    _assert_no_set_cookie(resp, "mcd_refresh")
+
+
+def test_session_without_cookie_returns_401() -> None:
+    # No cookie carried: uniform 401, use case not invoked.
+    fake = _Fake(result="acc3")
+    client = next(_client(restore=fake))
+    resp = client.post("/api/auth/session")
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == "Bearer"
+    assert resp.json()["reason"] == "invalid_credentials"
+    assert fake.calls == []
+
+
+def test_session_invalid_token_returns_uniform_401() -> None:
+    # An unknown / expired / revoked cookie is rejected with the same uniform 401
+    # as every other auth failure (no signal that distinguishes the cause).
+    fake = _Fake(error=InvalidRefreshTokenError())
+    client = next(_client(restore=fake))
+    client.cookies.set("mcd_refresh", "stale-cookie")
+    resp = client.post("/api/auth/session")
+    assert resp.status_code == 401
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.headers["www-authenticate"] == "Bearer"
+    assert resp.json()["reason"] == "invalid_credentials"
 
 
 def test_logout_returns_204() -> None:

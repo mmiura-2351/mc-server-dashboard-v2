@@ -106,6 +106,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Session */
+        post: operations["session_api_auth_session_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/backups/statistics": {
         parameters: {
             query?: never;
@@ -1425,6 +1442,22 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * AccessTokenResponse
+         * @description Just an access token — the non-rotating session-restore response (#512).
+         *
+         *     No ``refresh_token``: restore does not rotate, so there is no new refresh
+         *     secret to hand back, and the existing httpOnly cookie is left untouched.
+         */
+        AccessTokenResponse: {
+            /** Access Token */
+            access_token: string;
+            /**
+             * Token Type
+             * @default bearer
+             */
+            token_type: string;
+        };
+        /**
          * AddMemberRequest
          * @description Identify the user to add by *exactly one* of id or exact username.
          *
@@ -2364,6 +2397,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    session_api_auth_session_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessTokenResponse"];
                 };
             };
         };

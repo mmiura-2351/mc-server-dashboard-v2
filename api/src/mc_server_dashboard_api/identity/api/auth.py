@@ -42,12 +42,14 @@ from mc_server_dashboard_api.dependencies import (
     get_login,
     get_logout,
     get_refresh_session,
+    get_restore_session,
     get_settings,
 )
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
+from mc_server_dashboard_api.identity.application.restore_session import RestoreSession
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
@@ -112,6 +114,17 @@ class TokenResponse(BaseModel):
     @classmethod
     def from_pair(cls, pair: TokenPair) -> "TokenResponse":
         return cls(access_token=pair.access_token, refresh_token=pair.refresh_token)
+
+
+class AccessTokenResponse(BaseModel):
+    """Just an access token — the non-rotating session-restore response (#512).
+
+    No ``refresh_token``: restore does not rotate, so there is no new refresh
+    secret to hand back, and the existing httpOnly cookie is left untouched.
+    """
+
+    access_token: str
+    token_type: str = "bearer"
 
 
 @router.post("/auth/login")
@@ -191,6 +204,29 @@ async def refresh(
     if cookie_token is not None:
         _set_refresh_cookie(response, pair.refresh_token, token_cfg)
     return TokenResponse.from_pair(pair)
+
+
+@router.post("/auth/session")
+async def session(
+    request: Request,
+    use_case: Annotated[RestoreSession, Depends(get_restore_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AccessTokenResponse:
+    # The Web UI bootstrap: turn the httpOnly refresh cookie into a fresh access
+    # token WITHOUT rotating (issue #512). No Set-Cookie, no body token — a page
+    # load can no longer leave a torn rotation in the jar. Rotation and
+    # reuse-detection stay on /auth/refresh (the periodic in-session path), so the
+    # theft model is unchanged. This endpoint is cookie-only: the body-based
+    # worker/CLI clients use /auth/refresh, which carries the refresh token they
+    # need rotated. A missing or invalid cookie returns the uniform 401.
+    cookie_token = request.cookies.get(settings.auth.token.refresh_cookie_name)
+    if cookie_token is None:
+        raise _unauthorized()
+    try:
+        access_token = await use_case(refresh_token=cookie_token)
+    except InvalidRefreshTokenError as exc:
+        raise _unauthorized() from exc
+    return AccessTokenResponse(access_token=access_token)
 
 
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)

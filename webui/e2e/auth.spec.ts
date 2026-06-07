@@ -37,6 +37,38 @@ test("register, login, reload keeps the session, logout", async ({ page }) => {
   await expect(page).toHaveURL(/\/login/);
 });
 
+// An F5 storm must NOT cost the session (issue #512). The bootstrap exchanges
+// the refresh cookie for an access token via the NON-rotating /api/auth/session
+// probe, so rapid reloads can no longer race an in-flight rotation and leave a
+// revoked predecessor cookie in the jar (which, replayed past the reuse grace,
+// revoked the whole token family and bounced the user to /login). Reload several
+// times back-to-back and assert the user stays signed in.
+test("rapid reloads keep the session", async ({ page }) => {
+  const user = uniqueUser("auth-f5");
+
+  await page.goto("/register");
+  await page.getByLabel("Username").fill(user.username);
+  await page.getByLabel("Email").fill(user.email);
+  await page.locator("#register-password").fill(user.password);
+  await page.locator("#register-confirm").fill(user.password);
+  await page.getByRole("button", { name: "Create account" }).click();
+  await expect(page).toHaveURL(/\/login/);
+
+  await signIn(page, user.username, user.password);
+
+  // Five rapid reloads: every bootstrap is a non-rotating restore, so the
+  // refresh cookie is never rotated and the family is never revoked.
+  for (let i = 0; i < 5; i++) {
+    await page.reload();
+  }
+  await expect(page).not.toHaveURL(/\/login/);
+
+  // The session is genuinely intact: a fresh navigation still lands on the
+  // authenticated shell rather than bouncing to /login.
+  await page.goto("/account");
+  await expect(page).not.toHaveURL(/\/login/);
+});
+
 // Switching the UI language must NOT cost the session (issues #515, #512). The
 // switch re-renders in place rather than reloading, so it never tears down an
 // in-flight refresh rotation that would leave a revoked token in the cookie jar

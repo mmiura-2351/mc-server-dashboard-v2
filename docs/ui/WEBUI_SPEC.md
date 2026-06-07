@@ -56,7 +56,8 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 |---|---|---|
 | POST | `/users` | Register (username, email, password). Public. |
 | POST | `/auth/login` | username + password → `{access_token, refresh_token}` (bearer). |
-| POST | `/auth/refresh` | refresh token → new pair. |
+| POST | `/auth/session` | refresh cookie → `{access_token}` only; non-rotating bootstrap (7.1, #512). |
+| POST | `/auth/refresh` | refresh token → new pair (rotates). |
 | POST | `/auth/logout` | invalidates the refresh token. |
 | GET / PATCH / DELETE | `/users/me` | Profile read / update (username, email) / account deletion. |
 | PUT | `/users/me/password` | Change password (current + new). |
@@ -378,7 +379,14 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   (`Secure; SameSite=Strict; Path=/api/auth`) — never readable by JS; requires the
   API-side cookie transport (issue #363). Transparent refresh on 401 +
   single-flight refresh mutex; hard logout on refresh failure. Page reload
-  re-establishes the session via the cookie-based `POST /api/auth/refresh`.
+  (bootstrap) re-establishes the session via the **non-rotating**
+  `POST /api/auth/session` probe — it exchanges the cookie for an access token
+  without rotating the refresh token, so a reload / F5 storm can never race an
+  in-flight rotation and leave a revoked predecessor cookie in the jar (the
+  torn-rotation logout, issue #512). Rotation stays on the transparent
+  `POST /api/auth/refresh` (the in-session 401-retry path), where reuse-detection
+  still applies; a mid-session refresh failure still hard-logs-out (a genuinely
+  expired / revoked session).
 - WS connections carry `?token=`; on token rotation, sockets are reconnected
   (or left until the 60 s re-auth closes them — reconnect-on-rotate chosen).
 

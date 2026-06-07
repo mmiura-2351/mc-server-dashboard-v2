@@ -5,6 +5,7 @@ import {
   refreshForRetry,
   refreshSession,
   resetForTesting,
+  restoreSession,
   setHardLogoutHandler,
 } from "./session.ts";
 import {
@@ -102,6 +103,66 @@ describe("refreshSession", () => {
     await refreshSession();
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+function accessTokenResponse(): Response {
+  return new Response(
+    JSON.stringify({ access_token: "fresh", token_type: "bearer" }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+describe("restoreSession", () => {
+  it("posts /api/auth/session (the non-rotating bootstrap path)", async () => {
+    fetchMock.mockResolvedValue(accessTokenResponse());
+
+    const ok = await restoreSession();
+
+    expect(ok).toBe(true);
+    expect(getAccessToken()).toBe("fresh");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/auth/session");
+    expect(init.method).toBe("POST");
+    expect(init.credentials).toBe("same-origin");
+  });
+
+  it("reports signed out on a 401 and stores no token", async () => {
+    fetchMock.mockResolvedValue(new Response("", { status: 401 }));
+
+    const ok = await restoreSession();
+
+    expect(ok).toBe(false);
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it("reports signed out when the network call throws", async () => {
+    fetchMock.mockRejectedValue(new Error("offline"));
+
+    const ok = await restoreSession();
+
+    expect(ok).toBe(false);
+  });
+
+  it("resolves signed out on a 200 with an invalid JSON body", async () => {
+    fetchMock.mockResolvedValue(new Response("not json", { status: 200 }));
+
+    const ok = await restoreSession();
+
+    expect(ok).toBe(false);
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it("never rotates: repeated restores each just POST /api/auth/session", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(accessTokenResponse()));
+
+    await restoreSession();
+    await restoreSession();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [url] of fetchMock.mock.calls) {
+      expect(url).toBe("/api/auth/session");
+    }
   });
 });
 

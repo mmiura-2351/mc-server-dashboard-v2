@@ -19,6 +19,11 @@ interface TokenResponse {
   token_type: string;
 }
 
+interface AccessTokenResponse {
+  access_token: string;
+  token_type: string;
+}
+
 /**
  * The React layer registers what a hard logout does to its state (reset to
  * signed-out, navigate to /login). Kept as a hook so this module stays free of
@@ -61,6 +66,39 @@ async function doRefresh(): Promise<boolean> {
     // A 200 with a malformed/empty body yields no usable token; treat it as a
     // failed refresh so callers hard-log-out instead of rejecting the shared
     // single-flight promise (which would strand the bootstrap).
+    return false;
+  }
+  setAccessToken(data.access_token);
+  return true;
+}
+
+/**
+ * POST /api/auth/session: the non-rotating bootstrap (issue #512). Exchanges the
+ * httpOnly refresh cookie for a fresh access token WITHOUT rotating the refresh
+ * token, so a page load / F5 can no longer race an in-flight rotation and leave a
+ * revoked predecessor cookie in the jar. Rotation stays on the periodic
+ * in-session `/api/auth/refresh` path (`refreshSession`). 200 stores the access
+ * token and resolves true; any failure resolves false (signed out).
+ */
+export async function restoreSession(): Promise<boolean> {
+  let response: Response;
+  try {
+    response = await fetch("/api/auth/session", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+  } catch {
+    return false;
+  }
+  if (!response.ok) {
+    return false;
+  }
+  let data: AccessTokenResponse;
+  try {
+    data = (await response.json()) as AccessTokenResponse;
+  } catch {
+    // A 200 with a malformed/empty body yields no usable token; treat it as a
+    // failed restore so the bootstrap resolves signed-out rather than rejecting.
     return false;
   }
   setAccessToken(data.access_token);
