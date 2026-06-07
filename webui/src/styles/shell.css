@@ -264,6 +264,17 @@ body.col-resizing {
   cursor: col-resize;
   user-select: none;
 }
+/* With `table-layout: fixed` a narrowed column would otherwise clip its text
+ * mid-glyph. Single-token id/operation cells already expose the full value on
+ * hover via a `title` (#527), so ellipsize exactly those cells. Breakable-text
+ * cells (names, emails) have no `title` and keep wrapping. */
+.audit table.data td[title],
+.backups table.data td[title],
+.admin-communities table.data td.mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ---------- Dashboard server cards (WEBUI_SPEC.md 6.2) ---------- */
 .grid {

@@ -93,6 +93,41 @@ describe("ResizableTable", () => {
     expect(cols()[0].style.width).toBe(widened);
   });
 
+  it("clears the resize cursor class on pointercancel", () => {
+    render(<Harness />);
+    fireEvent.pointerDown(handles()[0], {
+      clientX: 100,
+      pointerId: 1,
+      button: 0,
+    });
+    expect(document.body.classList.contains("col-resizing")).toBe(true);
+    fireEvent.pointerCancel(window, { pointerId: 1 });
+    expect(document.body.classList.contains("col-resizing")).toBe(false);
+  });
+
+  it("leaves no resize cursor class behind when unmounted mid-drag", () => {
+    const { unmount } = render(<Harness />);
+    fireEvent.pointerDown(handles()[0], {
+      clientX: 100,
+      pointerId: 1,
+      button: 0,
+    });
+    expect(document.body.classList.contains("col-resizing")).toBe(true);
+    unmount();
+    expect(document.body.classList.contains("col-resizing")).toBe(false);
+  });
+
+  it("ignores non-numeric persisted widths", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ 0: "wide", 1: -10, 2: 120 }),
+    );
+    render(<Harness />);
+    expect(cols()[0].style.width).toBe("");
+    expect(cols()[1].style.width).toBe("");
+    expect(cols()[2].style.width).toBe("120px");
+  });
+
   it("resets a column to auto width on double-click of its handle", () => {
     render(<Harness />);
     dragHandle(0, 80);

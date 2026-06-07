@@ -5,6 +5,7 @@ import {
   type ReactElement,
   type ReactNode,
   useCallback,
+  useEffect,
   useRef,
   useState,
 } from "react";
@@ -45,7 +46,18 @@ function loadWidths(storageKey: string): Widths {
       return {};
     }
     const parsed = JSON.parse(raw);
-    return typeof parsed === "object" && parsed !== null ? parsed : {};
+    if (typeof parsed !== "object" || parsed === null) {
+      return {};
+    }
+    // Keep only finite positive widths; a hand-edited or corrupt entry must not
+    // feed a garbage `width` into the <col> style.
+    const clean: Widths = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        clean[Number(key)] = value;
+      }
+    }
+    return clean;
   } catch {
     // Corrupt/blocked storage must never break the table; fall back to auto.
     return {};
@@ -90,9 +102,9 @@ function ResizeHandle({
         if (e.button !== 0) {
           return;
         }
-        // Keep the handle owning the pointer so the drag tracks even if the
-        // cursor leaves it (no-op where unsupported, e.g. jsdom).
-        e.currentTarget.setPointerCapture?.(e.pointerId);
+        // The drag tracks via window-level pointermove/pointerup listeners
+        // (see beginResize), so the handle does not need to capture the
+        // pointer — those listeners fire wherever the cursor goes.
         e.preventDefault();
         onResizeStart(e.clientX);
       }}
@@ -108,6 +120,10 @@ export function ResizableTable({
 }: ResizableTableProps) {
   const tableRef = useRef<HTMLTableElement>(null);
   const [widths, setWidths] = useState<Widths>(() => loadWidths(storageKey));
+  // Teardown for the drag in progress, if any. Held in a ref so unmount
+  // cleanup can run it — pagination/state changes mid-drag can unmount the
+  // table while window listeners and the body cursor class are still live.
+  const endDragRef = useRef<(() => void) | null>(null);
 
   // The header cells are the first <tr> of the <thead> child; their count is
   // the column count and drives the <colgroup>.
@@ -168,17 +184,32 @@ export function ResizableTable({
       const onMove = (e: PointerEvent) => {
         setColumnWidth(index, startWidth + (e.clientX - startX));
       };
-      const onUp = () => {
+      // Shared teardown for a normal release (pointerup), a cancelled drag
+      // (pointercancel — e.g. the browser hijacks the pointer), and unmount.
+      const endDrag = () => {
         window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointerup", endDrag);
+        window.removeEventListener("pointercancel", endDrag);
         document.body.classList.remove("col-resizing");
+        endDragRef.current = null;
       };
       window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointerup", endDrag);
+      window.addEventListener("pointercancel", endDrag);
       document.body.classList.add("col-resizing");
+      endDragRef.current = endDrag;
     },
     [setColumnWidth],
   );
+
+  // If the table unmounts mid-drag (plausible when pagination/state changes
+  // swap it out), tear down the live window listeners and body cursor class so
+  // nothing is left stuck.
+  useEffect(() => {
+    return () => {
+      endDragRef.current?.();
+    };
+  }, []);
 
   // Re-render the header row with a resize handle appended to each cell.
   const decoratedThead =
