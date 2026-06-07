@@ -180,6 +180,11 @@ class FakeFileStore(FileStore):
         self.files[rel_path] = content
         self.writes.append((rel_path, content))
 
+    async def retain_if_changed(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        return None
+
     async def delete_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:

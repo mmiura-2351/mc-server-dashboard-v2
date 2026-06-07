@@ -380,6 +380,27 @@ class FileVersionStore(abc.ABC):
         """List retained prior versions of a file, newest-first."""
 
     @abc.abstractmethod
+    async def retain_file_version(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> None:
+        """Retain the current ``current/`` bytes of a file as a version, deduped.
+
+        Capture the file's current authoritative content into ``versions/``
+        (Section 5) the same way :meth:`FileStore.write_file` does on overwrite,
+        but **skip the capture when those bytes equal the newest retained
+        version** (compared by size, then content hash, so two large identical
+        blobs are not held in memory at once). This is the retain-only-if-changed
+        primitive a running-server edit's authoritative snapshot uses (issue #351)
+        so repeated identical snapshots do not churn the bounded version ring and
+        evict genuinely distinct at-rest versions.
+
+        A missing file (no authoritative copy yet) is a no-op (there is nothing to
+        retain), mirroring how a running edit of a not-yet-published file proceeds
+        unversioned. Unlike :meth:`FileStore.write_file`, this never mutates
+        ``current/`` — it only manages the version ring.
+        """
+
+    @abc.abstractmethod
     async def read_file_version(
         self,
         community_id: CommunityId,
