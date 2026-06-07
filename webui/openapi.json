@@ -617,6 +617,20 @@
         "title": "CreateServerRequest",
         "type": "object"
       },
+      "DeleteAccountRequest": {
+        "properties": {
+          "password": {
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "title": "DeleteAccountRequest",
+        "type": "object"
+      },
       "DirEntryResponse": {
         "properties": {
           "is_dir": {
@@ -5896,9 +5910,29 @@
     "/users/me": {
       "delete": {
         "operationId": "delete_account_users_me_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [

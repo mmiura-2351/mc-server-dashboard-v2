@@ -77,6 +77,19 @@ password change (`PUT /users/me/password`), and admin user creation
 | `contains_user_info` | Contains the username or the email local-part (`forbid_user_info`), matched case-insensitively. |
 | `simple_pattern` | Contains 4+ repeated characters or a 4+-long sequential run (`forbid_simple_patterns`). |
 
+### Re-authentication for destructive self-service actions
+
+Both self-service actions that are irreversible or revoke every session require
+the caller to re-supply their current password, verified against the stored hash
+before the action proceeds: password change (`PUT /users/me/password`, the
+`current_password` field) and account deletion (`DELETE /users/me`, the
+`password` field). A wrong current password returns the same uniform
+`401 invalid_credentials` that login returns — never a distinct "wrong password"
+signal — so neither endpoint can be used as a password-confirmation oracle. This
+re-auth check sits behind a valid access token and is therefore *not* fed into
+the Section 2 brute-force counters (those defend the unauthenticated login
+surface against username enumeration).
+
 ---
 
 ## 2. Brute-force protection

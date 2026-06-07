@@ -208,19 +208,48 @@ def test_delete_account_returns_204_and_audits() -> None:
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=None)
     client = next(_client(user, delete_account=fake, recorder=recorder))
-    resp = client.delete("/users/me")
+    resp = client.request("DELETE", "/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 204
-    assert fake.calls == [{"user_id": user.id}]
+    assert fake.calls == [{"user_id": user.id, "password": _VALID_PASSWORD}]
     assert [e.operation for e in recorder.events] == [ops.AUTH_ACCOUNT_DELETE]
     assert recorder.events[0].actor_id == user.id.value
     assert recorder.events[0].target_id == user.id.value
+
+
+def test_delete_account_wrong_password_returns_uniform_401() -> None:
+    # Re-auth (issue #420): a wrong password is the same uniform 401 the
+    # change-password endpoint returns, so it is no confirmation oracle.
+    user = make_user()
+    fake = _Fake(error=InvalidCredentialsError())
+    client = next(_client(user, delete_account=fake))
+    resp = client.request("DELETE", "/users/me", json={"password": "wrong"})
+    assert resp.status_code == 401
+    assert resp.json()["reason"] == "invalid_credentials"
+
+
+def test_delete_account_missing_password_returns_422() -> None:
+    user = make_user()
+    fake = _Fake(result=None)
+    client = next(_client(user, delete_account=fake))
+    resp = client.request("DELETE", "/users/me", json={})
+    assert resp.status_code == 422
+    assert fake.calls == []
+
+
+def test_delete_account_blank_password_returns_422() -> None:
+    user = make_user()
+    fake = _Fake(result=None)
+    client = next(_client(user, delete_account=fake))
+    resp = client.request("DELETE", "/users/me", json={"password": ""})
+    assert resp.status_code == 422
+    assert fake.calls == []
 
 
 def test_delete_account_owner_returns_409() -> None:
     user = make_user()
     fake = _Fake(error=CommunityOwnedError(str(uuid.uuid4())))
     client = next(_client(user, delete_account=fake))
-    resp = client.delete("/users/me")
+    resp = client.request("DELETE", "/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 409
     assert resp.json()["reason"] == "owns_community"
 
@@ -229,7 +258,7 @@ def test_delete_account_last_admin_returns_409() -> None:
     user = make_user()
     fake = _Fake(error=LastPlatformAdminError(str(uuid.uuid4())))
     client = next(_client(user, delete_account=fake))
-    resp = client.delete("/users/me")
+    resp = client.request("DELETE", "/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 409
     assert resp.json()["reason"] == "last_platform_admin"
 
@@ -238,6 +267,6 @@ def test_delete_account_user_gone_returns_401_invalid_token() -> None:
     user = make_user()
     fake = _Fake(error=UserNotFoundError(str(user.id.value)))
     client = next(_client(user, delete_account=fake))
-    resp = client.delete("/users/me")
+    resp = client.request("DELETE", "/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_token"
