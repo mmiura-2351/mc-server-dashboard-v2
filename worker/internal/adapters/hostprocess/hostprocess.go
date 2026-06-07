@@ -199,10 +199,27 @@ type instance struct {
 	// must close (issue #306). Nil in production.
 	beforeLaunch func()
 
+	// beforeSurvivedReset is a test-only hook fired inside Stop after the post-kill
+	// confirm wait times out but before re-acquiring the lock to reset the latch, so
+	// a test can drive the process exit (and supervise) into the exact window the
+	// survived-kill restore must not stomp (issue #392). Nil in production.
+	beforeSurvivedReset func()
+
 	mu       sync.Mutex
 	state    execution.ServerState
 	stopping bool
-	closed   bool
+	// stopRequested is a sticky record that a Stop was ever requested. Unlike
+	// stopping (which the survived-kill failure path resets so a retry re-runs the
+	// escalation, issue #253), it is never cleared, so supervise reports the
+	// eventual exit as stopped — not a spurious crash — even when the process
+	// survived the kill window and then died after the latch reset (issue #257).
+	stopRequested bool
+	// exitObserved is set by supervise under the lock the moment it observes the
+	// process exit, before recording the terminal state. The survived-kill restore
+	// checks it under the same lock and skips the reset when set, so it cannot stomp
+	// a terminal state supervise reached during the post-kill wait window (#392).
+	exitObserved bool
+	closed       bool
 
 	// cpu carries the previous CPU reading so Sample reports a rate (cpu_millis,
 	// thousandths of a core) over the interval between two samples.
@@ -452,6 +469,9 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 		return nil
 	}
 	i.stopping = true
+	// Record the stop intent stickily so supervise reports the eventual exit as
+	// stopped even if the survived-kill failure path later clears stopping (#257).
+	i.stopRequested = true
 	// Capture the pre-stop state before overwriting it with stopping: the
 	// survived-kill failure path (below) restores it rather than hardcoding running,
 	// so a stop escalation that hits the survived-kill error while the instance is
@@ -495,6 +515,9 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	// cancelled caller context must not be read as a lingering process when the
 	// process did in fact exit. Only the timeout means it survived.
 	if !i.waitExitDone(i.stopTimeout) {
+		if i.beforeSurvivedReset != nil {
+			i.beforeSurvivedReset()
+		}
 		// The process survived the kill, so this Stop failed but the process is
 		// still alive. Reset the stopping latch (and the recorded state back to its
 		// pre-stop value, since the process is still alive) so a subsequent Stop
@@ -502,11 +525,21 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 		// circuiting on the entry guard and returning a false success (issue #253).
 		// Restoring the prior state rather than hardcoding running keeps a
 		// still-starting instance labelled starting (issue #352). The reset is
-		// confined to this failure path: a successful stop or a terminal state keeps
-		// stopping latched so supervise reports the eventual exit as stopped and
-		// concurrent stops still dedupe. supervise has not run here (the process has
-		// not exited), so clearing stopping is safe.
+		// confined to this failure path: a successful stop keeps stopping latched so
+		// concurrent stops still dedupe.
+		//
+		// But the process can exit during the wait above, between waitExitDone
+		// timing out and re-acquiring the lock: supervise then sets a terminal state
+		// and the reset would stomp it back to prior, misreporting a dead process as
+		// alive (issue #392). Skip the reset entirely when supervise has observed the
+		// exit — the process is gone, supervise owns the terminal state, and there is
+		// nothing to retry. stopRequested stays set regardless, so supervise records
+		// stopped rather than a spurious crash (issue #257).
 		i.mu.Lock()
+		if i.exitObserved {
+			i.mu.Unlock()
+			return nil
+		}
 		i.stopping = false
 		i.state = prior
 		i.mu.Unlock()
@@ -574,7 +607,13 @@ func (i *instance) supervise() {
 	waitErr := i.currentProc().Wait()
 
 	i.mu.Lock()
-	stopping := i.stopping
+	// Mark the exit observed before recording the terminal state so the
+	// survived-kill restore, re-acquiring the lock, skips its reset rather than
+	// stomping the terminal state set below (issue #392). Read the sticky stop
+	// intent here too: a process that survived the kill window and then died after
+	// the latch was reset is still a requested stop, so report stopped (issue #257).
+	i.exitObserved = true
+	stopping := i.stopRequested
 	i.mu.Unlock()
 
 	if stopping {

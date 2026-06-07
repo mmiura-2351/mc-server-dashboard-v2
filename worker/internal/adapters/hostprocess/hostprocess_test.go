@@ -472,6 +472,71 @@ func TestSurvivedKillFromStartingDoesNotReportRunning(t *testing.T) {
 	}
 }
 
+// The process can exit during the post-kill confirm wait, in the window between
+// waitExitDone timing out and the survived-kill restore re-acquiring the lock:
+// supervise sets the terminal state, and the restore must not stomp it back to
+// the pre-stop state (issue #392). The beforeSurvivedReset hook drives the exit
+// and supervise into that exact window, then the restore runs.
+func TestSurvivedKillRestoreDoesNotStompTerminalState(t *testing.T) {
+	proc := newFakeProcess()
+	proc.killNoExit = true // the first confirm wait times out: the kill "survived"
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	in := inst.(*instance)
+	in.beforeSurvivedReset = func() {
+		// The process exits in the window; wait for supervise to record the terminal
+		// state before the restore re-acquires the lock.
+		proc.exit(errors.New("killed late"))
+		drainTo(t, inst.Events(), execution.StateStopped)
+	}
+
+	// The process did exit (during the window), so Stop succeeds rather than
+	// reporting a survived-kill failure.
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop = %v, want nil once the process exits in the wait window", err)
+	}
+	if got := inst.Status(); got != execution.StateStopped {
+		t.Fatalf("Status = %v after the exit-in-window Stop, want stopped (not stomped back)", got)
+	}
+}
+
+// A process that survives the kill for the whole timeout and then dies after the
+// survived-kill restore reset the stopping latch must still be recorded stopped,
+// not a spurious crash: a stop was requested (issue #257). The reset clears
+// stopping (so a retry can run), but the sticky stop intent makes supervise
+// report the operator-requested stop correctly.
+func TestSurvivedKillThenLateExitRecordsStopped(t *testing.T) {
+	proc := newFakeProcess()
+	proc.killNoExit = true // the kill survives for the whole confirm wait
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// The kill survives the whole timeout, so Stop fails with the survived-kill
+	// error and the latch is reset.
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected Stop to fail when the process survives SIGKILL")
+	}
+
+	// The orphan dies later; supervise must record it stopped, not crashed, because
+	// a stop was requested.
+	proc.exit(errors.New("died after reset"))
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if got := inst.Status(); got != execution.StateStopped {
+		t.Fatalf("Status = %v after the late exit, want stopped (not a spurious crash)", got)
+	}
+}
+
 // After a Stop that fails because the process survives SIGKILL, a retry Stop must
 // re-run the kill-and-confirm sequence rather than short-circuit on the stopping
 // latch. When the process then dies on the retry kill, the retry returns success
