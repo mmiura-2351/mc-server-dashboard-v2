@@ -1041,6 +1041,36 @@ body.col-resizing {
 .file-upload {
   cursor: pointer;
 }
+/* Styled file picker (issue #539): a design-token button drives a visually
+ * hidden — but still focusable — file input, with the chosen filename shown
+ * alongside. */
+.file-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.file-picker label {
+  cursor: pointer;
+}
+.file-picker-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.file-picker-input:focus-visible + .btn {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.file-picker-name {
+  font-size: 13px;
+  color: var(--text-dim);
+}
 .file-crumbs {
   font-size: 13px;
   color: var(--text-dim);

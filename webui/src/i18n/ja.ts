@@ -94,6 +94,8 @@ export const ja: Record<TranslationKey, string> = {
   "common.cancel": "キャンセル",
   "common.close": "閉じる",
   "common.resizeColumn": "ドラッグで幅を変更、ダブルクリックでリセット",
+  "common.chooseFile": "ファイルを選択",
+  "common.noFileChosen": "ファイルが選択されていません",
 
   // Account page (WEBUI_SPEC.md 6.11)
   "account.subtitle": "プロフィール、セキュリティ、メンバーシップ。",
