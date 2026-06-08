@@ -1544,7 +1544,10 @@ export interface components {
          * @description Admin view of a community: identity, age, and its operational counts.
          */
         AdminCommunityResponse: {
-            /** Created At */
+            /**
+             * Created At
+             * Format: date-time
+             */
             created_at: string;
             /** Id */
             id: string;
@@ -1571,7 +1574,10 @@ export interface components {
         AdminUserResponse: {
             /** Active */
             active: boolean;
-            /** Created At */
+            /**
+             * Created At
+             * Format: date-time
+             */
             created_at: string;
             /** Email */
             email: string;
@@ -1635,7 +1641,10 @@ export interface components {
          * @description One backup's metadata (DATABASE.md Section 8).
          */
         BackupResponse: {
-            /** Created At */
+            /**
+             * Created At
+             * Format: date-time
+             */
             created_at: string;
             /** Created By */
             created_by: string | null;
@@ -2135,9 +2144,15 @@ export interface components {
          *     stored on the row.
          */
         SessionResponse: {
-            /** Created At */
+            /**
+             * Created At
+             * Format: date-time
+             */
             created_at: string;
-            /** Expires At */
+            /**
+             * Expires At
+             * Format: date-time
+             */
             expires_at: string;
             /** Id */
             id: string;

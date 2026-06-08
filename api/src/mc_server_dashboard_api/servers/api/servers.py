@@ -53,6 +53,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_server_update_authz,
 )
+from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
@@ -183,7 +184,7 @@ class ServerResponse(BaseModel):
     game_port: int | None
     desired_state: str
     observed_state: str
-    observed_at: str | None
+    observed_at: UtcDatetime | None
     assigned_worker_id: str | None
 
     @classmethod
@@ -200,9 +201,7 @@ class ServerResponse(BaseModel):
             game_port=server.game_port,
             desired_state=server.desired_state.value,
             observed_state=server.observed_state.value,
-            observed_at=(
-                None if server.observed_at is None else server.observed_at.isoformat()
-            ),
+            observed_at=server.observed_at,
             assigned_worker_id=(
                 None
                 if server.assigned_worker_id is None

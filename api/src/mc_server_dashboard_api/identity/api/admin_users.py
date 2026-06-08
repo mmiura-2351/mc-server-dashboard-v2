@@ -33,6 +33,7 @@ from mc_server_dashboard_api.dependencies import (
     get_set_user_active,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.api.users import UserResponse
 from mc_server_dashboard_api.identity.application.admin_create_user import (
@@ -71,7 +72,7 @@ class AdminUserResponse(BaseModel):
     email: str
     is_platform_admin: bool
     active: bool
-    created_at: str
+    created_at: UtcDatetime
 
     @classmethod
     def from_entity(cls, user: User) -> "AdminUserResponse":
@@ -81,7 +82,7 @@ class AdminUserResponse(BaseModel):
             email=user.email.value,
             is_platform_admin=user.is_platform_admin,
             active=user.active,
-            created_at=user.created_at.isoformat(),
+            created_at=user.created_at,
         )
 
 

@@ -418,7 +418,8 @@ def test_statistics_returns_aggregate() -> None:
     assert body["count"] == 2
     assert body["total_bytes"] == 30
     assert body["unknown_size_count"] == 1
-    assert body["newest"] == _NOW.isoformat()
+    # Canonical RFC 3339 UTC form: the ``Z`` suffix, not ``+00:00`` (issue #632).
+    assert body["newest"] == "2026-06-04T12:00:00Z"
 
 
 def test_statistics_unknown_server_is_404() -> None:

@@ -31,6 +31,7 @@ from mc_server_dashboard_api.dependencies import (
     get_revoke_session,
     get_update_profile,
 )
+from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.application.change_password import ChangePassword
 from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
@@ -279,15 +280,15 @@ class SessionResponse(BaseModel):
     """
 
     id: str
-    created_at: str
-    expires_at: str
+    created_at: UtcDatetime
+    expires_at: UtcDatetime
 
     @classmethod
     def from_entity(cls, token: RefreshToken) -> "SessionResponse":
         return cls(
             id=str(token.id.value),
-            created_at=token.issued_at.isoformat(),
-            expires_at=token.expires_at.isoformat(),
+            created_at=token.issued_at,
+            expires_at=token.expires_at,
         )
 
 
