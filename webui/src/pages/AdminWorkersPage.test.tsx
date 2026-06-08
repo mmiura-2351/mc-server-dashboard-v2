@@ -32,6 +32,12 @@ const ADMIN = {
   is_platform_admin: true,
 };
 
+// Pinned "now" so the heartbeat-age fixtures below and the relative-time
+// assertions in the render test see a deterministic clock (#614). Without it the
+// wall-clock can cross the 5s→6s boundary between fixture construction and
+// assertion under parallel load, flaking "5s ago" into "6s ago".
+const NOW = new Date("2026-01-01T00:00:00Z");
+
 // worker-a: online (3 GiB / 4 cores, recent heartbeat). worker-b: draining.
 const WORKERS = {
   workers: [
@@ -40,8 +46,8 @@ const WORKERS = {
       version: "0.9.2",
       status: "online",
       assigned_count: 2,
-      last_heartbeat_at: new Date(Date.now() - 5_000).toISOString(),
-      registered_at: new Date().toISOString(),
+      last_heartbeat_at: new Date(NOW.getTime() - 5_000).toISOString(),
+      registered_at: NOW.toISOString(),
       capabilities: {
         drivers: ["container", "process"],
         max_servers: 8,
@@ -53,8 +59,8 @@ const WORKERS = {
       version: "0.9.2",
       status: "draining",
       assigned_count: 1,
-      last_heartbeat_at: new Date(Date.now() - 120_000).toISOString(),
-      registered_at: new Date().toISOString(),
+      last_heartbeat_at: new Date(NOW.getTime() - 120_000).toISOString(),
+      registered_at: NOW.toISOString(),
       capabilities: {
         drivers: ["container"],
         max_servers: 4,
@@ -98,10 +104,19 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // Restore the real clock for tests that pin it with fake timers (#614); a
+  // no-op for the cases that never enabled them.
+  vi.useRealTimers();
 });
 
 describe("admin workers page", () => {
   it("renders the fleet with humanized bytes and heartbeat age", async () => {
+    // Pin the clock to NOW so heartbeatAge sees a deterministic now and the
+    // relative-time assertions below stay stable (#614). shouldAdvanceTime
+    // keeps async polling (findBy*, react-query) progressing under fake timers.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+
     signedIn();
 
     renderApp({ path: "/admin/workers" });
