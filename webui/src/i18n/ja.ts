@@ -333,6 +333,9 @@ export const ja: Record<TranslationKey, string> = {
   // Stats header.
   "backups.stat.count": "バックアップ数",
   "backups.stat.totalSize": "合計サイズ",
+  // Shown beside the total when some backups have no recorded size (legacy
+  // NULL-size rows, #281): the figure sums only the known sizes (#640).
+  "backups.stat.totalSizePartial": "判明分のみ",
   "backups.stat.newest": "最新",
   "backups.stat.oldest": "最古",
   // Table.
