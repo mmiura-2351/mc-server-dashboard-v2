@@ -71,6 +71,14 @@ class RefreshSession:
             stored = await self.uow.refresh_tokens.get_by_token_hash(token_hash)
             if stored is None or stored.expires_at <= now:
                 raise InvalidRefreshTokenError
+            if stored.revoked_reason == REVOKED_SUPERSEDED:
+                # A *superseded* token was retired because the body token won
+                # precedence on a both-transports request (issue #384); no client
+                # holds it and it is NOT evidence of theft. Re-presenting it is
+                # plainly invalid -- it must NOT trip reuse/family-wide revocation,
+                # which would log out the (benign) device that owned it. Treat it
+                # like a dead token, distinct from the rotation-reuse theft path.
+                raise InvalidRefreshTokenError
             if stored.revoked_at is not None and not (
                 stored.revoked_reason == REVOKED_ROTATED
                 and now - stored.revoked_at <= self.reuse_grace

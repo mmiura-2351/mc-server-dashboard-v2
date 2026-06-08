@@ -62,9 +62,11 @@ REVOKED_USER = "user_revoked"
 # the body token won precedence (issue #384). The browser jar overwrote it with
 # the body token's successor, so no client holds it any more -- revoking it closes
 # the dangling-valid-token gap. It is a *single-token* revoke (never a family
-# revoke), so the just-issued successor in the same family is untouched. Like the
-# other non-rotation reasons it is never graced: the grace covers only ``ROTATED``
-# predecessors.
+# revoke), so the just-issued successor in the same family is untouched. It is
+# never graced (the grace covers only ``ROTATED`` predecessors); unlike ``FAMILY``
+# / ``LOGOUT``, however, re-presenting a superseded token is NOT theft -- no client
+# holds it and it lost precedence benignly -- so it is treated as a plain invalid
+# token (``InvalidRefreshTokenError``) rather than tripping reuse/family revocation.
 REVOKED_SUPERSEDED = "superseded"
 
 

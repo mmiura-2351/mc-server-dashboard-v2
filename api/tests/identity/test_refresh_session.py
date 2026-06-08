@@ -235,6 +235,34 @@ async def test_logout_revoked_token_within_grace_is_rejected() -> None:
     assert uow.commits == 1
 
 
+async def test_superseded_revoked_token_re_presented_is_plainly_invalid() -> None:
+    # Issue #384: a *superseded* token was retired because the body token won
+    # precedence on a both-transports request -- no client holds it and it is NOT
+    # evidence of theft. Re-presenting it must be a plain InvalidRefreshTokenError,
+    # NOT the reuse/family path: tripping family-wide revocation here would log out
+    # the benign device that owned it. Unlike ``family`` / ``logout`` (which stay on
+    # the theft path), ``superseded`` is exempted. Revoked 5 s ago, well inside the
+    # grace window, to show recency does not pull it onto the theft path either.
+    uow = FakeUnitOfWork()
+    sibling_hash = _seed_token(uow, secret="sibling")
+    _seed_token(
+        uow,
+        secret="superseded-cookie",
+        revoked_at=_NOW - dt.timedelta(seconds=5),
+        revoked_reason=REVOKED_SUPERSEDED,
+    )
+    clock = FakeClock(_NOW)
+
+    with pytest.raises(InvalidRefreshTokenError) as exc_info:
+        await _refresh(uow, clock)(refresh_token="superseded-cookie")
+
+    # Plain invalid: not a RefreshTokenReuseError, so the family is not nuked --
+    # the user's other active session survives -- and nothing is committed.
+    assert not isinstance(exc_info.value, RefreshTokenReuseError)
+    assert uow.refresh_tokens.by_hash[sibling_hash].revoked_at is None
+    assert uow.commits == 0
+
+
 async def test_superseded_cookie_token_is_revoked_and_successor_stays_active() -> None:
     # Both-transports refresh: the body token rotates as today, and the
     # cookie-carried token (same family, lost precedence) is revoked as a benign
