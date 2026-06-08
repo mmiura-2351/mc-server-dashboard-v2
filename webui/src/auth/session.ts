@@ -84,6 +84,13 @@ async function doRefresh(): Promise<boolean> {
  * revoked predecessor cookie in the jar. Rotation stays on the periodic
  * in-session `/api/auth/refresh` path (`refreshSession`). 200 stores the access
  * token and resolves true; any failure resolves false (signed out).
+ *
+ * A 401 here is the documented "no session" signal (the normal state on /login
+ * and after logout), not an error: it must resolve false silently, never
+ * `console.error`/throw (issue #641). The browser still emits its own
+ * "Failed to load resource: ... 401" line for the non-2xx response — that line
+ * is native and cannot be suppressed from JS; only app-level logging is in our
+ * control, and there is intentionally none.
  */
 export async function restoreSession(): Promise<boolean> {
   let response: Response;
