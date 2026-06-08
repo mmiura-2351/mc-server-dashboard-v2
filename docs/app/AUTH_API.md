@@ -98,7 +98,9 @@ branches on exactly one contract:
   code is its terminal segment **and** is surfaced verbatim as the `reason`
   extension member, so clients switch on `reason` without parsing the URI.
 - A `422` validation failure adds an `errors` extension member (the per-field
-  list) and uses `reason: "validation_error"`.
+  list) and uses `reason: "validation_error"`. A malformed (non-UUID) path id
+  (e.g. `server_id`, `community_id`) is a standard FastAPI path-param validation
+  error and likewise yields a `422`, reported once (issues #630, #631).
 - A `403` permission denial (the membership permission gate) keeps the stable
   `reason: "forbidden"` and adds a `permission` extension member naming the
   required permission code (e.g. `"permission": "server:start"`), so the Web UI
@@ -304,11 +306,14 @@ are on `/api/users/me/sessions`, so — unlike `/auth/*` — they authenticate b
 
 **List** returns only **active** (non-revoked, non-expired) sessions of the
 caller, newest-first. Each item is safe metadata only — the row id (an opaque
-session id used to address a revoke) plus `created_at` and `expires_at`:
+session id used to address a revoke) plus `created_at` and `expires_at`. Both
+timestamps — like every UTC datetime field on the HTTP surface — serialize as
+canonical RFC 3339 with the `Z` suffix and are pinned `format: date-time` in the
+OpenAPI schema (issue #632):
 
 ```json
 [
-  { "id": "<uuid>", "created_at": "<ISO 8601>", "expires_at": "<ISO 8601>" }
+  { "id": "<uuid>", "created_at": "2026-06-08T09:22:22Z", "expires_at": "2026-06-22T09:22:22Z" }
 ]
 ```
 
