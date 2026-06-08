@@ -5,6 +5,21 @@ import { clearAccessToken } from "./auth/tokenStore.ts";
 import { t } from "./i18n/index.ts";
 import { renderApp } from "./test/render.tsx";
 
+// Suspend the account route indefinitely so the lazy-chunk loading frame is
+// observable: the component throws a never-resolving promise on render, exactly
+// as React.lazy does while its chunk is in flight. Lets the test assert which
+// boundary catches the suspension — the shell's inner one, not an outer one.
+// (Account is a shell route no other case in this file visits, so the broad
+// module mock does not disturb the dashboard-rendering tests.)
+vi.mock("./pages/AccountPage.tsx", () => {
+  const pending = new Promise<void>(() => {});
+  return {
+    AccountPage: () => {
+      throw pending;
+    },
+  };
+});
+
 // The bootstrap refresh decides signed-in vs signed-out. A 200 token response
 // signs in; a 401 signs out; a pending promise keeps it "bootstrapping".
 function tokenResponse(): Response {
@@ -183,6 +198,23 @@ describe("App route guards", () => {
         "/communities/demo/servers/s1?tab=logs",
       ),
     );
+  });
+
+  it("keeps the shell mounted while a lazy route chunk loads", async () => {
+    signedInWith([{ id: "alpha", name: "Alpha" }]);
+
+    renderAt("/account");
+
+    // The account route suspends (mocked above), so the content area shows the
+    // loading fallback — but the shell chrome must stay mounted. With the
+    // Suspense boundary inside AppShell around <Outlet>, the sidebar nav renders
+    // alongside the fallback instead of being torn down to the bare fallback.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("link", { name: t("nav.dashboard") }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText(t("auth.loading"))).toBeInTheDocument();
   });
 
   it("renders the login page for signed-out users without shell chrome", async () => {

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { Suspense, useEffect } from "react";
 import { Link, NavLink, Outlet, useNavigate, useParams } from "react-router";
 import { useCurrentUser } from "../auth/useCurrentUser.ts";
 import {
@@ -186,7 +186,20 @@ export function AppShell() {
           </NavLink>
         </header>
         <main className="content">
-          <Outlet />
+          {/* The lazy-route Suspense boundary lives here, around <Outlet>, so a
+              not-yet-cached page chunk (#553) suspends only the content area —
+              the sidebar/top bar stay mounted instead of the whole shell
+              flashing through the app-level fallback (#602). The fallback
+              mirrors App's SessionLoading. */}
+          <Suspense
+            fallback={
+              <div className="auth-wrap" role="status">
+                {t("auth.loading")}
+              </div>
+            }
+          >
+            <Outlet />
+          </Suspense>
         </main>
       </div>
     </div>
