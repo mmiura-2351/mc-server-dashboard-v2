@@ -40,7 +40,10 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.identity.application.issue_tokens import issue_token_pair
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.clock import Clock
-from mc_server_dashboard_api.identity.domain.entities import REVOKED_ROTATED
+from mc_server_dashboard_api.identity.domain.entities import (
+    REVOKED_ROTATED,
+    REVOKED_SUPERSEDED,
+)
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidRefreshTokenError,
     RefreshTokenReuseError,
@@ -59,12 +62,22 @@ class RefreshSession:
     refresh_ttl: dt.timedelta
     reuse_grace: dt.timedelta
 
-    async def __call__(self, *, refresh_token: str) -> TokenPair:
+    async def __call__(
+        self, *, refresh_token: str, superseded_token: str | None = None
+    ) -> TokenPair:
         token_hash = self.tokens.hash_refresh_token(refresh_token)
         now = self.clock.now()
         async with self.uow:
             stored = await self.uow.refresh_tokens.get_by_token_hash(token_hash)
             if stored is None or stored.expires_at <= now:
+                raise InvalidRefreshTokenError
+            if stored.revoked_reason == REVOKED_SUPERSEDED:
+                # A *superseded* token was retired because the body token won
+                # precedence on a both-transports request (issue #384); no client
+                # holds it and it is NOT evidence of theft. Re-presenting it is
+                # plainly invalid -- it must NOT trip reuse/family-wide revocation,
+                # which would log out the (benign) device that owned it. Treat it
+                # like a dead token, distinct from the rotation-reuse theft path.
                 raise InvalidRefreshTokenError
             if stored.revoked_at is not None and not (
                 stored.revoked_reason == REVOKED_ROTATED
@@ -104,5 +117,27 @@ class RefreshSession:
                 now=now,
                 refresh_ttl=self.refresh_ttl,
             )
+            # Both-transports refresh: the cookie-carried token lost precedence to
+            # the body token and was overwritten in the browser jar, so no client
+            # holds it any more. Revoke it as a benign *superseded* token -- a
+            # single-token revoke, never the reuse/family path -- so it can no
+            # longer refresh while the successor just issued above (possibly in the
+            # same family) stays active (issue #384).
+            await self._revoke_superseded(superseded_token, token_hash, now)
             await self.uow.commit()
         return pair
+
+    async def _revoke_superseded(
+        self, superseded_token: str | None, used_hash: str, now: dt.datetime
+    ) -> None:
+        if superseded_token is None:
+            return
+        superseded_hash = self.tokens.hash_refresh_token(superseded_token)
+        if superseded_hash == used_hash:
+            return  # Same token in both transports: already rotated above, no-op.
+        stored = await self.uow.refresh_tokens.get_by_token_hash(superseded_hash)
+        if stored is None or not stored.is_active(now=now):
+            return  # Unknown / already revoked / expired: ignore gracefully.
+        await self.uow.refresh_tokens.revoke(
+            superseded_hash, revoked_at=now, reason=REVOKED_SUPERSEDED
+        )

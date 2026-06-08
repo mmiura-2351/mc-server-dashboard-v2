@@ -149,7 +149,14 @@ router — the security posture, not knobs.
 
 - **Body-token-wins precedence.** On refresh and logout, the body token is used
   when present; the cookie is a fallback for when the body carries none. If both
-  are present, the body token is used.
+  are present, the body token is used, and the cookie-carried token (a different
+  token) is **revoked as superseded** — the browser jar is overwritten with the
+  body token's successor, so the cookie token is held by no client and would
+  otherwise dangle valid server-side until its TTL (issue #384). It is a
+  *single-token* revoke (`revoked_reason = 'superseded'`, never graced), so a
+  same-family successor just issued by the rotation is untouched. If the cookie
+  carried the *same* token as the body, or one that is already revoked / expired /
+  unknown, the revoke is a no-op and the request still succeeds.
 - **Cookie emission follows cookie *presence*, not which token was used**
   (issue #372). Refresh re-sets (rotates) the cookie, and logout clears it,
   **only when the request itself carried the cookie**. A body-only request
@@ -173,14 +180,21 @@ default **60s**):
 | Presented token | Within grace window | Outside window / any time |
 |---|---|---|
 | rotated predecessor (revoked by rotation) | `200` + fresh pair, **family intact** | `401`, **whole family revoked** + `auth:refresh_reuse` DENIED audit event |
-| family- or logout-revoked token | `401`, whole family revoked + DENIED audit event | same |
+| family- / logout-revoked token | `401`, whole family revoked + DENIED audit event | same |
+| superseded-revoked token | `401` (no family action, not audited) | same |
 | unknown / expired token | `401` (no family action, not audited) | same |
 
 Only a *rotation*-revoked predecessor is ever graced. A token revoked by a family
-revoke (the theft response, or password change / deactivate / delete) or by
-logout is never graced — re-presenting it stays on the theft path regardless of
-how recent the revocation is. The grace-window predecessor is **not** re-revoked,
+revoke (the theft response, or password change / deactivate / delete) or by logout
+is never graced — re-presenting it stays on the theft path regardless of how
+recent the revocation is. The grace-window predecessor is **not** re-revoked,
 so repeated reuse cannot roll the window forward and keep a leaked token alive.
+
+A *superseded* both-transports cookie token (issue #384) is treated differently:
+it was retired because the body token won precedence, so no client holds it and it
+is **not** evidence of theft. Re-presenting it is therefore a plain `401`
+(`InvalidRefreshTokenError`) — it does **not** trip reuse detection or revoke the
+family, which would otherwise log out the benign device that owned the cookie.
 
 **`/auth/session` does not rotate; it leaves the rotation/reuse-detection
 mechanism on `/auth/refresh` unchanged, but it does remove one *incidental*

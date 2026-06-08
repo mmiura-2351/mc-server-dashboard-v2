@@ -176,13 +176,20 @@ async def refresh(
     refresh_token = body.refresh_token or cookie_token
     if refresh_token is None:
         raise _unauthorized()
+    # Both transports carried a token: the body wins, but the cookie's token is
+    # superseded -- the browser jar will be overwritten with the body token's
+    # successor below, so revoke the cookie token too rather than leave it dangling
+    # valid server-side (issue #384). Single transport: nothing to supersede.
+    superseded_token = cookie_token if body.refresh_token is not None else None
     # Reuse of an already-rotated token (RefreshTokenReuseError) triggers a family
     # revocation in the use case; record it as a DENIED security event attributed
     # to the affected user (FR-AUD-1). A plain unknown/expired token raises the
     # base InvalidRefreshTokenError and is not audited (proportionate: it is not a
     # token-theft signal). Both map to the same uniform 401 (no client signal).
     try:
-        pair = await use_case(refresh_token=refresh_token)
+        pair = await use_case(
+            refresh_token=refresh_token, superseded_token=superseded_token
+        )
     except RefreshTokenReuseError as exc:
         await recorder.record(
             AuditEvent(
@@ -265,7 +272,11 @@ async def logout(
     refresh_token = body.refresh_token or cookie_token
     if refresh_token is None:
         return response
-    await use_case(refresh_token=refresh_token)
+    # Both transports carried a token: revoke the superseded cookie token too, so
+    # logout does not leave it dangling valid server-side (issue #384). Single
+    # transport: nothing to supersede.
+    superseded_token = cookie_token if body.refresh_token is not None else None
+    await use_case(refresh_token=refresh_token, superseded_token=superseded_token)
     await recorder.record(
         AuditEvent(operation=ops.AUTH_LOGOUT, outcome=Outcome.SUCCESS)
     )
