@@ -1,13 +1,13 @@
 # Documentation Index
 
-Long-form documentation for the Minecraft Server Dashboard **v2**. A top-level
-`README.md` (planned) will carry the elevator pitch and quick start; everything
-that needs more than a paragraph lives here.
-
-> **This repository is in early construction.** The canonical document today is
-> [`REQUIREMENTS.md`](REQUIREMENTS.md). The application and development docs
-> below are filled in as the system is designed and built; entries marked
-> *(planned)* do not exist yet.
+Long-form documentation for the Minecraft Server Dashboard **v2**. The
+[root README](../README.md) carries the elevator pitch, philosophy, and
+architecture overview; everything that needs more than a paragraph lives here.
+[`REQUIREMENTS.md`](REQUIREMENTS.md) is the source of truth for scope. The four
+modules each have their own README ([`api/`](../api/README.md),
+[`worker/`](../worker/README.md), [`webui/`](../webui/README.md),
+[`proto/`](../proto/README.md)); the per-screen Web UI specs live in
+[`ui/`](ui/).
 
 Docs are split by intent:
 
@@ -44,7 +44,7 @@ Docs are split by intent:
 | Doc | What it covers |
 |---|---|
 | [`dev/CONTRIBUTING.md`](dev/CONTRIBUTING.md) | The change workflow: issues, branch naming, commits, pull requests, review hygiene, and squash-merge. |
-| [`dev/TESTING.md`](dev/TESTING.md) | The test-driven development discipline (Kent Beck): the red/green/refactor cycle, working disciplines, Tidy First, and what a good test looks like. Concrete tooling is per-component and forthcoming. |
+| [`dev/TESTING.md`](dev/TESTING.md) | The test-driven development discipline (Kent Beck): the red/green/refactor cycle, working disciplines, Tidy First, and what a good test looks like. Concrete tooling is per-component (`make test`; see the module READMEs). |
 | [`dev/RELEASING.md`](dev/RELEASING.md) | Versioning policy (a single repository-wide SemVer version), tag naming, and generated release notes (no hand-maintained CHANGELOG). The tag-driven release workflow; the git tag is the version source of truth. |
 | [`dev/DEPENDENCIES.md`](dev/DEPENDENCIES.md) | Pinning style, the 7-day supply-chain cooldown, security-update handling, and the automated-update policy across the Python and Go ecosystems. |
 | [`dev/DEVELOPMENT.md`](dev/DEVELOPMENT.md) | Day-to-day developer workflow: prerequisites and first-time setup, the common command table (root unified commands + per-module READMEs), where code lives, the import-direction rules and how to run them, and the proto regeneration loop. |
