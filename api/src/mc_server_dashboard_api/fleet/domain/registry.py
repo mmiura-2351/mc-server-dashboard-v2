@@ -54,12 +54,32 @@ class WorkerRegistry(abc.ABC):
     """Port: the live registry of connected Workers and their liveness."""
 
     @abc.abstractmethod
-    def register(self, worker: Worker) -> SessionToken:
+    def register(
+        self, worker: Worker, held_server_ids: frozenset[str] = frozenset()
+    ) -> SessionToken:
         """Add or replace the record for ``worker.id`` (FR-WRK-1).
 
         Return a fresh :data:`SessionToken` identifying this registration; the
         caller passes it back to :meth:`mark_disconnected` so a stale Session's
         teardown cannot offline a Worker that has since reconnected.
+
+        ``held_server_ids`` is the set of server ids whose working set the Worker
+        reported it already holds in its persistent scratch at registration (issue
+        #696). It is recorded so the lifecycle layer can skip the destructive
+        hydrate on a same-worker restart (see :meth:`holds_working_set`). A
+        re-registration REPLACES the prior set — the control plane keeps no
+        cross-stream session state (CONTROL_PLANE.md Section 4.4).
+        """
+
+    @abc.abstractmethod
+    def holds_working_set(self, worker_id: WorkerId, server_id: str) -> bool:
+        """Return whether ``worker_id`` reported holding ``server_id``'s working set.
+
+        Answers from the ids the Worker advertised on its current registration
+        (issue #696). False for an unknown Worker, and false once the Worker
+        re-registers without that id (e.g. its scratch was wiped) — so the
+        lifecycle layer hydrates rather than booting a server on an empty/absent
+        working set.
         """
 
     @abc.abstractmethod

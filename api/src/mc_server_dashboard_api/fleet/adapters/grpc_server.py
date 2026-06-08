@@ -291,7 +291,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 capabilities=_capabilities_from_proto(register.capabilities),
                 registered_at=now,
                 last_heartbeat_at=now,
-            )
+            ),
+            # The working sets the Worker reports already on its persistent scratch
+            # (issue #696); recorded so the lifecycle layer skips the destructive
+            # hydrate on a same-worker restart.
+            held_server_ids=frozenset(register.held_server_ids),
         )
         _LOG.info("worker registered", extra={"worker_id": worker_id.value})
         return worker_id, first.correlation_id, session

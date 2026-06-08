@@ -202,7 +202,7 @@ holding different roles in each, and may also be a platform administrator.
         │  Worker (stateless / replaceable)                                                 │
         │  ExecutionDriver ──▶ [ host-process | container | (k8s-ready) ]                   │
         │  Runs MC in a local scratch working dir; manages it (RCON, signals)               │
-        │  Holds no authoritative data: hydrate on start, snapshot on stop / interval       │
+        │  Holds no authoritative data: hydrate on placement, snapshot on stop / interval   │
         └───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -386,8 +386,13 @@ Requirements:
   Storage backend directly; the API mediates all transfer (API-mediated data
   plane).
 - FR-DATA-4: Runtime data lifecycle (snapshot-based sync):
-  - **Start**: API drives hydrate of the server's working set from Storage to
-    the assigned Worker's local scratch; then the Worker launches MC.
+  - **Start**: on placement onto a Worker that does not already hold the working
+    set, the API drives hydrate of the server's working set from Storage to that
+    Worker's local scratch; then the Worker launches MC. A same-worker restart
+    starts on the Worker's existing scratch (the live, newer working set) without
+    hydrating, so a restart does not roll the world back to the last snapshot
+    (issue #696). The Worker advertises which working sets it already holds at
+    registration, and the skip is gated on that live presence.
   - **Running**: MC writes to the Worker's local scratch; the authoritative copy
     is temporarily stale.
   - **Stop / interval**: the Worker's working set is snapshotted back to Storage.

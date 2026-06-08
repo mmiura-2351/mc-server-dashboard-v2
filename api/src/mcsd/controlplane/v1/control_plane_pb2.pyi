@@ -380,6 +380,7 @@ class Register(_message.Message):
     WORKER_ID_FIELD_NUMBER: _builtins.int
     WORKER_VERSION_FIELD_NUMBER: _builtins.int
     CAPABILITIES_FIELD_NUMBER: _builtins.int
+    HELD_SERVER_IDS_FIELD_NUMBER: _builtins.int
     worker_id: _builtins.str
     """worker_id is the stable identifier the Worker registers under
     (CONFIGURATION.md Section 6.1 worker.id).
@@ -392,16 +393,30 @@ class Register(_message.Message):
         placement filters on (FR-WRK-3).
         """
 
+    @_builtins.property
+    def held_server_ids(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """held_server_ids advertises the server ids whose working set the Worker
+        already holds in its persistent local scratch at registration: the immediate
+        subdirectories of the scratch root named for a server that are NON-EMPTY
+        (issue #696). The API uses this to skip the destructive hydrate on a
+        same-worker restart — hydrating would unpack the last authoritative snapshot
+        over the Worker's LIVE, newer working set and roll the world back. The field
+        is additive: an older Worker leaves it empty, and the API then hydrates as
+        before (the historical behaviour), so no same-worker restart silently boots a
+        fresh/empty world.
+        """
+
     def __init__(
         self,
         *,
         worker_id: _builtins.str = ...,
         worker_version: _builtins.str = ...,
         capabilities: Global___WorkerCapabilities | None = ...,
+        held_server_ids: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["capabilities", b"capabilities"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["capabilities", b"capabilities", "worker_id", b"worker_id", "worker_version", b"worker_version"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["capabilities", b"capabilities", "held_server_ids", b"held_server_ids", "worker_id", b"worker_id", "worker_version", b"worker_version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

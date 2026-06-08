@@ -14,6 +14,12 @@ type Capabilities struct {
 	WorkerVersion string
 	Drivers       []string
 	MaxServers    uint32
+	// HeldServerIDs is the set of server ids whose working set this Worker already
+	// holds in its persistent local scratch at registration (issue #696). The
+	// adapter maps it onto the wire Register.held_server_ids; the API uses it to
+	// skip the destructive hydrate on a same-worker restart (a hydrate would clobber
+	// the Worker's live, newer working set with the last authoritative snapshot).
+	HeldServerIDs []string
 }
 
 // RegisterAck is the API's answer to a Register (CONTROL_PLANE.md Section 4.1).

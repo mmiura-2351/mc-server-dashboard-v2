@@ -69,6 +69,9 @@ func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) e
 			Register: &controlplanev1.Register{
 				WorkerId:      caps.WorkerID,
 				WorkerVersion: caps.WorkerVersion,
+				// held_server_ids advertises the working sets this Worker already holds
+				// so the API skips a destructive hydrate on a same-worker restart (#696).
+				HeldServerIds: caps.HeldServerIDs,
 				Capabilities: &controlplanev1.WorkerCapabilities{
 					Drivers:    mapDrivers(caps.Drivers),
 					MaxServers: caps.MaxServers,

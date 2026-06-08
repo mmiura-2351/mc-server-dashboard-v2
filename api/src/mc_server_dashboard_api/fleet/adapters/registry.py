@@ -51,13 +51,26 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # drain intent survives the Go agent's automatic reconnect; only the
         # DELETE drain endpoint clears it (FR-WRK-5).
         self._drained: set[WorkerId] = set()
+        # The server ids each connected Worker reported it already holds in its
+        # persistent scratch at its current registration (issue #696). Replaced on
+        # every (re)register, so it tracks only the live session's reality; the
+        # lifecycle layer reads it via holds_working_set to skip the destructive
+        # hydrate on a same-worker restart.
+        self._held: dict[WorkerId, frozenset[str]] = {}
 
-    def register(self, worker: Worker) -> SessionToken:
+    def register(
+        self, worker: Worker, held_server_ids: frozenset[str] = frozenset()
+    ) -> SessionToken:
         # Re-apply any standing drain intent: a re-registering worker that was
         # drained must come back DRAINING, not silently ONLINE.
         if worker.id in self._drained:
             worker = worker.start_draining()
         self._workers[worker.id] = worker
+        # Replace the held-working-set inventory with what THIS registration
+        # reported (issue #696): a reconnect whose scratch was wiped reports fewer
+        # ids, so a stale "held" claim never survives a re-register and the
+        # lifecycle layer hydrates rather than booting an empty working set.
+        self._held[worker.id] = held_server_ids
         # Assignment counts reset on (re)register; the server-lifecycle layer
         # (epic #7) MUST reconcile counts from worker status reports after
         # reconnect — a reconnected worker may still be running servers.
@@ -66,6 +79,9 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         self._next_session += 1
         self._sessions[worker.id] = session
         return session
+
+    def holds_working_set(self, worker_id: WorkerId, server_id: str) -> bool:
+        return server_id in self._held.get(worker_id, frozenset())
 
     def record_heartbeat(self, worker_id: WorkerId, at: dt.datetime) -> None:
         worker = self._workers.get(worker_id)

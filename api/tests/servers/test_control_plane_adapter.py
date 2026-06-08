@@ -370,3 +370,32 @@ def test_is_worker_connected_false_for_offline_worker() -> None:
     adapter = _registry_adapter(registry)
 
     assert adapter.is_worker_connected(worker_id=WorkerId(worker_uuid)) is False
+
+
+# --- holds_working_set bridges UUID server-id to the registry string (#696) --
+
+
+def test_holds_working_set_reflects_reported_ids() -> None:
+    worker_uuid = uuid.uuid4()
+    server_uuid = uuid.uuid4()
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    registry.register(
+        make_worker(worker_id=str(worker_uuid), at=_T0),
+        held_server_ids=frozenset({str(server_uuid)}),
+    )
+
+    adapter = _registry_adapter(registry)
+
+    assert (
+        adapter.holds_working_set(
+            worker_id=WorkerId(worker_uuid), server_id=ServerId(server_uuid)
+        )
+        is True
+    )
+    assert (
+        adapter.holds_working_set(
+            worker_id=WorkerId(worker_uuid), server_id=ServerId(uuid.uuid4())
+        )
+        is False
+    )

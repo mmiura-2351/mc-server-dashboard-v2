@@ -143,6 +143,20 @@ class ControlPlane(abc.ABC):
         """
 
     @abc.abstractmethod
+    def holds_working_set(self, *, worker_id: WorkerId, server_id: ServerId) -> bool:
+        """Return whether ``worker_id`` reported holding ``server_id``'s working set.
+
+        Answers from the held-working-set inventory the Worker advertised on its
+        current registration (issue #696). The lifecycle layer consults it on a
+        same-worker restart (``redispatch_start``): when the assigned Worker still
+        holds the live working set, the destructive hydrate is skipped (it would
+        clobber the newer scratch with the last authoritative snapshot). False for
+        a disconnected/unknown Worker, and false once the Worker re-registers
+        without that id (e.g. its scratch was wiped) — so the start hydrates rather
+        than booting an empty/absent working set.
+        """
+
+    @abc.abstractmethod
     def increment_assignment(self, *, worker_id: WorkerId) -> None:
         """Record one more server placed on ``worker_id`` (placement load++)."""
 

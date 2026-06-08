@@ -654,7 +654,17 @@ type Register struct {
 	WorkerVersion string `protobuf:"bytes,2,opt,name=worker_version,json=workerVersion,proto3" json:"worker_version,omitempty"`
 	// capabilities advertises the drivers and resources the API's greedy
 	// placement filters on (FR-WRK-3).
-	Capabilities  *WorkerCapabilities `protobuf:"bytes,3,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
+	Capabilities *WorkerCapabilities `protobuf:"bytes,3,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
+	// held_server_ids advertises the server ids whose working set the Worker
+	// already holds in its persistent local scratch at registration: the immediate
+	// subdirectories of the scratch root named for a server that are NON-EMPTY
+	// (issue #696). The API uses this to skip the destructive hydrate on a
+	// same-worker restart — hydrating would unpack the last authoritative snapshot
+	// over the Worker's LIVE, newer working set and roll the world back. The field
+	// is additive: an older Worker leaves it empty, and the API then hydrates as
+	// before (the historical behaviour), so no same-worker restart silently boots a
+	// fresh/empty world.
+	HeldServerIds []string `protobuf:"bytes,4,rep,name=held_server_ids,json=heldServerIds,proto3" json:"held_server_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -706,6 +716,13 @@ func (x *Register) GetWorkerVersion() string {
 func (x *Register) GetCapabilities() *WorkerCapabilities {
 	if x != nil {
 		return x.Capabilities
+	}
+	return nil
+}
+
+func (x *Register) GetHeldServerIds() []string {
+	if x != nil {
+		return x.HeldServerIds
 	}
 	return nil
 }
@@ -2283,11 +2300,12 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\fregister_ack\x18\x03 \x01(\v2!.mcsd.controlplane.v1.RegisterAckH\x00R\vregisterAck\x12C\n" +
 	"\vapi_command\x18\x04 \x01(\v2 .mcsd.controlplane.v1.ApiCommandH\x00R\n" +
 	"apiCommandB\t\n" +
-	"\apayload\"\x9c\x01\n" +
+	"\apayload\"\xc4\x01\n" +
 	"\bRegister\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12%\n" +
 	"\x0eworker_version\x18\x02 \x01(\tR\rworkerVersion\x12L\n" +
-	"\fcapabilities\x18\x03 \x01(\v2(.mcsd.controlplane.v1.WorkerCapabilitiesR\fcapabilities\"\xbd\x01\n" +
+	"\fcapabilities\x18\x03 \x01(\v2(.mcsd.controlplane.v1.WorkerCapabilitiesR\fcapabilities\x12&\n" +
+	"\x0fheld_server_ids\x18\x04 \x03(\tR\rheldServerIds\"\xbd\x01\n" +
 	"\x12WorkerCapabilities\x12C\n" +
 	"\adrivers\x18\x01 \x03(\x0e2).mcsd.controlplane.v1.ExecutionDriverKindR\adrivers\x12\x1f\n" +
 	"\vmax_servers\x18\x02 \x01(\rR\n" +
