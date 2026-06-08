@@ -965,6 +965,26 @@ describe("ServerDetailPage Console tab", () => {
     );
   }
 
+  it("shows the empty-state placeholder when the stream has no output", async () => {
+    await openConsole({ observed_state: "running" });
+    expect(
+      screen.getByText(t("serverDetail.logTailEmpty")),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the empty-state placeholder once the stream has output", async () => {
+    await openConsole({ observed_state: "running" });
+    act(() => {
+      MockWebSocket.last().message(
+        serverFrame("log", { line: "hello world", stream: "stdout" }),
+      );
+    });
+    expect(screen.getByText("hello world")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.logTailEmpty")),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders the gap marker as a missed-events divider", async () => {
     await openConsole({ observed_state: "running" });
     act(() => {

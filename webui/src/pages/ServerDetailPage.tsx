@@ -839,7 +839,11 @@ function Console({
         </button>
       </div>
       <div className="card console-stream">
-        <LogView entries={visible} follow={follow} />
+        {visible.length === 0 ? (
+          <p className="sub">{t("serverDetail.logTailEmpty")}</p>
+        ) : (
+          <LogView entries={visible} follow={follow} />
+        )}
       </div>
       {canCommand && (
         <div className="console-input">
