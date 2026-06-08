@@ -13,7 +13,7 @@ import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { NoCommunityPage } from "./pages/NoCommunityPage.tsx";
-import { PlaceholderPage } from "./pages/PlaceholderPage.tsx";
+import { NotFoundPage } from "./pages/NotFoundPage.tsx";
 import { RegisterPage } from "./pages/RegisterPage.tsx";
 import { useActiveCommunity } from "./permissions/ActiveCommunityProvider.tsx";
 import { dashboardPath, postLoginPath, safeNextPath } from "./routes.ts";
@@ -24,7 +24,7 @@ import { AppShell } from "./shell/AppShell.tsx";
 // demand so the SPA no longer ships every page in the initial chunk. React.lazy
 // needs a default export; these pages are named exports, so each loader re-maps
 // the named export to `default`. The eagerly imported pages above stay in the
-// initial chunk on purpose: the auth pages (Login/Register) and PlaceholderPage
+// initial chunk on purpose: the auth pages (Login/Register) and NotFoundPage
 // are first paint / fallback chrome, and NoCommunityPage renders inline from the
 // Landing redirect — splitting them would only add a Suspense flash before the
 // very first screen.
@@ -226,10 +226,7 @@ export function App() {
             </Route>
           </Route>
 
-          <Route
-            path="*"
-            element={<PlaceholderPage titleKey="page.notFound" />}
-          />
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </Suspense>
     </ToastProvider>

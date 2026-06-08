@@ -43,6 +43,11 @@ export const en = {
   "page.placeholder": "Placeholder page — content arrives in a later phase.",
   "page.notFound": "Page not found",
 
+  // Not-found (404) route: shown for any unmatched URL (#639). The body
+  // explains the state and the link returns the user to the landing route.
+  "notFound.body": "The page you are looking for does not exist or has moved.",
+  "notFound.home": "Back to home",
+
   // No-community empty state (#584): shown on the landing route when the
   // signed-in account belongs to zero communities.
   "noCommunity.title": "No community yet",
@@ -464,6 +469,8 @@ export const en = {
   // Attach picker: community groups not yet attached to this server.
   "players.attachHeading": "Attach a group",
   "players.attachEmpty": "All of this community's groups are already attached.",
+  // Distinct from attachEmpty: the community has no groups at all (issue #642).
+  "players.attachNoGroups": "This community has no groups yet.",
   "players.attach": "Attach",
   "players.attached": "Group attached.",
   // Inline pointer to the full Groups management surface (Phase 6).
