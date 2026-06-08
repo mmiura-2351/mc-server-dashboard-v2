@@ -580,6 +580,7 @@ class FakeControlPlane(ControlPlane):
         raise_unavailable: bool = False,
         unavailable_kinds: set[str] | None = None,
         connected: dict[WorkerId, bool] | None = None,
+        held: dict[tuple[WorkerId, ServerId], bool] | None = None,
     ) -> None:
         self._place_to = place_to
         self._outcome = outcome or CommandOutcome(status=CommandStatus.OK)
@@ -594,6 +595,10 @@ class FakeControlPlane(ControlPlane):
         # Worker-connectivity map for the scheduler's skip-disconnected path; a
         # worker absent here is treated as connected.
         self._connected = connected or {}
+        # Held-working-set presence map for the skip-hydrate decision (issue #696);
+        # a (worker, server) pair absent here is treated as NOT held, so the default
+        # is to hydrate.
+        self._held = held or {}
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
         self.incremented: list[WorkerId] = []
         self.decremented: list[WorkerId] = []
@@ -606,6 +611,9 @@ class FakeControlPlane(ControlPlane):
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
         return self._connected.get(worker_id, True)
+
+    def holds_working_set(self, *, worker_id: WorkerId, server_id: ServerId) -> bool:
+        return self._held.get((worker_id, server_id), False)
 
     def increment_assignment(self, *, worker_id: WorkerId) -> None:
         self.incremented.append(worker_id)

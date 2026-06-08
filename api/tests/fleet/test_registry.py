@@ -308,3 +308,46 @@ def test_candidates_exclude_offline_worker() -> None:
     registry.mark_disconnected(WorkerId("worker-1"), session)
 
     assert registry.candidates_for_placement() == []
+
+
+def test_holds_working_set_reflects_reported_ids() -> None:
+    # The registry records the held-working-set ids a Worker reports on Register
+    # (issue #696) and answers presence per server id.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(
+        make_worker(at=_T0), held_server_ids=frozenset({"server-a", "server-b"})
+    )
+
+    assert registry.holds_working_set(WorkerId("worker-1"), "server-a") is True
+    assert registry.holds_working_set(WorkerId("worker-1"), "server-b") is True
+    assert registry.holds_working_set(WorkerId("worker-1"), "server-c") is False
+
+
+def test_holds_working_set_false_for_unknown_worker() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+
+    assert registry.holds_working_set(WorkerId("ghost"), "server-a") is False
+
+
+def test_register_replaces_held_working_set() -> None:
+    # A re-registration REPLACES the held set (the control plane keeps no
+    # cross-stream session state): a reconnect whose scratch was wiped reports
+    # fewer ids, so a stale "held" claim never survives (issue #696).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0), held_server_ids=frozenset({"server-a"}))
+    registry.register(make_worker(at=_T0), held_server_ids=frozenset())
+
+    assert registry.holds_working_set(WorkerId("worker-1"), "server-a") is False
+
+
+def test_register_without_held_ids_holds_nothing() -> None:
+    # The default (an older Worker that does not report) holds nothing, so the
+    # lifecycle layer hydrates as before (issue #696).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    assert registry.holds_working_set(WorkerId("worker-1"), "server-a") is False

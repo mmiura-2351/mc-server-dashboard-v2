@@ -86,6 +86,17 @@ message Register {
   // capabilities advertises the drivers and resources the API's greedy
   // placement filters on (FR-WRK-3).
   WorkerCapabilities capabilities = 3;
+
+  // held_server_ids advertises the server ids whose working set the Worker
+  // already holds in its persistent local scratch at registration: the immediate
+  // subdirectories of the scratch root named for a server that are NON-EMPTY
+  // (issue #696). The API uses this to skip the destructive hydrate on a
+  // same-worker restart — hydrating would unpack the last authoritative snapshot
+  // over the Worker's LIVE, newer working set and roll the world back. The field
+  // is additive: an older Worker leaves it empty, and the API then hydrates as
+  // before (the historical behaviour), so no same-worker restart silently boots a
+  // fresh/empty world.
+  repeated string held_server_ids = 4;
 }
 
 // WorkerCapabilities is what a Worker advertises at registration (FR-WRK-1).

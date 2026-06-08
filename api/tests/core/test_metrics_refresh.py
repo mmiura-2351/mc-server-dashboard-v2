@@ -44,7 +44,10 @@ class _Registry(WorkerRegistry):
     def __init__(self, snapshots: list[WorkerSnapshot]) -> None:
         self._snapshots = snapshots
 
-    def register(self, worker):  # type: ignore[no-untyped-def]
+    def register(self, worker, held_server_ids=frozenset()):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    def holds_working_set(self, worker_id, server_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     def record_heartbeat(self, worker_id, at):  # type: ignore[no-untyped-def]

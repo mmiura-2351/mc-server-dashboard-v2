@@ -29,6 +29,7 @@ from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServ
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
 from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from mcsd.controlplane.v1.control_plane_pb2_grpc import (
     WorkerServiceStub,
@@ -48,7 +49,9 @@ _CREDENTIAL = "shared-worker-secret"
 _WORKER_ID = "22222222-2222-2222-2222-222222222222"
 
 
-def _register_message(worker_id: str = _WORKER_ID) -> pb.WorkerMessage:
+def _register_message(
+    worker_id: str = _WORKER_ID, held_server_ids: list[str] | None = None
+) -> pb.WorkerMessage:
     caps = pb.WorkerCapabilities(
         drivers=[pb.EXECUTION_DRIVER_KIND_HOST_PROCESS],
         max_servers=4,
@@ -57,7 +60,10 @@ def _register_message(worker_id: str = _WORKER_ID) -> pb.WorkerMessage:
     return pb.WorkerMessage(
         correlation_id="reg-1",
         register=pb.Register(
-            worker_id=worker_id, worker_version="1.0.0", capabilities=caps
+            worker_id=worker_id,
+            worker_version="1.0.0",
+            capabilities=caps,
+            held_server_ids=held_server_ids or [],
         ),
     )
 
@@ -214,6 +220,23 @@ async def test_register_returns_ack(harness: _Harness) -> None:
     snapshots = harness.registry.list_workers()
     assert len(snapshots) == 1
     assert snapshots[0].status is WorkerStatus.ONLINE
+    await call.done_writing()
+
+
+async def test_register_records_held_server_ids(harness: _Harness) -> None:
+    # The register intake records the working sets the Worker reports it already
+    # holds (issue #696) so the lifecycle layer can skip the destructive hydrate on
+    # a same-worker restart.
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message(held_server_ids=["server-a", "server-b"]))
+
+    await call.read()
+
+    worker = WorkerId(_WORKER_ID)
+    assert harness.registry.holds_working_set(worker, "server-a") is True
+    assert harness.registry.holds_working_set(worker, "server-b") is True
+    assert harness.registry.holds_working_set(worker, "server-c") is False
     await call.done_writing()
 
 

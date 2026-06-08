@@ -267,7 +267,14 @@ class StartServer:
     async def redispatch_start(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> Server:
-        """Re-send hydrate-then-start to an assigned, desired-running server.
+        """Re-send the start to an assigned, desired-running server.
+
+        Presence-gated skip-hydrate (issue #696): a same-worker restart starts on
+        the Worker's EXISTING working set when the Worker reports it still holds it
+        (its persistent scratch is the live, newer copy), and only hydrates first
+        when the Worker does NOT report holding it (a fresh/wiped scratch). The
+        unconditional hydrate this path used to do rolled the world back to the last
+        snapshot on every restart by clobbering the newer scratch.
 
         The reconciler's stale-intent path (issue #101): the start intent committed
         and a Worker is assigned, but the launch was never sent (crash between
@@ -301,7 +308,19 @@ class StartServer:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             worker_id = server.assigned_worker_id
 
-        outcome = await self._launch(server, community_id, server_id, worker_id)
+        # Presence-gated skip-hydrate (issue #696): a same-worker restart must NOT
+        # hydrate-clobber a live, newer working set. When the assigned Worker still
+        # reports holding this server's working set (its persistent scratch is at
+        # least as fresh as the last snapshot, since snapshots are pushed FROM it),
+        # skip the destructive hydrate and start on the existing scratch. When it
+        # does NOT report it (a fresh/wiped scratch, or a Worker too old to report),
+        # hydrate as before — never silently boot an empty/absent working set.
+        skip_hydrate = self.control_plane.holds_working_set(
+            worker_id=worker_id, server_id=server_id
+        )
+        outcome = await self._launch(
+            server, community_id, server_id, worker_id, skip_hydrate=skip_hydrate
+        )
         if outcome.success:
             return server
         if outcome.status is CommandStatus.INVALID_STATE:
@@ -332,6 +351,8 @@ class StartServer:
         server_id: ServerId,
         worker_id: WorkerId,
         dispatch: _Dispatch | None = None,
+        *,
+        skip_hydrate: bool = False,
     ) -> CommandOutcome:
         """Hydrate the working set then dispatch the launch; return the outcome.
 
@@ -353,15 +374,26 @@ class StartServer:
         :class:`WorkerUnavailableError` propagates. Compensation/cleanup policy is
         the caller's — this helper makes no DB write — so the normal start and the
         reconciler's re-dispatch paths can each react differently to a failure.
+
+        ``skip_hydrate`` SKIPS the hydrate and goes straight to start (issue #696).
+        Only a same-worker restart (``redispatch_start``) sets it, and only when the
+        assigned Worker reports it still HOLDS the live working set: hydrating there
+        would unpack the last authoritative snapshot over the Worker's newer scratch
+        and roll the world back. A fresh placement (``place_and_start``, the normal
+        ``__call__``) always hydrates — the Worker may have an empty/absent scratch,
+        and a server that moved A->B->A returns via ``place_and_start``, whose
+        leftover scratch on A is stale (B advanced + snapshotted it), so it MUST
+        hydrate.
         """
 
-        hydrate = await self.control_plane.hydrate(
-            worker_id=worker_id,
-            community_id=community_id,
-            server_id=server_id,
-        )
-        if not hydrate.success:
-            return hydrate
+        if not skip_hydrate:
+            hydrate = await self.control_plane.hydrate(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
+            if not hydrate.success:
+                return hydrate
         if dispatch is not None:
             dispatch.attempted = True
         return await self.control_plane.start(

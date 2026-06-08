@@ -52,9 +52,10 @@ type fakeServer struct {
 	heartbeatEvery time.Duration
 	dropAfterFirst bool
 
-	mu         sync.Mutex
-	registers  int
-	heartbeats int
+	mu            sync.Mutex
+	registers     int
+	heartbeats    int
+	heldServerIDs []string
 }
 
 func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) error {
@@ -73,6 +74,7 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 	}
 	s.mu.Lock()
 	s.registers++
+	s.heldServerIDs = first.GetRegister().GetHeldServerIds()
 	s.mu.Unlock()
 
 	if err := stream.Send(acceptAck(s.heartbeatEvery)); err != nil {
@@ -120,6 +122,12 @@ func (s *fakeServer) heartbeatCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.heartbeats
+}
+
+func (s *fakeServer) reportedHeldServerIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.heldServerIDs
 }
 
 func acceptAck(every time.Duration) *controlplanev1.ApiMessage {
@@ -203,6 +211,42 @@ func TestHappyPathRegisterAndHeartbeat(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+// TestRegisterAdvertisesHeldServerIDs proves the adapter maps the domain
+// Capabilities.HeldServerIDs onto the wire Register.held_server_ids (issue #696),
+// so the API can skip the destructive hydrate on a same-worker restart.
+func TestRegisterAdvertisesHeldServerIDs(t *testing.T) {
+	srv := &fakeServer{
+		wantCredential: "the-secret",
+		heartbeatEvery: 20 * time.Millisecond,
+	}
+	conn := startServer(t, srv)
+
+	caps := testCaps()
+	caps.HeldServerIDs = []string{"server-a", "server-b"}
+	dialer := controlplane.NewDialer(conn, "the-secret", realClock{})
+	runner := session.NewRunner(dialer, caps, realClock{}, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = runner.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool { return srv.registerCount() == 1 })
+	got := srv.reportedHeldServerIDs()
+	cancel()
+	<-done
+
+	want := []string{"server-a", "server-b"}
+	if len(got) != len(want) {
+		t.Fatalf("held_server_ids = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("held_server_ids = %v, want %v", got, want)
+		}
+	}
 }
 
 // TestAuthRejectStopsRunner proves a wrong-credential Worker STOPS instead of

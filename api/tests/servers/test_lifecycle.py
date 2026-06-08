@@ -1120,6 +1120,36 @@ async def test_place_and_start_assigns_an_orphan_and_dispatches() -> None:
     assert uow.servers.by_id[ServerId(server_id)].desired_state is DesiredState.RUNNING
 
 
+async def test_place_and_start_always_hydrates_even_if_worker_holds_working_set() -> (
+    None
+):
+    # The skip-hydrate gate is for same-worker restart ONLY (redispatch_start).
+    # A fresh placement ALWAYS hydrates, even when the chosen Worker reports holding
+    # the working set: a server that moved A->B->A returns via place_and_start, and
+    # A's leftover scratch is STALE (B advanced + snapshotted it). Starting on stale
+    # leftover scratch is the opposite regression the fix must avoid (issue #696).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), ServerId(server_id)): True},
+    )
+    await _start_server(uow, cp).place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    # Hydrate is dispatched despite the held report — place_and_start never skips.
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
 async def test_place_and_start_pre_dispatch_failure_unassigns() -> None:
     # A failure BEFORE the start command is sent (here a failed hydrate) must NOT
     # flip desired to stopped (the running intent is authoritative) but IS safe to
@@ -1238,6 +1268,57 @@ async def test_redispatch_start_replays_launch_without_increment() -> None:
     assert stored.observed_state is ObservedState.CRASHED
     assert stored.observed_at is None
     assert result.observed_state is ObservedState.CRASHED
+
+
+async def test_redispatch_start_skips_hydrate_when_worker_holds_working_set() -> None:
+    # Presence-gated skip-hydrate (issue #696): a same-worker restart whose assigned
+    # Worker reports it still holds the live working set must NOT hydrate — the
+    # hydrate would clobber the newer scratch with the last snapshot and roll the
+    # world back. Start is still dispatched.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        held={(WorkerId(worker), ServerId(server_id)): True},
+    )
+    await _start_server(uow, cp).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    # Hydrate is SKIPPED; only start is dispatched.
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
+
+
+async def test_redispatch_start_hydrates_when_worker_does_not_hold_working_set() -> (
+    None
+):
+    # The assigned Worker does NOT report holding the working set (a fresh/wiped
+    # scratch, or a Worker too old to report): hydrate then start, so a same-worker
+    # restart never silently boots an empty/absent working set (issue #696).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    # No `held` entry -> holds_working_set is False -> hydrate.
+    cp = FakeControlPlane()
+    await _start_server(uow, cp).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
 
 
 async def test_redispatch_start_invalid_state_is_treated_as_running() -> None:
