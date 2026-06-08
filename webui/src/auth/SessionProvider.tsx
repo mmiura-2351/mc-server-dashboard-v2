@@ -16,11 +16,14 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
-import { useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import { setRefresher } from "../api/client.ts";
+import { expiredLoginPath } from "../routes.ts";
 import {
+  type LogoutReason,
   logout as logoutSession,
   refreshForRetry,
   restoreSession,
@@ -44,6 +47,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
+  // The latest router location, kept in a ref so the hard-logout handler can
+  // read where the user was without re-binding the handler on every navigation
+  // (#565). A 401 hard logout fires outside React's render, so the handler
+  // needs the current location at call time, not at bind time.
+  const location = useLocation();
+  const locationRef = useRef(location);
+  locationRef.current = location;
+
   // Reset to signed-out and send the user to /login. Used both for an explicit
   // logout and for a hard logout triggered by a failed transparent refresh.
   // Drop every cached query so the previous user's data (user, communities,
@@ -51,11 +62,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // browser, and so the next sign-in bootstraps from an empty cache (#532).
   // Per-device prefs (language, module-level UI stores) live outside the query
   // cache and are intentionally left untouched.
-  const resetToSignedOut = useCallback(() => {
-    queryClient.clear();
-    setStatus("signed-out");
-    navigate("/login");
-  }, [navigate, queryClient]);
+  //
+  // An involuntary expiry (reason "expired") captures where the user was so
+  // login can return them there and explain the logout; a deliberate logout
+  // (no reason) lands on a clean /login (#565). The location is read from the
+  // ref so the latest route is captured even though this handler is invoked
+  // outside render by a failed transparent refresh.
+  const resetToSignedOut = useCallback(
+    (reason?: LogoutReason) => {
+      queryClient.clear();
+      setStatus("signed-out");
+      navigate(
+        reason === "expired" ? expiredLoginPath(locationRef.current) : "/login",
+      );
+    },
+    [navigate, queryClient],
+  );
 
   // Wire the framework-free session core to React: the client retries 401s
   // through the single-flight refresh, and a hard logout resets this state.

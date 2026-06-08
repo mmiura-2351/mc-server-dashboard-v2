@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiError, api } from "../api/client.ts";
+import { membersKeys, rolesKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
@@ -12,14 +13,6 @@ import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 
 type MemberResponse = components["schemas"]["MemberResponse"];
 type RoleResponse = components["schemas"]["RoleResponse"];
-
-export function membersKey(communityId: string) {
-  return ["communities", communityId, "members"] as const;
-}
-
-export function rolesKey(communityId: string) {
-  return ["communities", communityId, "roles"] as const;
-}
 
 // Members tab (WEBUI_SPEC.md 6.10): table of username + role chips, add by
 // exact username, inline role assign/unassign, remove with a revocation
@@ -39,7 +32,7 @@ export function CommunityMembersTab({
   const canReadRoles = can("role:read");
 
   const members = useQuery({
-    queryKey: membersKey(communityId),
+    queryKey: membersKeys.list(communityId),
     queryFn: () =>
       api.get(
         apiPath("/api/communities/{community_id}/members", {
@@ -51,7 +44,7 @@ export function CommunityMembersTab({
   // Role choices for the assign picker; only fetched when the caller can both
   // read roles and manage them (otherwise the picker is hidden anyway).
   const roles = useQuery({
-    queryKey: rolesKey(communityId),
+    queryKey: rolesKeys.list(communityId),
     queryFn: () =>
       api.get(
         apiPath("/api/communities/{community_id}/roles", {
@@ -77,7 +70,9 @@ export function CommunityMembersTab({
       ),
     onSuccess: () => {
       showToast(t("communitySettings.members.removed"), "success");
-      queryClient.invalidateQueries({ queryKey: membersKey(communityId) });
+      queryClient.invalidateQueries({
+        queryKey: membersKeys.list(communityId),
+      });
       setRemoving(null);
     },
     onError: (error) => {
@@ -194,7 +189,7 @@ function MemberRow({
     showToast(t("communitySettings.members.roleError"), "error");
   };
   const onRoleSettled = () =>
-    queryClient.invalidateQueries({ queryKey: membersKey(communityId) });
+    queryClient.invalidateQueries({ queryKey: membersKeys.list(communityId) });
 
   const assign = useMutation({
     mutationFn: (roleId: string) =>
@@ -355,7 +350,9 @@ function AddMemberDialog({
       ),
     onSuccess: () => {
       showToast(t("communitySettings.members.added"), "success");
-      queryClient.invalidateQueries({ queryKey: membersKey(communityId) });
+      queryClient.invalidateQueries({
+        queryKey: membersKeys.list(communityId),
+      });
       close();
     },
     onError: (err) => {

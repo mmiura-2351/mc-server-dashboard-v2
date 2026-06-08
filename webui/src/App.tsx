@@ -1,5 +1,12 @@
 import { lazy, type ReactNode, Suspense } from "react";
-import { Navigate, Outlet, Route, Routes, useLocation } from "react-router";
+import {
+  Navigate,
+  Outlet,
+  Route,
+  Routes,
+  useLocation,
+  useSearchParams,
+} from "react-router";
 import { useSession } from "./auth/SessionProvider.tsx";
 import { useCurrentUser } from "./auth/useCurrentUser.ts";
 import { ToastProvider } from "./components/Toast.tsx";
@@ -9,7 +16,7 @@ import { NoCommunityPage } from "./pages/NoCommunityPage.tsx";
 import { PlaceholderPage } from "./pages/PlaceholderPage.tsx";
 import { RegisterPage } from "./pages/RegisterPage.tsx";
 import { useActiveCommunity } from "./permissions/ActiveCommunityProvider.tsx";
-import { dashboardPath, postLoginPath } from "./routes.ts";
+import { dashboardPath, postLoginPath, safeNextPath } from "./routes.ts";
 import { AppShell } from "./shell/AppShell.tsx";
 
 // Route-level code splitting (#553): the heavier authenticated pages (dashboard,
@@ -108,11 +115,15 @@ function RequireAuth({ children }: { children: ReactNode }) {
 function RequireAnon({ children }: { children: ReactNode }) {
   const { status } = useSession();
   const from = (useLocation().state as { from?: unknown } | null)?.from;
+  const [searchParams] = useSearchParams();
   if (status === "bootstrapping") {
     return <SessionLoading />;
   }
   if (status === "signed-in") {
-    return <Navigate to={postLoginPath(from)} replace />;
+    // A validated `next` (session-expiry return-to, #565) wins over the #424
+    // guard stash; both fall back to the post-login landing.
+    const next = safeNextPath(searchParams.get("next"));
+    return <Navigate to={next ?? postLoginPath(from)} replace />;
   }
   return <>{children}</>;
 }
