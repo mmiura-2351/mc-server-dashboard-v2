@@ -133,7 +133,10 @@ describe("AdminAuditPage", () => {
 
     renderApp({ path: "/admin/audit" });
 
-    expect(await screen.findByText("server:start")).toBeInTheDocument();
+    // Operation code humanized to its readable label (#643).
+    expect(
+      await screen.findByText(t("communitySettings.audit.op.server:start")),
+    ).toBeInTheDocument();
     // The global view shows the community column.
     const communityCells = screen.getAllByText(COMMUNITY.id);
     expect(communityCells.length).toBeGreaterThan(0);
@@ -169,7 +172,7 @@ describe("AdminAuditPage", () => {
     });
 
     renderApp({ path: "/admin/audit" });
-    await screen.findByText("server:start");
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
 
     const hint = await screen.findByText(
       t("admin.audit.communitiesTruncatedPrefix"),
@@ -183,7 +186,7 @@ describe("AdminAuditPage", () => {
     signedInAs(ADMIN, [record()], [adminCommunity()]);
 
     renderApp({ path: "/admin/audit" });
-    await screen.findByText("server:start");
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
 
     expect(
       screen.queryByText(t("admin.audit.communitiesTruncatedPrefix"), {
@@ -203,7 +206,7 @@ describe("AdminAuditPage", () => {
     );
 
     renderApp({ path: "/admin/audit" });
-    await screen.findByText("server:start");
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
 
     const picker = screen.getByLabelText(t("admin.audit.filterCommunity"));
     // "Bravo" is not in the membership-scoped switcher list, so its presence as
@@ -231,7 +234,7 @@ describe("AdminAuditPage", () => {
     signedInAs(ADMIN, [record()]);
 
     renderApp({ path: "/admin/audit" });
-    await screen.findByText("server:start");
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
 
     fireEvent.change(screen.getByLabelText(t("admin.audit.filterCommunity")), {
       target: { value: COMMUNITY.id },
@@ -282,7 +285,7 @@ describe("AdminAuditPage", () => {
     signedInAs(ADMIN, [record()]);
 
     renderApp({ path: "/admin/audit" });
-    await screen.findByText("server:start");
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
     const before = auditCalls().length;
 
     fireEvent.change(
@@ -308,7 +311,7 @@ describe("AdminAuditPage", () => {
     renderApp({
       path: `/admin/audit?community=${COMMUNITY.id}&operation=member%3Aadd&actor=${ACTOR}`,
     });
-    await screen.findByText("server:start");
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
 
     // The persisted filters drive the first request without any Apply click.
     await waitFor(() => {
@@ -342,7 +345,7 @@ describe("AdminAuditPage", () => {
     );
 
     renderApp({ path: "/admin/audit" });
-    await screen.findAllByText("server:start");
+    await screen.findAllByText(t("communitySettings.audit.op.server:start"));
 
     await waitFor(() => {
       const first = new URL(auditCalls()[0], "http://x");

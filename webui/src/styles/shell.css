@@ -1259,7 +1259,13 @@ body.col-resizing {
 }
 .file-layout {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 2fr;
+  /* The name column carries a filename plus up to three action buttons, so a
+   * 1:2 split left common names (server.properties, banned-players.json)
+   * over-truncated next to a preview pane that is empty until a file is opened.
+   * Give the tree a fairer share and a wider min so typical names are readable
+   * without hover; the preview's minmax(0,…) lets it shrink instead of forcing
+   * horizontal overflow at narrow widths. */
+  grid-template-columns: minmax(300px, 1fr) minmax(0, 1.4fr);
   gap: 14px;
 }
 .file-list {

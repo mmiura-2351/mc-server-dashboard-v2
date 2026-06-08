@@ -129,11 +129,16 @@ describe("CommunityAuditTab", () => {
     renderPage();
     await openAuditTab();
 
-    expect(await screen.findByText("server:start")).toBeInTheDocument();
+    // Operation code humanized to its readable label (#643).
+    expect(
+      await screen.findByText(t("communitySettings.audit.op.server:start")),
+    ).toBeInTheDocument();
     expect(screen.getByText("u1")).toBeInTheDocument();
     expect(screen.getByText("success")).toBeInTheDocument();
-    // Target rendered as "type:id".
-    expect(screen.getByText("server:s1")).toBeInTheDocument();
+    // Target prefix humanized; the id is kept ("<Type>: <id>", #643).
+    expect(
+      screen.getByText(`${t("communitySettings.audit.targetType.server")}: s1`),
+    ).toBeInTheDocument();
   });
 
   it("carries the full value as a hover title on the long-value cells", async () => {
@@ -151,6 +156,7 @@ describe("CommunityAuditTab", () => {
     renderPage();
     await openAuditTab();
 
+    // An unmapped operation falls back to its raw code, both as text and title.
     const op = await screen.findByText("community.permission_grant_revoke");
     expect(op.closest("td")).toHaveAttribute(
       "title",
@@ -160,10 +166,12 @@ describe("CommunityAuditTab", () => {
       "title",
       actor,
     );
-    expect(screen.getByText("server:s1").closest("td")).toHaveAttribute(
-      "title",
-      "server:s1",
-    );
+    // Target displays the humanized prefix; the title keeps the raw "type:id".
+    expect(
+      screen
+        .getByText(`${t("communitySettings.audit.targetType.server")}: s1`)
+        .closest("td"),
+    ).toHaveAttribute("title", "server:s1");
   });
 
   it("shows the empty state when there are no records", async () => {
@@ -196,7 +204,7 @@ describe("CommunityAuditTab", () => {
     routeGet({ records: [record()] });
     renderPage();
     await openAuditTab();
-    await screen.findByText("server:start");
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
 
     fireEvent.change(
       screen.getByLabelText(t("communitySettings.audit.filterOperation")),
@@ -246,7 +254,7 @@ describe("CommunityAuditTab", () => {
     renderPage(
       `/communities/${CID}/settings?operation=member%3Aadd&actor=${ACTOR}#audit`,
     );
-    await screen.findByText("server:start");
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
 
     // The persisted filters drive the first request without any Apply click.
     await waitFor(() => {
@@ -268,7 +276,7 @@ describe("CommunityAuditTab", () => {
     routeGet({ records: [record()] });
     renderPage();
     await openAuditTab();
-    await screen.findByText("server:start");
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
     const before = auditCalls().length;
 
     fireEvent.change(
@@ -295,7 +303,7 @@ describe("CommunityAuditTab", () => {
     });
     renderPage();
     await openAuditTab();
-    await screen.findAllByText("server:start");
+    await screen.findAllByText(t("communitySettings.audit.op.server:start"));
 
     // First page requests offset 0.
     await waitFor(() => {
