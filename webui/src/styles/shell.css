@@ -785,6 +785,13 @@ body.col-resizing {
 .account .form-row .field {
   flex: 1;
 }
+/* Phone forms (#621, --bp-phone): two side-by-side fields force the row past a
+ * ~375px viewport. Stack them so each field gets the full width. */
+@media (max-width: 430px) {
+  .account .form-row {
+    flex-direction: column;
+  }
+}
 .account .field-error {
   color: var(--red);
   font-size: 12px;
@@ -885,6 +892,13 @@ body.col-resizing {
 }
 .settings .form-row .field {
   flex: 1;
+}
+/* Phone forms (#621, --bp-phone): stack the side-by-side fields so each gets
+ * the full width on a ~375px viewport instead of overflowing the row. */
+@media (max-width: 430px) {
+  .settings .form-row {
+    flex-direction: column;
+  }
 }
 .settings .field-hint,
 .settings .field-hint.ok {
@@ -1471,6 +1485,14 @@ body.col-resizing {
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 12px;
   margin-top: 6px;
+}
+/* Phone roles matrix (#621, --bp-phone): the 180px track minimum can leave the
+ * grid wider than a ~375px viewport. Each permission-family card is
+ * self-contained, so collapse to a single column. */
+@media (max-width: 430px) {
+  .roles-matrix {
+    grid-template-columns: 1fr;
+  }
 }
 .roles-matrix .field-label {
   grid-column: 1 / -1;
