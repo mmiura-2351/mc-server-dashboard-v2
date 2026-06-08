@@ -440,6 +440,24 @@ describe("ServerDetailPage lifecycle controls", () => {
       ).not.toBeInTheDocument();
       expect(trigger).toHaveFocus();
     });
+
+    it("returns focus to the trigger after keyboard activation (APG)", async () => {
+      const trigger = await openWith("Enter");
+      fireEvent.keyDown(items()[0], { key: "Enter" });
+      expect(
+        screen.queryByRole("menuitem", { name: t("serverDetail.stopForce") }),
+      ).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    });
+
+    it("returns focus to the trigger after click activation (APG)", async () => {
+      const trigger = await openWith("Enter");
+      fireEvent.click(items()[1]);
+      expect(
+        screen.queryByRole("menuitem", { name: t("serverDetail.stopForce") }),
+      ).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    });
   });
 
   it("routes a lifecycle 403 through the permission glue", async () => {
