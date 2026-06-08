@@ -80,12 +80,13 @@ func (i *fakeInstance) wasStopped() (stopped, graceful bool) {
 // fakeControl is an in-memory ServerControl for ServerCommand forwarding.
 type fakeControl struct {
 	reply string
+	err   error
 	lines []string
 }
 
 func (c *fakeControl) Execute(_ context.Context, line string) (string, error) {
 	c.lines = append(c.lines, line)
-	return c.reply, nil
+	return c.reply, c.err
 }
 
 func (c *fakeControl) Close() error { return nil }

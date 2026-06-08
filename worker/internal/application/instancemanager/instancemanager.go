@@ -242,9 +242,11 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 }
 
 // handleSnapshot packs the server's working dir and uploads it. For a running
-// server it first flushes pending writes with a save-all over RCON (best-effort;
-// a failure is logged, not fatal) so the captured copy is as fresh as possible
-// (CONTROL_PLANE.md Section 6.9).
+// server it first issues a non-blocking save-all over RCON (best-effort; a
+// failure is logged, not fatal) to initiate a chunk save so the captured copy is
+// as fresh as possible (CONTROL_PLANE.md Section 6.9). It deliberately does not
+// flush: a synchronous main-thread flush can occupy a tick past max-tick-time and
+// trip the server watchdog, crashing a running server (#693).
 func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) session.CommandResult {
 	if m.transfer == nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -265,9 +267,12 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// flushRunning issues a save-all over RCON to flush pending world writes before a
-// snapshot of a running server. Failures are logged, not propagated: a snapshot
-// of a not-quite-flushed working set is still useful and bounded by FR-DATA-5.
+// flushRunning issues a non-blocking save-all over RCON before a snapshot of a
+// running server: it initiates a chunk save so the captured copy is fresh, but
+// does not flush — a synchronous main-thread flush can occupy a tick past
+// max-tick-time and trip the server watchdog (#693). Failures are logged, not
+// propagated: a snapshot of a not-quite-saved working set is still useful and
+// bounded by FR-DATA-5. (Name is historical; this no longer issues a flush.)
 func (m *Manager) flushRunning(ctx context.Context, serverID string) {
 	ctrl, err := m.openControl(ctx, serverID, m.driverFor(serverID))
 	if err != nil {
@@ -275,7 +280,7 @@ func (m *Manager) flushRunning(ctx context.Context, serverID string) {
 		return
 	}
 	defer func() { _ = ctrl.Close() }()
-	if _, err := ctrl.Execute(ctx, "save-all flush"); err != nil {
+	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
 		m.logger.Warn("snapshot save-all failed", "server_id", serverID, "error", err)
 	}
 }
