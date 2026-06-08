@@ -117,3 +117,41 @@ func TestSnapshotTriggerTransferFailureIsCoded(t *testing.T) {
 		t.Fatalf("SnapshotTrigger failure = %+v, want transfer-failed", res)
 	}
 }
+
+// A running-server snapshot issues a plain "save-all" over RCON — never the
+// blocking "save-all flush", whose synchronous main-thread flush can trip the
+// server watchdog and crash the server (#693).
+func TestSnapshotTriggerRunningServerIssuesSaveAllNotFlush(t *testing.T) {
+	ctrl := &fakeControl{reply: "ok"}
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("SnapshotTrigger result = %+v, want success", res)
+	}
+	if len(ctrl.lines) != 1 || ctrl.lines[0] != "save-all" {
+		t.Fatalf("rcon lines = %v, want [\"save-all\"]", ctrl.lines)
+	}
+}
+
+// The pre-snapshot save-all is best-effort: an RCON failure is logged, not
+// propagated, and the snapshot still succeeds (FR-DATA-5).
+func TestSnapshotTriggerRunningServerSaveAllFailureIsNonFatal(t *testing.T) {
+	ctrl := &fakeControl{err: errors.New("rcon: read length: EOF")}
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	res := m.Handle(context.Background(), snapshotCmd())
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger result = %+v, want success despite save-all failure", res)
+	}
+	if len(tr.snapshots) != 1 {
+		t.Fatalf("snapshots = %v, want one despite save-all failure", tr.snapshots)
+	}
+}
