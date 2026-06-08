@@ -15,6 +15,22 @@ export function humanizeBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unit]}`;
 }
 
+// Render an ISO timestamp in the viewer's locale and timezone, e.g. a raw
+// `2026-06-05T13:46:35.411582Z` → "6/5/2026, 1:46:35 PM". Mirrors the audit
+// log's inline `toLocaleString()` (auditShared.tsx) so "created" times read
+// consistently across the app (#644).
+export function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString();
+}
+
+// Shorten a UUID to its leading segment for display, keeping the full id for a
+// hover title. The API exposes no friendly name for workers (WorkerResponse is
+// id-only) nor for a backup's author (created_by is a bare UUID), so those ids
+// are labelled and abbreviated rather than dumped in full (#644).
+export function shortId(id: string): string {
+  return id.split("-")[0];
+}
+
 // The pill class mirrors the workers mockup: online → running (green),
 // draining → starting (amber), anything else (offline) → crashed (red).
 // Shared across the Overview and Workers fleet pages (#477) so the mapping

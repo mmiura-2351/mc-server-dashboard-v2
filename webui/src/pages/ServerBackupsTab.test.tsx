@@ -179,6 +179,41 @@ describe("ServerBackupsTab stats + table", () => {
     expect(screen.getByText(t("backups.stat.newest"))).toBeInTheDocument();
   });
 
+  it("formats the created-at timestamp and shortens a UUID author (#644)", async () => {
+    const authorId = "ad1051a7-1234-5678-9abc-def012345678";
+    const createdAt = "2026-06-05T13:46:35.411582Z";
+    routeGet({
+      backups: [backup({ created_by: authorId, created_at: createdAt })],
+    });
+    await openBackups();
+
+    // The raw ISO no longer leaks: rendered via toLocaleString (no "T", no
+    // microseconds).
+    const formatted = new Date(createdAt).toLocaleString();
+    expect(await screen.findByText(formatted)).toBeInTheDocument();
+    expect(screen.queryByText(createdAt)).not.toBeInTheDocument();
+
+    // A UUID author is abbreviated, full id in the cell title.
+    expect(screen.getByText("ad1051a7").closest("td")).toHaveAttribute(
+      "title",
+      authorId,
+    );
+  });
+
+  it("formats the newest/oldest stat timestamps (#644)", async () => {
+    // Empty list so the formatted stat values cannot collide with a row's
+    // created-at cell.
+    routeGet({ backups: [] });
+    await openBackups();
+
+    expect(
+      await screen.findByText(new Date(STATS.newest).toLocaleString()),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(new Date(STATS.oldest).toLocaleString()),
+    ).toBeInTheDocument();
+  });
+
   it("renders an unknown-size row and flags the total as partial", async () => {
     // A legacy NULL-size backup (predates size tracking, #281): the row shows
     // "unknown" and the total-size stat is flagged as a partial sum so the

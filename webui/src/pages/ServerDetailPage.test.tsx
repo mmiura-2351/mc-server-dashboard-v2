@@ -143,7 +143,11 @@ describe("ServerDetailPage scaffold + header", () => {
       .getAllByText(t("dashboard.state.running"))
       .find((el) => el.className.includes("pill"));
     expect(pill).toBeDefined();
-    expect(screen.getByText("worker-a")).toBeInTheDocument();
+    // The worker chip is labelled and the id abbreviated (#644): "worker-a"
+    // shortens to its leading segment.
+    expect(
+      screen.getByText(`${t("serverDetail.worker")}: worker`),
+    ).toBeInTheDocument();
     expect(screen.getByText(":25565")).toBeInTheDocument();
     expect(
       screen.getByRole("tab", { name: t("serverDetail.tab.overview") }),
@@ -160,6 +164,28 @@ describe("ServerDetailPage scaffold + header", () => {
     const heading = await screen.findByRole("heading", { level: 1 });
     expect(heading).toHaveAccessibleName("survival");
     expect(heading).not.toHaveAccessibleName(/running/i);
+  });
+
+  it("carries the full worker id in a hover title (#644)", async () => {
+    const fullId = "ad1051a7-1234-5678-9abc-def012345678";
+    mockApi.get.mockResolvedValue(server({ assigned_worker_id: fullId }));
+    renderPage();
+
+    const chip = await screen.findByText(
+      `${t("serverDetail.worker")}: ad1051a7`,
+    );
+    expect(chip).toHaveAttribute("title", fullId);
+  });
+
+  it("labels the stopped-server chip as no worker assigned (#644)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ assigned_worker_id: null, observed_state: "stopped" }),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByText(t("serverDetail.noWorker")),
+    ).toBeInTheDocument();
   });
 
   it("shows the converging hint when desired ≠ observed", async () => {

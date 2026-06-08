@@ -100,7 +100,11 @@ describe("DashboardPage list", () => {
     expect(screen.getByText("paper 1.21.6")).toBeInTheDocument();
     expect(screen.getByText("container")).toBeInTheDocument();
     expect(screen.getByText(":25565")).toBeInTheDocument();
-    expect(screen.getByText("worker-a")).toBeInTheDocument();
+    // The worker chip is labelled and the id abbreviated (#644): "worker-a"
+    // shortens to its leading segment.
+    expect(
+      screen.getByText(`${t("dashboard.col.worker")}: worker`),
+    ).toBeInTheDocument();
     expect(screen.getByText(t("dashboard.state.running"))).toBeInTheDocument();
   });
 
@@ -379,7 +383,8 @@ describe("DashboardPage view toggle (#541)", () => {
     expect(screen.getAllByText("paper 1.21.6")).toHaveLength(2);
     expect(screen.getAllByText("container")).toHaveLength(2);
     expect(screen.getAllByText("25565")).toHaveLength(2);
-    expect(screen.getAllByText("worker-a")).toHaveLength(2);
+    // The worker id is abbreviated to its leading segment (#644).
+    expect(screen.getAllByText("worker")).toHaveLength(2);
   });
 
   it("runs a quick action from the table row", async () => {

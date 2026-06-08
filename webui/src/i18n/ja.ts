@@ -235,6 +235,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.desired": "目標",
   "serverDetail.observed": "現在",
   "serverDetail.noWorker": "Worker未割り当て",
+  "serverDetail.worker": "Worker",
   "serverDetail.noPort": "ポートなし",
   // Tabs (WEBUI_SPEC.md 6.4–6.9).
   "serverDetail.tab.overview": "概要",
