@@ -100,7 +100,8 @@ def test_list_users_returns_page() -> None:
     assert body["offset"] == 0
     assert body["users"][0]["username"] == "a"
     assert body["users"][0]["active"] is True
-    assert "created_at" in body["users"][0]
+    # Canonical RFC 3339 UTC form: the ``Z`` suffix, not ``+00:00`` (issue #632).
+    assert body["users"][0]["created_at"] == "2026-06-04T00:00:00Z"
     assert fake.calls == [{"limit": 10, "offset": 0}]
 
 

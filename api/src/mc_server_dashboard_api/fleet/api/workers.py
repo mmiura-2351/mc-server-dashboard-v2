@@ -11,7 +11,6 @@ since the fleet is cross-community infrastructure, not community-scoped:
 
 from __future__ import annotations
 
-import datetime as dt
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
@@ -30,6 +29,7 @@ from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.registry import WorkerSnapshot
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.identity.domain.entities import User
 
@@ -52,8 +52,8 @@ class WorkerResponse(BaseModel):
     version: str
     status: str
     assigned_count: int
-    registered_at: dt.datetime
-    last_heartbeat_at: dt.datetime
+    registered_at: UtcDatetime
+    last_heartbeat_at: UtcDatetime
     capabilities: CapabilitiesResponse
 
 

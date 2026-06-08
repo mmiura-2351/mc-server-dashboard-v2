@@ -41,6 +41,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
@@ -95,7 +96,7 @@ class BackupResponse(BaseModel):
     source: str
     size_bytes: int | None
     created_by: uuid.UUID | None
-    created_at: str
+    created_at: UtcDatetime
 
     @classmethod
     def from_backup(cls, backup: Backup) -> "BackupResponse":
@@ -105,7 +106,7 @@ class BackupResponse(BaseModel):
             source=backup.source.value,
             size_bytes=backup.size_bytes,
             created_by=backup.created_by,
-            created_at=backup.created_at.isoformat(),
+            created_at=backup.created_at,
         )
 
 
@@ -123,8 +124,8 @@ class BackupStatisticsResponse(BaseModel):
     count: int
     total_bytes: int
     unknown_size_count: int
-    newest: str | None
-    oldest: str | None
+    newest: UtcDatetime | None
+    oldest: UtcDatetime | None
 
     @classmethod
     def from_stats(cls, stats: BackupStatistics) -> "BackupStatisticsResponse":
@@ -132,8 +133,8 @@ class BackupStatisticsResponse(BaseModel):
             count=stats.count,
             total_bytes=stats.total_bytes,
             unknown_size_count=stats.unknown_size_count,
-            newest=stats.newest.isoformat() if stats.newest is not None else None,
-            oldest=stats.oldest.isoformat() if stats.oldest is not None else None,
+            newest=stats.newest,
+            oldest=stats.oldest,
         )
 
 

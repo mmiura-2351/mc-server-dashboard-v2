@@ -28,6 +28,7 @@ from mc_server_dashboard_api.dependencies import (
     get_list_all_communities,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_datetime import UtcDatetime
 
 router = APIRouter()
 
@@ -37,7 +38,7 @@ class AdminCommunityResponse(BaseModel):
 
     id: str
     name: str
-    created_at: str
+    created_at: UtcDatetime
     member_count: int
     server_count: int
 
@@ -46,7 +47,7 @@ class AdminCommunityResponse(BaseModel):
         return cls(
             id=str(summary.id.value),
             name=summary.name.value,
-            created_at=summary.created_at.isoformat(),
+            created_at=summary.created_at,
             member_count=summary.member_count,
             server_count=summary.server_count,
         )

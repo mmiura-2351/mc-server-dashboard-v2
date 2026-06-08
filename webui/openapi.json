@@ -106,6 +106,7 @@
         "description": "Admin view of a community: identity, age, and its operational counts.",
         "properties": {
           "created_at": {
+            "format": "date-time",
             "title": "Created At",
             "type": "string"
           },
@@ -171,6 +172,7 @@
             "type": "boolean"
           },
           "created_at": {
+            "format": "date-time",
             "title": "Created At",
             "type": "string"
           },
@@ -347,6 +349,7 @@
         "description": "One backup's metadata (DATABASE.md Section 8).",
         "properties": {
           "created_at": {
+            "format": "date-time",
             "title": "Created At",
             "type": "string"
           },
@@ -409,6 +412,7 @@
           "newest": {
             "anyOf": [
               {
+                "format": "date-time",
                 "type": "string"
               },
               {
@@ -420,6 +424,7 @@
           "oldest": {
             "anyOf": [
               {
+                "format": "date-time",
                 "type": "string"
               },
               {
@@ -1523,6 +1528,7 @@
           "observed_at": {
             "anyOf": [
               {
+                "format": "date-time",
                 "type": "string"
               },
               {
@@ -1579,10 +1585,12 @@
         "description": "Safe metadata for one active refresh-token session (issue #387).\n\nAddressed by the row ``id`` (an opaque session id); the token hash/secret is\ndeliberately never exposed. No client-hint field is included because none is\nstored on the row.",
         "properties": {
           "created_at": {
+            "format": "date-time",
             "title": "Created At",
             "type": "string"
           },
           "expires_at": {
+            "format": "date-time",
             "title": "Expires At",
             "type": "string"
           },

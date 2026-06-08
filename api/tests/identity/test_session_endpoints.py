@@ -95,8 +95,9 @@ def test_list_returns_safe_metadata_without_token_hash() -> None:
     assert body == [
         {
             "id": str(token.id.value),
-            "created_at": token.issued_at.isoformat(),
-            "expires_at": token.expires_at.isoformat(),
+            # Canonical RFC 3339 UTC form: ``Z`` suffix, not ``+00:00`` (issue #632).
+            "created_at": "2026-06-04T00:00:00Z",
+            "expires_at": "2026-06-18T00:00:00Z",
         }
     ]
     # The token hash/secret is never serialised.

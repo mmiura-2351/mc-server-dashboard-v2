@@ -114,6 +114,8 @@ def test_platform_audit_lists_records() -> None:
     assert len(body["records"]) == 1
     assert body["records"][0]["operation"] == "server:create"
     assert body["records"][0]["outcome"] == "success"
+    # Canonical RFC 3339 UTC form: the ``Z`` suffix, not ``+00:00`` (issue #632).
+    assert body["records"][0]["created_at"] == "2026-06-04T12:00:00Z"
 
 
 def test_platform_audit_passes_filters_through() -> None:

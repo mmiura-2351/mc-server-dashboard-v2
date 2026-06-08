@@ -32,6 +32,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_datetime import UtcDatetime
 
 router = APIRouter()
 
@@ -47,7 +48,7 @@ class AuditRecordResponse(BaseModel):
     id: str
     operation: str
     outcome: str
-    created_at: dt.datetime
+    created_at: UtcDatetime
     actor_id: str | None
     community_id: str | None
     target_type: str | None
