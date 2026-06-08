@@ -244,6 +244,15 @@ function GroupDetail({
   };
   const invalidateGroups = () =>
     queryClient.invalidateQueries({ queryKey: groupsKeys.list(communityId) });
+  // Attach/detach and player add/remove both change the relation rendered from
+  // both ends, so invalidate the whole attachment prefix: this refreshes this
+  // group's server list here and the server's group list (with its
+  // group.players.length count) in ServerPlayersTab wherever it is mounted
+  // (#473, #611).
+  const invalidateAttachments = () =>
+    queryClient.invalidateQueries({
+      queryKey: attachmentsKeys.all(communityId),
+    });
 
   const attachedServers = useQuery({
     queryKey: attachmentsKeys.forGroup(communityId, group.id),
@@ -270,17 +279,12 @@ function GroupDetail({
       ),
     onSuccess: () =>
       showToast(t("communitySettings.groups.playerRemoved"), "success"),
-    onSettled: invalidateGroups,
+    onSettled: () => {
+      invalidateGroups();
+      invalidateAttachments();
+    },
     onError,
   });
-
-  // Attach/detach changes the relation from both ends, so invalidate the whole
-  // attachment prefix: this refreshes this group's server list here and the
-  // server's group list in ServerPlayersTab wherever it is mounted (#473).
-  const invalidateAttachments = () =>
-    queryClient.invalidateQueries({
-      queryKey: attachmentsKeys.all(communityId),
-    });
 
   const attach = useMutation({
     mutationFn: (serverId: string) =>
@@ -462,6 +466,11 @@ function AddPlayerForm({
     onSuccess: () => {
       showToast(t("communitySettings.groups.playerAdded"), "success");
       queryClient.invalidateQueries({ queryKey: groupsKeys.list(communityId) });
+      // Refresh the server's-groups projection too so the Players tab's
+      // group.players.length count stops being stale (#611).
+      queryClient.invalidateQueries({
+        queryKey: attachmentsKeys.all(communityId),
+      });
       setUuid("");
       setUsername("");
       setError(null);

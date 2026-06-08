@@ -362,6 +362,7 @@ function StopControl({
   };
   const activate = (force: boolean) => {
     setOpen(false);
+    triggerRef.current?.focus();
     onStop(force);
   };
 
