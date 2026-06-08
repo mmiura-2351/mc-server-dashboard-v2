@@ -69,6 +69,7 @@ export const en = {
   "login.submitting": "Signing in…",
   "login.invalidCredentials": "Invalid username or password.",
   "login.genericError": "Could not sign in. Please try again.",
+  "login.sessionExpired": "Your session expired. Please sign in again.",
   "register.usernamePlaceholder": "username",
   "register.emailPlaceholder": "you@example.com",
   "register.passwordPlaceholder": "min. 12 characters",
