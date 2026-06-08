@@ -25,6 +25,24 @@
   /* Radii */
   --radius: 8px;
   --radius-sm: 5px;
+
+  /* Responsive breakpoints (mobile/responsive epic #583).
+   *
+   * Canonical max-widths for the two device tiers the UI targets:
+   *   --bp-tablet  900px  the existing collapse point (icon-rail sidebar #586,
+   *                       narrow top bar #554)
+   *   --bp-phone   430px  small phones; below this, padding/wrapping tighten
+   *                       further so a ~375px viewport stays usable.
+   *
+   * CSS custom properties CANNOT be used inside `@media` ranges, so these
+   * tokens are the single source of truth for the VALUES, not the selectors.
+   * The convention every mobile rule follows is to use the matching literal:
+   *   @media (max-width: 900px) { ... }   tablet -> --bp-tablet
+   *   @media (max-width: 430px) { ... }   phone  -> --bp-phone
+   * Keep the literal in the query in sync with the token above, and reference
+   * the token wherever a media query can't reach (e.g. calc() or values). */
+  --bp-phone: 430px;
+  --bp-tablet: 900px;
 }
 
 /* Dark theme (shipped). Applied by default and when data-theme="dark". */
