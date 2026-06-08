@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { heartbeatAge, humanizeBytes, statusPill } from "./format.ts";
+import {
+  formatDateTime,
+  heartbeatAge,
+  humanizeBytes,
+  shortId,
+  statusPill,
+} from "./format.ts";
 
 describe("humanizeBytes", () => {
   it("renders sub-KiB values as plain bytes", () => {
@@ -14,6 +20,29 @@ describe("humanizeBytes", () => {
 
   it("clamps at the largest unit (TiB)", () => {
     expect(humanizeBytes(1024 ** 5)).toBe("1024.0 TiB");
+  });
+});
+
+describe("formatDateTime", () => {
+  it("renders an ISO timestamp in the viewer's locale, dropping microseconds", () => {
+    const iso = "2026-06-05T13:46:35.411582Z";
+    // Locale/timezone-dependent, so assert against the same toLocaleString path
+    // rather than a hard-coded string — what matters is the raw ISO no longer
+    // leaks through (no "T", no microseconds, no offset).
+    const out = formatDateTime(iso);
+    expect(out).toBe(new Date(iso).toLocaleString());
+    expect(out).not.toContain("T");
+    expect(out).not.toContain("411582");
+  });
+});
+
+describe("shortId", () => {
+  it("keeps only the leading UUID segment", () => {
+    expect(shortId("ad1051a7-1234-5678-9abc-def012345678")).toBe("ad1051a7");
+  });
+
+  it("returns a value without dashes unchanged", () => {
+    expect(shortId("miura")).toBe("miura");
   });
 });
 

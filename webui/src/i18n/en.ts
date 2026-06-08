@@ -228,6 +228,7 @@ export const en = {
   "serverDetail.desired": "desired",
   "serverDetail.observed": "observed",
   "serverDetail.noWorker": "no worker assigned",
+  "serverDetail.worker": "Worker",
   "serverDetail.noPort": "no port",
   // Tabs (WEBUI_SPEC.md 6.4–6.9). Built tabs: Overview, Settings; the rest are
   // placeholders pending later phases.

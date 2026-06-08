@@ -22,7 +22,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
-import { humanizeBytes } from "../format.ts";
+import { formatDateTime, humanizeBytes, shortId } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
@@ -236,11 +236,19 @@ export function ServerBackupsTab({
         />
         <Stat
           labelKey="backups.stat.newest"
-          value={stats.newest ?? t("backups.none")}
+          value={
+            stats.newest !== null
+              ? formatDateTime(stats.newest)
+              : t("backups.none")
+          }
         />
         <Stat
           labelKey="backups.stat.oldest"
-          value={stats.oldest ?? t("backups.none")}
+          value={
+            stats.oldest !== null
+              ? formatDateTime(stats.oldest)
+              : t("backups.none")
+          }
         />
       </div>
 
@@ -308,7 +316,7 @@ export function ServerBackupsTab({
             ) : (
               backups.map((backup) => (
                 <tr key={backup.id}>
-                  <td>{backup.created_at}</td>
+                  <td>{formatDateTime(backup.created_at)}</td>
                   <td>
                     <span className="badge">{backup.source}</span>
                   </td>
@@ -318,7 +326,9 @@ export function ServerBackupsTab({
                       : t("backups.unknownSize")}
                   </td>
                   <td title={backup.created_by ?? undefined}>
-                    {backup.created_by ?? t("backups.unknownCreator")}
+                    {backup.created_by !== null
+                      ? shortId(backup.created_by)
+                      : t("backups.unknownCreator")}
                   </td>
                   <td className="row-actions">
                     <button

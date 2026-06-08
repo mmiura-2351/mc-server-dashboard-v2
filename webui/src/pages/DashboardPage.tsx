@@ -6,6 +6,7 @@ import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { shortId } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { type Can, useCan } from "../permissions/useCan.ts";
@@ -302,8 +303,10 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
             onRun={mutation.mutate}
           />
         ))}
-        <span className="right">
-          {server.assigned_worker_id ?? t("dashboard.noWorker")}
+        <span className="right" title={server.assigned_worker_id ?? undefined}>
+          {server.assigned_worker_id !== null
+            ? `${t("dashboard.col.worker")}: ${shortId(server.assigned_worker_id)}`
+            : t("dashboard.noWorker")}
         </span>
       </div>
     </div>
@@ -369,7 +372,9 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
       <td>{server.execution_backend}</td>
       <td className="num">{server.game_port ?? "—"}</td>
       <td className="dim" title={server.assigned_worker_id ?? undefined}>
-        {server.assigned_worker_id ?? t("dashboard.noWorker")}
+        {server.assigned_worker_id !== null
+          ? shortId(server.assigned_worker_id)
+          : t("dashboard.noWorker")}
       </td>
       <td className="row-actions">
         {(["start", "stop", "restart"] as const).map((action) => (

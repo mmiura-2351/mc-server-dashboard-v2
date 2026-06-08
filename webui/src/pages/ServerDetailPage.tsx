@@ -13,6 +13,7 @@ import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { shortId } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
@@ -215,8 +216,13 @@ function Header({
               ? `:${server.game_port}`
               : t("serverDetail.noPort")}
           </span>
-          <span className="badge">
-            {server.assigned_worker_id ?? t("serverDetail.noWorker")}
+          <span
+            className="badge"
+            title={server.assigned_worker_id ?? undefined}
+          >
+            {server.assigned_worker_id !== null
+              ? `${t("serverDetail.worker")}: ${shortId(server.assigned_worker_id)}`
+              : t("serverDetail.noWorker")}
           </span>
           {" · "}
           {t("serverDetail.desired")}: {desired}
