@@ -30,3 +30,23 @@ async def correlation_id_middleware(
         correlation_id.reset(token)
     response.headers[_HEADER] = cid
     return response
+
+
+async def strip_no_content_body_headers_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Drop the entity-body headers from ``204 No Content`` responses (issue #633).
+
+    A handler that declares ``status_code=204`` and returns ``None`` is rendered
+    by the default ``JSONResponse``, which still stamps ``Content-Type:
+    application/json`` (and a ``Content-Length``) onto an empty body. A 204 must
+    not advertise a representation, so strip both here — centrally, for every
+    such route — rather than per handler. Deleting an absent header is a no-op,
+    so this is harmless for routes that already return a bare ``Response``.
+    """
+
+    response = await call_next(request)
+    if response.status_code == 204:
+        del response.headers["content-type"]
+        del response.headers["content-length"]
+    return response

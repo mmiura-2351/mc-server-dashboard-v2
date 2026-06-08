@@ -332,6 +332,9 @@ export const en = {
   // Stats header.
   "backups.stat.count": "Backups",
   "backups.stat.totalSize": "Total size",
+  // Shown beside the total when some backups have no recorded size (legacy
+  // NULL-size rows, #281): the figure sums only the known sizes (#640).
+  "backups.stat.totalSizePartial": "known only",
   "backups.stat.newest": "Newest",
   "backups.stat.oldest": "Oldest",
   // Table.

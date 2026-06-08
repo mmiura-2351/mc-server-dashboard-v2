@@ -179,6 +179,24 @@ describe("ServerBackupsTab stats + table", () => {
     expect(screen.getByText(t("backups.stat.newest"))).toBeInTheDocument();
   });
 
+  it("renders an unknown-size row and flags the total as partial", async () => {
+    // A legacy NULL-size backup (predates size tracking, #281): the row shows
+    // "unknown" and the total-size stat is flagged as a partial sum so the
+    // figure is not silently misread as full usage (#640).
+    routeGet({
+      backups: [backup(), backup({ id: "b-old", size_bytes: null })],
+      stats: { ...STATS, count: 2, unknown_size_count: 1 },
+    });
+    await openBackups();
+
+    expect(
+      await screen.findByText(t("backups.unknownSize")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(`(${t("backups.stat.totalSizePartial")})`),
+    ).toBeInTheDocument();
+  });
+
   it("shows an empty-state row when there are no backups", async () => {
     routeGet({ backups: [], stats: { ...STATS, count: 0, total_bytes: 0 } });
     await openBackups();

@@ -68,7 +68,10 @@ from mc_server_dashboard_api.identity.application.prune_login_attempts import (
     PruneLoginAttempts,
 )
 from mc_server_dashboard_api.logging import configure_logging
-from mc_server_dashboard_api.middleware import correlation_id_middleware
+from mc_server_dashboard_api.middleware import (
+    correlation_id_middleware,
+    strip_no_content_body_headers_middleware,
+)
 from mc_server_dashboard_api.servers.adapters.backup_loop import run_backup_loop
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
@@ -608,6 +611,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # handling and labels by route template (issue #282).
     app.middleware("http")(correlation_id_middleware)
     app.middleware("http")(metrics_middleware)
+    # Strip the spurious Content-Type/Content-Length the default JSONResponse
+    # stamps onto a 204 No Content (issue #633). Registered last so it is the
+    # outermost wrapper and sees the final response of every route.
+    app.middleware("http")(strip_no_content_body_headers_middleware)
     # One ``/api`` prefix carried by a parent router that includes every other
     # router, so the prefix lives in one place and the generated openapi.json
     # paths are honest (issue #498). Sub-router order is preserved (e.g. the
