@@ -28,8 +28,13 @@ interface AccessTokenResponse {
  * The React layer registers what a hard logout does to its state (reset to
  * signed-out, navigate to /login). Kept as a hook so this module stays free of
  * React and routing.
+ *
+ * `reason` distinguishes an involuntary expiry (a transparent refresh that
+ * 401ed) from a deliberate user logout, so only the involuntary path captures a
+ * return-to location and shows the "session expired" notice (#565).
  */
-type LogoutHandler = () => void;
+export type LogoutReason = "expired";
+type LogoutHandler = (reason?: LogoutReason) => void;
 let onHardLogout: LogoutHandler | null = null;
 
 export function setHardLogoutHandler(fn: LogoutHandler): void {
@@ -128,7 +133,8 @@ export function refreshSession(): Promise<boolean> {
 export async function refreshForRetry(): Promise<boolean> {
   const ok = await refreshSession();
   if (!ok) {
-    hardLogout();
+    // Involuntary: the session died under the user, so flag it as expired.
+    hardLogout("expired");
   }
   return ok;
 }
@@ -152,10 +158,14 @@ export async function logout(): Promise<void> {
   hardLogout();
 }
 
-/** Drop local credentials and reset React state without an API round-trip. */
-export function hardLogout(): void {
+/**
+ * Drop local credentials and reset React state without an API round-trip. A
+ * `reason` is forwarded to the React handler so an involuntary expiry can be
+ * told apart from a deliberate logout; an absent reason is a deliberate logout.
+ */
+export function hardLogout(reason?: LogoutReason): void {
   clearAccessToken();
-  onHardLogout?.();
+  onHardLogout?.(reason);
 }
 
 /**
