@@ -136,6 +136,23 @@ describe("restoreSession", () => {
     expect(getAccessToken()).toBeNull();
   });
 
+  it("treats the 401 probe as the no-session signal without logging an error (#641)", async () => {
+    fetchMock.mockResolvedValue(new Response("", { status: 401 }));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // The 401 on /login and after logout is the documented "no session" state;
+    // the app must resolve signed-out silently and never surface it as an
+    // application error (the browser's native "Failed to load resource ... 401"
+    // line is separate and not suppressible from JS).
+    await expect(restoreSession()).resolves.toBe(false);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
   it("reports signed out when the network call throws", async () => {
     fetchMock.mockRejectedValue(new Error("offline"));
 
