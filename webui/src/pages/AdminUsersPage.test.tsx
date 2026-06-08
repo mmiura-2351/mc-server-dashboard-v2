@@ -104,6 +104,17 @@ describe("AdminUsersPage", () => {
     );
   });
 
+  it("exposes the full email via a title so the truncated cell stays discoverable (#638)", async () => {
+    const longEmail = "webui409_21810@example.test";
+    mockApi.get.mockResolvedValue(
+      listResponse({ users: [user({ email: longEmail })] }),
+    );
+    renderPage();
+
+    const cell = await screen.findByText(longEmail);
+    expect(cell.closest("td")).toHaveAttribute("title", longEmail);
+  });
+
   it("pages forward with a new offset when there are more users", async () => {
     mockApi.get.mockResolvedValue(
       listResponse({ total: 120, users: [user()] }),
