@@ -1640,6 +1640,15 @@ body.col-resizing {
 .admin-users table.data td.dim {
   color: var(--text-dim);
 }
+/* The email is a long single token with no break opportunity, so under
+ * `table-layout: fixed` it would overrun the Status column. Ellipsize it like
+ * the dashboard's `td.dim[title]`; the cell's `title` keeps the full address
+ * discoverable on hover (#638). */
+.admin-users table.data td.dim[title] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .admin-users table.data td.num {
   font-variant-numeric: tabular-nums;
 }

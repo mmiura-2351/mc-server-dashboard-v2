@@ -365,7 +365,9 @@ function UserRow({
           <span className="badge admin"> {t("admin.users.you")}</span>
         ) : null}
       </td>
-      <td className="dim">{user.email}</td>
+      <td className="dim" title={user.email}>
+        {user.email}
+      </td>
       <td>
         <span className={`pill ${user.active ? "running" : "stopped"}`}>
           {user.active
