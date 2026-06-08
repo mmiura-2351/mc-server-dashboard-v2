@@ -152,6 +152,53 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
         await refresh(refresh_token=rotated.refresh_token)
 
 
+async def test_both_transports_refresh_revokes_superseded_cookie_token(
+    engine: AsyncEngine,
+) -> None:
+    # Issue #384: a both-transports refresh uses the body token and revokes the
+    # superseded cookie token. Two logins stand in for the body token and the
+    # cookie token; afterwards the cookie token can no longer refresh, while the
+    # body token's just-issued successor still rotates (no family-wide revoke).
+    await _seed_user(engine)
+    factory = create_session_factory(engine)
+
+    login = Login(
+        uow=SqlAlchemyUnitOfWork(factory),
+        attempts=SqlAlchemyLoginAttemptStore(factory),
+        brute_force=make_brute_force_config(),
+        hasher=Argon2PasswordHasher(),
+        dummy_password_hash=_DUMMY_HASH,
+        tokens=_tokens(),
+        clock=SystemClock(),
+        failure_delay=FixedLoginFailureDelay(
+            delay=dt.timedelta(), sleeper=RecordingSleeper()
+        ),
+        refresh_ttl=_REFRESH_TTL,
+    )
+    body = (await login(username="alice", password=_PASSWORD)).pair
+    cookie = (await login(username="alice", password=_PASSWORD)).pair
+
+    refresh = RefreshSession(
+        uow=SqlAlchemyUnitOfWork(factory),
+        tokens=_tokens(),
+        clock=SystemClock(),
+        refresh_ttl=_REFRESH_TTL,
+        reuse_grace=_REUSE_GRACE,
+    )
+    rotated = await refresh(
+        refresh_token=body.refresh_token, superseded_token=cookie.refresh_token
+    )
+
+    # The superseded cookie token can no longer refresh.
+    with pytest.raises(InvalidRefreshTokenError):
+        await refresh(refresh_token=cookie.refresh_token)
+
+    # The body token's successor still rotates: it was not caught by a family-wide
+    # revoke (the superseded revoke is a single-token operation).
+    again = await refresh(refresh_token=rotated.refresh_token)
+    assert again.refresh_token != rotated.refresh_token
+
+
 async def test_restore_yields_access_token_and_leaves_family_intact(
     engine: AsyncEngine,
 ) -> None:

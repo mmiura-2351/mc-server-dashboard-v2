@@ -241,20 +241,44 @@ def test_refresh_reads_token_from_cookie_when_body_omits_it() -> None:
     client.cookies.set("mcd_refresh", "ref1")
     resp = client.post("/api/auth/refresh", json={})
     assert resp.status_code == 200
-    assert fake.calls == [{"refresh_token": "ref1"}]
+    assert fake.calls == [{"refresh_token": "ref1", "superseded_token": None}]
     cookie = _set_cookie_header(resp, "mcd_refresh")
     assert "mcd_refresh=ref2" in cookie
     assert "HttpOnly" in cookie
 
 
 def test_refresh_prefers_body_token_over_cookie() -> None:
-    # The body-based contract wins when both are present (worker/CLI parity).
+    # The body-based contract wins when both are present (worker/CLI parity), and
+    # the superseded cookie token is forwarded for revocation (issue #384).
     fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
     client = next(_client(refresh=fake))
     client.cookies.set("mcd_refresh", "cookie-token")
     resp = client.post("/api/auth/refresh", json={"refresh_token": "body-token"})
     assert resp.status_code == 200
-    assert fake.calls == [{"refresh_token": "body-token"}]
+    assert fake.calls == [
+        {"refresh_token": "body-token", "superseded_token": "cookie-token"}
+    ]
+
+
+def test_refresh_body_only_passes_no_superseded_token() -> None:
+    # Single transport (body only): nothing to supersede, so the use case is called
+    # without a superseded token (regression guard, issue #384).
+    fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
+    client = next(_client(refresh=fake))
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "body-token"})
+    assert resp.status_code == 200
+    assert fake.calls == [{"refresh_token": "body-token", "superseded_token": None}]
+
+
+def test_refresh_cookie_only_passes_no_superseded_token() -> None:
+    # Single transport (cookie only): the cookie is the used token, not a
+    # superseded one (regression guard, issue #384).
+    fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
+    client = next(_client(refresh=fake))
+    client.cookies.set("mcd_refresh", "cookie-token")
+    resp = client.post("/api/auth/refresh", json={})
+    assert resp.status_code == 200
+    assert fake.calls == [{"refresh_token": "cookie-token", "superseded_token": None}]
 
 
 def test_refresh_body_only_emits_no_set_cookie() -> None:
@@ -276,7 +300,9 @@ def test_refresh_with_cookie_rotates_cookie_even_when_body_token_wins() -> None:
     client.cookies.set("mcd_refresh", "cookie-token")
     resp = client.post("/api/auth/refresh", json={"refresh_token": "body-token"})
     assert resp.status_code == 200
-    assert fake.calls == [{"refresh_token": "body-token"}]
+    assert fake.calls == [
+        {"refresh_token": "body-token", "superseded_token": "cookie-token"}
+    ]
     cookie = _set_cookie_header(resp, "mcd_refresh")
     assert "mcd_refresh=ref2" in cookie
 
@@ -349,7 +375,7 @@ def test_logout_returns_204() -> None:
     client = next(_client(logout=fake))
     resp = client.post("/api/auth/logout", json={"refresh_token": "ref"})
     assert resp.status_code == 204
-    assert fake.calls == [{"refresh_token": "ref"}]
+    assert fake.calls == [{"refresh_token": "ref", "superseded_token": None}]
 
 
 def test_logout_reads_token_from_cookie_and_clears_it() -> None:
@@ -358,11 +384,24 @@ def test_logout_reads_token_from_cookie_and_clears_it() -> None:
     client.cookies.set("mcd_refresh", "ref")
     resp = client.post("/api/auth/logout", json={})
     assert resp.status_code == 204
-    assert fake.calls == [{"refresh_token": "ref"}]
+    assert fake.calls == [{"refresh_token": "ref", "superseded_token": None}]
     cookie = _set_cookie_header(resp, "mcd_refresh")
     # Cleared: empty value plus an immediate expiry.
     assert 'mcd_refresh=""' in cookie or "mcd_refresh=;" in cookie
     assert "Path=/api/auth" in cookie
+
+
+def test_logout_both_transports_forwards_superseded_cookie_token() -> None:
+    # Both transports present: the body token is revoked and the superseded cookie
+    # token is forwarded for revocation too (issue #384).
+    fake = _Fake(result=None)
+    client = next(_client(logout=fake))
+    client.cookies.set("mcd_refresh", "cookie-token")
+    resp = client.post("/api/auth/logout", json={"refresh_token": "body-token"})
+    assert resp.status_code == 204
+    assert fake.calls == [
+        {"refresh_token": "body-token", "superseded_token": "cookie-token"}
+    ]
 
 
 def test_logout_body_only_emits_no_clearing_set_cookie() -> None:
@@ -372,7 +411,7 @@ def test_logout_body_only_emits_no_clearing_set_cookie() -> None:
     client = next(_client(logout=fake))
     resp = client.post("/api/auth/logout", json={"refresh_token": "ref"})
     assert resp.status_code == 204
-    assert fake.calls == [{"refresh_token": "ref"}]
+    assert fake.calls == [{"refresh_token": "ref", "superseded_token": None}]
     _assert_no_set_cookie(resp, "mcd_refresh")
 
 

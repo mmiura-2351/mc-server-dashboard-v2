@@ -17,6 +17,7 @@ from mc_server_dashboard_api.identity.domain.entities import (
     REVOKED_FAMILY,
     REVOKED_LOGOUT,
     REVOKED_ROTATED,
+    REVOKED_SUPERSEDED,
     RefreshToken,
 )
 from mc_server_dashboard_api.identity.domain.errors import (
@@ -232,3 +233,98 @@ async def test_logout_revoked_token_within_grace_is_rejected() -> None:
 
     assert "hash::refresh-secret-1" not in uow.refresh_tokens.by_hash
     assert uow.commits == 1
+
+
+async def test_superseded_cookie_token_is_revoked_and_successor_stays_active() -> None:
+    # Both-transports refresh: the body token rotates as today, and the
+    # cookie-carried token (same family, lost precedence) is revoked as a benign
+    # *superseded* token -- a single-token revoke, never the family path -- so the
+    # just-issued successor stays active (issue #384).
+    uow = FakeUnitOfWork()
+    body_hash = _seed_token(uow, secret="body-token")
+    cookie_hash = _seed_token(uow, secret="cookie-token")
+    clock = FakeClock(_NOW)
+
+    pair = await _refresh(uow, clock)(
+        refresh_token="body-token", superseded_token="cookie-token"
+    )
+
+    # The body token rotated normally.
+    assert uow.refresh_tokens.by_hash[body_hash].revoked_reason == REVOKED_ROTATED
+    # The superseded cookie token is now revoked, with the non-grace reason.
+    assert uow.refresh_tokens.by_hash[cookie_hash].revoked_at == _NOW
+    assert uow.refresh_tokens.by_hash[cookie_hash].revoked_reason == REVOKED_SUPERSEDED
+    # The successor the client now holds is untouched (family not nuked).
+    successor = uow.refresh_tokens.by_hash[f"hash::{pair.refresh_token}"]
+    assert successor.revoked_at is None
+    assert uow.commits == 1
+
+
+async def test_superseded_revoke_is_single_token_not_family() -> None:
+    # The superseded revoke must not cascade: an unrelated sibling session of the
+    # same user stays active (it would die if this went through the family path).
+    uow = FakeUnitOfWork()
+    _seed_token(uow, secret="body-token")
+    _seed_token(uow, secret="cookie-token")
+    sibling_hash = _seed_token(uow, secret="sibling")
+    clock = FakeClock(_NOW)
+
+    await _refresh(uow, clock)(
+        refresh_token="body-token", superseded_token="cookie-token"
+    )
+
+    assert uow.refresh_tokens.by_hash[sibling_hash].revoked_at is None
+
+
+async def test_superseded_equal_to_body_token_is_not_double_revoked() -> None:
+    # Same token in both transports: it rotated as the body token, so it must keep
+    # its ``rotated`` reason -- not be overwritten with ``superseded`` -- so a
+    # grace-window concurrent refresh still works.
+    uow = FakeUnitOfWork()
+    body_hash = _seed_token(uow, secret="same-token")
+    clock = FakeClock(_NOW)
+
+    await _refresh(uow, clock)(
+        refresh_token="same-token", superseded_token="same-token"
+    )
+
+    assert uow.refresh_tokens.by_hash[body_hash].revoked_reason == REVOKED_ROTATED
+
+
+async def test_already_revoked_superseded_token_is_ignored() -> None:
+    # An already-revoked (e.g. logout/family) cookie token alongside a valid body
+    # token must not error or be re-stamped: the refresh still succeeds and the
+    # stale row keeps its original reason and time.
+    uow = FakeUnitOfWork()
+    _seed_token(uow, secret="body-token")
+    cookie_hash = _seed_token(
+        uow,
+        secret="cookie-token",
+        revoked_at=_NOW - dt.timedelta(minutes=2),
+        revoked_reason=REVOKED_LOGOUT,
+    )
+    clock = FakeClock(_NOW)
+
+    pair = await _refresh(uow, clock)(
+        refresh_token="body-token", superseded_token="cookie-token"
+    )
+
+    assert pair.refresh_token == "refresh-secret-1"
+    stale = uow.refresh_tokens.by_hash[cookie_hash]
+    assert stale.revoked_reason == REVOKED_LOGOUT
+    assert stale.revoked_at == _NOW - dt.timedelta(minutes=2)
+
+
+async def test_unknown_superseded_token_is_ignored() -> None:
+    # A malformed / never-issued cookie token alongside a valid body token must not
+    # fail the refresh.
+    uow = FakeUnitOfWork()
+    _seed_token(uow, secret="body-token")
+    clock = FakeClock(_NOW)
+
+    pair = await _refresh(uow, clock)(
+        refresh_token="body-token", superseded_token="never-issued"
+    )
+
+    assert pair.refresh_token == "refresh-secret-1"
+    assert "hash::never-issued" not in uow.refresh_tokens.by_hash

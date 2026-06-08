@@ -12,7 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.identity.domain.clock import Clock
-from mc_server_dashboard_api.identity.domain.entities import REVOKED_LOGOUT
+from mc_server_dashboard_api.identity.domain.entities import (
+    REVOKED_LOGOUT,
+    REVOKED_SUPERSEDED,
+)
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 
@@ -25,10 +28,24 @@ class Logout:
     tokens: TokenService
     clock: Clock
 
-    async def __call__(self, *, refresh_token: str) -> None:
+    async def __call__(
+        self, *, refresh_token: str, superseded_token: str | None = None
+    ) -> None:
+        now = self.clock.now()
         token_hash = self.tokens.hash_refresh_token(refresh_token)
         async with self.uow:
             await self.uow.refresh_tokens.revoke(
-                token_hash, revoked_at=self.clock.now(), reason=REVOKED_LOGOUT
+                token_hash, revoked_at=now, reason=REVOKED_LOGOUT
             )
+            # Both-transports logout: the body token wins, but the cookie-carried
+            # token must be revoked too, otherwise it stays valid server-side while
+            # the browser jar already overwrote it -- a dangling session no client
+            # holds (issue #384). Revoke is idempotent on a missing/already-revoked
+            # row, so a different-but-already-dead or unknown cookie is a no-op.
+            if superseded_token is not None:
+                superseded_hash = self.tokens.hash_refresh_token(superseded_token)
+                if superseded_hash != token_hash:
+                    await self.uow.refresh_tokens.revoke(
+                        superseded_hash, revoked_at=now, reason=REVOKED_SUPERSEDED
+                    )
             await self.uow.commit()
