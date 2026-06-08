@@ -49,6 +49,11 @@ export const ja: Record<TranslationKey, string> = {
     "プレースホルダーページ — 内容は後のフェーズで追加されます。",
   "page.notFound": "ページが見つかりません",
 
+  // Not-found (404) route: shown for any unmatched URL (#639). The body
+  // explains the state and the link returns the user to the landing route.
+  "notFound.body": "お探しのページは存在しないか、移動されました。",
+  "notFound.home": "ホームに戻る",
+
   // No-community empty state (#584): shown on the landing route when the
   // signed-in account belongs to zero communities.
   "noCommunity.title": "コミュニティがありません",
