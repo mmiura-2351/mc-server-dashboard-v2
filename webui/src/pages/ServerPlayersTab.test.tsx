@@ -180,6 +180,34 @@ describe("ServerPlayersTab", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("does not flash the no-groups picker message while the community query is loading", async () => {
+    // attached resolves immediately; community never settles, so community.data
+    // stays undefined. The picker must show the loading message, not the
+    // zero-groups empty state (#665).
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith(`/servers/${SID}/groups`)) {
+        return Promise.resolve([]);
+      }
+      if (path === `/api/communities/${CID}/groups`) {
+        return new Promise(() => {});
+      }
+      return Promise.resolve(serverResponse());
+    });
+    renderTab();
+    await openPlayers();
+
+    expect(
+      await screen.findByText(t("players.attachHeading")),
+    ).toBeInTheDocument();
+    expect(screen.getByText(t("players.loading"))).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("players.attachNoGroups")),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(t("players.attachEmpty")),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows the all-attached picker message when groups exist but all are attached", async () => {
     routeGet({
       attached: [group({ id: "g1", name: "Admins" })],

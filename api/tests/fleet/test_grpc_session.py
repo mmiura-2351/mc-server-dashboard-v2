@@ -100,19 +100,27 @@ class _Harness:
         self._port = server.add_insecure_port("127.0.0.1:0")
         await server.start()
         self._server = server
-        return self.new_stub()
+        return await self.new_stub()
 
-    def new_stub(self) -> WorkerServiceStub:
+    async def new_stub(self) -> WorkerServiceStub:
         """Open a fresh channel to the running server and return a stub on it.
 
         A fresh connection per call keeps a previous channel's teardown (or a
         connection-level GOAWAY) from racing a new call (issue #181). Every
         channel is tracked and closed in ``stop``.
+
+        The channel is awaited to READY before the stub is handed out: under
+        full-suite load the server's listening socket can still be coming up
+        when the client dials, so issuing the first RPC eagerly raced the bind
+        and surfaced a transient UNAVAILABLE / "Connection refused" (issue
+        #667). Waiting for readiness removes that race without masking any
+        per-call status.
         """
 
         assert self._port is not None, "start() must run before new_stub()"
         channel = aio.insecure_channel(f"127.0.0.1:{self._port}")
         self._channels.append(channel)
+        await asyncio.wait_for(channel.channel_ready(), timeout=5)
         return WorkerServiceStub(channel)
 
     async def stop(self) -> None:
@@ -184,13 +192,11 @@ async def _terminal_code(
     failure.
     """
 
-    code = await _drive_terminal_code(
-        harness.new_stub().Session(metadata=metadata), message
-    )
+    stub = await harness.new_stub()
+    code = await _drive_terminal_code(stub.Session(metadata=metadata), message)
     if code in _GOAWAY_CODES:
-        code = await _drive_terminal_code(
-            harness.new_stub().Session(metadata=metadata), message
-        )
+        stub = await harness.new_stub()
+        code = await _drive_terminal_code(stub.Session(metadata=metadata), message)
     return code
 
 
