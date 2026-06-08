@@ -153,6 +153,15 @@ describe("ServerDetailPage scaffold + header", () => {
     ).toBeInTheDocument();
   });
 
+  it("names the h1 by the server alone, not the status pill (a11y; #647)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+
+    const heading = await screen.findByRole("heading", { level: 1 });
+    expect(heading).toHaveAccessibleName("survival");
+    expect(heading).not.toHaveAccessibleName(/running/i);
+  });
+
   it("shows the converging hint when desired ≠ observed", async () => {
     mockApi.get.mockResolvedValue(
       server({ desired_state: "running", observed_state: "starting" }),

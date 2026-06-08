@@ -52,6 +52,7 @@ export function LoginPage() {
   return (
     <div className="auth-wrap">
       <form className="card auth-card" onSubmit={onSubmit}>
+        <h1 className="visually-hidden">{t("app.title")}</h1>
         <div className="brand">
           <span className="cube" aria-hidden="true" />
           {t("shell.brand")}
