@@ -225,6 +225,14 @@ export function ServerBackupsTab({
         <Stat
           labelKey="backups.stat.totalSize"
           value={humanizeBytes(stats.total_bytes)}
+          // total_bytes sums only backups with a recorded size; legacy NULL-size
+          // rows are excluded (#281). Flag the figure as partial so it is not
+          // misread as full usage (#640).
+          hint={
+            stats.unknown_size_count > 0
+              ? t("backups.stat.totalSizePartial")
+              : undefined
+          }
         />
         <Stat
           labelKey="backups.stat.newest"
@@ -381,14 +389,19 @@ export function ServerBackupsTab({
 function Stat({
   labelKey,
   value,
+  hint,
 }: {
   labelKey: TranslationKey;
   value: string;
+  hint?: string;
 }) {
   return (
     <div className="metric">
       <div className="metric-label">{t(labelKey)}</div>
-      <div className="metric-value">{value}</div>
+      <div className="metric-value">
+        {value}
+        {hint !== undefined && <span className="metric-unit"> ({hint})</span>}
+      </div>
     </div>
   );
 }
