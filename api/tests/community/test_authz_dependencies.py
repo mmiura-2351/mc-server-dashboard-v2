@@ -231,6 +231,44 @@ def test_missing_path_param_is_a_server_misconfiguration() -> None:
     assert resp.status_code == 500
 
 
+def test_malformed_resource_id_param_returns_422() -> None:
+    # A non-UUID {server_id} must surface as the same 422 FastAPI emits for a
+    # bad ``server_id: uuid.UUID`` route param, not the 500 the unguarded
+    # ``uuid.UUID(...)`` parse used to raise from the auth dependency (#630).
+    app = FastAPI()
+    install_problem_handlers(app)
+    checker = _FakeChecker(allow=True)
+
+    @app.get(
+        "/api/communities/{community_id}/servers/{server_id}",
+        dependencies=[
+            Depends(
+                require_permission(
+                    Permission("server:read"),
+                    resource_type="server",
+                    resource_id_param="server_id",
+                )
+            )
+        ],
+    )
+    async def _server() -> dict[str, str]:
+        return {"ok": "yes"}
+
+    user = make_user()
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=True
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: checker
+
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/badsrv")
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["errors"][0]["loc"] == ["path", "server_id"]
+    assert body["errors"][0]["type"] == "uuid_parsing"
+
+
 # --- require_server_update_authz (issue #458) ------------------------------
 #
 # The server-PATCH gate cannot pin a single operation: the required code depends
@@ -292,3 +330,15 @@ def test_server_update_authz_binds_callable_to_resource() -> None:
     assert resource.community_id == CommunityId(community_id)
     assert resource.resource_type == "server"
     assert resource.resource_id == server_id
+
+
+def test_server_update_authz_malformed_server_id_returns_422() -> None:
+    # The PATCH gate shares ``_resource_id_from_path``; a non-UUID {server_id}
+    # must likewise yield a 422, not a 500 (#630).
+    app, _ = _authz_app()
+    client = next(_client(app))
+    resp = client.patch(f"/api/communities/{uuid.uuid4()}/servers/badsrv", json={})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["errors"][0]["loc"] == ["path", "server_id"]
+    assert body["errors"][0]["type"] == "uuid_parsing"
