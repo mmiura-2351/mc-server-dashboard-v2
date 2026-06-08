@@ -15,24 +15,32 @@ from fastapi import FastAPI
 from starlette.exceptions import HTTPException
 from starlette.staticfiles import StaticFiles
 
+# Mount-relative prefixes whose unmatched paths must 404 instead of falling
+# back to the SPA index.html. ``api`` is the whole HTTP API (issue #567); a miss
+# there is a wrong/removed route, not a client-side SPA route. ``assets`` is the
+# Vite build output (issue #634): every chunk and stylesheet is a fingerprinted
+# file under ``/assets/`` (the rest of ``dist`` is just ``index.html`` at the
+# root), so a miss is a stale/renamed chunk that must surface a clean 404 rather
+# than HTML a stale client cannot execute.
+_STATIC_ONLY_PREFIXES = ("api", "assets")
+
+
+def _is_static_only(path: str) -> bool:
+    return any(path == p or path.startswith(f"{p}/") for p in _STATIC_ONLY_PREFIXES)
+
 
 class SpaStaticFiles(StaticFiles):
     """``StaticFiles`` that falls back to ``index.html`` for missing paths.
 
     A real asset (``/assets/app-abc.js``) is served as-is; any other path that
     does not resolve to a file returns ``index.html`` with a 200 so the SPA
-    router can render the client-side route. A genuinely missing asset (a path
-    under a directory that the SPA would never own, e.g. a fingerprinted file
-    that is gone) also resolves to ``index.html`` — acceptable for an SPA, and
-    the precedent FastAPI pattern.
+    router can render the client-side route.
 
-    The one carve-out is ``/api`` (issue #567): the whole HTTP API lives under
-    that prefix (issue #498), so an unmatched ``/api/*`` GET is a wrong/removed
-    route, not a client-side SPA route. Letting it fall back to ``index.html``
-    returns a misleading 200 + HTML to an API client; re-raising the 404 lets
-    the app-level problem handler render an honest ``application/problem+json``
-    response instead. The contract stays "everything non-``/api`` serves the
-    SPA".
+    The carve-outs are the static-only prefixes (``_STATIC_ONLY_PREFIXES``):
+    ``/api`` (issue #567) and ``/assets`` (issue #634). An unmatched path under
+    either is never a client-side SPA route, so re-raising the 404 lets the
+    app-level problem handler render an honest ``application/problem+json``
+    response instead of a misleading 200 + HTML. Everything else serves the SPA.
     """
 
     async def get_response(self, path: str, scope):  # type: ignore[no-untyped-def]
@@ -40,10 +48,9 @@ class SpaStaticFiles(StaticFiles):
             return await super().get_response(path, scope)
         except HTTPException as exc:
             # ``path`` is relative to the ``/`` mount, so ``/api/users`` arrives
-            # as ``api/users``; never shadow an unmatched /api path with the SPA.
-            if exc.status_code == 404 and not (
-                path == "api" or path.startswith("api/")
-            ):
+            # as ``api/users``; never shadow an unmatched static-only path with
+            # the SPA fallback.
+            if exc.status_code == 404 and not _is_static_only(path):
                 return await super().get_response("index.html", scope)
             raise
 

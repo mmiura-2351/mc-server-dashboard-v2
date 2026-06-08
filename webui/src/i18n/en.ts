@@ -43,6 +43,11 @@ export const en = {
   "page.placeholder": "Placeholder page — content arrives in a later phase.",
   "page.notFound": "Page not found",
 
+  // Not-found (404) route: shown for any unmatched URL (#639). The body
+  // explains the state and the link returns the user to the landing route.
+  "notFound.body": "The page you are looking for does not exist or has moved.",
+  "notFound.home": "Back to home",
+
   // No-community empty state (#584): shown on the landing route when the
   // signed-in account belongs to zero communities.
   "noCommunity.title": "No community yet",
@@ -327,6 +332,9 @@ export const en = {
   // Stats header.
   "backups.stat.count": "Backups",
   "backups.stat.totalSize": "Total size",
+  // Shown beside the total when some backups have no recorded size (legacy
+  // NULL-size rows, #281): the figure sums only the known sizes (#640).
+  "backups.stat.totalSizePartial": "known only",
   "backups.stat.newest": "Newest",
   "backups.stat.oldest": "Oldest",
   // Table.

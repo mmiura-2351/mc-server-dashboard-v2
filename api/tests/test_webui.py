@@ -101,6 +101,17 @@ def test_unmatched_api_path_is_404_problem_not_spa(webui_client: TestClient) -> 
     assert resp.json()["reason"] == "not_found"
 
 
+def test_unmatched_asset_is_404_not_spa(webui_client: TestClient) -> None:
+    # Regression for issue #634: a missing/renamed file under the static-only
+    # /assets prefix is a stale chunk, never a client-side route, so it must
+    # return 404 (RFC 9457 problem) — not the SPA index.html — to give a stale
+    # client a clean cache-miss signal instead of HTML it cannot execute.
+    resp = webui_client.get("/assets/bogus-does-not-exist.js")
+    assert resp.status_code == 404
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.json()["reason"] == "not_found"
+
+
 def test_spa_route_still_serves_index(webui_client: TestClient) -> None:
     # The counterpart to the /api 404: a non-/api path still falls back to the
     # SPA index.html with 200 text/html (issue #567).
