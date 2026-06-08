@@ -721,7 +721,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.grants.filterLabel": "メンバーで絞り込み",
   "communitySettings.grants.filterAll": "すべてのメンバー",
   "communitySettings.grants.unknownUser": "（不明なユーザー）",
-  "communitySettings.grants.unknownServer": "（不明なサーバー）",
   "communitySettings.grants.revoke": "取り消し",
   "communitySettings.grants.revoked": "権限付与を取り消しました。",
   "communitySettings.grants.revokeError":

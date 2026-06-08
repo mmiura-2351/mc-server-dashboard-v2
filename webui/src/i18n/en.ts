@@ -711,7 +711,6 @@ export const en = {
   "communitySettings.grants.filterLabel": "Filter by member",
   "communitySettings.grants.filterAll": "All members",
   "communitySettings.grants.unknownUser": "(unknown user)",
-  "communitySettings.grants.unknownServer": "(unknown server)",
   "communitySettings.grants.revoke": "Revoke",
   "communitySettings.grants.revoked": "Grant revoked.",
   "communitySettings.grants.revokeError":
