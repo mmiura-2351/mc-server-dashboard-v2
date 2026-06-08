@@ -230,6 +230,14 @@ select.community-switcher {
   margin: 0 auto;
 }
 
+/* Phone content padding (#618, --bp-phone): 24px each side eats 48px of a
+ * ~375px viewport. Tighten to 12px so the content area keeps usable width. */
+@media (max-width: 430px) {
+  .content {
+    padding: 12px;
+  }
+}
+
 .page-head {
   display: flex;
   align-items: flex-start;
@@ -287,6 +295,17 @@ select.community-switcher {
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* Phone button base (#618, --bp-phone): the desktop `white-space: nowrap`
+ * (set above) can push a long-labelled button past a ~375px viewport. Allow
+ * the label to wrap and cap the button at the content width so it never forces
+ * horizontal overflow. Desktop keeps nowrap and is unaffected. */
+@media (max-width: 430px) {
+  .btn {
+    white-space: normal;
+    max-width: 100%;
+  }
 }
 
 /* ---------- Cards ---------- */
