@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { api } from "../api/client.ts";
+import { attachmentsKeys, groupsKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { useToast } from "../components/Toast.tsx";
@@ -10,14 +11,6 @@ import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 
 type GroupResponse = components["schemas"]["GroupResponse"];
-
-// Query keys for the two group lists this tab reads (WEBUI_SPEC.md 6.8).
-function serverGroupsKey(communityId: string, serverId: string) {
-  return ["server-groups", communityId, serverId] as const;
-}
-function communityGroupsKey(communityId: string) {
-  return ["community-groups", communityId] as const;
-}
 
 // `kind` is a free-form string on the wire; only op/whitelist have a localized
 // label, anything else falls back to its raw value.
@@ -47,7 +40,7 @@ export function ServerPlayersTab({
   const canManage = can("group:manage");
 
   const attached = useQuery({
-    queryKey: serverGroupsKey(communityId, serverId),
+    queryKey: attachmentsKeys.forServer(communityId, serverId),
     queryFn: () =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}/groups", {
@@ -59,7 +52,7 @@ export function ServerPlayersTab({
 
   // Source for the attach picker; only needed to manage attachments.
   const community = useQuery({
-    queryKey: communityGroupsKey(communityId),
+    queryKey: groupsKeys.list(communityId),
     queryFn: () =>
       api.get(
         apiPath("/api/communities/{community_id}/groups", {
@@ -69,9 +62,12 @@ export function ServerPlayersTab({
     enabled: canManage,
   });
 
+  // Attach/detach changes the relation from both ends, so invalidate the whole
+  // attachment prefix: this refreshes this server's group list here and the
+  // group's server list in CommunityGroupsTab wherever it is mounted (#473).
   const invalidate = () =>
     queryClient.invalidateQueries({
-      queryKey: serverGroupsKey(communityId, serverId),
+      queryKey: attachmentsKeys.all(communityId),
     });
   const onError = (error: unknown) => {
     if (onForbidden(error)) {

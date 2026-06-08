@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiError, api } from "../api/client.ts";
+import { membersKeys, rolesKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
@@ -13,7 +14,6 @@ import {
 } from "../permissions/catalog.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
-import { rolesKey } from "./CommunityMembersTab.tsx";
 
 type RoleResponse = components["schemas"]["RoleResponse"];
 
@@ -37,8 +37,16 @@ export function CommunityRolesTab({
   const [editing, setEditing] = useState<RoleResponse | "new" | null>(null);
   const [deleting, setDeleting] = useState<RoleResponse | null>(null);
 
+  // A role mutation also refreshes the Members tab's role chips: those chips are
+  // rendered from each member's roles in the members list, so deleting/renaming
+  // a role must invalidate both the roles list and the members list (#473).
+  const invalidateRoles = () => {
+    queryClient.invalidateQueries({ queryKey: rolesKeys.list(communityId) });
+    queryClient.invalidateQueries({ queryKey: membersKeys.list(communityId) });
+  };
+
   const roles = useQuery({
-    queryKey: rolesKey(communityId),
+    queryKey: rolesKeys.list(communityId),
     queryFn: () =>
       api.get(
         apiPath("/api/communities/{community_id}/roles", {
@@ -57,7 +65,7 @@ export function CommunityRolesTab({
       ),
     onSuccess: () => {
       showToast(t("communitySettings.roles.deleted"), "success");
-      queryClient.invalidateQueries({ queryKey: rolesKey(communityId) });
+      invalidateRoles();
       setDeleting(null);
     },
     onError: (error) => {
@@ -218,7 +226,12 @@ function RoleEditor({
           : t("communitySettings.roles.updated"),
         "success",
       );
-      queryClient.invalidateQueries({ queryKey: rolesKey(communityId) });
+      // Renaming a role changes the chip text in the Members tab, so refresh
+      // both the roles list and the members list (#473).
+      queryClient.invalidateQueries({ queryKey: rolesKeys.list(communityId) });
+      queryClient.invalidateQueries({
+        queryKey: membersKeys.list(communityId),
+      });
       onClose();
     },
     onError: (err) => {
