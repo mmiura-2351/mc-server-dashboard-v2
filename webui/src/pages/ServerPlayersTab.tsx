@@ -119,10 +119,9 @@ export function ServerPlayersTab({
 
   const attachedGroups = attached.data;
   const attachedIds = new Set(attachedGroups.map((g) => g.id));
+  const communityGroups = community.data ?? [];
   // Picker = community groups not already attached (WEBUI_SPEC.md 6.8).
-  const candidates = (community.data ?? []).filter(
-    (g) => !attachedIds.has(g.id),
-  );
+  const candidates = communityGroups.filter((g) => !attachedIds.has(g.id));
   const busy = attach.isPending || detach.isPending;
 
   return (
@@ -159,7 +158,11 @@ export function ServerPlayersTab({
         <div className="card">
           <h2>{t("players.attachHeading")}</h2>
           {candidates.length === 0 ? (
-            <p className="sub">{t("players.attachEmpty")}</p>
+            <p className="sub">
+              {communityGroups.length === 0
+                ? t("players.attachNoGroups")
+                : t("players.attachEmpty")}
+            </p>
           ) : (
             <ul className="group-list">
               {candidates.map((group) => (

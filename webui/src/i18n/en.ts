@@ -461,6 +461,8 @@ export const en = {
   // Attach picker: community groups not yet attached to this server.
   "players.attachHeading": "Attach a group",
   "players.attachEmpty": "All of this community's groups are already attached.",
+  // Distinct from attachEmpty: the community has no groups at all (issue #642).
+  "players.attachNoGroups": "This community has no groups yet.",
   "players.attach": "Attach",
   "players.attached": "Group attached.",
   // Inline pointer to the full Groups management surface (Phase 6).

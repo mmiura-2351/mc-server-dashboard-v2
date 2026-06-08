@@ -167,6 +167,35 @@ describe("ServerPlayersTab", () => {
     expect(await screen.findByText(t("players.empty"))).toBeInTheDocument();
   });
 
+  it("shows a no-groups picker message when the community has zero groups", async () => {
+    routeGet({ attached: [], community: [] });
+    renderTab();
+    await openPlayers();
+
+    expect(
+      await screen.findByText(t("players.attachNoGroups")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("players.attachEmpty")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the all-attached picker message when groups exist but all are attached", async () => {
+    routeGet({
+      attached: [group({ id: "g1", name: "Admins" })],
+      community: [group({ id: "g1", name: "Admins" })],
+    });
+    renderTab();
+    await openPlayers();
+
+    expect(
+      await screen.findByText(t("players.attachEmpty")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("players.attachNoGroups")),
+    ).not.toBeInTheDocument();
+  });
+
   it("attach picker excludes already-attached community groups", async () => {
     routeGet({
       attached: [group({ id: "g1", name: "Admins" })],
