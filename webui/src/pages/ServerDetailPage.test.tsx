@@ -325,6 +325,114 @@ describe("ServerDetailPage lifecycle controls", () => {
     ).not.toBeInTheDocument();
   });
 
+  describe("stop menu WAI-ARIA keyboard pattern (#496)", () => {
+    function items() {
+      return screen.getAllByRole("menuitem");
+    }
+    async function openWith(key: string) {
+      mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+      mockApi.post.mockResolvedValue(server({ observed_state: "stopping" }));
+      renderPage();
+      await screen.findByText("survival");
+      const trigger = screen.getByRole("button", { name: /Stop/ });
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key });
+      return trigger;
+    }
+
+    it("opening with Enter focuses the first item with roving tabindex", async () => {
+      await openWith("Enter");
+      const [graceful, force] = items();
+      expect(graceful).toHaveFocus();
+      expect(graceful).toHaveAttribute("tabindex", "0");
+      expect(force).toHaveAttribute("tabindex", "-1");
+    });
+
+    it("opening with ArrowDown focuses the first item", async () => {
+      await openWith("ArrowDown");
+      expect(items()[0]).toHaveFocus();
+    });
+
+    it("opening with ArrowUp focuses the last item", async () => {
+      await openWith("ArrowUp");
+      const list = items();
+      expect(list[list.length - 1]).toHaveFocus();
+    });
+
+    it("ArrowDown / ArrowUp move focus and wrap with roving tabindex", async () => {
+      await openWith("Enter");
+      const [graceful, force] = items();
+
+      fireEvent.keyDown(graceful, { key: "ArrowDown" });
+      expect(force).toHaveFocus();
+      expect(force).toHaveAttribute("tabindex", "0");
+      expect(graceful).toHaveAttribute("tabindex", "-1");
+
+      // Wrap forward past the last item back to the first.
+      fireEvent.keyDown(force, { key: "ArrowDown" });
+      expect(graceful).toHaveFocus();
+
+      // Wrap backward from the first to the last.
+      fireEvent.keyDown(graceful, { key: "ArrowUp" });
+      expect(force).toHaveFocus();
+    });
+
+    it("Home / End jump to the first / last item", async () => {
+      await openWith("Enter");
+      const [graceful, force] = items();
+
+      fireEvent.keyDown(graceful, { key: "End" });
+      expect(force).toHaveFocus();
+
+      fireEvent.keyDown(force, { key: "Home" });
+      expect(graceful).toHaveFocus();
+    });
+
+    it("type-ahead moves focus to the next item starting with the typed key", async () => {
+      await openWith("Enter");
+      const [graceful, force] = items();
+
+      // "Force stop" starts with F.
+      fireEvent.keyDown(graceful, { key: "f" });
+      expect(force).toHaveFocus();
+
+      // "Stop (graceful)" starts with S.
+      fireEvent.keyDown(force, { key: "s" });
+      expect(graceful).toHaveFocus();
+    });
+
+    it("Enter activates the focused item", async () => {
+      await openWith("ArrowUp"); // focuses Force stop
+      fireEvent.keyDown(items()[1], { key: "Enter" });
+      await waitFor(() =>
+        expect(mockApi.post).toHaveBeenCalledWith(
+          `/api/communities/${CID}/servers/${SID}/stop?force=true`,
+        ),
+      );
+    });
+
+    it("Space activates the focused item", async () => {
+      await openWith("Enter"); // focuses Stop (graceful)
+      fireEvent.keyDown(items()[0], { key: " " });
+      await waitFor(() =>
+        expect(mockApi.post).toHaveBeenCalledWith(
+          `/api/communities/${CID}/servers/${SID}/stop`,
+        ),
+      );
+    });
+
+    it("Escape closes the menu and returns focus to the trigger", async () => {
+      const trigger = await openWith("Enter");
+      expect(items()[0]).toHaveFocus();
+
+      fireEvent.keyDown(items()[0], { key: "Escape" });
+      expect(
+        screen.queryByRole("menuitem", { name: t("serverDetail.stopForce") }),
+      ).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    });
+  });
+
   it("routes a lifecycle 403 through the permission glue", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
     mockApi.post.mockRejectedValue(
