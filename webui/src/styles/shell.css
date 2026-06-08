@@ -1273,6 +1273,10 @@ body.col-resizing {
   font: inherit;
   text-align: left;
   flex: 1;
+  /* Without min-width:0 a flex item refuses to shrink below its content
+   * min-content, so a long unbreakable filename defeats the ellipsis and
+   * overflows the row. */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1291,6 +1295,11 @@ body.col-resizing {
 .file-viewer-head .path {
   font-family: var(--font-mono);
   font-size: 13px;
+  /* A pathologically long unbreakable path must wrap (overflow-wrap:anywhere
+   * also shrinks the flex item's min-content) instead of overflowing the head
+   * horizontally at any width. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .file-viewer-actions {
   margin-left: auto;
@@ -1630,6 +1639,15 @@ body.col-resizing {
 }
 .admin-users table.data td.dim {
   color: var(--text-dim);
+}
+/* The email is a long single token with no break opportunity, so under
+ * `table-layout: fixed` it would overrun the Status column. Ellipsize it like
+ * the dashboard's `td.dim[title]`; the cell's `title` keeps the full address
+ * discoverable on hover (#638). */
+.admin-users table.data td.dim[title] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .admin-users table.data td.num {
   font-variant-numeric: tabular-nums;

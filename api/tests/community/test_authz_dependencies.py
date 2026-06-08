@@ -152,6 +152,94 @@ def test_authorized_member_gets_200() -> None:
     assert resource.community_id == CommunityId(community_id)
 
 
+def test_malformed_community_id_reported_once() -> None:
+    # Real community-scoped routes declare ``community_id: uuid.UUID`` on the
+    # handler too. The auth dependency must NOT re-declare it as its own typed
+    # parameter, or FastAPI validates and reports the same malformed id twice
+    # in the 422 errors array (#631). It must appear exactly once.
+    app = FastAPI()
+    install_problem_handlers(app)
+    checker = _FakeChecker(allow=True)
+
+    @app.get(
+        "/api/communities/{community_id}/ping",
+        dependencies=[Depends(require_permission(Permission("server:read")))],
+    )
+    async def _ping(community_id: uuid.UUID) -> dict[str, str]:
+        return {"ok": "yes"}
+
+    user = make_user()
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=True
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: checker
+
+    client = next(_client(app))
+    resp = client.get("/api/communities/notauuid/ping")
+    assert resp.status_code == 422
+    errors = resp.json()["errors"]
+    community_id_errors = [e for e in errors if e["loc"] == ["path", "community_id"]]
+    assert len(community_id_errors) == 1
+    assert community_id_errors[0]["type"] == "uuid_parsing"
+
+
+def _roles_app() -> FastAPI:
+    # A two-path-param route mirroring real ``/communities/{community_id}/roles/
+    # {role_id}`` handlers, which declare BOTH ids as ``uuid.UUID`` params.
+    app = FastAPI()
+    install_problem_handlers(app)
+    checker = _FakeChecker(allow=True)
+
+    @app.get(
+        "/api/communities/{community_id}/roles/{role_id}",
+        dependencies=[
+            Depends(
+                require_permission(
+                    Permission("role:read"),
+                    resource_type="role",
+                    resource_id_param="role_id",
+                )
+            )
+        ],
+    )
+    async def _role(community_id: uuid.UUID, role_id: uuid.UUID) -> dict[str, str]:
+        return {"ok": "yes"}
+
+    user = make_user()
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=True
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: checker
+    return app
+
+
+def test_two_malformed_path_ids_have_no_duplicate_community_id() -> None:
+    # With both ids malformed the gate rejects on ``community_id`` first (it is
+    # parsed at the edge to scope the membership check, before the per-resource
+    # ``role_id``); the key contract is that ``community_id`` is never duplicated
+    # in the 422 errors array (#631), which the pre-fix dependency violated.
+    client = next(_client(_roles_app()))
+    resp = client.get("/api/communities/badc/roles/badr")
+    assert resp.status_code == 422
+    errors = resp.json()["errors"]
+    community_errors = [e for e in errors if e["loc"] == ["path", "community_id"]]
+    assert len(community_errors) == 1
+
+
+def test_malformed_role_id_reported_once() -> None:
+    # A valid community but malformed ``role_id`` still yields the per-resource
+    # 422 exactly once (#630 behavior preserved, #631 no duplication).
+    client = next(_client(_roles_app()))
+    resp = client.get(f"/api/communities/{uuid.uuid4()}/roles/badr")
+    assert resp.status_code == 422
+    errors = resp.json()["errors"]
+    role_errors = [e for e in errors if e["loc"] == ["path", "role_id"]]
+    assert len(role_errors) == 1
+    assert role_errors[0]["type"] == "uuid_parsing"
+
+
 def test_platform_admin_required_allows_admin() -> None:
     app, _ = _app(member=False, allow=False, platform_admin=True)
     client = next(_client(app))

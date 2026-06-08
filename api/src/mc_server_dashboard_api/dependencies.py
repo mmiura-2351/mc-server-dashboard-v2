@@ -1794,14 +1794,13 @@ def require_permission(
         )
 
     async def _dependency(
-        community_id: uuid.UUID,
         request: Request,
         user: Annotated[User, Depends(get_current_user)],
         visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
         checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     ) -> AuthUser:
         auth_user = _to_auth_user(user)
-        community = CommunityId(community_id)
+        community = CommunityId(_community_id_from_path(request))
 
         if allow_platform_admin and auth_user.is_platform_admin:
             return auth_user
@@ -1855,14 +1854,13 @@ def require_server_update_authz(
     """
 
     async def _dependency(
-        community_id: uuid.UUID,
         request: Request,
         user: Annotated[User, Depends(get_current_user)],
         visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
         checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     ) -> ServerUpdateAuthz:
         auth_user = _to_auth_user(user)
-        community = CommunityId(community_id)
+        community = CommunityId(_community_id_from_path(request))
         if not await visibility.is_member(
             user_id=auth_user.user_id, community_id=community
         ):
@@ -1932,6 +1930,19 @@ def _resource_id_from_path(request: Request, param: str | None) -> uuid.UUID | N
             {**err, "loc": ("path", param)} for err in exc.errors(include_url=False)
         ]
         raise RequestValidationError(errors) from exc
+
+
+def _community_id_from_path(request: Request) -> uuid.UUID:
+    # Read ``community_id`` from the request path rather than declaring it as a
+    # typed parameter on the auth dependency: the route handler already declares
+    # it, and a second typed declaration here makes FastAPI validate + report a
+    # malformed id twice in the 422 errors array (issue #631). Reusing the shared
+    # helper keeps the malformed-id -> 422 (reported once) behavior from #630; the
+    # ``community_id`` segment is always present by route convention, so the
+    # ``None`` case (no param) cannot occur here.
+    community_id = _resource_id_from_path(request, "community_id")
+    assert community_id is not None
+    return community_id
 
 
 def _not_found() -> ProblemException:
