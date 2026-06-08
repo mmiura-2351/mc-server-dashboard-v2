@@ -365,6 +365,27 @@ body.col-resizing {
   white-space: nowrap;
 }
 
+/* ---------- Tables on phones (#620, epic #583) ----------
+ * Dense data tables (admin users/roles/workers/audit, server/backup lists,
+ * dashboard, …) are wider than a 375px viewport. Without this they either clip
+ * their columns or push page-level horizontal scroll. Turn each `table.data`
+ * into its own contained horizontal scroller at the phone breakpoint:
+ * `display: block` makes the <table> the scroll viewport, so the overflow is
+ * the table's, never the page's. The trade-off is that `table-layout: fixed`
+ * (and ResizableTable's stored colgroup widths) stop applying while block —
+ * acceptable on a phone, where columns auto-size to content and drag-resize is
+ * not a touch affordance. A focusable wrapper is unnecessary: Chromium/Firefox
+ * make an overflowing scroll container keyboard-focusable on its own.
+ * CSS vars can't be used in @media, so the phone breakpoint is the literal
+ * 430px from tokens.css (--bp-phone). */
+@media (max-width: 430px) {
+  table.data {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
 /* ---------- Dashboard server cards (WEBUI_SPEC.md 6.2) ---------- */
 .grid {
   display: grid;
