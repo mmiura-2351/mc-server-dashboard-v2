@@ -15,7 +15,9 @@ from functools import lru_cache
 from typing import Annotated, NamedTuple
 
 from fastapi import Depends, Request, WebSocket, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from starlette.requests import HTTPConnection
 
@@ -1896,6 +1898,12 @@ async def require_platform_admin(
     return user
 
 
+# Parses a raw path id the same way FastAPI coerces a ``uuid.UUID`` route param,
+# so a malformed id raises pydantic's ``uuid_parsing`` error rather than a bare
+# ``ValueError`` (issue #630).
+_UUID_PATH_ADAPTER: TypeAdapter[uuid.UUID] = TypeAdapter(uuid.UUID)
+
+
 def _resource_id_from_path(request: Request, param: str | None) -> uuid.UUID | None:
     if param is None:
         return None
@@ -1909,7 +1917,21 @@ def _resource_id_from_path(request: Request, param: str | None) -> uuid.UUID | N
             f"{{{param}}} path segment"
         )
     raw = request.path_params[param]
-    return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
+    if isinstance(raw, uuid.UUID):
+        return raw
+    try:
+        return _UUID_PATH_ADAPTER.validate_python(str(raw))
+    except ValidationError as exc:
+        # A malformed (non-UUID) path id must yield the same 422 FastAPI emits
+        # when a ``server_id: uuid.UUID`` route param fails to coerce -- this
+        # auth dependency runs first, so without re-raising as a validation
+        # error the bare ValueError would surface as a 500 (issue #630). Stamp
+        # the parse error with the ``("path", param)`` loc so the body matches
+        # the framework's native path-validation 422.
+        errors = [
+            {**err, "loc": ("path", param)} for err in exc.errors(include_url=False)
+        ]
+        raise RequestValidationError(errors) from exc
 
 
 def _not_found() -> ProblemException:

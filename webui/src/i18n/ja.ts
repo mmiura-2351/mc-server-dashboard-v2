@@ -474,6 +474,8 @@ export const ja: Record<TranslationKey, string> = {
   // Attach picker: community groups not yet attached to this server.
   "players.attachHeading": "グループをアタッチ",
   "players.attachEmpty": "このコミュニティのグループはすべてアタッチ済みです。",
+  // Distinct from attachEmpty: the community has no groups at all (issue #642).
+  "players.attachNoGroups": "このコミュニティにはまだグループがありません。",
   "players.attach": "アタッチ",
   "players.attached": "グループをアタッチしました。",
   // Inline pointer to the full Groups management surface (Phase 6).
