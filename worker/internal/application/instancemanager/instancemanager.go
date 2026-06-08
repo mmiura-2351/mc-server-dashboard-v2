@@ -460,8 +460,9 @@ const MaxFileBytes = 4 * 1024 * 1024
 // handleReadFile reads a working-set-relative file and returns its bytes
 // (Section 6.9, 7.2). The path is sanitized against traversal (FR-FILE-4); a
 // missing file maps to SERVER_NOT_FOUND (the API turns it into a 404) and an
-// oversized file to FILE_ACCESS_DENIED. It runs inline on the receive loop: a
-// small file read is fast, unlike the off-loop bulk transfers.
+// oversized file to FILE_ACCESS_DENIED. It is executed on the server's
+// per-server lane (issue #95): a small file read is fast, unlike the bulk
+// transfers the session takes off the lane.
 func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 	root := filepath.Join(m.scratchDir, cmd.ServerID)
 	target, err := safeJoin(root, cmd.Path)
@@ -523,7 +524,8 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 // handleEditFile writes bytes to a working-set-relative file (Section 6.9, 7.2).
 // The path is sanitized against traversal and the payload is size-bounded; the
 // write is atomic (temp sibling + rename) so a concurrent reader never sees a
-// torn file. It runs inline on the receive loop (a small, interactive edit).
+// torn file. It is executed on the server's per-server lane, issue #95 (a small,
+// interactive edit).
 func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	if len(cmd.Content) > MaxFileBytes {
 		return failFileAccess(cmd.CommandID, session.FileAccessReasonPayloadTooLarge,
@@ -585,8 +587,9 @@ const MaxDirEntries = 4096
 // resolution refusing intermediate or final symlinks, and the result is bounded
 // to MaxDirEntries with a truncation marker. A missing directory maps to
 // SERVER_NOT_FOUND (the API turns it into a 404); a path that is a regular file
-// (not a directory) is FILE_ACCESS_DENIED. It runs inline on the receive loop:
-// a single directory read is fast, unlike the off-loop bulk transfers.
+// (not a directory) is FILE_ACCESS_DENIED. It is executed on the server's
+// per-server lane (issue #95): a single directory read is fast, unlike the bulk
+// transfers the session takes off the lane.
 func (m *Manager) handleListFiles(cmd session.Command) session.CommandResult {
 	root := filepath.Join(m.scratchDir, cmd.ServerID)
 
