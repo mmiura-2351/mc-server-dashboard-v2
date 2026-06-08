@@ -325,6 +325,12 @@ function Controls({
 
 // Stop with a graceful/force choice (WEBUI_SPEC.md 6.4). The bare button stops
 // gracefully; the caret toggles a small menu whose entries pick the mode.
+//
+// The menu follows the WAI-ARIA menu-button keyboard pattern (#496): a roving
+// tabindex (only the active item is tabbable), arrow keys / Home / End move
+// focus, type-ahead jumps to the next item by first letter, Enter/Space
+// activates, and Escape closes and returns focus to the trigger. Two items only,
+// so the logic is kept local rather than hoisted into a generic menu primitive.
 function StopControl({
   disabled,
   onStop,
@@ -333,11 +339,39 @@ function StopControl({
   onStop: (force: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Index of the focused menu item while open; drives the roving tabindex.
+  const [active, setActive] = useState(0);
   const ref = useRef<HTMLSpanElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  const menu = [
+    { labelKey: "serverDetail.stopGraceful", force: false, extra: "" },
+    { labelKey: "serverDetail.stopForce", force: true, extra: " danger" },
+  ] as const;
+
+  const close = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+  const activate = (force: boolean) => {
+    setOpen(false);
+    onStop(force);
+  };
+
+  // Move focus to the menu item once open/active settles, so opening with a key
+  // lands focus on the right entry and arrow keys keep DOM focus in step.
+  useLayoutEffect(() => {
+    if (open) {
+      itemRefs.current[active]?.focus();
+    }
+  }, [open, active]);
+
   // Close the menu on a click outside it or on Escape, mirroring the
   // document-listener pattern in Modal.tsx (listeners attached only while open).
-  // Escape returns focus to the trigger so keyboard users are not stranded.
+  // Escape returns focus to the trigger so keyboard users are not stranded; the
+  // per-item handler below also catches it (and stops propagation), so this is
+  // the fallback for an Escape pressed before focus has entered the menu.
   useEffect(() => {
     if (!open) {
       return;
@@ -360,6 +394,72 @@ function StopControl({
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [open]);
+
+  // Open from the trigger via the keyboard: Enter/Space/Down focus the first
+  // item, Up focuses the last (WAI-ARIA menu-button pattern).
+  const onTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (
+      event.key === "Enter" ||
+      event.key === " " ||
+      event.key === "ArrowDown"
+    ) {
+      event.preventDefault();
+      setActive(0);
+      setOpen(true);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActive(menu.length - 1);
+      setOpen(true);
+    }
+  };
+
+  const onItemKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    i: number,
+  ) => {
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        setActive((i + 1) % menu.length);
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        setActive((i - 1 + menu.length) % menu.length);
+        break;
+      case "Home":
+        event.preventDefault();
+        setActive(0);
+        break;
+      case "End":
+        event.preventDefault();
+        setActive(menu.length - 1);
+        break;
+      case "Escape":
+        event.preventDefault();
+        close();
+        break;
+      case "Enter":
+      case " ":
+        event.preventDefault();
+        activate(menu[i].force);
+        break;
+      default: {
+        // Type-ahead: jump to the next item whose label starts with the key.
+        if (event.key.length !== 1) {
+          return;
+        }
+        const key = event.key.toLowerCase();
+        const match = menu.findIndex((m) =>
+          t(m.labelKey).toLowerCase().startsWith(key),
+        );
+        if (match !== -1) {
+          event.preventDefault();
+          setActive(match);
+        }
+      }
+    }
+  };
+
   return (
     <span className="stop-control" ref={ref}>
       <button
@@ -367,7 +467,11 @@ function StopControl({
         type="button"
         className="btn"
         disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          setActive(0);
+          setOpen((v) => !v);
+        }}
+        onKeyDown={onTriggerKeyDown}
         aria-haspopup="menu"
         aria-expanded={open}
       >
@@ -375,30 +479,23 @@ function StopControl({
       </button>
       {open && (
         <span className="stop-menu" role="menu">
-          <button
-            type="button"
-            role="menuitem"
-            className="btn sm"
-            disabled={disabled}
-            onClick={() => {
-              setOpen(false);
-              onStop(false);
-            }}
-          >
-            {t("serverDetail.stopGraceful")}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="btn sm danger"
-            disabled={disabled}
-            onClick={() => {
-              setOpen(false);
-              onStop(true);
-            }}
-          >
-            {t("serverDetail.stopForce")}
-          </button>
+          {menu.map((item, i) => (
+            <button
+              key={item.labelKey}
+              ref={(el) => {
+                itemRefs.current[i] = el;
+              }}
+              type="button"
+              role="menuitem"
+              tabIndex={active === i ? 0 : -1}
+              className={`btn sm${item.extra}`}
+              disabled={disabled}
+              onClick={() => activate(item.force)}
+              onKeyDown={(event) => onItemKeyDown(event, i)}
+            >
+              {t(item.labelKey)}
+            </button>
+          ))}
         </span>
       )}
     </span>

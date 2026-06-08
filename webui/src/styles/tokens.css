@@ -38,7 +38,10 @@
   --border-subtle: #1f2630;
   --text: #d7dee8;
   --text-dim: #8b97a8;
-  --text-faint: #5c6878;
+  /* Lightened from #5c6878 to clear WCAG AA 4.5:1 on every surface it sits on,
+   * including --bg-overlay (the .pill.stopped background), while staying dimmer
+   * than --text-dim so the faint < dim < text hierarchy holds (#496). */
+  --text-faint: #79899e;
   --accent: #4d9fff;
   --accent-dim: #2b5e9e;
 
