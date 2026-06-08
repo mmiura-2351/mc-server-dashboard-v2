@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
+import { attachmentsKeys } from "../api/communityQueryKeys.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
@@ -297,6 +298,70 @@ describe("CommunityGroupsTab", () => {
       expect(mockApi.delete).toHaveBeenCalledWith(
         `/api/communities/${CID}/groups/g1/players/uuid-1`,
       );
+    });
+  });
+
+  // #611: the Players tab renders group.players.length from the attachments
+  // (server's-groups) projection, so an add/remove must invalidate that prefix
+  // too, not only the groups list, or the count stays stale until remount.
+  it("invalidates the attachments prefix after adding a player", async () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    routeGet({ groups: [group({ players: [] })], groupServers: [] });
+    mockApi.post.mockResolvedValue(group());
+    renderPage();
+    await openGroupsTab();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("communitySettings.groups.expand"),
+      }),
+    );
+    fireEvent.change(
+      screen.getByLabelText(t("communitySettings.groups.uuidLabel")),
+      { target: { value: "uuid-1" } },
+    );
+    fireEvent.change(
+      screen.getByLabelText(t("communitySettings.groups.usernameLabel")),
+      { target: { value: "steve" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("communitySettings.groups.addPlayer"),
+      }),
+    );
+
+    await waitFor(() => {
+      expect(invalidate).toHaveBeenCalledWith({
+        queryKey: attachmentsKeys.all(CID),
+      });
+    });
+  });
+
+  it("invalidates the attachments prefix after removing a player", async () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, "invalidateQueries");
+    routeGet({
+      groups: [group({ players: [{ uuid: "uuid-1", username: "steve" }] })],
+      groupServers: [],
+    });
+    mockApi.delete.mockResolvedValue(group());
+    renderPage();
+    await openGroupsTab();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("communitySettings.groups.expand"),
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("communitySettings.groups.removePlayer"),
+      }),
+    );
+
+    await waitFor(() => {
+      expect(invalidate).toHaveBeenCalledWith({
+        queryKey: attachmentsKeys.all(CID),
+      });
     });
   });
 
