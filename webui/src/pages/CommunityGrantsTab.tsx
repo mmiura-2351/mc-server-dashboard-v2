@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client.ts";
+import { membersKeys } from "../api/communityQueryKeys.ts";
+import { labelQueryFn } from "../api/labelQuery.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
@@ -48,24 +50,33 @@ export function CommunityGrantsTab({
   const [revoking, setRevoking] = useState<GrantResponse | null>(null);
 
   // Members and servers label the grant rows (the grant payload carries only
-  // ids) and feed the create-flow pickers.
+  // ids) and feed the create-flow pickers. These are display-only secondary
+  // reads under different gates (`member:read` / `server:read`) than the tab's
+  // `grant:read` primary read, so a 403 degrades to an empty list (raw-id
+  // fallback) via `labelQueryFn` instead of failing the whole tab (#471).
   const members = useQuery({
-    queryKey: ["communities", communityId, "members"] as const,
-    queryFn: () =>
-      api.get(
-        apiPath("/api/communities/{community_id}/members", {
-          community_id: communityId,
-        }),
-      ),
+    queryKey: membersKeys.list(communityId),
+    queryFn: labelQueryFn(
+      () =>
+        api.get(
+          apiPath("/api/communities/{community_id}/members", {
+            community_id: communityId,
+          }),
+        ),
+      [],
+    ),
   });
   const servers = useQuery({
     queryKey: ["communities", communityId, "servers"] as const,
-    queryFn: () =>
-      api.get(
-        apiPath("/api/communities/{community_id}/servers", {
-          community_id: communityId,
-        }),
-      ),
+    queryFn: labelQueryFn(
+      () =>
+        api.get(
+          apiPath("/api/communities/{community_id}/servers", {
+            community_id: communityId,
+          }),
+        ),
+      [],
+    ),
   });
 
   const grants = useQuery({
@@ -176,13 +187,9 @@ export function CommunityGrantsTab({
           <tbody>
             {grants.data.map((grant) => (
               <tr key={grant.id}>
+                <td>{usernameById.get(grant.user_id) ?? grant.user_id}</td>
                 <td>
-                  {usernameById.get(grant.user_id) ??
-                    t("communitySettings.grants.unknownUser")}
-                </td>
-                <td>
-                  {serverNameById.get(grant.resource_id) ??
-                    t("communitySettings.grants.unknownServer")}
+                  {serverNameById.get(grant.resource_id) ?? grant.resource_id}
                 </td>
                 <td>
                   <span className="chips">

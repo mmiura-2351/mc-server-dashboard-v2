@@ -319,6 +319,99 @@ describe("CommunityGrantsTab", () => {
     ).toBeInTheDocument();
   });
 
+  it("degrades a 403 on the secondary member/server reads to raw-id rows without failing the tab", async () => {
+    // Caller holds grant:read but not member:read / server:read: the secondary
+    // label reads 403 and must degrade to raw ids, not collapse the tab (#471).
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === `/api/communities/${CID}/members`) {
+        return Promise.reject(
+          new ApiError(403, { reason: "forbidden", permission: "member:read" }),
+        );
+      }
+      if (path === `/api/communities/${CID}/servers`) {
+        return Promise.reject(
+          new ApiError(403, { reason: "forbidden", permission: "server:read" }),
+        );
+      }
+      if (path.startsWith(`/api/communities/${CID}/grants`)) {
+        return Promise.resolve([grant({ user_id: "u9", resource_id: "s9" })]);
+      }
+      return Promise.resolve(community());
+    });
+    renderPage();
+    await openGrants();
+
+    // Row falls back to the raw user_id and resource_id…
+    expect(await screen.findByText("u9")).toBeInTheDocument();
+    expect(screen.getByText("s9")).toBeInTheDocument();
+    // …and the tab is not collapsed into its generic load error.
+    expect(
+      screen.queryByText(t("communitySettings.grants.loadError")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still fails the tab when the primary grants read 403s", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === `/api/communities/${CID}/members`) {
+        return Promise.resolve([member()]);
+      }
+      if (path === `/api/communities/${CID}/servers`) {
+        return Promise.resolve([server()]);
+      }
+      if (path.startsWith(`/api/communities/${CID}/grants`)) {
+        return Promise.reject(
+          new ApiError(403, { reason: "forbidden", permission: "grant:read" }),
+        );
+      }
+      return Promise.resolve(community());
+    });
+    renderPage();
+    await openGrants();
+
+    expect(
+      await screen.findByText(t("communitySettings.grants.loadError")),
+    ).toBeInTheDocument();
+  });
+
+  it("does not swallow a non-403 error on a secondary read", async () => {
+    // A 500 on a secondary read is a real outage, not an authorization gap: it
+    // must still surface the tab error rather than degrade silently.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === `/api/communities/${CID}/members`) {
+        return Promise.reject(new ApiError(500, { reason: "server_error" }));
+      }
+      if (path === `/api/communities/${CID}/servers`) {
+        return Promise.resolve([server()]);
+      }
+      if (path.startsWith(`/api/communities/${CID}/grants`)) {
+        return Promise.resolve([grant()]);
+      }
+      return Promise.resolve(community());
+    });
+    renderPage();
+    await openGrants();
+
+    expect(
+      await screen.findByText(t("communitySettings.grants.loadError")),
+    ).toBeInTheDocument();
+  });
+
+  it("shows resolved labels when the caller holds the secondary gates", async () => {
+    routeGet({
+      members: [member({ user_id: "u1", username: "alice" })],
+      servers: [server({ id: "s1", name: "survival" })],
+      grants: [grant({ user_id: "u1", resource_id: "s1" })],
+    });
+    renderPage();
+    await openGrants();
+
+    expect((await screen.findAllByText("alice")).length).toBeGreaterThan(0);
+    expect(screen.getByText("survival")).toBeInTheDocument();
+    // The resolved names are shown, not the raw ids.
+    expect(screen.queryByText("u1")).not.toBeInTheDocument();
+    expect(screen.queryByText("s1")).not.toBeInTheDocument();
+  });
+
   it("routes a 403 on revoke through onForbidden (named-permission toast)", async () => {
     routeGet({
       members: [member()],
