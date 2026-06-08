@@ -33,6 +33,11 @@ AUTH_SESSION_RESTORE: Final = "auth:session_restore"
 AUTH_PASSWORD_CHANGE: Final = "auth:password_change"
 AUTH_PROFILE_UPDATE: Final = "auth:profile_update"
 AUTH_ACCOUNT_DELETE: Final = "auth:account_delete"
+# Session management (issue #387): the authenticated user revoking one of their
+# own refresh-token sessions, or all other sessions (everywhere-else logout).
+# Both DELETE endpoints record this SUCCESS row attributed to the caller; listing
+# is a read and is not audited.
+AUTH_SESSION_REVOKE: Final = "auth:session_revoke"
 
 # Platform-admin user administration (M2 Epic A2, issue #278): an admin acting on
 # another user's lifecycle. These name the operation, not a permission code --

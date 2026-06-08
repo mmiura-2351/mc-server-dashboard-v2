@@ -10,9 +10,10 @@ by an ownership / last-admin invariant is 409 with a reason.
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Body, Depends, Response, status
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -24,15 +25,23 @@ from mc_server_dashboard_api.dependencies import (
     get_client_ip,
     get_current_user,
     get_delete_account,
+    get_list_sessions,
     get_register_user,
+    get_revoke_other_sessions,
+    get_revoke_session,
     get_update_profile,
 )
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.application.change_password import ChangePassword
 from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
+from mc_server_dashboard_api.identity.application.list_sessions import ListSessions
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
+from mc_server_dashboard_api.identity.application.revoke_other_sessions import (
+    RevokeOtherSessions,
+)
+from mc_server_dashboard_api.identity.application.revoke_session import RevokeSession
 from mc_server_dashboard_api.identity.application.update_profile import UpdateProfile
-from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.errors import (
     CommunityOwnedError,
     EmailAlreadyExistsError,
@@ -46,7 +55,10 @@ from mc_server_dashboard_api.identity.domain.errors import (
     UsernameAlreadyExistsError,
     UserNotFoundError,
 )
-from mc_server_dashboard_api.identity.domain.value_objects import UserId
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    RefreshTokenId,
+    UserId,
+)
 
 router = APIRouter()
 
@@ -258,6 +270,102 @@ async def delete_account(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+class SessionResponse(BaseModel):
+    """Safe metadata for one active refresh-token session (issue #387).
+
+    Addressed by the row ``id`` (an opaque session id); the token hash/secret is
+    deliberately never exposed. No client-hint field is included because none is
+    stored on the row.
+    """
+
+    id: str
+    created_at: str
+    expires_at: str
+
+    @classmethod
+    def from_entity(cls, token: RefreshToken) -> "SessionResponse":
+        return cls(
+            id=str(token.id.value),
+            created_at=token.issued_at.isoformat(),
+            expires_at=token.expires_at.isoformat(),
+        )
+
+
+class RevokeOtherSessionsRequest(BaseModel):
+    # The caller's current refresh token, so its session is spared (everywhere-
+    # else logout). Optional: an access-token-only caller cannot present it, in
+    # which case all active sessions are revoked (see RevokeOtherSessions).
+    refresh_token: str | None = Field(default=None, min_length=1)
+
+
+@router.get("/users/me/sessions")
+async def list_sessions(
+    user: Annotated[User, Depends(get_current_user)],
+    use_case: Annotated[ListSessions, Depends(get_list_sessions)],
+) -> list[SessionResponse]:
+    """List the caller's active (non-revoked, non-expired) sessions (issue #387)."""
+
+    tokens = await use_case(user_id=user.id)
+    return [SessionResponse.from_entity(token) for token in tokens]
+
+
+@router.delete(
+    "/users/me/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def revoke_session(
+    session_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    use_case: Annotated[RevokeSession, Depends(get_revoke_session)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> Response:
+    # A malformed id, an unknown id, and an id owned by another user all map to the
+    # same 404: the use case scopes the revoke to the caller, so it never reveals
+    # whether the session exists or whom it belongs to (issue #387).
+    try:
+        token_id = RefreshTokenId(uuid.UUID(session_id))
+    except ValueError as exc:
+        raise _session_not_found() from exc
+    revoked = await use_case(user_id=user.id, session_id=token_id)
+    if not revoked:
+        raise _session_not_found()
+    await recorder.record(
+        AuditEvent(
+            operation=ops.AUTH_SESSION_REVOKE,
+            outcome=Outcome.SUCCESS,
+            actor_id=user.id.value,
+            target_type=ops.TARGET_USER,
+            target_id=user.id.value,
+        )
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/users/me/sessions", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_other_sessions(
+    user: Annotated[User, Depends(get_current_user)],
+    use_case: Annotated[RevokeOtherSessions, Depends(get_revoke_other_sessions)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    # Optional body: a browser caller (whose refresh cookie is confined to
+    # /api/auth and not sent here) can DELETE with no body at all.
+    body: Annotated[RevokeOtherSessionsRequest | None, Body()] = None,
+) -> Response:
+    # Everywhere-else logout: the session matching the presented refresh token is
+    # kept alive, the rest revoked. With no token presented, every active session
+    # is revoked (the safe option — never another user's, issue #387).
+    current = body.refresh_token if body is not None else None
+    await use_case(user_id=user.id, current_refresh_token=current)
+    await recorder.record(
+        AuditEvent(
+            operation=ops.AUTH_SESSION_REVOKE,
+            outcome=Outcome.SUCCESS,
+            actor_id=user.id.value,
+            target_type=ops.TARGET_USER,
+            target_id=user.id.value,
+        )
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 def _conflict_reason(exc: Exception) -> str:
     return (
         "username_taken"
@@ -280,6 +388,13 @@ def _unauthorized() -> ProblemException:
         "invalid_credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def _session_not_found() -> ProblemException:
+    # An unknown id, an id owned by another user, and a malformed id are
+    # indistinguishable: a single 404 so the endpoint leaks neither the session's
+    # existence nor its owner (issue #387 — 404, never 403).
+    return problem(status.HTTP_404_NOT_FOUND, "session_not_found")
 
 
 def _user_gone() -> ProblemException:

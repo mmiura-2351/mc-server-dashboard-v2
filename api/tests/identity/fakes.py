@@ -39,6 +39,7 @@ from mc_server_dashboard_api.identity.domain.token_service import (
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
+    RefreshTokenId,
     UserId,
     Username,
 )
@@ -140,6 +141,50 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
                 self.by_hash[token_hash] = _with_revoked(
                     token, revoked_at, REVOKED_FAMILY
                 )
+
+    async def list_active_for_user(
+        self, user_id: UserId, *, now: dt.datetime
+    ) -> list[RefreshToken]:
+        active = [
+            token
+            for token in self.by_hash.values()
+            if token.user_id == user_id and token.is_active(now=now)
+        ]
+        return sorted(active, key=lambda t: (t.issued_at, t.id.value), reverse=True)
+
+    async def revoke_by_id(
+        self,
+        token_id: RefreshTokenId,
+        user_id: UserId,
+        *,
+        revoked_at: dt.datetime,
+        reason: str,
+    ) -> bool:
+        for token_hash, token in list(self.by_hash.items()):
+            if (
+                token.id == token_id
+                and token.user_id == user_id
+                and token.revoked_at is None
+            ):
+                self.by_hash[token_hash] = _with_revoked(token, revoked_at, reason)
+                return True
+        return False
+
+    async def revoke_all_for_user_except(
+        self,
+        user_id: UserId,
+        *,
+        keep_token_hash: str | None,
+        revoked_at: dt.datetime,
+        reason: str,
+    ) -> None:
+        for token_hash, token in list(self.by_hash.items()):
+            if (
+                token.user_id == user_id
+                and token.revoked_at is None
+                and token_hash != keep_token_hash
+            ):
+                self.by_hash[token_hash] = _with_revoked(token, revoked_at, reason)
 
 
 def _with_revoked(

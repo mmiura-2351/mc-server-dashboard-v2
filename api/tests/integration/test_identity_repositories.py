@@ -24,6 +24,7 @@ from mc_server_dashboard_api.identity.adapters.unit_of_work import (
 from mc_server_dashboard_api.identity.domain.entities import (
     REVOKED_FAMILY,
     REVOKED_ROTATED,
+    REVOKED_USER,
     RefreshToken,
     User,
 )
@@ -273,6 +274,140 @@ async def test_revoke_all_for_user_revokes_only_active_tokens(
     # An already-revoked token keeps its original timestamp (only active swept).
     assert loaded_revoked is not None
     assert loaded_revoked.revoked_at == already_revoked_at
+
+
+def _token(
+    user_id: UserId,
+    token_hash: str,
+    *,
+    issued_at: dt.datetime = _NOW,
+    expires_at: dt.datetime | None = None,
+    revoked_at: dt.datetime | None = None,
+) -> RefreshToken:
+    return RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=user_id,
+        token_hash=token_hash,
+        issued_at=issued_at,
+        expires_at=expires_at or (_NOW + dt.timedelta(days=30)),
+        revoked_at=revoked_at,
+    )
+
+
+async def test_list_active_for_user_returns_only_callers_active(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    alice = _user(username="alice", email="alice@example.com")
+    bob = _user(username="bob", email="bob@example.com")
+    older = _token(alice.id, "a-older", issued_at=_NOW - dt.timedelta(days=1))
+    newer = _token(alice.id, "a-newer", issued_at=_NOW)
+    revoked = _token(alice.id, "a-revoked", revoked_at=_NOW)
+    expired = _token(
+        alice.id,
+        "a-expired",
+        issued_at=_NOW - dt.timedelta(days=60),
+        expires_at=_NOW - dt.timedelta(days=1),
+    )
+    bobs = _token(bob.id, "b-active")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(alice)
+        await uow.users.add(bob)
+        await uow.commit()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        for tok in (older, newer, revoked, expired, bobs):
+            await uow.refresh_tokens.add(tok)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        sessions = await uow.refresh_tokens.list_active_for_user(alice.id, now=_NOW)
+
+    # Only alice's active tokens, newest-first; revoked / expired / bob's excluded.
+    assert [s.id for s in sessions] == [newer.id, older.id]
+
+
+async def test_revoke_by_id_scoped_to_user(engine: AsyncEngine) -> None:
+    factory = create_session_factory(engine)
+    alice = _user(username="alice", email="alice@example.com")
+    bob = _user(username="bob", email="bob@example.com")
+    alices = _token(alice.id, "alices")
+    bobs = _token(bob.id, "bobs")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(alice)
+        await uow.users.add(bob)
+        await uow.commit()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.add(alices)
+        await uow.refresh_tokens.add(bobs)
+        await uow.commit()
+
+    revoked_at = _NOW + dt.timedelta(hours=1)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        # Alice revoking her own session reports a hit and stamps the user reason.
+        own = await uow.refresh_tokens.revoke_by_id(
+            alices.id, alice.id, revoked_at=revoked_at, reason=REVOKED_USER
+        )
+        # Alice revoking Bob's session (real id, wrong owner) reports a miss.
+        cross = await uow.refresh_tokens.revoke_by_id(
+            bobs.id, alice.id, revoked_at=revoked_at, reason=REVOKED_USER
+        )
+        # An unknown id reports a miss.
+        unknown = await uow.refresh_tokens.revoke_by_id(
+            RefreshTokenId.new(), alice.id, revoked_at=revoked_at, reason=REVOKED_USER
+        )
+        await uow.commit()
+
+    assert own is True
+    assert cross is False
+    assert unknown is False
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        loaded_alice = await uow.refresh_tokens.get_by_token_hash("alices")
+        loaded_bob = await uow.refresh_tokens.get_by_token_hash("bobs")
+    assert loaded_alice is not None
+    assert loaded_alice.revoked_at == revoked_at
+    assert loaded_alice.revoked_reason == REVOKED_USER
+    # Bob's session is untouched (cross-user isolation).
+    assert loaded_bob is not None and loaded_bob.revoked_at is None
+
+
+async def test_revoke_all_for_user_except_keeps_current(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    alice = _user(username="alice", email="alice@example.com")
+    bob = _user(username="bob", email="bob@example.com")
+    current = _token(alice.id, "current")
+    other = _token(alice.id, "other")
+    bobs = _token(bob.id, "bobs")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(alice)
+        await uow.users.add(bob)
+        await uow.commit()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        for tok in (current, other, bobs):
+            await uow.refresh_tokens.add(tok)
+        await uow.commit()
+
+    sweep_at = _NOW + dt.timedelta(hours=1)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.revoke_all_for_user_except(
+            alice.id,
+            keep_token_hash="current",
+            revoked_at=sweep_at,
+            reason=REVOKED_USER,
+        )
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        loaded_current = await uow.refresh_tokens.get_by_token_hash("current")
+        loaded_other = await uow.refresh_tokens.get_by_token_hash("other")
+        loaded_bob = await uow.refresh_tokens.get_by_token_hash("bobs")
+    assert loaded_current is not None and loaded_current.revoked_at is None
+    assert loaded_other is not None
+    assert loaded_other.revoked_at == sweep_at
+    assert loaded_other.revoked_reason == REVOKED_USER
+    # Another user's session is never swept.
+    assert loaded_bob is not None and loaded_bob.revoked_at is None
 
 
 async def test_deleting_user_cascades_to_refresh_tokens(
