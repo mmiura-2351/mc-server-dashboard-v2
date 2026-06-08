@@ -3,13 +3,15 @@
 > Status: **Reference** · Audience: contributors to `api/`, Web UI session layer
 >
 > The status-code and transport contract for the `/auth/*` endpoints (login,
-> refresh, logout). It exists so contract changes have a place to land and a
-> reviewer can diff a change against a documented baseline instead of re-deriving
-> it from the router. **Code is the source of truth**
-> (`api/src/mc_server_dashboard_api/identity/api/auth.py`); where this doc and the
-> router disagree, the router wins and this doc is stale.
+> refresh, logout) and the `/users/me/sessions` session-management endpoints. It
+> exists so contract changes have a place to land and a reviewer can diff a change
+> against a documented baseline instead of re-deriving it from the router. **Code
+> is the source of truth** (`api/src/mc_server_dashboard_api/identity/api/auth.py`
+> and `.../identity/api/users.py`); where this doc and the router disagree, the
+> router wins and this doc is stale.
 >
-> **Scope.** The `/auth/*` endpoints only. Token issuance/verification semantics
+> **Scope.** The `/auth/*` endpoints and the `/users/me/sessions` session
+> endpoints (Section 7). Token issuance/verification semantics
 > (FR-AUTH-2) live behind the `TokenService` Port
 > ([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 5.1); the brute-force / lockout
 > behaviour that login participates in is owned by [`SECURITY.md`](SECURITY.md);
@@ -25,7 +27,8 @@
 4. [Refresh rotation and the reuse grace window](#4-refresh-rotation-and-the-reuse-grace-window)
 5. [CSRF posture](#5-csrf-posture)
 6. [Audit events](#6-audit-events)
-7. [Related documents](#7-related-documents)
+7. [Session management endpoints](#7-session-management-endpoints)
+8. [Related documents](#8-related-documents)
 
 ## 1. Endpoints at a glance
 
@@ -252,6 +255,13 @@ status code returned to the client:
 | refresh reuse (family revoked) | `auth:refresh_reuse` | `DENIED` | the affected user (target: user) |
 | session restore success | `auth:session_restore` | `SUCCESS` | the session's user (target: user) |
 | logout (token presented) | `auth:logout` | `SUCCESS` | — |
+| revoke one session (hit) | `auth:session_revoke` | `SUCCESS` | the caller (target: user) |
+| revoke all other sessions | `auth:session_revoke` | `SUCCESS` | the caller (target: user) |
+
+A `DELETE /users/me/sessions/{id}` that misses (unknown / malformed id, or one
+owned by another user — all `404`) records **no** row: it changed nothing and is
+not a security signal. Listing (`GET /users/me/sessions`) is a read and is not
+audited.
 
 A plain unknown / expired refresh token is **not** audited — it is not a
 token-theft signal, so auditing it would be noise. `/auth/session` follows the
@@ -263,7 +273,57 @@ SUCCESS row is its replacement — it lets operators see session-restore activit
 against an idle victim's cookie even though restore never revokes the family
 (Section 4).
 
-## 7. Related documents
+## 7. Session management endpoints
+
+A refresh token is a persisted **session** (`refresh_token` row). These endpoints
+let the authenticated caller see and revoke their own sessions (issue #387). They
+are on `/api/users/me/sessions`, so — unlike `/auth/*` — they authenticate by the
+**access token** (`Authorization: Bearer <access token>`), the same as the rest of
+`/users/me`. Code:
+`api/src/mc_server_dashboard_api/identity/api/users.py`.
+
+| Endpoint | Success | Body | Failure |
+|---|---|---|---|
+| `GET /api/users/me/sessions` | `200` | JSON array of the caller's active sessions | — (empty array if none) |
+| `DELETE /api/users/me/sessions/{id}` | `204` | empty | `404` `session_not_found` (unknown / malformed id, **or** owned by another user) |
+| `DELETE /api/users/me/sessions` | `204` | empty | — |
+
+**List** returns only **active** (non-revoked, non-expired) sessions of the
+caller, newest-first. Each item is safe metadata only — the row id (an opaque
+session id used to address a revoke) plus `created_at` and `expires_at`:
+
+```json
+[
+  { "id": "<uuid>", "created_at": "<ISO 8601>", "expires_at": "<ISO 8601>" }
+]
+```
+
+The raw refresh-token secret and its stored hash are **never** exposed. There is
+no client-hint field because no such metadata is stored on the row (the proposal
+allowed one only if already stored; it is not).
+
+**Revoke one** (`DELETE /users/me/sessions/{id}`) revokes a single session the
+caller owns, stamping `revoked_reason = 'user_revoked'`. The operation is scoped
+to the caller's user id, so an id that is unknown, malformed, **or** owned by
+another user all return the same `404 session_not_found` — never `403` — so the
+endpoint leaks neither the session's existence nor its owner. A revoked session
+can no longer refresh (a `user_revoked` token is never graced in the reuse window;
+Section 4).
+
+**Revoke all others** (`DELETE /users/me/sessions`) is everywhere-else logout. It
+keeps the caller's **current** session alive and revokes the rest, also stamping
+`revoked_reason = 'user_revoked'`. The current session is identified by the
+refresh token the caller presents in an optional JSON body
+(`{ "refresh_token": "<secret>" }`): the row whose hash matches is spared. Because
+these endpoints authenticate by access token and the refresh cookie is confined to
+`/api/auth` (Section 3), a browser request reaches this endpoint with **no**
+refresh token; in that case the current session cannot be identified, so **all**
+the caller's active sessions are revoked. This is the safe choice — it never
+revokes another user's sessions, and a presented token is the only trustworthy way
+to know which row is "current". A Web UI calling this should send its current
+refresh token in the body to stay logged in on the device it is using.
+
+## 8. Related documents
 
 - [`SECURITY.md`](SECURITY.md) — login's brute-force / lockout behaviour and the
   username-enumeration posture behind the uniform `401`.
