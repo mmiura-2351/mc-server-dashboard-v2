@@ -467,9 +467,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - **Production.** The API container serves the built SPA (`webui/dist`) via
   FastAPI `StaticFiles` with an SPA fallback, on the same origin as the API. No
   reverse proxy and no new Compose service. The `/api/*` routes (including the WS
-  paths and the health/readiness/metrics probes) take precedence; every other
-  path falls back to the SPA's `index.html` so client-side routing works on deep
-  links and reloads (#378 Phase 8, #498).
+  paths and the health/readiness/metrics probes) and `/assets/*` (the built SPA
+  chunks) are both excluded from the SPA fallback: a `/api/*` path is the API,
+  and an unmatched `/assets/*` request returns 404 (a stale/renamed chunk, never
+  a client-side route). Every other unmatched path falls back to the SPA's
+  `index.html` so client-side routing works on deep links and reloads (#378
+  Phase 8, #498, #634).
 
 ## 8. Out of scope for the first UI cut
 
@@ -477,8 +480,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - `/metrics` (Prometheus) visualization — operators use Grafana.
 - Mobile-optimized layouts (responsive down to tablet only).
 - Light theme (structure ready, not shipped).
-- Active-session listing / revocation on the account page — the API has no
-  session-enumeration endpoint; the capability is deferred (#387).
+- Active-session listing / revocation on the account page — the session API now
+  exists (`GET`/`DELETE /api/users/me/sessions`, #387 via PR #603), but the
+  account-page UI is still deferred (see #606 for the revoke-all-others
+  hardening to land before the UI is added).
 
 ## 9. Resolved open questions
 
