@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { api } from "../api/client.ts";
+import { attachmentsKeys, groupsKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
@@ -14,14 +15,6 @@ import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 type GroupResponse = components["schemas"]["GroupResponse"];
 type PlayerResponse = components["schemas"]["PlayerResponse"];
 type ServerResponse = components["schemas"]["ServerResponse"];
-
-export function groupsKey(communityId: string) {
-  return ["communities", communityId, "groups"] as const;
-}
-
-function groupServersKey(communityId: string, groupId: string) {
-  return ["communities", communityId, "groups", groupId, "servers"] as const;
-}
 
 // `kind` is a free-form string on the wire; only op/whitelist have a localized
 // label (matching ServerPlayersTab), anything else falls back to its raw value.
@@ -62,7 +55,7 @@ export function CommunityGroupsTab({
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const groups = useQuery({
-    queryKey: groupsKey(communityId),
+    queryKey: groupsKeys.list(communityId),
     queryFn: () =>
       api.get(
         apiPath("/api/communities/{community_id}/groups", {
@@ -84,7 +77,7 @@ export function CommunityGroupsTab({
   });
 
   const invalidateGroups = () =>
-    queryClient.invalidateQueries({ queryKey: groupsKey(communityId) });
+    queryClient.invalidateQueries({ queryKey: groupsKeys.list(communityId) });
 
   const remove = useMutation({
     mutationFn: (group: GroupResponse) =>
@@ -97,6 +90,11 @@ export function CommunityGroupsTab({
     onSuccess: () => {
       showToast(t("communitySettings.groups.deleted"), "success");
       invalidateGroups();
+      // A deleted group also disappears from each server's attached-group list,
+      // which ServerPlayersTab reads under the attachments prefix (#473).
+      queryClient.invalidateQueries({
+        queryKey: attachmentsKeys.all(communityId),
+      });
       setDeleting(null);
     },
     onError: (error) => {
@@ -245,10 +243,10 @@ function GroupDetail({
     showToast(t("communitySettings.groups.error"), "error");
   };
   const invalidateGroups = () =>
-    queryClient.invalidateQueries({ queryKey: groupsKey(communityId) });
+    queryClient.invalidateQueries({ queryKey: groupsKeys.list(communityId) });
 
   const attachedServers = useQuery({
-    queryKey: groupServersKey(communityId, group.id),
+    queryKey: attachmentsKeys.forGroup(communityId, group.id),
     queryFn: () =>
       api.get(
         apiPath("/api/communities/{community_id}/groups/{group_id}/servers", {
@@ -276,9 +274,12 @@ function GroupDetail({
     onError,
   });
 
-  const invalidateServers = () =>
+  // Attach/detach changes the relation from both ends, so invalidate the whole
+  // attachment prefix: this refreshes this group's server list here and the
+  // server's group list in ServerPlayersTab wherever it is mounted (#473).
+  const invalidateAttachments = () =>
     queryClient.invalidateQueries({
-      queryKey: groupServersKey(communityId, group.id),
+      queryKey: attachmentsKeys.all(communityId),
     });
 
   const attach = useMutation({
@@ -295,7 +296,7 @@ function GroupDetail({
       ),
     onSuccess: () =>
       showToast(t("communitySettings.groups.attached"), "success"),
-    onSettled: invalidateServers,
+    onSettled: invalidateAttachments,
     onError,
   });
 
@@ -313,7 +314,7 @@ function GroupDetail({
       ),
     onSuccess: () =>
       showToast(t("communitySettings.groups.detached"), "success"),
-    onSettled: invalidateServers,
+    onSettled: invalidateAttachments,
     onError,
   });
 
@@ -460,7 +461,7 @@ function AddPlayerForm({
       ),
     onSuccess: () => {
       showToast(t("communitySettings.groups.playerAdded"), "success");
-      queryClient.invalidateQueries({ queryKey: groupsKey(communityId) });
+      queryClient.invalidateQueries({ queryKey: groupsKeys.list(communityId) });
       setUuid("");
       setUsername("");
       setError(null);
@@ -550,7 +551,7 @@ function CreateGroupDialog({
       ),
     onSuccess: () => {
       showToast(t("communitySettings.groups.created"), "success");
-      queryClient.invalidateQueries({ queryKey: groupsKey(communityId) });
+      queryClient.invalidateQueries({ queryKey: groupsKeys.list(communityId) });
       close();
     },
     onError: (err) => {
@@ -642,7 +643,7 @@ function RenameGroupDialog({
       ),
     onSuccess: () => {
       showToast(t("communitySettings.groups.renamed"), "success");
-      queryClient.invalidateQueries({ queryKey: groupsKey(communityId) });
+      queryClient.invalidateQueries({ queryKey: groupsKeys.list(communityId) });
       onClose();
     },
     onError: (err) => {
