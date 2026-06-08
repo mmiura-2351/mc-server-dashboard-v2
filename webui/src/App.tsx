@@ -1,4 +1,4 @@
-import { lazy, type ReactNode, Suspense } from "react";
+import { lazy, type ReactNode } from "react";
 import {
   Navigate,
   Outlet,
@@ -171,64 +171,62 @@ function Landing() {
 export function App() {
   return (
     <ToastProvider>
-      <Suspense fallback={<SessionLoading />}>
-        <Routes>
+      <Routes>
+        <Route
+          path="/login"
+          element={
+            <RequireAnon>
+              <LoginPage />
+            </RequireAnon>
+          }
+        />
+        <Route
+          path="/register"
+          element={
+            <RequireAnon>
+              <RegisterPage />
+            </RequireAnon>
+          }
+        />
+
+        <Route
+          element={
+            <RequireAuth>
+              <AppShell />
+            </RequireAuth>
+          }
+        >
+          <Route index element={<Landing />} />
+          <Route path="/communities/:cid" element={<DashboardPage />} />
           <Route
-            path="/login"
-            element={
-              <RequireAnon>
-                <LoginPage />
-              </RequireAnon>
-            }
+            path="/communities/:cid/servers/new"
+            element={<ServerCreatePage />}
           />
           <Route
-            path="/register"
-            element={
-              <RequireAnon>
-                <RegisterPage />
-              </RequireAnon>
-            }
+            path="/communities/:cid/servers/:sid"
+            element={<ServerDetailPage />}
           />
-
           <Route
-            element={
-              <RequireAuth>
-                <AppShell />
-              </RequireAuth>
-            }
-          >
-            <Route index element={<Landing />} />
-            <Route path="/communities/:cid" element={<DashboardPage />} />
-            <Route
-              path="/communities/:cid/servers/new"
-              element={<ServerCreatePage />}
-            />
-            <Route
-              path="/communities/:cid/servers/:sid"
-              element={<ServerDetailPage />}
-            />
-            <Route
-              path="/communities/:cid/settings"
-              element={<CommunitySettingsPage />}
-            />
-            <Route path="/account" element={<AccountPage />} />
+            path="/communities/:cid/settings"
+            element={<CommunitySettingsPage />}
+          />
+          <Route path="/account" element={<AccountPage />} />
 
-            <Route element={<RequireAdmin />}>
-              <Route path="/admin" element={<AdminOverviewPage />} />
-              <Route path="/admin/users" element={<AdminUsersPage />} />
-              <Route
-                path="/admin/communities"
-                element={<AdminCommunitiesPage />}
-              />
-              <Route path="/admin/workers" element={<AdminWorkersPage />} />
-              <Route path="/admin/versions" element={<AdminVersionsPage />} />
-              <Route path="/admin/audit" element={<AdminAuditPage />} />
-            </Route>
+          <Route element={<RequireAdmin />}>
+            <Route path="/admin" element={<AdminOverviewPage />} />
+            <Route path="/admin/users" element={<AdminUsersPage />} />
+            <Route
+              path="/admin/communities"
+              element={<AdminCommunitiesPage />}
+            />
+            <Route path="/admin/workers" element={<AdminWorkersPage />} />
+            <Route path="/admin/versions" element={<AdminVersionsPage />} />
+            <Route path="/admin/audit" element={<AdminAuditPage />} />
           </Route>
+        </Route>
 
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
-      </Suspense>
+        <Route path="*" element={<NotFoundPage />} />
+      </Routes>
     </ToastProvider>
   );
 }
