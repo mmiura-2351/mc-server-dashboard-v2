@@ -157,7 +157,12 @@ export function ServerPlayersTab({
       {canManage && (
         <div className="card">
           <h2>{t("players.attachHeading")}</h2>
-          {candidates.length === 0 ? (
+          {community.isPending ? (
+            // Until the community groups list resolves, the empty-state copy
+            // below would misreport "no groups" (community.data is undefined);
+            // show the loading message instead of flashing it (#665).
+            <p className="sub">{t("players.loading")}</p>
+          ) : candidates.length === 0 ? (
             <p className="sub">
               {communityGroups.length === 0
                 ? t("players.attachNoGroups")
