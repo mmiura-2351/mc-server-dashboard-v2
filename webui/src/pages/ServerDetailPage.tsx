@@ -187,8 +187,8 @@ function Header({
           </Link>{" "}
           / {server.name}
         </div>
-        <h1 className="detail-title">
-          {server.name}
+        <div className="detail-title">
+          <h1 className="detail-name">{server.name}</h1>
           <span
             className={`pill ${pill.className}${pill.blink ? " blink" : ""}`}
           >
@@ -204,7 +204,7 @@ function Header({
               {t("dashboard.liveDegraded")}
             </span>
           )}
-        </h1>
+        </div>
         <div className="sub">
           <span className="badge type">
             {server.server_type} {server.mc_version}
@@ -839,7 +839,11 @@ function Console({
         </button>
       </div>
       <div className="card console-stream">
-        <LogView entries={visible} follow={follow} />
+        {visible.length === 0 ? (
+          <p className="sub">{t("serverDetail.logTailEmpty")}</p>
+        ) : (
+          <LogView entries={visible} follow={follow} />
+        )}
       </div>
       {canCommand && (
         <div className="console-input">
