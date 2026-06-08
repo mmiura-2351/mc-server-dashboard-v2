@@ -1268,6 +1268,32 @@ body.col-resizing {
   grid-template-columns: minmax(220px, 1fr) 2fr;
   gap: 14px;
 }
+/* Phone file browser (#619, --bp-phone): the desktop two-column grid
+ * (minmax(220px,1fr) 2fr) can't fit two panes side by side at ~375px and forces
+ * horizontal overflow. Stack the panes vertically — tree/list above, the
+ * viewer/editor below — so the browser is a single scrollable column reachable
+ * by vertical scroll. Desktop keeps the two-column grid and is unaffected.
+ *
+ * The panes are grid items, whose default `min-width: auto` won't shrink them
+ * below their content's min-content — the textarea and the action rows would
+ * otherwise blow the track back out past the viewport — so pin `min-width: 0`.
+ * The row's name (nowrap) + non-shrinking action buttons, and the viewer head's
+ * path + actions, likewise have a combined min-content wider than ~375px, so
+ * let both wrap: the name/path takes the first line and the actions drop below
+ * it instead of forcing horizontal scroll. */
+@media (max-width: 430px) {
+  .file-layout {
+    grid-template-columns: 1fr;
+  }
+  .file-tree,
+  .file-viewer {
+    min-width: 0;
+  }
+  .file-row,
+  .file-viewer-head {
+    flex-wrap: wrap;
+  }
+}
 .file-list {
   list-style: none;
   margin: 0;
@@ -1327,6 +1353,16 @@ body.col-resizing {
   border-radius: var(--radius-sm);
   padding: 10px;
   resize: vertical;
+}
+/* Phone editor (#619, --bp-phone): once the layout stacks, the full-width
+ * textarea stays usable for viewing and small edits, but the 360px desktop
+ * min-height would dominate a phone viewport and push the rest of the page out
+ * of reach. Shorten it (still resizable) so the tree above and the viewer head
+ * actions stay reachable by vertical scroll. */
+@media (max-width: 430px) {
+  .file-editor {
+    min-height: 200px;
+  }
 }
 /* Search box (files/search) + per-file history drawer (files/history). */
 .files-search {
