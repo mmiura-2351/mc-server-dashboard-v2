@@ -10,6 +10,29 @@ const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? "http://localhost:8000";
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        // Split the React ecosystem (react, react-dom, react-router,
+        // react-query) into a long-lived `vendor` chunk (#553). These libraries
+        // change far less often than app code, so isolating them keeps the app
+        // chunk small and lets the browser cache the vendor bundle across app
+        // deploys. Route-level React.lazy in App.tsx handles the per-page
+        // splitting; together they clear Vite's 500 kB initial-chunk warning.
+        // The function form is used because rolldown-vite (Vite 8) only types
+        // `manualChunks` as a function, not the rollup id→chunk record.
+        manualChunks(id) {
+          if (
+            /\/node_modules\/(react|react-dom|react-router|@tanstack)\//.test(
+              id,
+            )
+          ) {
+            return "vendor";
+          }
+        },
+      },
+    },
+  },
   server: {
     // The entire HTTP API (REST + WebSocket) lives under /api (issue #498), so a
     // single prefix is forwarded to the local API and every other path falls

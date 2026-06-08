@@ -163,7 +163,9 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 // servers' commands — including a slow graceful Stop — proceed in parallel. The
 // cap limits concurrent execution, not routing: the receive loop never blocks on
 // it, so a full pool delays only the start of additional servers' work, never the
-// dispatch of further commands.
+// dispatch of further commands. Quick commands (ServerCommand) bypass the cap
+// entirely so an instant op is never delayed by long-running lane work on other
+// servers (issue #169); see runLane and isQuickCommand.
 const maxConcurrentLanes = 4
 
 // serve runs the steady state: a heartbeat ticker, an inbound-command receive
@@ -380,17 +382,14 @@ func (d *dispatcher) dispatch(cmd Command) {
 }
 
 // runLane drains a server's queue serially until it is empty, then removes the
-// lane and exits. It holds one sem slot for its lifetime, bounding how many
-// servers execute commands at once.
+// lane and exits. The lane preserves per-server FIFO: one goroutine runs the
+// server's commands in arrival order, so a command never races ahead of an
+// earlier same-server op. The global concurrency cap (sem) is acquired
+// per-command and only for long-running ops; quick commands bypass it (issue
+// #169), so an instant ServerCommand for an otherwise-idle server is not delayed
+// by other servers' slow hydrate/stop work holding every cap slot. The bypass
+// touches only the global cap — the same-server ordering above is unaffected.
 func (d *dispatcher) runLane(serverID string, l *lane) {
-	select {
-	case d.sem <- struct{}{}:
-	case <-d.ctx.Done():
-		d.removeLane(serverID)
-		return
-	}
-	defer func() { <-d.sem }()
-
 	for {
 		d.mu.Lock()
 		if len(l.queue) == 0 {
@@ -402,8 +401,32 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 		l.queue = l.queue[1:]
 		d.mu.Unlock()
 
+		if isQuickCommand(cmd.Kind) {
+			d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, cmd))
+			continue
+		}
+
+		select {
+		case d.sem <- struct{}{}:
+		case <-d.ctx.Done():
+			d.removeLane(serverID)
+			return
+		}
 		d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, cmd))
+		<-d.sem
 	}
+}
+
+// isQuickCommand reports whether a command kind is an instant op that bypasses
+// the global concurrency cap. Only ServerCommand qualifies: it sends one
+// console/RCON line to an already-running server and returns at once. Every other
+// server-scoped kind (StartServer/StopServer/RestartServer, HydrateTrigger/
+// SnapshotTrigger, and the file ops) can run long and stays bounded by the cap
+// (issue #169). The bypass keeps per-server FIFO: it changes only whether a lane
+// acquires a cap slot for a command, never the order in which a server's commands
+// run.
+func isQuickCommand(kind string) bool {
+	return kind == "ServerCommand"
 }
 
 // removeLane drops a lane that never started draining (ctx already cancelled).

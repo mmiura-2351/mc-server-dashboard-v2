@@ -674,6 +674,144 @@ func TestIdleLaneIsTornDown(t *testing.T) {
 	<-done
 }
 
+// gateHandler blocks every command whose Kind is in slowKinds until released,
+// recording handling order. Commands whose Kind is not slow (e.g. ServerCommand)
+// return immediately. It models long-running lane work (hydrate/stop) saturating
+// the concurrency cap while an instant ServerCommand wants to run.
+type gateHandler struct {
+	mu        sync.Mutex
+	handled   []Command
+	inflight  int
+	slowKinds map[string]bool
+	release   chan struct{}
+}
+
+func newGateHandler(slowKinds ...string) *gateHandler {
+	set := make(map[string]bool, len(slowKinds))
+	for _, k := range slowKinds {
+		set[k] = true
+	}
+	return &gateHandler{slowKinds: set, release: make(chan struct{})}
+}
+
+func (h *gateHandler) Handle(ctx context.Context, cmd Command) CommandResult {
+	if h.slowKinds[cmd.Kind] {
+		h.mu.Lock()
+		h.inflight++
+		h.mu.Unlock()
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+		}
+	}
+	h.mu.Lock()
+	h.handled = append(h.handled, cmd)
+	h.mu.Unlock()
+	return CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+func (h *gateHandler) inflightCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.inflight
+}
+
+func (h *gateHandler) Events() <-chan StatusEvent   { return nil }
+func (h *gateHandler) Logs() <-chan LogEvent        { return nil }
+func (h *gateHandler) Metrics() <-chan MetricsEvent { return nil }
+
+// A burst of slow long-running ops on maxConcurrentLanes distinct servers
+// saturates the global concurrency cap. An instant ServerCommand for a further,
+// otherwise-idle server must still complete promptly — the quick-command bypass
+// lets it skip the cap (issue #169). Without the bypass it blocks on a lane slot
+// and this test times out.
+func TestQuickCommandBypassesSaturatedCap(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newGateHandler("HydrateTrigger")
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// Saturate the cap with one slow hydrate per distinct server.
+	for i := 0; i < maxConcurrentLanes; i++ {
+		id := fmt.Sprintf("slow-%d", i)
+		transport.commands <- Command{CommandID: id, ServerID: id, Kind: "HydrateTrigger"}
+	}
+
+	// Wait until all slow ops are actually in-flight (each holding a cap slot)
+	// before issuing the quick command, so the cap is genuinely saturated.
+	waitFor(t, func() bool { return handler.inflightCount() == maxConcurrentLanes })
+
+	// An instant ServerCommand for a different, idle server must still complete
+	// while all slow lanes hold the cap.
+	transport.commands <- Command{CommandID: "quick", ServerID: "quick-server", Kind: "ServerCommand"}
+
+	waitFor(t, func() bool {
+		for _, res := range transport.resultsCopy() {
+			if res.CommandID == "quick" && res.Success {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The slow hydrates must still be blocked: only the quick command got through.
+	for _, res := range transport.resultsCopy() {
+		if res.CommandID != "quick" {
+			t.Fatalf("slow op %q answered before release; cap was not actually saturated", res.CommandID)
+		}
+	}
+
+	close(handler.release)
+	cancel()
+	<-done
+}
+
+// The bypass must not break per-server FIFO/safety: a ServerCommand queued behind
+// a same-server long-running op must still wait for that op, never racing ahead
+// of it (issue #169). A command must not run against a server mid-hydrate.
+func TestQuickCommandStillSerializesWithinServer(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newGateHandler("HydrateTrigger")
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// A slow hydrate then a ServerCommand for the SAME server.
+	transport.commands <- Command{CommandID: "hydrate", ServerID: "s1", Kind: "HydrateTrigger"}
+	transport.commands <- Command{CommandID: "cmd", ServerID: "s1", Kind: "ServerCommand"}
+
+	// The same-server quick command must not bypass ahead of the in-flight
+	// hydrate: while the hydrate is blocked, nothing for s1 may complete.
+	waitFor(t, func() bool { return r.laneCount() == 1 })
+	for _, res := range transport.resultsCopy() {
+		if res.CommandID == "cmd" {
+			t.Fatal("same-server ServerCommand bypassed an in-flight hydrate; FIFO broken")
+		}
+	}
+
+	// Release the hydrate; both complete in FIFO order.
+	close(handler.release)
+	waitFor(t, func() bool { return len(transport.resultsCopy()) == 2 })
+	got := transport.resultsCopy()
+	if got[0].CommandID != "hydrate" || got[1].CommandID != "cmd" {
+		t.Fatalf("same-server order = [%s %s], want [hydrate cmd]", got[0].CommandID, got[1].CommandID)
+	}
+
+	cancel()
+	<-done
+}
+
 func TestStatusEventsForwardedAsStatusChange(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
