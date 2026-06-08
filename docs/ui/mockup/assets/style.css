@@ -523,3 +523,40 @@ textarea { font-family: var(--mono); resize: vertical; }
   padding: 2px 10px; border-radius: 0 6px 0 0;
   z-index: 100; text-transform: uppercase;
 }
+
+/* ---------- Responsive / mobile (epic #583) ----------
+ * Mirrors the shipped webui rules (webui/src/styles/{tokens,shell}.css) so the
+ * mockup stays a faithful design reference. Two device tiers — see README.md.
+ *   --bp-tablet  900px  icon-rail sidebar (#586), narrow top bar (#554/#585)
+ *   --bp-phone   430px  content padding (#618), table scroll (#620),
+ *                       form/grid stacking (#621), file browser stacking (#619)
+ * CSS vars can't be used inside @media, so the literals repeat the token. */
+
+/* Tablet (≤900px): sidebar collapses to an icon-only rail; the top bar tightens
+ * and the account link drops its label to just the avatar. */
+@media (max-width: 900px) {
+  .sidebar { width: auto; }
+  .nav-group .nav-label,
+  .sidebar-foot { display: none; }
+  /* The mockup renders nav/brand/account labels as bare text nodes (no wrapping
+   * span), so hide them with font-size:0 on the row and restore the icon/avatar
+   * glyph. The real shell uses `.label` spans + display:none. */
+  .sidebar .brand,
+  .nav-item { justify-content: center; font-size: 0; }
+  .sidebar .brand .cube,
+  .nav-item .ico { font-size: 14px; }
+  .topbar { gap: 8px; }
+  .user-menu { font-size: 0; }
+  .user-menu .avatar { font-size: 12px; }
+  .grid.cols-2 { grid-template-columns: 1fr; }
+}
+
+/* Phone (≤430px): tighten padding, let buttons wrap, scroll wide tables, and
+ * stack forms / the role matrix / the file browser into a single column. */
+@media (max-width: 430px) {
+  .content { padding: 12px; }
+  .btn { white-space: normal; max-width: 100%; }
+  table.data { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .form-row { flex-direction: column; }
+  .file-layout { grid-template-columns: 1fr; }
+}

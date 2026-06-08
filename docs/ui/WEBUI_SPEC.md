@@ -267,7 +267,16 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   loss fall back to 10s polling of `GET …/servers` with a "live degraded"
   indicator.
 - Quick actions on card: start / stop / restart (permission-scoped).
-- Empty state → CTA to the create wizard.
+- Empty state (community with zero servers) → CTA to the create wizard.
+- No-community empty state (#584): a signed-in account that belongs to **zero
+  communities** never reaches the dashboard. The landing route renders a
+  dedicated informational page (`NoCommunityPage`) instead of a bare
+  placeholder: a heading, an explanation that the account is not a member of any
+  community (and that communities scope servers/members/settings), and the next
+  action. There is no self-serve create/join flow — provisioning a community
+  requires platform admin — so a normal user is told to ask an administrator to
+  add them, while a platform admin additionally gets a "Create a community" CTA
+  linking to the admin Communities screen (Section 6.12).
 
 ### 6.3 Server create wizard
 1. **Type & version** — type cards from `GET /versions`; version dropdown
@@ -471,11 +480,69 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   path falls back to the SPA's `index.html` so client-side routing works on deep
   links and reloads (#378 Phase 8, #498).
 
+### 7.8 Responsive / mobile (epic #583)
+
+Mobile is no longer a non-goal. The current support target is a **~375px phone**
+and **desktop**; the intermediate **tablet range (431px–~700px)** is partially
+covered and still being refined (see *Known limitations* below).
+
+**Breakpoints.** Two device tiers, defined once as tokens in
+`webui/src/styles/tokens.css` and applied as `max-width` media queries:
+
+| Token | Value | Applies to |
+|---|---|---|
+| `--bp-tablet` | `900px` | sidebar icon rail, narrow top bar, multi-column grids collapse |
+| `--bp-phone` | `430px` | content padding, button wrap, table scroll, form/grid stacking, file browser stacking |
+
+CSS custom properties cannot be used inside `@media` ranges, so the tokens are
+the source of truth for the **values** only; each rule repeats the matching
+literal (`@media (max-width: 900px)` / `@media (max-width: 430px)`) and is kept
+in sync with the token by convention.
+
+**Per-area behavior (what ships):**
+
+- **Sidebar (≤900px, #586/#598).** Collapses to an **icon-only rail** — text
+  labels, group headings, and the nav hint are hidden and the icons centered;
+  the column shrinks to one glyph. Nav links and the brand keep their
+  `aria-label`, so the accessible name still resolves once the visible text is
+  hidden. (An off-canvas drawer was the original sketch in the epic; the shipped
+  behavior is a rail, not a drawer.)
+- **Top bar (≤900px, #554/#585).** Trailing items tighten: the gap shrinks, the
+  account link drops its label down to just the avatar (the link keeps its
+  `aria-label`), and the community switcher truncates a long name instead of
+  pushing the trailing controls off-screen.
+- **Content & buttons (≤430px, #618).** Content padding drops 24px→12px so a
+  ~375px viewport keeps usable width; buttons allow their label to wrap
+  (`white-space: normal`, capped at the content width) instead of forcing
+  horizontal overflow. Desktop keeps `nowrap`.
+- **Data tables (≤430px, #620).** Each `table.data` becomes its own contained
+  horizontal scroller (`display: block; overflow-x: auto`), so the overflow is
+  the table's, never the page's. The trade-off is that `table-layout: fixed`
+  and ResizableTable's stored column widths stop applying while block —
+  acceptable on a phone where drag-resize is not a touch affordance.
+- **Forms & grids (≤430px, #621).** `.form-row` (account, settings) stacks
+  side-by-side fields into a single full-width column, the role permission
+  matrix collapses to one column, and the multi-column dashboard/metric grids
+  (already collapsed at 900px) stay single/limited column.
+- **File browser (≤430px, #619).** The two-pane `minmax(220px,1fr) 2fr` grid
+  stacks to a single column (tree/list above, viewer/editor below); the file row
+  and viewer head wrap their actions below the name/path. In-browser file
+  **editing is intentionally not given a special mobile mode** (owner
+  minimum-needs decision): the editor stays editable (read-only without
+  `file:edit`, as on desktop) with a reduced `min-height` (360px→200px) so the
+  rest of the page stays reachable by vertical scroll.
+
+**Known limitations (tracked, not yet fixed):**
+
+- The tablet range (431px–~700px) is not fully covered for some layouts — e.g.
+  the file browser keeps two columns until they fit (#627).
+- Long unbreakable file paths/names can overflow the file viewer head at all
+  widths (#626).
+
 ## 8. Out of scope for the first UI cut
 
 - Metrics history/persistence (only live sparklines from the WS stream).
 - `/metrics` (Prometheus) visualization — operators use Grafana.
-- Mobile-optimized layouts (responsive down to tablet only).
 - Light theme (structure ready, not shipped).
 - Active-session listing / revocation on the account page — the API has no
   session-enumeration endpoint; the capability is deferred (#387).

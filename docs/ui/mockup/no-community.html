@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>No community — MC Dashboard</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-page="no-community">
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="content">
+      <!-- No-community empty state (WEBUI_SPEC.md 6.2, #584). A signed-in
+           account with zero community memberships lands here instead of the
+           dashboard. No self-serve create/join flow exists, so a normal user is
+           told to ask an admin; a platform admin gets a "Create a community"
+           CTA. Toggle the body[data-page] runtime aside, the admin CTA below is
+           shown statically here to document the admin variant of the screen. -->
+      <div class="empty">
+        <div class="big">▣</div>
+        <h1>No community yet</h1>
+        <p>
+          Your account isn't a member of any community yet. Communities scope
+          your servers, members, and settings.
+        </p>
+        <!-- Member variant -->
+        <p class="member-hint">
+          Ask a platform administrator to add you to a community.
+        </p>
+        <!-- Platform-admin variant (additional CTA) -->
+        <p class="admin-hint">
+          As a platform administrator, you can create the first community.
+        </p>
+        <p>
+          <a class="btn primary" href="admin-communities.html">Create a community</a>
+        </p>
+      </div>
+    </main>
+  </div>
+</div>
+<script src="assets/mock-data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
