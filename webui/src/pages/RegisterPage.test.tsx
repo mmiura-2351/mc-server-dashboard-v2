@@ -110,6 +110,14 @@ function submit() {
 }
 
 describe("RegisterPage", () => {
+  it("exposes a top-level heading naming the app (a11y; #678)", async () => {
+    renderRegister();
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: t("app.title") }),
+    ).toBeInTheDocument();
+  });
+
   it("surfaces a server 422 weak-password reason inline", async () => {
     queueUsers(
       new Response(JSON.stringify({ reason: "simple_pattern", status: 422 }), {
