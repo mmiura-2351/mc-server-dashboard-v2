@@ -163,7 +163,10 @@ from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import InvalidAccessTokenError
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
-from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
+from mc_server_dashboard_api.identity.domain.password_policy import (
+    PRESETS,
+    PasswordPolicy,
+)
 from mc_server_dashboard_api.identity.domain.registration import RegistrationConfig
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.servers.adapters.backup_store import (
@@ -573,20 +576,22 @@ def _common_passwords() -> frozenset[str]:
 
 
 def _build_password_policy(password: PasswordSettings) -> PasswordPolicy:
-    """Build the pure :class:`PasswordPolicy` from the configured knobs."""
+    """Build the pure :class:`PasswordPolicy` from the selected strength preset."""
 
-    common = _common_passwords() if password.check_common_list else frozenset()
+    preset = PRESETS[password.policy]
+    common = _common_passwords() if preset.check_common_list else frozenset()
     # bcrypt ignores bytes past 72; cap the effective byte length so two passwords
     # sharing a 72-byte prefix cannot collide. argon2 has no such limit.
     max_bytes = 72 if password.hash == "bcrypt" else None
     return PasswordPolicy(
-        min_length=password.min_length,
+        min_length=preset.min_length,
         max_length=password.max_length,
         max_bytes=max_bytes,
-        require_complexity=password.require_complexity,
-        check_common_list=password.check_common_list,
-        forbid_user_info=password.forbid_user_info,
-        forbid_simple_patterns=password.forbid_simple_patterns,
+        require_complexity=preset.require_complexity,
+        complexity_classes=preset.complexity_classes,
+        check_common_list=preset.check_common_list,
+        forbid_user_info=preset.forbid_user_info,
+        forbid_simple_patterns=preset.forbid_simple_patterns,
         common_passwords=common,
     )
 

@@ -46,6 +46,16 @@ const (
 // daemon escalates to SIGKILL.
 const defaultStopTimeout = 30 * time.Second
 
+// defaultSweepCallMargin is the slack added on top of each Sweep daemon call's
+// expected duration to bound it against a wedged daemon (issue #338). The startup
+// Sweep runs with context.Background() (cmd/worker), so without a per-call
+// deadline a wedged Docker daemon would block worker startup indefinitely. A
+// healthy daemon answers each call well inside the deadline, so the bound never
+// fires on the success path; it only caps the wedged case. The graceful-stop call
+// gets StopTimeout + this margin (the daemon needs the full grace before
+// escalating to SIGKILL); the list/remove calls get this margin alone.
+const defaultSweepCallMargin = 10 * time.Second
+
 // defaultReadinessTimeout bounds how long the driver holds StateStarting waiting
 // for the server's startup-complete log marker before falling back to running
 // (issue #345). It is generous enough for a modded server's boot (tens of
@@ -103,6 +113,10 @@ type Options struct {
 	// the server's startup-complete log marker before falling back to running
 	// (issue #345). Zero uses defaultReadinessTimeout.
 	ReadinessTimeout time.Duration
+	// SweepCallMargin is the slack added to each startup-Sweep daemon call's
+	// deadline so a wedged daemon cannot hang worker startup (issue #338). Zero uses
+	// defaultSweepCallMargin; tests set a short value to keep the suite fast.
+	SweepCallMargin time.Duration
 }
 
 // Driver is the container ExecutionDriver.
@@ -119,6 +133,8 @@ type Driver struct {
 	conflictDeadline time.Duration
 	// readinessTimeout bounds the hold-on-starting wait (issue #345).
 	readinessTimeout time.Duration
+	// sweepCallMargin bounds each startup-Sweep daemon call (issue #338).
+	sweepCallMargin time.Duration
 }
 
 // New builds a container Driver. docker is the Engine seam; images resolves a
@@ -145,6 +161,10 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	if readinessTimeout <= 0 {
 		readinessTimeout = defaultReadinessTimeout
 	}
+	sweepCallMargin := opts.SweepCallMargin
+	if sweepCallMargin <= 0 {
+		sweepCallMargin = defaultSweepCallMargin
+	}
 	return &Driver{
 		docker:           docker,
 		images:           images,
@@ -156,6 +176,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		conflictPoll:     conflictPoll,
 		conflictDeadline: conflictDeadline,
 		readinessTimeout: readinessTimeout,
+		sweepCallMargin:  sweepCallMargin,
 	}
 }
 
@@ -449,19 +470,36 @@ const containerStateRunning = "running"
 // force-removed directly (no graceful stop). Removal/stop errors for individual
 // containers are returned joined so the caller can log them, but a partial sweep
 // does not block startup.
+//
+// Each daemon call runs under a per-call deadline derived from ctx so a wedged
+// daemon cannot block worker startup indefinitely (issue #338): the startup Sweep
+// is invoked with context.Background() and the EngineClient has no http.Client
+// timeout, so without these bounds a hung daemon would hang startup forever. The
+// graceful stop gets StopTimeout + a margin (the daemon needs the full grace to
+// escalate to SIGKILL); list/remove get the margin alone. A healthy daemon
+// answers each call well inside its deadline, so the bound never fires on the
+// success path.
 func (d *Driver) Sweep(ctx context.Context) error {
-	containers, err := d.docker.List(ctx, labelWorkerID, d.workerID)
+	listCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
+	containers, err := d.docker.List(listCtx, labelWorkerID, d.workerID)
+	cancel()
 	if err != nil {
 		return fmt.Errorf("containerdriver: list orphans: %w", err)
 	}
 	var errs []error
 	for _, c := range containers {
 		if c.State == containerStateRunning {
-			if err := d.docker.Stop(ctx, c.ID, d.stopTimeout); err != nil {
+			stopCtx, cancel := context.WithTimeout(ctx, d.stopTimeout+d.sweepCallMargin)
+			err := d.docker.Stop(stopCtx, c.ID, d.stopTimeout)
+			cancel()
+			if err != nil {
 				errs = append(errs, fmt.Errorf("stop %s (%s): %w", c.Name, c.ID, err))
 			}
 		}
-		if err := d.docker.Remove(ctx, c.ID); err != nil {
+		removeCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
+		err := d.docker.Remove(removeCtx, c.ID)
+		cancel()
+		if err != nil {
 			errs = append(errs, fmt.Errorf("remove %s (%s): %w", c.Name, c.ID, err))
 		}
 	}
