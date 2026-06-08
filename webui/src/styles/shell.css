@@ -815,6 +815,10 @@ body.col-resizing {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin: 0 0 var(--space-3);
+}
+.detail-title .detail-name {
+  margin: 0;
 }
 .pill.settling {
   font-size: 11px;

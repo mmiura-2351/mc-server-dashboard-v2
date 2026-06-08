@@ -165,6 +165,15 @@ describe("LoginPage", () => {
     expect(screen.queryByText(t("login.sessionExpired"))).toBeNull();
   });
 
+  it("exposes a top-level heading naming the app (a11y; #647)", async () => {
+    bootstrapSignedOut();
+    renderLogin();
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: t("app.title") }),
+    ).toBeInTheDocument();
+  });
+
   it("returns to a valid next param after login", async () => {
     bootstrapSignedOut();
     renderLogin(
