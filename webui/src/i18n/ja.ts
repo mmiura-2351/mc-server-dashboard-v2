@@ -74,6 +74,8 @@ export const ja: Record<TranslationKey, string> = {
   "login.submitting": "サインインしています…",
   "login.invalidCredentials": "ユーザー名またはパスワードが正しくありません。",
   "login.genericError": "サインインできませんでした。もう一度お試しください。",
+  "login.sessionExpired":
+    "セッションの有効期限が切れました。もう一度サインインしてください。",
   "register.usernamePlaceholder": "ユーザー名",
   "register.emailPlaceholder": "you@example.com",
   "register.passwordPlaceholder": "12文字以上",

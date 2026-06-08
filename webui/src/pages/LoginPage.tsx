@@ -1,10 +1,10 @@
 import { type FormEvent, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { useSession } from "../auth/SessionProvider.tsx";
 import { PasswordInput } from "../components/PasswordInput.tsx";
 import { t } from "../i18n/index.ts";
-import { postLoginPath } from "../routes.ts";
+import { postLoginPath, safeNextPath } from "../routes.ts";
 
 // Login page (WEBUI_SPEC.md 6.1). Posts credentials to /auth/login; the API
 // returns the token pair and sets the refresh cookie. We adopt the access token
@@ -15,6 +15,12 @@ export function LoginPage() {
   const { signIn } = useSession();
   const navigate = useNavigate();
   const from = (useLocation().state as { from?: unknown } | null)?.from;
+  const [searchParams] = useSearchParams();
+  // The session-expiry flow (#565) carries the return-to target and the reason
+  // on the URL so a refresh/bookmark of /login stays consistent. `next` is
+  // validated against open redirects; `expired` drives the explanatory notice.
+  const nextPath = safeNextPath(searchParams.get("next"));
+  const expired = searchParams.get("reason") === "expired";
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +35,9 @@ export function LoginPage() {
         body: JSON.stringify({ username, password }),
       });
       signIn(tokens.access_token);
-      navigate(postLoginPath(from), { replace: true });
+      // A validated `next` (session-expiry return-to) wins over the #424 guard
+      // stash; both fall back to the post-login landing.
+      navigate(nextPath ?? postLoginPath(from), { replace: true });
     } catch (err) {
       // 401 is the only credential outcome; everything else is a generic fault.
       setError(
@@ -48,6 +56,11 @@ export function LoginPage() {
           <span className="cube" aria-hidden="true" />
           {t("shell.brand")}
         </div>
+        {expired ? (
+          <div className="notice" role="status">
+            {t("login.sessionExpired")}
+          </div>
+        ) : null}
         <div className="field">
           <label htmlFor="login-username">{t("auth.fieldUsername")}</label>
           <input

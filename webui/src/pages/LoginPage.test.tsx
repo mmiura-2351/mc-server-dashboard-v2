@@ -12,13 +12,22 @@ function PathProbe() {
   return <span data-testid="path">{`${pathname}${search}`}</span>;
 }
 
-function renderLogin(fromState?: {
-  from: { pathname: string; search: string };
-}) {
+function renderLogin(
+  fromState?: {
+    from: { pathname: string; search: string };
+  },
+  loginSearch = "",
+) {
   render(
     <QueryClientProvider client={new QueryClient()}>
       <MemoryRouter
-        initialEntries={[{ pathname: "/login", state: fromState ?? null }]}
+        initialEntries={[
+          {
+            pathname: "/login",
+            search: loginSearch,
+            state: fromState ?? null,
+          },
+        ]}
       >
         <SessionProvider>
           <Routes>
@@ -136,6 +145,70 @@ describe("LoginPage", () => {
       expect(screen.getByTestId("path").textContent).toBe(
         "/api/communities/demo/servers/s1?tab=logs",
       ),
+    );
+  });
+
+  it("shows the session-expired notice only when arriving via expiry", async () => {
+    bootstrapSignedOut();
+    renderLogin(undefined, "?reason=expired");
+
+    expect(
+      await screen.findByText(t("login.sessionExpired")),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no expiry notice on a normal first visit to /login", async () => {
+    bootstrapSignedOut();
+    renderLogin();
+
+    await screen.findByRole("button", { name: t("login.submit") });
+    expect(screen.queryByText(t("login.sessionExpired"))).toBeNull();
+  });
+
+  it("returns to a valid next param after login", async () => {
+    bootstrapSignedOut();
+    renderLogin(
+      undefined,
+      "?reason=expired&next=%2Fcommunities%2Fc1%3Ftab%3Dlogs%23h",
+    );
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          access_token: "issued",
+          refresh_token: "ignored",
+          token_type: "bearer",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await submitCredentials();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("path").textContent).toBe(
+        "/communities/c1?tab=logs",
+      ),
+    );
+  });
+
+  it("falls back to the landing for an invalid next param (open redirect)", async () => {
+    bootstrapSignedOut();
+    renderLogin(undefined, "?reason=expired&next=%2F%2Fevil.com");
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          access_token: "issued",
+          refresh_token: "ignored",
+          token_type: "bearer",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await submitCredentials();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("path").textContent).toBe("/"),
     );
   });
 });

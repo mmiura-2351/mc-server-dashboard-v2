@@ -28,6 +28,7 @@ function StatusProbe() {
     <div>
       <span data-testid="status">{status}</span>
       <span data-testid="path">{location.pathname}</span>
+      <span data-testid="search">{location.search}</span>
       <button type="button" onClick={() => logout()}>
         logout
       </button>
@@ -35,10 +36,13 @@ function StatusProbe() {
   );
 }
 
-function renderSession(queryClient = new QueryClient()) {
+function renderSession(
+  queryClient = new QueryClient(),
+  initialEntry = "/account",
+) {
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/account"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <SessionProvider>
           <Routes>
             <Route path="*" element={<StatusProbe />} />
@@ -144,6 +148,44 @@ describe("SessionProvider logout", () => {
     expect(queryClient.getQueryData(["users", "me"])).toBeUndefined();
     expect(queryClient.getQueryData(["communities"])).toBeUndefined();
     expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+  });
+
+  it("captures the current location into next on an involuntary 401 expiry", async () => {
+    fetchMock.mockResolvedValueOnce(tokenResponse());
+    renderSession(new QueryClient(), "/communities/c1?tab=logs");
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-in"),
+    );
+
+    // A transparent refresh that 401s is involuntary: it should land on /login
+    // carrying reason=expired and the return-to location as next.
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 401 }));
+    await refreshForRetry();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("path")).toHaveTextContent("/login"),
+    );
+    const search = screen.getByTestId("search").textContent ?? "";
+    const params = new URLSearchParams(search);
+    expect(params.get("reason")).toBe("expired");
+    expect(params.get("next")).toBe("/communities/c1?tab=logs");
+  });
+
+  it("does not set next or a reason on a deliberate user logout", async () => {
+    fetchMock.mockResolvedValueOnce(tokenResponse());
+    renderSession(new QueryClient(), "/communities/c1?tab=logs");
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-in"),
+    );
+
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    screen.getByRole("button", { name: "logout" }).click();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("path")).toHaveTextContent("/login"),
+    );
+    // A deliberate logout lands on a clean /login: no reason, no next.
+    expect(screen.getByTestId("search").textContent).toBe("");
   });
 
   it("clears the query cache on a hard logout from a failed refresh", async () => {
