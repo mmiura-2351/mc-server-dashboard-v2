@@ -277,6 +277,19 @@ def test_delete_authorized_returns_204() -> None:
     assert resp.status_code == 204
 
 
+def test_delete_204_carries_no_content_type() -> None:
+    # A 204 No Content must not advertise an entity body (issue #633): the
+    # default JSONResponse otherwise stamps Content-Type: application/json onto
+    # the empty body. Asserted on the representative community delete; the strip
+    # is centralized so it covers every 204 route.
+    app = _managed_app(member=True, allow=True, delete_uc=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}")
+    assert resp.status_code == 204
+    assert "content-type" not in resp.headers
+    assert "content-length" not in resp.headers
+
+
 def test_delete_non_member_gets_404() -> None:
     app = _managed_app(member=False, allow=True, delete_uc=_FakeUseCase())
     client = next(_client(app))
