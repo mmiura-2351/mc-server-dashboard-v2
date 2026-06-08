@@ -85,6 +85,28 @@
   opacity: 0.8;
 }
 
+/* Narrow-width sidebar (#586): a fixed 220px rail plus the top bar overflows
+ * sub-~430px viewports even after the #554 top-bar fix. At the shell's existing
+ * 900px breakpoint collapse to an icon-only rail — hide every text label and
+ * the group headings, center the icons, and shrink the column to fit one glyph.
+ * The nav links and brand keep their aria-label (set in AppShell), so the
+ * accessible name still resolves once the visible text is hidden. */
+@media (max-width: 900px) {
+  .sidebar {
+    width: auto;
+  }
+  .brand .label,
+  .nav-group .nav-label,
+  .nav-hint,
+  .nav-item .label {
+    display: none;
+  }
+  .sidebar .brand,
+  .nav-item {
+    justify-content: center;
+  }
+}
+
 .main {
   flex: 1;
   min-width: 0;

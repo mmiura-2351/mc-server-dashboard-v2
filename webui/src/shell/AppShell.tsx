@@ -49,11 +49,12 @@ function NavItem({ to, icon, labelKey }: NavSpec) {
       to={to}
       end
       className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+      aria-label={t(labelKey)}
     >
       <span className="ico" aria-hidden="true">
         {icon}
       </span>
-      {t(labelKey)}
+      <span className="label">{t(labelKey)}</span>
     </NavLink>
   );
 }
@@ -145,9 +146,9 @@ export function AppShell() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <Link className="brand" to={LANDING_PATH}>
+        <Link className="brand" to={LANDING_PATH} aria-label={t("shell.brand")}>
           <span className="cube" aria-hidden="true" />
-          {t("shell.brand")}
+          <span className="label">{t("shell.brand")}</span>
         </Link>
         <nav className="nav-group">
           <div className="nav-label">{t("nav.community")}</div>
