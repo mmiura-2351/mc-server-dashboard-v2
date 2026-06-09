@@ -54,10 +54,14 @@ from mc_server_dashboard_api.servers.domain.config_bounds import (
     MAX_CONFIG_BYTES,
     MAX_CONFIG_DEPTH,
 )
+from mc_server_dashboard_api.servers.domain.cpu_allocation import (
+    CPU_ALLOCATION_CONFIG_KEY,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
+    InvalidCpuAllocationError,
     InvalidMemoryLimitError,
     InvalidSnapshotIntervalError,
     PermissionDeniedError,
@@ -276,6 +280,55 @@ def test_create_invalid_memory_limit_is_422() -> None:
     resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_memory_limit"
+
+
+def test_create_forwards_and_reads_back_cpu_allocation() -> None:
+    # The CPU allocation (#722) is carried on config; the response surfaces it both
+    # in the raw config blob and as the typed cpu_millis field.
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.config = {**server.config, CPU_ALLOCATION_CONFIG_KEY: 2000}
+    use_case = _FakeUseCase(result=server)
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{community}/servers",
+        json={
+            **_create_body(),
+            "config": {"motd": "hi", CPU_ALLOCATION_CONFIG_KEY: 2000},
+        },
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["cpu_millis"] == 2000
+    assert body["config"][CPU_ALLOCATION_CONFIG_KEY] == 2000
+    assert use_case.calls[0]["config"] == {
+        "motd": "hi",
+        CPU_ALLOCATION_CONFIG_KEY: 2000,
+    }
+
+
+def test_create_without_cpu_allocation_reads_back_none() -> None:
+    # Default-unset: no key, cpu_millis is null (#722).
+    community = uuid.uuid4()
+    use_case = _FakeUseCase(result=_server_entity(community_id=community))
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(f"/api/communities/{community}/servers", json=_create_body())
+    assert resp.status_code == 201
+    assert resp.json()["cpu_millis"] is None
+
+
+def test_create_invalid_cpu_allocation_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=InvalidCpuAllocationError("1")),
+    )
+    client = next(_client(app))
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_cpu_allocation"
 
 
 def test_create_defaults_accept_eula_to_false() -> None:
@@ -584,6 +637,40 @@ def test_update_memory_limit_denied_without_permission_is_403() -> None:
     resp = client.patch(
         f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"config": {MEMORY_LIMIT_CONFIG_KEY: 2048}},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "forbidden"
+    assert body["permission"] == "server:update"
+
+
+def test_update_invalid_cpu_allocation_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=InvalidCpuAllocationError("1")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": {CPU_ALLOCATION_CONFIG_KEY: 1}},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_cpu_allocation"
+
+
+def test_update_cpu_allocation_denied_without_permission_is_403() -> None:
+    # Changing the CPU allocation (#722) is gated by server:update via the existing
+    # changed-key gate; a caller lacking it is denied (issue #458 surface).
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=PermissionDeniedError("server:update")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": {CPU_ALLOCATION_CONFIG_KEY: 2000}},
     )
     assert resp.status_code == 403
     body = resp.json()

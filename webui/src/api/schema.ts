@@ -2106,6 +2106,8 @@ export interface components {
             config: {
                 [key: string]: unknown;
             };
+            /** Cpu Millis */
+            cpu_millis: number | null;
             /** Desired State */
             desired_state: string;
             /** Execution Backend */

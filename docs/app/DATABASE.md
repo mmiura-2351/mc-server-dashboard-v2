@@ -358,6 +358,7 @@ here when it is added, so the blob does not accumulate undocumented keys.
 | `snapshot_interval_seconds` | integer seconds | **operator** — per-server snapshot-cadence override (FR-DATA-7), clamped up to the configured floor | issue #107 |
 | `backup_interval_hours` | integer hours | **operator** — per-server backup-schedule interval (Section 8); absent means no scheduled backups | issue #117 |
 | `memory_limit_mb` | integer mebibytes (MiB) | **operator** — per-server memory limit; absent means no limit (the JVM heap stays at its default). The worker derives the JVM heap from it; whether it is also a *hard* ceiling is per-driver (`container` enforces it, `host-process` is best-effort heap-only — see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #705 |
+| `cpu_millis` | integer millicores (1000 = one core) | **operator** — per-server CPU allocation; absent means no allocation (the driver's default share). A **soft, rough relative share** (owner decision), not a hard cap — the worker translates it to a container relative weight (`CPUShares`), and a server may burst above it when the host is idle | issue #722 |
 
 The operator-settable keys are validated on write (a bad value is `422`), and the
 update permission gate branches on the changed-key set: an edit that touches only

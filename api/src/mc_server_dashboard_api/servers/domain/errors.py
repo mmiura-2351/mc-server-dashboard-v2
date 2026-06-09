@@ -131,6 +131,18 @@ class InvalidMemoryLimitError(ServerError):
     """
 
 
+class InvalidCpuAllocationError(ServerError):
+    """A per-server CPU allocation was invalid (per-server resources, #722).
+
+    The allocation (``config['cpu_millis']``, in millicores; 1000 = one core) is a
+    *soft, rough* relative share, not a hard cap. It must be a positive integer
+    (``bool`` rejected) within the accepted range: at least
+    ``CPU_ALLOCATION_FLOOR_MILLIS`` (below it the server's main tick thread cannot
+    make progress) and no more than ``CPU_ALLOCATION_CEILING_MILLIS`` (an absurd
+    value is a typo, not an intent). The edge maps this to 422.
+    """
+
+
 class ServerNotStoppedError(ServerError):
     """An operation requiring a fully stopped server ran against a live one.
 
