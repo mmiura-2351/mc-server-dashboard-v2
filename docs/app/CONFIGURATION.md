@@ -406,7 +406,27 @@ The `host-process` heap-only stance is the deliberate first cut for that driver
 need a hard per-server memory ceiling should run those servers under the
 `container` driver.
 
-This guarantee covers memory only; CPU and disk quotas remain deferred (epic
+#### Per-server CPU allocation: per-driver guarantee
+
+A server's `cpu_millis` (the operator-set per-server CPU allocation,
+[`DATABASE.md`](DATABASE.md) Section 7) is carried end-to-end to the Worker as a
+**soft relative share** — not a hard cap (owner decision). Unlike memory there is
+no derived launch flag: CPU is enforced (if at all) by the driver, not the JVM
+command line. **An unset allocation leaves the server at the driver's default
+share.** What each driver does with it differs:
+
+| Driver | CPU guarantee | Mechanism |
+|---|---|---|
+| `container` | **Soft relative share — enforced under contention only.** The allocation sets the server's CPU weight proportional to other containers; when the host is otherwise idle the server may burst above it. There is **no hard cap**. | Docker `CPUShares`, proportional to the allocation (issue #724). |
+| `host-process` | **NOT enforced — container-only.** A host-process server is not CPU-constrained: there is no CPU-share mechanism for a bare `os/exec` subprocess without cgroups, so `cpu_millis` does not reach the launch and has no effect. | None. |
+
+The `host-process` no-CPU-enforcement stance follows the same first-cut posture
+as its memory handling (no cgroup). Hard/soft CPU enforcement for `host-process`
+via cgroup v2 (`cpu.weight`/quota) is deferred and tracked in issue #718.
+Operators who need a CPU share honoured under contention should run those servers
+under the `container` driver.
+
+These guarantees cover memory and CPU; disk quotas remain deferred (epic
 #704, REQUIREMENTS.md Section 2.2).
 
 ### 6.4 Observability
