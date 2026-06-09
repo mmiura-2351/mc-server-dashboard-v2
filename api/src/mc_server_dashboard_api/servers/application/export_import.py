@@ -44,6 +44,7 @@ import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.http_datetime import serialize_utc
 from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
     MAX_UPLOAD_BYTES,
@@ -134,7 +135,7 @@ class ExportServer:
             "mc_edition": server.mc_edition,
             "mc_version": server.mc_version,
             "server_type": server.server_type.value,
-            "exported_at": self.clock.now().isoformat(),
+            "exported_at": serialize_utc(self.clock.now()),
         }
         metadata_bytes = json.dumps(metadata, indent=2).encode("utf-8")
         return self.file_store.export_dir(

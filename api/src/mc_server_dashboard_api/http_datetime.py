@@ -23,7 +23,10 @@ the HTTP surface. It:
 
 Model UTC-datetime response fields as :data:`UtcDatetime` (or
 ``UtcDatetime | None``) rather than as a ``str`` filled by ``.isoformat()``, so
-the serialization stays consistent as new models are added.
+the serialization stays consistent as new models are added. For UTC datetimes
+built as raw ``dict`` values rather than response-model fields (e.g. the SSE
+wire frame ``ts`` and the export metadata ``exported_at``), call
+:func:`serialize_utc` directly so they share the same canonical ``Z`` form.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from typing import Annotated
 from pydantic import PlainSerializer, WithJsonSchema
 
 
-def _serialize_utc(value: dt.datetime) -> str:
+def serialize_utc(value: dt.datetime) -> str:
     """Render ``value`` as RFC 3339 UTC with the ``Z`` suffix."""
 
     return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -42,7 +45,7 @@ def _serialize_utc(value: dt.datetime) -> str:
 
 UtcDatetime = Annotated[
     dt.datetime,
-    PlainSerializer(_serialize_utc, return_type=str),
+    PlainSerializer(serialize_utc, return_type=str),
     WithJsonSchema({"type": "string", "format": "date-time"}),
 ]
 """A UTC ``datetime`` field that serializes to RFC 3339 with the ``Z`` suffix."""
