@@ -152,6 +152,11 @@ class StartServerCommand:
     jar_relpath: str
     minecraft_version: str
     launch_mode: LaunchMode = LaunchMode.JAR
+    # The per-server memory ceiling in bytes (the operator-declared limit, issue
+    # #706). 0 means "unset" — the Worker driver picks a default heap, preserving
+    # the pre-#706 launch. The Worker derives ``-Xmx`` from this limit; it is not a
+    # pre-computed JVM flag.
+    memory_limit_bytes: int = 0
 
 
 @dataclass(frozen=True)

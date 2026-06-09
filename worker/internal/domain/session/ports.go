@@ -52,6 +52,10 @@ type Command struct {
 	JarRelpath string
 	// MinecraftVersion drives Java runtime selection for StartServer.
 	MinecraftVersion string
+	// MemoryLimitBytes is the per-server memory ceiling for StartServer (the
+	// operator-declared limit, issue #706). 0 means unset — the driver picks a
+	// default heap. The instance manager converts it to MiB for the InstanceSpec.
+	MemoryLimitBytes uint64
 	// Force skips the graceful path for StopServer.
 	Force bool
 	// Line is the console/RCON line for ServerCommand.

@@ -90,9 +90,13 @@ type InstanceSpec struct {
 	// LaunchMode selects the launch command shape (JAR vs Forge args file). The
 	// zero value is the historical JAR launch (issue #305).
 	LaunchMode LaunchMode
-	// MemoryMB is the JVM heap size in mebibytes; 0 lets the driver pick a
-	// proportionate default.
-	MemoryMB uint32
+	// MemoryLimitMB is the per-server memory ceiling in mebibytes (the
+	// operator-declared limit carried from StartServer, issue #706). It is the
+	// LIMIT, not the heap: the JVM heap (`-Xmx`) is derived from it (limit minus
+	// headroom, see heapArgs), and the enforcement drivers (#707/#708) consume this
+	// ceiling to cap the container/process. 0 means unset — the driver/JVM picks a
+	// default heap, preserving the pre-#706 launch.
+	MemoryLimitMB uint32
 }
 
 // StatusEvent is an observed state transition for a server instance. The

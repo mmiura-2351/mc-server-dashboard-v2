@@ -49,18 +49,47 @@ func TestBuildLaunchPlanJar(t *testing.T) {
 	}
 }
 
-// JAR mode with a heap size keeps the -Xms/-Xmx flags before the jar.
+// JAR mode with a memory limit derives the JVM heap (-Xms/-Xmx = limit minus
+// headroom) and keeps the flags before the jar (issue #706). At a 2048 MiB limit
+// the headroom is max(20%, 256) = 409 MiB, so the heap is 1639 MiB.
 func TestBuildLaunchPlanJarHeap(t *testing.T) {
 	dir := t.TempDir()
-	spec := InstanceSpec{ServerID: "s1", WorkingDir: dir, JarRelpath: "server.jar", MemoryMB: 2048}
+	spec := InstanceSpec{ServerID: "s1", WorkingDir: dir, JarRelpath: "server.jar", MemoryLimitMB: 2048}
 
 	plan, err := BuildLaunchPlan(spec, dir, hostPaths(dir))
 	if err != nil {
 		t.Fatalf("BuildLaunchPlan: %v", err)
 	}
-	want := []string{"-Xms2048M", "-Xmx2048M", "-jar", filepath.Join(dir, "server.jar"), "nogui"}
+	want := []string{"-Xms1639M", "-Xmx1639M", "-jar", filepath.Join(dir, "server.jar"), "nogui"}
 	if !equalArgs(plan.LaunchArgs, want) {
 		t.Fatalf("LaunchArgs = %v, want %v", plan.LaunchArgs, want)
+	}
+}
+
+// heapArgs derivation: unset limit emits no flags; the 256 MiB headroom floor
+// applies at the small (512 MiB) end; the 20% headroom applies once it exceeds
+// the floor (at 2048 MiB).
+func TestHeapArgsFromMemoryLimit(t *testing.T) {
+	cases := []struct {
+		name    string
+		limitMB uint32
+		want    []string
+	}{
+		{name: "unset emits nothing", limitMB: 0, want: nil},
+		// 512 floor (#705): headroom = max(102, 256) = 256 -> heap 256.
+		{name: "floor uses 256 headroom floor", limitMB: 512, want: []string{"-Xms256M", "-Xmx256M"}},
+		// boundary where 20% overtakes the 256 floor: 1280/5 = 256.
+		{name: "boundary 20pct equals floor", limitMB: 1280, want: []string{"-Xms1024M", "-Xmx1024M"}},
+		// 8192: headroom = max(1638, 256) = 1638 -> heap 6554.
+		{name: "large uses 20pct headroom", limitMB: 8192, want: []string{"-Xms6554M", "-Xmx6554M"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := heapArgs(InstanceSpec{MemoryLimitMB: tc.limitMB})
+			if !equalArgs(got, tc.want) {
+				t.Fatalf("heapArgs(%d) = %v, want %v", tc.limitMB, got, tc.want)
+			}
+		})
 	}
 }
 

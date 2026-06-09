@@ -399,6 +399,69 @@ async def test_start_carries_jar_launch_mode_on_the_wire(harness: _Harness) -> N
     await call.done_writing()
 
 
+async def test_start_carries_memory_limit_bytes_on_the_wire(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+    received: list[pb.StartServer] = []
+
+    async def worker_echo() -> None:
+        msg = await call.read()
+        received.append(msg.api_command.start)
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=StartServerCommand(
+            driver=DriverKind.HOST_PROCESS,
+            jar_relpath="server.jar",
+            minecraft_version="1.21.1",
+            memory_limit_bytes=2048 * 1024 * 1024,
+        ),
+    )
+    await echo
+
+    assert received[0].memory_limit_bytes == 2048 * 1024 * 1024
+    await call.done_writing()
+
+
+async def test_start_defaults_memory_limit_bytes_to_zero(harness: _Harness) -> None:
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+    received: list[pb.StartServer] = []
+
+    async def worker_echo() -> None:
+        msg = await call.read()
+        received.append(msg.api_command.start)
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=StartServerCommand(
+            driver=DriverKind.HOST_PROCESS,
+            jar_relpath="server.jar",
+            minecraft_version="1.21.1",
+        ),
+    )
+    await echo
+
+    assert received[0].memory_limit_bytes == 0
+    await call.done_writing()
+
+
 async def test_dispatch_to_unconnected_worker_raises(harness: _Harness) -> None:
     await harness.start()
     with pytest.raises(WorkerNotConnectedError):

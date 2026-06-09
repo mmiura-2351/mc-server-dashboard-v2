@@ -86,6 +86,7 @@ def _server(
     desired: DesiredState = DesiredState.STOPPED,
     observed: ObservedState = ObservedState.STOPPED,
     worker_id: uuid.UUID | None = None,
+    config: dict[str, object] | None = None,
 ) -> Server:
     return Server(
         id=ServerId(server_id),
@@ -95,7 +96,7 @@ def _server(
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
         execution_backend=ExecutionBackend.HOST_PROCESS,
-        config={},
+        config={} if config is None else config,
         desired_state=desired,
         observed_state=observed,
         observed_at=None,
@@ -1118,6 +1119,53 @@ async def test_place_and_start_assigns_an_orphan_and_dispatches() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
     assert cp.incremented == [WorkerId(worker)]
     assert uow.servers.by_id[ServerId(server_id)].desired_state is DesiredState.RUNNING
+
+
+async def test_start_sources_memory_limit_from_config_as_bytes() -> None:
+    # The per-server memory limit lives in the config blob as MiB (#705); the start
+    # flow must source it via the helper and convert MiB -> bytes for the wire (#706).
+    from mc_server_dashboard_api.servers.domain.memory_limit import (
+        MEMORY_LIMIT_CONFIG_KEY,
+    )
+
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+            config={MEMORY_LIMIT_CONFIG_KEY: 2048},
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    await _start_server(uow, cp).place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert cp.start_memory_limit_bytes == 2048 * 1024 * 1024
+
+
+async def test_start_sends_zero_memory_limit_when_unset() -> None:
+    # No limit key -> 0 on the wire, so the Worker driver keeps picking a default
+    # heap (pre-#706 behavior unchanged).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    await _start_server(uow, cp).place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert cp.start_memory_limit_bytes == 0
 
 
 async def test_place_and_start_always_hydrates_even_if_worker_holds_working_set() -> (

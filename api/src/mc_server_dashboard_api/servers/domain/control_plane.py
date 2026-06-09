@@ -174,12 +174,16 @@ class ControlPlane(abc.ABC):
         server_type: ServerType,
         jar_relpath: str,
         minecraft_version: str,
+        memory_limit_bytes: int,
     ) -> CommandOutcome:
         """Dispatch StartServer to ``worker_id`` and await the result (FR-SRV-2).
 
         ``server_type`` selects the Worker launch mode: ``forge`` launches via the
         supervised installer + args file, every other type via the historical JAR
         launch (issue #307).
+
+        ``memory_limit_bytes`` is the per-server memory ceiling (issue #706); 0
+        means unset, so the Worker driver picks a default heap.
         """
 
     @abc.abstractmethod

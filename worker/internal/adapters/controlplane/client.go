@@ -369,6 +369,7 @@ func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
 		out.LaunchMode = launchModeName(c.Start.GetLaunchMode())
 		out.JarRelpath = c.Start.GetJarRelpath()
 		out.MinecraftVersion = c.Start.GetMinecraftVersion()
+		out.MemoryLimitBytes = c.Start.GetMemoryLimitBytes()
 	case *controlplanev1.ApiCommand_Stop:
 		out.Force = c.Stop.GetForce()
 	case *controlplanev1.ApiCommand_ServerCommand:
