@@ -363,10 +363,18 @@ Requirements:
 - FR-WRK-2: The API maintains a registry of connected Workers and their
   liveness (heartbeat over the control plane).
 - FR-WRK-3: When a server is started, the API assigns it to an eligible Worker.
-  M1 placement is **greedy**: filter Workers by capability (the required
-  ExecutionDriver is available) and free capacity, then pick the least-loaded
-  candidate. The placement function is isolated so a richer scheduler can replace
-  it later without changing callers.
+  M1 placement is **resource-aware** but advisory (issue #710): filter Workers by
+  capability (the required ExecutionDriver is available), then **memory-gate** and
+  **CPU-rank** the survivors. Accounting is commit-based — it sums the committed
+  `memory_limit_mb` / `cpu_millis` of each Worker's running-assigned servers
+  against that Worker's advertised `HostResources`. A Worker whose committed
+  memory plus the request cannot fit advertised memory minus a reserve
+  (`max(1024 MiB, 10%)`) is **excluded**; if none fit, placement fails with
+  `NoEligibleWorker`. CPU is a soft least-loaded tie-break on committed
+  `cpu_millis` and never excludes. Memory hard-gates because it is OOM-enforced
+  (issue #707); CPU soft-ranks because shares oversubscribe (issue #724). The
+  placement function is isolated so a richer scheduler can replace it later
+  without changing callers.
 - FR-WRK-4: Workers are stateless and replaceable. If a Worker disconnects, its
   servers are marked accordingly; they can be (re)started on another eligible
   Worker after hydrate from authoritative storage.
@@ -553,7 +561,7 @@ The open questions from the first draft are resolved as follows:
 | 3 | File/backup semantics for running servers | **State-branching policy** (read/edit read-through to the Worker when running; backup via save-all→snapshot→archive; restore requires stop). | 6.9, FR-FILE-2, FR-BAK-4 |
 | 4 | Snapshot interval policy | **Periodic default + per-server override + event-driven** (graceful stop, on-demand backup). | FR-DATA-7 |
 | 5 | Transport | **gRPC bidirectional stream** for the control plane; **API-terminated HTTP** for the bulk data plane. | 5.1, 5.2 |
-| 6 | Worker placement (M1) | **Greedy**: capability + free-capacity filter, then least-loaded; placement isolated for a future scheduler. | FR-WRK-3 |
+| 6 | Worker placement (M1) | **Resource-aware, advisory**: capability filter, then commit-based memory gate (hard, OOM-enforced) and CPU least-loaded rank (soft, oversubscribed) against advertised `HostResources`; `NoEligibleWorker` if memory cannot fit. Placement isolated for a future scheduler. | FR-WRK-3, #710, #707, #724 |
 | 7 | Repository topology | **Monorepo** (`api/`, `worker/`, shared `proto/`). | 1.2 |
 | 8 | Platform-admin authentication | **Same identity system + administrator role/flag.** | FR-AUTH-6 |
 | 9 | Quotas | **Deferred**; the Community data model leaves room for optional limit fields (unused in M1). | Appendix B |
