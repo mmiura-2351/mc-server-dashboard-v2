@@ -25,7 +25,6 @@ def _candidate(
     capacity: int = 4,
     load: int = 0,
     memory_capacity_mb: int = 0,
-    cpu_capacity_millis: int = 0,
     committed_memory_mb: int = 0,
     committed_cpu_millis: int = 0,
 ) -> PlacementCandidate:
@@ -35,7 +34,6 @@ def _candidate(
         capacity=capacity,
         load=load,
         memory_capacity_mb=memory_capacity_mb,
-        cpu_capacity_millis=cpu_capacity_millis,
         committed_memory_mb=committed_memory_mb,
         committed_cpu_millis=committed_cpu_millis,
     )
