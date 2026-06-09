@@ -15,12 +15,18 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
-from mc_server_dashboard_api.servers.domain.errors import BackupNotFoundError
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupCorruptError,
+    BackupNotFoundError,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
+from mc_server_dashboard_api.storage.domain.errors import (
+    IntegrityCheckError,
+    NotFoundError,
+)
 from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -56,6 +62,13 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             key = await self._storage.create_backup_from_current(community, server)
         except NotFoundError as exc:
             raise BackupNotFoundError(str(server_id.value)) from exc
+        except IntegrityCheckError as exc:
+            # The working set is structurally corrupt: refuse to archive it (#739).
+            # Translate to the servers error so no storage type crosses the seam,
+            # carrying the corrupt-file count for the edge log/audit.
+            raise BackupCorruptError(
+                str(server_id.value), corrupt_count=len(exc.report.corrupt)
+            ) from exc
         return key.value
 
     async def restore(

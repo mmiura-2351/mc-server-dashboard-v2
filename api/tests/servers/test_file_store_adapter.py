@@ -33,7 +33,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
-from tests.storage.helpers import publish
+from tests.storage.helpers import healthy_region_bytes, publish
 
 
 def _scope() -> tuple[uuid.UUID, uuid.UUID]:
@@ -270,7 +270,10 @@ async def test_download_dir_streams_zip_of_subtree(tmp_path: Path) -> None:
         {
             "server.properties": b"top",
             "world/level.dat": b"world-bytes",
-            "world/region/r.0.0.mca": b"region-bytes",
+            # A structurally valid region: the publish path now runs the integrity
+            # gate (#739), so a garbage-byte ``.mca`` would be refused before this
+            # download could run.
+            "world/region/r.0.0.mca": healthy_region_bytes(),
         },
     )
     adapter = StorageFileStoreAdapter(storage=storage)
@@ -286,7 +289,7 @@ async def test_download_dir_streams_zip_of_subtree(tmp_path: Path) -> None:
         contents = {name: zf.read(name) for name in zf.namelist()}
     assert contents == {
         "level.dat": b"world-bytes",
-        "region/r.0.0.mca": b"region-bytes",
+        "region/r.0.0.mca": healthy_region_bytes(),
     }
 
 
@@ -508,7 +511,7 @@ async def test_delete_dir_removes_subtree(tmp_path: Path) -> None:
         storage,
         StorageCommunityId(community),
         StorageServerId(server),
-        {"world/level.dat": b"a", "world/region/r.mca": b"b", "keep.txt": b"k"},
+        {"world/level.dat": b"a", "world/region/r.dat": b"b", "keep.txt": b"k"},
     )
     adapter = StorageFileStoreAdapter(storage=storage)
     cid, sid = CommunityId(community), ServerId(server)

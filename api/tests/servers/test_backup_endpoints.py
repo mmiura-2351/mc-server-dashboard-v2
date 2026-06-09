@@ -54,6 +54,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupCorruptError,
     BackupNotFoundError,
     BackupUnsettledError,
     FileTooLargeError,
@@ -239,6 +240,18 @@ def test_create_worker_unavailable_is_503() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 503
+
+
+def test_create_corrupt_working_set_is_500_with_reason() -> None:
+    # The integrity gate (#739) refused to archive a structurally corrupt working
+    # set: a server-side data fault, surfaced as a 500 with a machine-readable
+    # reason, not a 4xx client error.
+    use_case = _FakeUseCase(error=BackupCorruptError("x", corrupt_count=3))
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 500
+    assert resp.json()["reason"] == "working_set_corrupt"
 
 
 # --- list ------------------------------------------------------------------

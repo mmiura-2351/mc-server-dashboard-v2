@@ -287,6 +287,25 @@ class BackupUnsettledError(ServerError):
     """
 
 
+class BackupCorruptError(ServerError):
+    """A create-backup hit a structurally corrupt working set (issue #739).
+
+    The authoritative-create integrity gate (issue #738) walks the working set for
+    structurally corrupt ``.mca`` region files before archiving it; a crash during a
+    chunk save can truncate a region (#703). Fail-closed: a known-corrupt world is
+    never archived, so the create is refused and no archive is written. The seam
+    translation of the storage ``IntegrityCheckError``; the edge maps it to 500
+    (the data is corrupt on the server, not a client error) and audits the refusal.
+
+    ``corrupt_count`` is the number of corrupt region files, carried through so the
+    edge can log/audit *why* without the storage type leaking across the seam.
+    """
+
+    def __init__(self, identifier: str, *, corrupt_count: int) -> None:
+        super().__init__(identifier)
+        self.corrupt_count = corrupt_count
+
+
 class InvalidBackupScheduleError(ServerError):
     """A per-server backup-schedule override was invalid (FR-BAK-3).
 

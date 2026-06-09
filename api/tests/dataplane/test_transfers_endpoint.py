@@ -375,6 +375,44 @@ def test_snapshot_empty_upload_is_rejected_and_not_published(tmp_path: Path) -> 
     assert _read_tar(published) == {"keep.txt": b"prior"}
 
 
+def test_snapshot_corrupt_region_is_refused_with_machine_readable_reason(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+
+    # A byte-complete upload (clears the length gate) whose ``.mca`` is structurally
+    # corrupt — size not a multiple of 4096, modelling a crash-during-save
+    # truncation (#703). The content-integrity gate (#739) must refuse the publish
+    # with a non-2xx and a machine-readable reason, and leave the prior snapshot.
+    corrupt_mca = bytes(2 * 4096 + 17)
+    body = _tar_bytes({"world/region/r.0.0.mca": corrupt_mca})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    payload = resp.json()
+    assert payload["reason"] == "working_set_corrupt"
+    assert payload["corrupt_count"] == 1
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    published = asyncio.run(_read())
+    assert _read_tar(published) == {"keep.txt": b"prior"}
+
+
 def test_snapshot_requires_content_length(tmp_path: Path) -> None:
     client, _ = _setup(tmp_path)
     community, server = _scope()
