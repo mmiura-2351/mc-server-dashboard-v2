@@ -846,6 +846,201 @@ describe("ServerDetailPage settings", () => {
   });
 });
 
+describe("ServerDetailPage settings memory limit", () => {
+  let restoreWs: () => void;
+
+  beforeEach(() => {
+    restoreWs = installMockWebSocket();
+  });
+  afterEach(() => {
+    restoreWs();
+  });
+
+  function openSettings() {
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    );
+  }
+
+  function memoryInput() {
+    return screen.getByLabelText(t("serverDetail.settings.memoryLimit"));
+  }
+
+  it("shows the driver-default placeholder when the limit is unset", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    const input = memoryInput() as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(input).toHaveAttribute(
+      "placeholder",
+      t("serverDetail.settings.memoryLimitDefault"),
+    );
+  });
+
+  it("shows the current limit when set", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        memory_limit_mb: 2048,
+        config: { memory_limit_mb: 2048 },
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect((memoryInput() as HTMLInputElement).value).toBe("2048");
+  });
+
+  it("does not show memory_limit_mb as a raw config override row", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        memory_limit_mb: 2048,
+        config: { memory_limit_mb: 2048, motd: "hi" },
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect(screen.getByDisplayValue("motd")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("memory_limit_mb")).toBeNull();
+  });
+
+  it("saves a set memory limit into the config blob", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(memoryInput(), { target: { value: "2048" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    expect(config).toEqual({ memory_limit_mb: 2048 });
+    expect(typeof config.memory_limit_mb).toBe("number");
+  });
+
+  it("omits the key from the config blob when the limit is cleared", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        memory_limit_mb: 2048,
+        config: { memory_limit_mb: 2048, motd: "hi" },
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(memoryInput(), { target: { value: "" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    expect(config).toEqual({ motd: "hi" });
+  });
+
+  it("rejects a below-floor value and blocks the save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(memoryInput(), { target: { value: "256" } });
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
+    ).toBeInTheDocument();
+    expect(mockApi.patch).not.toHaveBeenCalled();
+  });
+
+  it("rejects an above-ceiling value and blocks the save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(memoryInput(), { target: { value: "1048577" } });
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
+    ).toBeInTheDocument();
+    expect(mockApi.patch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-integer value and blocks the save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(memoryInput(), { target: { value: "1024.5" } });
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
+    ).toBeInTheDocument();
+    expect(mockApi.patch).not.toHaveBeenCalled();
+  });
+
+  it("disables the memory limit field without server:update", async () => {
+    mockCan = (code) => code !== "server:update";
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", memory_limit_mb: 2048 }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    expect(memoryInput()).toBeDisabled();
+  });
+
+  it("surfaces a 422 invalid_memory_limit specifically on save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
+    );
+    mockApi.patch.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_memory_limit" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(memoryInput(), { target: { value: "2048" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(
+      await screen.findByText(t("serverDetail.error.invalidMemoryLimit")),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("ServerDetailPage delete (typed confirm)", () => {
   it("deletes after typed confirm and navigates to the dashboard", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
