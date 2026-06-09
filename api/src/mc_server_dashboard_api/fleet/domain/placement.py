@@ -66,11 +66,11 @@ class PlacementCandidate:
     """A placement-eligible Worker projected to just what the filter needs.
 
     ``capacity`` is the advertised ``max_servers`` (``0`` = no cap); ``load`` is
-    the current assigned-server count. ``memory_capacity_mb`` /
-    ``cpu_capacity_millis`` are the Worker's advertised host resources (``0`` =
-    not advertised); ``committed_memory_mb`` / ``committed_cpu_millis`` are the
-    summed declared resources of the servers already assigned to it (commit-based
-    accounting, supplied by the caller at the adapter/application boundary).
+    the current assigned-server count. ``memory_capacity_mb`` is the Worker's
+    advertised host memory (``0`` = not advertised); ``committed_memory_mb`` /
+    ``committed_cpu_millis`` are the summed declared resources of the servers
+    already assigned to it (commit-based accounting, supplied by the caller at
+    the adapter/application boundary).
     """
 
     worker_id: WorkerId
@@ -78,7 +78,6 @@ class PlacementCandidate:
     capacity: int
     load: int
     memory_capacity_mb: int = 0
-    cpu_capacity_millis: int = 0
     committed_memory_mb: int = 0
     committed_cpu_millis: int = 0
 
