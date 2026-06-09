@@ -175,6 +175,7 @@ class ControlPlane(abc.ABC):
         jar_relpath: str,
         minecraft_version: str,
         memory_limit_bytes: int,
+        cpu_millis: int,
     ) -> CommandOutcome:
         """Dispatch StartServer to ``worker_id`` and await the result (FR-SRV-2).
 
@@ -184,6 +185,9 @@ class ControlPlane(abc.ABC):
 
         ``memory_limit_bytes`` is the per-server memory ceiling (issue #706); 0
         means unset, so the Worker driver picks a default heap.
+
+        ``cpu_millis`` is the per-server CPU allocation in millicores (issue #723);
+        0 means unset, so the Worker driver applies its default weight.
         """
 
     @abc.abstractmethod

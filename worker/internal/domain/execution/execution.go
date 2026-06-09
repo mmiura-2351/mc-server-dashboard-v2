@@ -97,6 +97,12 @@ type InstanceSpec struct {
 	// ceiling to cap the container/process. 0 means unset — the driver/JVM picks a
 	// default heap, preserving the pre-#706 launch.
 	MemoryLimitMB uint32
+	// CPUMillis is the per-server CPU allocation in millicores (1000 = one core),
+	// the operator-declared SOFT relative share carried from StartServer (issue
+	// #723). Unlike MemoryLimitMB there is NO derivation: it is carried as-is and
+	// the enforcement driver (#724) turns it into a relative CPUShares weight. 0
+	// means unset — the driver applies its default weight.
+	CPUMillis uint32
 }
 
 // StatusEvent is an observed state transition for a server instance. The

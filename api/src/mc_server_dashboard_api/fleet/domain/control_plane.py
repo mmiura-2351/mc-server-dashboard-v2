@@ -157,6 +157,10 @@ class StartServerCommand:
     # the pre-#706 launch. The Worker derives ``-Xmx`` from this limit; it is not a
     # pre-computed JVM flag.
     memory_limit_bytes: int = 0
+    # The per-server CPU allocation in millicores (the operator-declared soft share,
+    # issue #723). 0 means "unset" — the Worker driver applies its default weight.
+    # Carried as-is; there is no derivation step (unlike ``-Xmx``).
+    cpu_millis: int = 0
 
 
 @dataclass(frozen=True)

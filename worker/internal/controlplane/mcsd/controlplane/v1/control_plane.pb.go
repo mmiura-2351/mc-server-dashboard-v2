@@ -1172,8 +1172,17 @@ type StartServer struct {
 	// enforcement of the ceiling (Docker `Memory`, host limits) is later sub-issues
 	// (#707/#708) and not implied by this field alone.
 	MemoryLimitBytes uint64 `protobuf:"varint,5,opt,name=memory_limit_bytes,json=memoryLimitBytes,proto3" json:"memory_limit_bytes,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// cpu_millis is the per-server CPU allocation in millicores (1000 = one core)
+	// the operator declared on the server config (issue #723, epic #704). It is a
+	// SOFT, relative allocation (owner decision 2026-06-09), not a hard quota: the
+	// Worker carries it as-is — there is NO derivation step (unlike the JVM heap
+	// from memory_limit_bytes) — and the enforcement driver (#724) turns it into a
+	// relative CPUShares weight. 0/unset means "no per-server allocation → the
+	// driver's default weight", so a command from an API that does not set the
+	// field is unchanged.
+	CpuMillis     uint32 `protobuf:"varint,6,opt,name=cpu_millis,json=cpuMillis,proto3" json:"cpu_millis,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StartServer) Reset() {
@@ -1237,6 +1246,13 @@ func (x *StartServer) GetLaunchMode() LaunchMode {
 func (x *StartServer) GetMemoryLimitBytes() uint64 {
 	if x != nil {
 		return x.MemoryLimitBytes
+	}
+	return 0
+}
+
+func (x *StartServer) GetCpuMillis() uint32 {
+	if x != nil {
+		return x.CpuMillis
 	}
 	return 0
 }
@@ -2350,7 +2366,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	" \x01(\v2\x1e.mcsd.controlplane.v1.EditFileH\x00R\beditFile\x12@\n" +
 	"\n" +
 	"list_files\x18\v \x01(\v2\x1f.mcsd.controlplane.v1.ListFilesH\x00R\tlistFilesB\t\n" +
-	"\acommand\"\x8f\x02\n" +
+	"\acommand\"\xae\x02\n" +
 	"\vStartServer\x12A\n" +
 	"\x06driver\x18\x01 \x01(\x0e2).mcsd.controlplane.v1.ExecutionDriverKindR\x06driver\x12\x1f\n" +
 	"\vjar_relpath\x18\x02 \x01(\tR\n" +
@@ -2358,7 +2374,9 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\x11minecraft_version\x18\x03 \x01(\tR\x10minecraftVersion\x12A\n" +
 	"\vlaunch_mode\x18\x04 \x01(\x0e2 .mcsd.controlplane.v1.LaunchModeR\n" +
 	"launchMode\x12,\n" +
-	"\x12memory_limit_bytes\x18\x05 \x01(\x04R\x10memoryLimitBytes\"\"\n" +
+	"\x12memory_limit_bytes\x18\x05 \x01(\x04R\x10memoryLimitBytes\x12\x1d\n" +
+	"\n" +
+	"cpu_millis\x18\x06 \x01(\rR\tcpuMillis\"\"\n" +
 	"\n" +
 	"StopServer\x12\x14\n" +
 	"\x05force\x18\x01 \x01(\bR\x05force\"\x0f\n" +

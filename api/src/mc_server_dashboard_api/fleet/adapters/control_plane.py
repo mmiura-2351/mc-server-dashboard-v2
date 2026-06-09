@@ -208,6 +208,7 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
                 minecraft_version=command.minecraft_version,
                 launch_mode=_LAUNCH_MODE_TO_PROTO[command.launch_mode],
                 memory_limit_bytes=command.memory_limit_bytes,
+                cpu_millis=command.cpu_millis,
             )
         )
     elif isinstance(command, StopServerCommand):

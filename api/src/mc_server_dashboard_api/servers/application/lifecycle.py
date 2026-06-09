@@ -65,6 +65,9 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane,
     WorkerUnavailableError,
 )
+from mc_server_dashboard_api.servers.domain.cpu_allocation import (
+    cpu_allocation_from_config,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
@@ -406,6 +409,10 @@ class StartServer:
         memory_limit_bytes = (
             memory_limit_mb * 1024 * 1024 if memory_limit_mb is not None else 0
         )
+        # Source the per-server CPU allocation from the config blob (#722 helper) and
+        # carry it as-is on the wire (#723). Unset -> 0, so the Worker driver applies
+        # its default weight. No derivation (unlike the memory -> -Xmx path).
+        cpu_millis = cpu_allocation_from_config(server.config) or 0
         return await self.control_plane.start(
             worker_id=worker_id,
             server_id=server_id,
@@ -414,6 +421,7 @@ class StartServer:
             jar_relpath=_DEFAULT_JAR_RELPATH,
             minecraft_version=server.mc_version,
             memory_limit_bytes=memory_limit_bytes,
+            cpu_millis=cpu_millis,
         )
 
     async def _ensure_jar(self, server: Server) -> str:

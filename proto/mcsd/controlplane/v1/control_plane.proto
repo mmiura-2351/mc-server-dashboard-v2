@@ -215,6 +215,16 @@ message StartServer {
   // enforcement of the ceiling (Docker `Memory`, host limits) is later sub-issues
   // (#707/#708) and not implied by this field alone.
   uint64 memory_limit_bytes = 5;
+
+  // cpu_millis is the per-server CPU allocation in millicores (1000 = one core)
+  // the operator declared on the server config (issue #723, epic #704). It is a
+  // SOFT, relative allocation (owner decision 2026-06-09), not a hard quota: the
+  // Worker carries it as-is — there is NO derivation step (unlike the JVM heap
+  // from memory_limit_bytes) — and the enforcement driver (#724) turns it into a
+  // relative CPUShares weight. 0/unset means "no per-server allocation → the
+  // driver's default weight", so a command from an API that does not set the
+  // field is unchanged.
+  uint32 cpu_millis = 6;
 }
 
 // LaunchMode selects how the Worker launches a server's process (issue #305).
