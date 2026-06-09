@@ -547,6 +547,21 @@ export const en = {
   // Step 3 — config & EULA.
   "serverCreate.nameLabel": "Server name",
   "serverCreate.namePlaceholder": "survival",
+  // Per-server resource allocation in the create wizard (issue #715), mirroring
+  // the Settings tab: a memory limit (MiB) and a soft CPU share (millicores).
+  // Both are optional — blank means the driver default / auto.
+  "serverCreate.memoryLimitLabel": "Memory limit (MiB)",
+  "serverCreate.memoryLimitDefault": "Driver default",
+  "serverCreate.memoryLimitHint":
+    "Maximum memory for this server, in MiB. Leave blank to use the driver default.",
+  "serverCreate.memoryLimitRange":
+    "Enter a whole number between 512 and 1048576 MiB, or leave blank for the driver default.",
+  "serverCreate.cpuAllocationLabel": "CPU allocation (millicores)",
+  "serverCreate.cpuAllocationDefault": "Auto",
+  "serverCreate.cpuAllocationHint":
+    "Soft share of CPU for this server, in millicores (1000 = one core). A relative weight under load, not a hard cap — the server can use more when the host is idle. Leave blank for auto.",
+  "serverCreate.cpuAllocationRange":
+    "Enter a whole number between 100 and 128000 millicores, or leave blank for auto.",
   "serverCreate.propsHeading": "server.properties overrides",
   "serverCreate.propsHint":
     "Optional. Keys written into server.properties on first boot.",
@@ -569,6 +584,10 @@ export const en = {
   "serverCreate.error.invalid_server_name": "That server name is not allowed.",
   "serverCreate.error.unknown_version":
     "That version is not available for this type.",
+  "serverCreate.error.invalid_memory_limit":
+    "The memory limit must be a whole number between 512 and 1048576 MiB.",
+  "serverCreate.error.invalid_cpu_allocation":
+    "The CPU allocation must be a whole number between 100 and 128000 millicores.",
   "serverCreate.genericError": "Could not create the server. Please try again.",
   // Import tab.
   "serverCreate.import.heading": "Import from a ZIP export",
