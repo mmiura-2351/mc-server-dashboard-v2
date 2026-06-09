@@ -553,6 +553,19 @@ export const ja: Record<TranslationKey, string> = {
   // Step 3 — config & EULA.
   "serverCreate.nameLabel": "サーバー名",
   "serverCreate.namePlaceholder": "survival",
+  // Per-server resource allocation in the create wizard (issue #715).
+  "serverCreate.memoryLimitLabel": "メモリ上限（MiB）",
+  "serverCreate.memoryLimitDefault": "ドライバー既定値",
+  "serverCreate.memoryLimitHint":
+    "このサーバーに割り当てるメモリの上限（MiB）。空欄にするとドライバーの既定値を使用します。",
+  "serverCreate.memoryLimitRange":
+    "512〜1048576 MiB の整数を入力するか、空欄にしてドライバー既定値を使用してください。",
+  "serverCreate.cpuAllocationLabel": "CPU割り当て（ミリコア）",
+  "serverCreate.cpuAllocationDefault": "自動",
+  "serverCreate.cpuAllocationHint":
+    "このサーバーへのCPUの割り当て（ミリコア、1000＝1コア）。上限ではなく負荷時の相対的な割り当てで、ホストに余裕があればこれを超えて使用できます。空欄にすると自動になります。",
+  "serverCreate.cpuAllocationRange":
+    "100〜128000 ミリコアの整数を入力するか、空欄にして自動にしてください。",
   "serverCreate.propsHeading": "server.properties の上書き",
   "serverCreate.propsHint":
     "任意。初回起動時に server.properties に書き込まれるキー。",
@@ -575,6 +588,10 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.error.invalid_server_name": "そのサーバー名は使用できません。",
   "serverCreate.error.unknown_version":
     "そのバージョンはこの種類では利用できません。",
+  "serverCreate.error.invalid_memory_limit":
+    "メモリ上限は 512〜1048576 MiB の整数で指定してください。",
+  "serverCreate.error.invalid_cpu_allocation":
+    "CPU割り当ては 100〜128000 ミリコアの整数で指定してください。",
   "serverCreate.genericError":
     "サーバーを作成できませんでした。もう一度お試しください。",
   // Import tab.
