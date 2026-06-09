@@ -296,6 +296,148 @@ describe("Step 3 — config & EULA", () => {
   });
 });
 
+describe("Step 3 — resource allocation (#715)", () => {
+  it("includes set memory limit and CPU allocation in the create config", async () => {
+    mockApi.post.mockResolvedValue({ id: "s-new" });
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.memoryLimitLabel")),
+      { target: { value: "2048" } },
+    );
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.cpuAllocationLabel")),
+      { target: { value: "2000" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    const body = JSON.parse(mockApi.post.mock.calls[0][1].body);
+    expect(body.config).toEqual({ memory_limit_mb: 2048, cpu_millis: 2000 });
+  });
+
+  it("omits blank resource fields from the create config", async () => {
+    mockApi.post.mockResolvedValue({ id: "s-new" });
+    renderPage();
+    await reachConfigStep();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    const body = JSON.parse(mockApi.post.mock.calls[0][1].body);
+    expect(body.config).toEqual({});
+  });
+
+  it("blocks submit on a memory limit below the floor", async () => {
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.memoryLimitLabel")),
+      { target: { value: "256" } },
+    );
+    expect(
+      screen.getByText(t("serverCreate.memoryLimitRange")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    ).toBeDisabled();
+  });
+
+  it("blocks submit on a memory limit above the ceiling", async () => {
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.memoryLimitLabel")),
+      { target: { value: "1048577" } },
+    );
+    expect(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    ).toBeDisabled();
+  });
+
+  it("blocks submit on a non-integer memory limit", async () => {
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.memoryLimitLabel")),
+      { target: { value: "1024.5" } },
+    );
+    expect(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    ).toBeDisabled();
+  });
+
+  it("blocks submit on a CPU allocation below the floor", async () => {
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.cpuAllocationLabel")),
+      { target: { value: "50" } },
+    );
+    expect(
+      screen.getByText(t("serverCreate.cpuAllocationRange")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    ).toBeDisabled();
+  });
+
+  it("blocks submit on a CPU allocation above the ceiling", async () => {
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.cpuAllocationLabel")),
+      { target: { value: "128001" } },
+    );
+    expect(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    ).toBeDisabled();
+  });
+
+  it("blocks submit on a non-integer CPU allocation", async () => {
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.cpuAllocationLabel")),
+      { target: { value: "100.5" } },
+    );
+    expect(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    ).toBeDisabled();
+  });
+
+  it("surfaces a 422 invalid_memory_limit from the API", async () => {
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_memory_limit" }),
+    );
+    renderPage();
+    await reachConfigStep();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    expect(
+      await screen.findByText(t("serverCreate.error.invalid_memory_limit")),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a 422 invalid_cpu_allocation from the API", async () => {
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_cpu_allocation" }),
+    );
+    renderPage();
+    await reachConfigStep();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    expect(
+      await screen.findByText(t("serverCreate.error.invalid_cpu_allocation")),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("create error surfacing", () => {
   it("surfaces a 409 port_taken specifically", async () => {
     mockApi.post.mockRejectedValue(new ApiError(409, { reason: "port_taken" }));

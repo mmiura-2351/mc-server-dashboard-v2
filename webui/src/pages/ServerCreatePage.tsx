@@ -41,6 +41,42 @@ const TYPE_SUB: Record<string, TranslationKey> = {
 type Backend = "host_process" | "container";
 const BACKENDS: Backend[] = ["host_process", "container"];
 
+// Per-server memory limit / CPU allocation in the create wizard (issue #715),
+// mirroring the Settings tab (ServerDetailPage.tsx). Both ride the `config` blob
+// as reserved keys and are optional: blank = driver default / auto.
+const MEMORY_LIMIT_KEY = "memory_limit_mb";
+const MEMORY_LIMIT_FLOOR_MIB = 512;
+const MEMORY_LIMIT_CEILING_MIB = 1024 * 1024;
+const CPU_ALLOCATION_KEY = "cpu_millis";
+const CPU_ALLOCATION_FLOOR_MILLIS = 100;
+const CPU_ALLOCATION_CEILING_MILLIS = 128_000;
+
+// A non-blank input is valid only as a whole number within range; blank is
+// always allowed (the key is omitted so the server falls back to the default).
+function memoryLimitValid(value: string): boolean {
+  if (value.trim() === "") {
+    return true;
+  }
+  const parsed = Number(value);
+  return (
+    Number.isInteger(parsed) &&
+    parsed >= MEMORY_LIMIT_FLOOR_MIB &&
+    parsed <= MEMORY_LIMIT_CEILING_MIB
+  );
+}
+
+function cpuAllocationValid(value: string): boolean {
+  if (value.trim() === "") {
+    return true;
+  }
+  const parsed = Number(value);
+  return (
+    Number.isInteger(parsed) &&
+    parsed >= CPU_ALLOCATION_FLOOR_MILLIS &&
+    parsed <= CPU_ALLOCATION_CEILING_MILLIS
+  );
+}
+
 // Create-path problem reasons that map to a specific inline/toast message. A
 // 409 `port_taken` is surfaced specifically (issue requirement); everything else
 // falls back to the generic toast.
@@ -51,6 +87,8 @@ const CREATE_ERROR_KEY: Record<string, TranslationKey> = {
   server_name_exists: "serverCreate.error.server_name_exists",
   invalid_server_name: "serverCreate.error.invalid_server_name",
   unknown_version: "serverCreate.error.unknown_version",
+  invalid_memory_limit: "serverCreate.error.invalid_memory_limit",
+  invalid_cpu_allocation: "serverCreate.error.invalid_cpu_allocation",
 };
 
 export function ServerCreatePage() {
@@ -150,6 +188,10 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   const [portTouched, setPortTouched] = useState(false);
   const [name, setName] = useState("");
   const [props, setProps] = useState<PropOverride[]>([]);
+  // Empty string ↔ unset (driver default / auto); a number ↔ the value (MiB /
+  // millicores). Mirrors the Settings tab's optional resource fields (#715).
+  const [memoryLimit, setMemoryLimit] = useState("");
+  const [cpuAllocation, setCpuAllocation] = useState("");
   const [acceptEula, setAcceptEula] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [nameError, setNameError] = useState<string | undefined>();
@@ -205,14 +247,25 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     };
   }, [step, portTouched]);
 
+  const memoryLimitOk = memoryLimitValid(memoryLimit);
+  const cpuAllocationOk = cpuAllocationValid(cpuAllocation);
+
   async function onCreate() {
     setSubmitting(true);
     setNameError(undefined);
-    const config: Record<string, string> = {};
+    const config: Record<string, string | number> = {};
     for (const { key, value } of props) {
       if (key.trim() !== "") {
         config[key.trim()] = value;
       }
+    }
+    // Layer the resource fields: a number when set, omitted when blank so the
+    // server falls back to the driver default / auto share (#715).
+    if (memoryLimit.trim() !== "") {
+      config[MEMORY_LIMIT_KEY] = Number(memoryLimit);
+    }
+    if (cpuAllocation.trim() !== "") {
+      config[CPU_ALLOCATION_KEY] = Number(cpuAllocation);
     }
     try {
       const server = await api.post(
@@ -389,6 +442,46 @@ function NewServerWizard({ communityId }: { communityId: string }) {
             )}
           </div>
 
+          <div className="field">
+            <label htmlFor="memory-limit-input">
+              {t("serverCreate.memoryLimitLabel")}
+            </label>
+            <input
+              id="memory-limit-input"
+              type="number"
+              value={memoryLimit}
+              placeholder={t("serverCreate.memoryLimitDefault")}
+              onChange={(e) => setMemoryLimit(e.target.value)}
+            />
+            {memoryLimitOk ? (
+              <div className="hint">{t("serverCreate.memoryLimitHint")}</div>
+            ) : (
+              <div className="error" role="alert">
+                {t("serverCreate.memoryLimitRange")}
+              </div>
+            )}
+          </div>
+
+          <div className="field">
+            <label htmlFor="cpu-allocation-input">
+              {t("serverCreate.cpuAllocationLabel")}
+            </label>
+            <input
+              id="cpu-allocation-input"
+              type="number"
+              value={cpuAllocation}
+              placeholder={t("serverCreate.cpuAllocationDefault")}
+              onChange={(e) => setCpuAllocation(e.target.value)}
+            />
+            {cpuAllocationOk ? (
+              <div className="hint">{t("serverCreate.cpuAllocationHint")}</div>
+            ) : (
+              <div className="error" role="alert">
+                {t("serverCreate.cpuAllocationRange")}
+              </div>
+            )}
+          </div>
+
           <PropsEditor props={props} onChange={setProps} />
 
           <div className="field">
@@ -418,7 +511,12 @@ function NewServerWizard({ communityId }: { communityId: string }) {
             <button
               type="button"
               className="btn primary"
-              disabled={submitting || name.trim() === ""}
+              disabled={
+                submitting ||
+                name.trim() === "" ||
+                !memoryLimitOk ||
+                !cpuAllocationOk
+              }
               onClick={onCreate}
             >
               {submitting
