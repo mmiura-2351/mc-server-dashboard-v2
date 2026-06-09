@@ -589,6 +589,39 @@ func TestStartLaunchContainerNoMemoryLimit(t *testing.T) {
 	}
 }
 
+// The launch container's CPU weight is proportional to the per-server CPU
+// allocation: CPUMillis is mapped to CpuShares at 1024 shares = 1 core, so
+// 2000m → 2048 (issue #724).
+func TestStartLaunchContainerCPUShares(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	s := spec()
+	s.CPUMillis = 2000
+	if _, err := d.Start(context.Background(), s); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if got := docker.createSpec.CPUShares; got != 2048 {
+		t.Fatalf("CPUShares = %d, want 2048 (2000m)", got)
+	}
+}
+
+// An unset CPU allocation (0) keeps the historical fixed weight (2048), so
+// existing servers do not regress (issue #724).
+func TestStartLaunchContainerNoCPUMillisKeepsDefaultShares(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	if _, err := d.Start(context.Background(), spec()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if got := docker.createSpec.CPUShares; got != gameServerCPUShares {
+		t.Fatalf("CPUShares = %d, want %d (default)", got, gameServerCPUShares)
+	}
+}
+
 // Start publishes the game port on the configured GameBindIP while RCON stays on
 // loopback (a control channel that must not be exposed).
 func TestStartGamePortBindIP(t *testing.T) {
