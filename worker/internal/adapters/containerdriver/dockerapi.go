@@ -103,7 +103,8 @@ type ContainerStats struct {
 }
 
 // CreateSpec describes a container to create. Only the fields the driver sets are
-// modelled; resource limits are deferred to M2+.
+// modelled. Memory is enforced as a hard container limit (issue #707); CPU and
+// disk limits remain deferred.
 type CreateSpec struct {
 	Name       string
 	Image      string
@@ -118,6 +119,13 @@ type CreateSpec struct {
 	Network string
 	// Labels are attached for identification and the orphan sweep.
 	Labels map[string]string
+	// MemoryLimitBytes is the hard container memory ceiling in bytes, derived from
+	// InstanceSpec.MemoryLimitMB (MiB→bytes). Zero leaves the container
+	// unconstrained, preserving the pre-#707 behavior. The JVM heap (`-Xmx`) is
+	// derived to sit safely below this ceiling (issue #706), so the kernel OOM
+	// killer caps a runaway server at the container boundary rather than starving
+	// the host.
+	MemoryLimitBytes int64
 }
 
 // PortMapping publishes a container TCP port on a host interface/port.
