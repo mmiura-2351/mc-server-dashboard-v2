@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,6 +110,48 @@ func TestEngineClientCreateEncodesSpec(t *testing.T) {
 	pb, ok := body.HostConfig.PortBindings["25565/tcp"]
 	if !ok || len(pb) != 1 || pb[0].HostPort != "25565" || pb[0].HostIP != "127.0.0.1" {
 		t.Fatalf("PortBindings = %v", body.HostConfig.PortBindings)
+	}
+}
+
+// A non-zero memory ceiling is encoded as the host-config Memory field (in bytes)
+// so the daemon caps the container at that hard limit; a zero ceiling omits it,
+// leaving the container unconstrained (issue #707).
+func TestEngineClientCreateEncodesMemory(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
+	})
+	c := d.client(t)
+
+	const wantBytes = int64(2048) * 1024 * 1024
+	if _, err := c.Create(context.Background(), CreateSpec{
+		Name:             "mcsd-s1",
+		Image:            "img",
+		MemoryLimitBytes: wantBytes,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var body createBody
+	if err := json.Unmarshal([]byte(d.requests[0].body), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.HostConfig.Memory != wantBytes {
+		t.Fatalf("HostConfig.Memory = %d, want %d", body.HostConfig.Memory, wantBytes)
+	}
+}
+
+// A zero memory ceiling omits the Memory field from the wire payload (Memory has
+// the omitempty tag), so the container runs unconstrained (issue #707).
+func TestEngineClientCreateOmitsMemoryWhenZero(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
+	})
+	c := d.client(t)
+
+	if _, err := c.Create(context.Background(), CreateSpec{Name: "mcsd-s1", Image: "img"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if strings.Contains(d.requests[0].body, "\"Memory\"") {
+		t.Fatalf("body carries Memory, want it omitted: %s", d.requests[0].body)
 	}
 }
 

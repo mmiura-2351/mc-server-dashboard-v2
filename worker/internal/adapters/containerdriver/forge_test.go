@@ -240,6 +240,41 @@ func TestForgeContainerInstallThenLaunch(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
+// Both the Forge install container and the post-install launch container carry
+// the per-server memory ceiling as the Docker host-config Memory limit, converted
+// MiB→bytes (issue #707).
+func TestForgeContainerMemoryLimit(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	d := forgeDriver(docker)
+
+	s := forgeSpec(dir)
+	s.MemoryLimitMB = 1024
+	inst, err := d.Start(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	const wantBytes = int64(1024) * 1024 * 1024
+	if got := docker.createSpecs[0].MemoryLimitBytes; got != wantBytes {
+		t.Fatalf("install MemoryLimitBytes = %d, want %d (1024 MiB)", got, wantBytes)
+	}
+
+	writeArgsfile(t, dir)
+	docker.exit("mcsd-s1-install", 0, nil)
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if len(docker.createSpecs) < 2 {
+		t.Fatalf("createSpecs = %v, want install + launch", docker.createSpecs)
+	}
+	if got := docker.createSpecs[1].MemoryLimitBytes; got != wantBytes {
+		t.Fatalf("launch MemoryLimitBytes = %d, want %d (1024 MiB)", got, wantBytes)
+	}
+
+	docker.exit("mcsd-s1", 0, nil)
+	drainClosed(inst.Events())
+}
+
 // A Forge install container exiting non-zero reports crashed and never creates the
 // launch container (issue #305). Install failure surfaces as crashed via the
 // status pump, not a command error code.
