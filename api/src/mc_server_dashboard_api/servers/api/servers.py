@@ -82,12 +82,16 @@ from mc_server_dashboard_api.servers.domain.config_bounds import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
+from mc_server_dashboard_api.servers.domain.cpu_allocation import (
+    cpu_allocation_from_config,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     ExecutionBackendImmutableError,
     FileTooLargeError,
     InvalidBackupScheduleError,
+    InvalidCpuAllocationError,
     InvalidExportMetadataError,
     InvalidLifecycleTransitionError,
     InvalidMemoryLimitError,
@@ -190,6 +194,12 @@ class ServerResponse(BaseModel):
     # derived from ``config['memory_limit_mb']`` (None when unset); the full blob
     # still carries the raw key for round-tripping.
     memory_limit_mb: int | None
+    # The per-server CPU allocation in millicores (#722; 1000 = one core), surfaced
+    # as a typed field for clients that should not parse the reserved config key
+    # themselves. It is derived from ``config['cpu_millis']`` (None when unset); the
+    # full blob still carries the raw key for round-tripping. A soft relative share,
+    # not a hard cap (owner decision).
+    cpu_millis: int | None
     game_port: int | None
     desired_state: str
     observed_state: str
@@ -208,6 +218,7 @@ class ServerResponse(BaseModel):
             execution_backend=server.execution_backend.value,
             config=server.config,
             memory_limit_mb=memory_limit_from_config(server.config),
+            cpu_millis=cpu_allocation_from_config(server.config),
             game_port=server.game_port,
             desired_state=server.desired_state.value,
             observed_state=server.observed_state.value,
@@ -274,6 +285,9 @@ async def create_server(
     except InvalidMemoryLimitError as exc:
         # A per-server memory limit outside the accepted shape/range (#705).
         raise _unprocessable("invalid_memory_limit") from exc
+    except InvalidCpuAllocationError as exc:
+        # A per-server CPU allocation outside the accepted shape/range (#722).
+        raise _unprocessable("invalid_cpu_allocation") from exc
     except PortOutOfRangeError as exc:
         # An explicit game_port outside the configured range (issue #243).
         raise _unprocessable("port_out_of_range") from exc
@@ -537,6 +551,9 @@ async def update_server(
     except InvalidMemoryLimitError as exc:
         # A per-server memory limit outside the accepted shape/range (#705).
         raise _unprocessable("invalid_memory_limit") from exc
+    except InvalidCpuAllocationError as exc:
+        # A per-server CPU allocation outside the accepted shape/range (#722).
+        raise _unprocessable("invalid_cpu_allocation") from exc
     except PortOutOfRangeError as exc:
         # A new game_port outside the configured range (issue #311).
         raise _unprocessable("port_out_of_range") from exc

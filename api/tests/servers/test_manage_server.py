@@ -23,10 +23,14 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.domain.cpu_allocation import (
+    CPU_ALLOCATION_CONFIG_KEY,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
+    InvalidCpuAllocationError,
     InvalidMemoryLimitError,
     InvalidSnapshotIntervalError,
     PermissionDeniedError,
@@ -224,6 +228,70 @@ async def test_create_without_memory_limit_writes_no_key() -> None:
         config={"motd": "hi"},
     )
     assert MEMORY_LIMIT_CONFIG_KEY not in server.config
+
+
+async def test_create_accepts_valid_cpu_allocation() -> None:
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={CPU_ALLOCATION_CONFIG_KEY: 2000},
+    )
+    assert server.config[CPU_ALLOCATION_CONFIG_KEY] == 2000
+    assert uow.commits == 1
+
+
+async def test_create_rejects_invalid_cpu_allocation() -> None:
+    # A below-floor CPU allocation 422s before the row is staged (#722).
+    uow = FakeUnitOfWork()
+    with pytest.raises(InvalidCpuAllocationError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=_PORTS,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={CPU_ALLOCATION_CONFIG_KEY: 1},
+        )
+    assert uow.commits == 0
+
+
+async def test_create_without_cpu_allocation_writes_no_key() -> None:
+    # Default-unset: no cpu_millis key is written, behavior unchanged (#722).
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={"motd": "hi"},
+    )
+    assert CPU_ALLOCATION_CONFIG_KEY not in server.config
 
 
 async def test_create_rejects_non_java_edition() -> None:
@@ -782,6 +850,34 @@ async def test_update_rejects_invalid_memory_limit() -> None:
     assert uow.commits == 0
 
 
+async def test_update_accepts_valid_cpu_allocation() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        config={CPU_ALLOCATION_CONFIG_KEY: 4000},
+    )
+    assert updated.config[CPU_ALLOCATION_CONFIG_KEY] == 4000
+    assert uow.commits == 1
+
+
+async def test_update_rejects_invalid_cpu_allocation() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(InvalidCpuAllocationError):
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            config={CPU_ALLOCATION_CONFIG_KEY: 1},
+        )
+    assert uow.commits == 0
+
+
 # --- update permission gate (issue #458) -----------------------------------
 #
 # A config edit that touches only the backup-scheduling key
@@ -958,6 +1054,24 @@ async def test_update_memory_limit_change_requires_server_update() -> None:
             community_id=community,
             server_id=server.id,
             config={"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048},
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_cpu_allocation_change_requires_server_update() -> None:
+    # cpu_millis has no dedicated permission code; like any non-scheduling config
+    # key it is gated by server:update (#722 reuses the existing gate).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "hi", CPU_ALLOCATION_CONFIG_KEY: 2000},
             authorize=_grant("backup:schedule"),
         )
     assert exc.value.permission == "server:update"

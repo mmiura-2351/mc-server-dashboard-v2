@@ -29,6 +29,9 @@ from mc_server_dashboard_api.servers.domain.backup_schedule import (
     schedule_from_config,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.cpu_allocation import (
+    cpu_allocation_from_config,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
@@ -229,6 +232,11 @@ class CreateServer:
         # the row is staged: a bad shape/range 422s. Range only — host capacity
         # is the deferred placement sub-issue #710.
         memory_limit_from_config(config)
+        # The per-server CPU allocation carried on config (#722) is validated the
+        # same way: a bad shape/range 422s before the row is staged. It is a soft
+        # relative share, not a hard cap; range only — host capacity is the
+        # deferred placement sub-issue #710.
+        cpu_allocation_from_config(config)
         await self.version_validator.validate(
             server_type=server_type, version=mc_version
         )
@@ -432,6 +440,11 @@ class UpdateServer:
             # bad shape/range 422s before any write. Range only — host capacity
             # is the deferred placement sub-issue #710.
             memory_limit_from_config(config)
+            # The per-server CPU allocation (#722) is validated the same way: a
+            # bad shape/range 422s before any write. A soft relative share, not a
+            # hard cap; range only — host capacity is the deferred placement
+            # sub-issue #710.
+            cpu_allocation_from_config(config)
         if game_port is not None and game_port not in self.port_range:
             # Range is a pure 422 that runs before the state gate (the precedence
             # ruling), so an out-of-range port on a running server is a 422.

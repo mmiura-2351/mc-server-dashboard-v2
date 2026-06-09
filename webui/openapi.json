@@ -1490,6 +1490,17 @@
             "title": "Config",
             "type": "object"
           },
+          "cpu_millis": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Millis"
+          },
           "desired_state": {
             "title": "Desired State",
             "type": "string"
@@ -1567,6 +1578,7 @@
           "execution_backend",
           "config",
           "memory_limit_mb",
+          "cpu_millis",
           "game_port",
           "desired_state",
           "observed_state",
