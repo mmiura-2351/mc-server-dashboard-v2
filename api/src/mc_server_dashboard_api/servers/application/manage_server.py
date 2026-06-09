@@ -45,6 +45,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.memory_limit import (
+    memory_limit_from_config,
+)
 from mc_server_dashboard_api.servers.domain.ports import (
     PortRange,
     pick_lowest_free_port,
@@ -222,6 +225,10 @@ class CreateServer:
             raise UnsupportedEditionError(mc_edition)
         parsed_type = _parse_server_type(server_type)
         parsed_backend = _parse_execution_backend(execution_backend)
+        # A per-server memory limit carried on config (#705) is validated before
+        # the row is staged: a bad shape/range 422s. Range only — host capacity
+        # is the deferred placement sub-issue #710.
+        memory_limit_from_config(config)
         await self.version_validator.validate(
             server_type=server_type, version=mc_version
         )
@@ -421,6 +428,10 @@ class UpdateServer:
             # backup schedule (FR-BAK-3) are validated the same way.
             override_from_config(config, floor=self.min_interval_seconds)
             schedule_from_config(config)
+            # The per-server memory limit (#705) is validated the same way: a
+            # bad shape/range 422s before any write. Range only — host capacity
+            # is the deferred placement sub-issue #710.
+            memory_limit_from_config(config)
         if game_port is not None and game_port not in self.port_range:
             # Range is a pure 422 that runs before the state gate (the precedence
             # ruling), so an out-of-range port on a running server is a 422.

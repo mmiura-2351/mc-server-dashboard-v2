@@ -90,6 +90,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupScheduleError,
     InvalidExportMetadataError,
     InvalidLifecycleTransitionError,
+    InvalidMemoryLimitError,
     InvalidServerNameError,
     InvalidSnapshotIntervalError,
     LifecycleTransitionConflictError,
@@ -109,6 +110,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
+from mc_server_dashboard_api.servers.domain.memory_limit import (
+    memory_limit_from_config,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError,
@@ -181,6 +185,11 @@ class ServerResponse(BaseModel):
     server_type: str
     execution_backend: str
     config: dict[str, Any]
+    # The per-server memory limit in mebibytes (#705), surfaced as a typed field
+    # for clients that should not parse the reserved config key themselves. It is
+    # derived from ``config['memory_limit_mb']`` (None when unset); the full blob
+    # still carries the raw key for round-tripping.
+    memory_limit_mb: int | None
     game_port: int | None
     desired_state: str
     observed_state: str
@@ -198,6 +207,7 @@ class ServerResponse(BaseModel):
             server_type=server.server_type.value,
             execution_backend=server.execution_backend.value,
             config=server.config,
+            memory_limit_mb=memory_limit_from_config(server.config),
             game_port=server.game_port,
             desired_state=server.desired_state.value,
             observed_state=server.observed_state.value,
@@ -261,6 +271,9 @@ async def create_server(
         raise _service_unavailable("catalog_unavailable") from exc
     except InvalidServerNameError as exc:
         raise _unprocessable("invalid_server_name") from exc
+    except InvalidMemoryLimitError as exc:
+        # A per-server memory limit outside the accepted shape/range (#705).
+        raise _unprocessable("invalid_memory_limit") from exc
     except PortOutOfRangeError as exc:
         # An explicit game_port outside the configured range (issue #243).
         raise _unprocessable("port_out_of_range") from exc
@@ -521,6 +534,9 @@ async def update_server(
         raise _unprocessable("invalid_snapshot_interval") from exc
     except InvalidBackupScheduleError as exc:
         raise _unprocessable("invalid_backup_schedule") from exc
+    except InvalidMemoryLimitError as exc:
+        # A per-server memory limit outside the accepted shape/range (#705).
+        raise _unprocessable("invalid_memory_limit") from exc
     except PortOutOfRangeError as exc:
         # A new game_port outside the configured range (issue #311).
         raise _unprocessable("port_out_of_range") from exc

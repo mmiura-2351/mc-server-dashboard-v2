@@ -120,6 +120,17 @@ class InvalidSnapshotIntervalError(ServerError):
     """
 
 
+class InvalidMemoryLimitError(ServerError):
+    """A per-server memory limit was invalid (per-server resources, #705).
+
+    The limit (``config['memory_limit_mb']``, in mebibytes) must be a positive
+    integer (``bool`` rejected) within the accepted range: at least
+    ``MEMORY_LIMIT_FLOOR_MB`` (a Minecraft server needs real heap) and no more
+    than ``MEMORY_LIMIT_CEILING_MB`` (an absurd value is a typo, not an intent).
+    The edge maps this to 422.
+    """
+
+
 class ServerNotStoppedError(ServerError):
     """An operation requiring a fully stopped server ran against a live one.
 
