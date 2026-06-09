@@ -88,21 +88,18 @@ def check_region_file(path: Path) -> ReasonCode | None:
     Reads at most the 8 KiB header plus a 5-byte prefix per present chunk.
     """
     size = path.stat().st_size
-    if size == 0 or size % _SECTOR != 0:
+    # A valid region carries both header tables (location + timestamp), so the
+    # smallest sound file is two sectors. A non-zero size below that — or any
+    # size that is not a 4096 multiple — is a torn save.
+    if size < _HEADER_SECTORS * _SECTOR or size % _SECTOR != 0:
         return ReasonCode.NOT_4096_ALIGNED
 
     total_sectors = size // _SECTOR
 
     with path.open("rb") as fh:
         location_table = fh.read(_LOCATION_TABLE_SIZE)
-        # A multiple of 4096 that is non-zero is at least one sector; but a
-        # region with a valid header is at least two (both tables). A file with
-        # fewer header bytes than the location table cannot carry valid chunk
-        # pointers, so any present entry below is already out of bounds.
         for index in range(_ENTRY_COUNT):
             entry = location_table[index * 4 : index * 4 + 4]
-            if len(entry) < 4:
-                break
             offset = int.from_bytes(entry[0:3], "big")
             sector_count = entry[3]
             if offset == 0 and sector_count == 0:
