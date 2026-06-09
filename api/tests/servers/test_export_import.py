@@ -151,7 +151,9 @@ async def test_export_streams_working_set_plus_metadata() -> None:
     assert meta["format"] == EXPORT_FORMAT_VERSION
     assert meta["server_type"] == "vanilla"
     assert meta["mc_version"] == "1.21.1"
-    assert meta["exported_at"] == _NOW.isoformat()
+    # ``exported_at`` is the canonical RFC 3339 ``Z`` form (#674), not the
+    # ``+00:00`` offset that ``datetime.isoformat()`` would emit for UTC.
+    assert meta["exported_at"] == "2026-06-04T12:00:00Z"
 
 
 async def test_export_running_is_unsettled() -> None:

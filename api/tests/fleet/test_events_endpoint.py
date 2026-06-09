@@ -244,7 +244,9 @@ def test_frame_ts_uses_worker_emitted_at() -> None:
             ),
         )
         frame = ws.receive_json()
-    assert frame["ts"] == emitted.isoformat()
+    # The wire frame ``ts`` is the canonical RFC 3339 ``Z`` form (#674), not the
+    # ``+00:00`` offset that ``datetime.isoformat()`` would emit for UTC.
+    assert frame["ts"] == "2026-06-03T12:00:00Z"
 
 
 def test_frame_ts_falls_back_to_receive_time_when_unset() -> None:
@@ -262,6 +264,7 @@ def test_frame_ts_falls_back_to_receive_time_when_unset() -> None:
         )
         frame = ws.receive_json()
     after = dt.datetime.now(dt.timezone.utc)
+    assert frame["ts"].endswith("Z")
     ts = dt.datetime.fromisoformat(frame["ts"])
     assert before <= ts <= after
 

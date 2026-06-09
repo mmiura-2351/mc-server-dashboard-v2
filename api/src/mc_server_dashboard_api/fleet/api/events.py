@@ -69,6 +69,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvent,
     RealTimeEvents,
 )
+from mc_server_dashboard_api.http_datetime import serialize_utc
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.manage_server import ReadServer
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
@@ -409,6 +410,6 @@ def _frame(event: RealTimeEvent) -> dict[str, object]:
     ts = event.emitted_at or dt.datetime.now(dt.timezone.utc)
     return {
         "stream": event.stream.value,
-        "ts": ts.isoformat(),
+        "ts": serialize_utc(ts),
         "payload": event.payload,
     }
