@@ -383,8 +383,31 @@ container after the server exits. The sweep recovers from a crash that left a
 server's container behind, but because it force-removes *running* containers too,
 a graceful Worker restart while servers are up kills those live servers — this is
 the deliberate M1 stateless-worker posture (no hydration of prior state yet; the
-API observes the resulting state via the Worker's reconnect/status). Resource
-limits (CPU/memory quotas) are deferred to M2+ (REQUIREMENTS.md Section 2.2).
+API observes the resulting state via the Worker's reconnect/status).
+
+#### Per-server memory limit: per-driver guarantee
+
+A server's `memory_limit_mb` (the operator-set per-server limit,
+[`DATABASE.md`](DATABASE.md) Section 7) is carried end-to-end to the Worker, which
+derives the JVM heap from it: `-Xms = -Xmx = limit − max(limit/5, 256 MiB)`,
+reserving headroom for JVM off-heap/native overhead so the heap stays under the
+limit (issue #706). **An unset limit leaves the heap at the JVM default** (the
+pre-limit launch). The heap is derived identically for both drivers; what differs
+is whether the limit is also a **hard ceiling** the process cannot exceed:
+
+| Driver | Memory guarantee | Mechanism |
+|---|---|---|
+| `container` | **Hard ceiling — enforced.** The process cannot exceed the limit; the kernel OOM-kills it if it tries. | Docker `Memory` set to the limit, plus the derived `-Xmx` (added in issue #707). |
+| `host-process` | **Best-effort, heap-only — NOT enforced.** Only the derived `-Xmx` constrains the JVM heap; there is **no hard cap**, so a misbehaving server (native libs, off-heap buffers, runaway plugins) can exceed the limit and starve other servers on the host. | Derived `-Xmx` only. |
+
+The `host-process` heap-only stance is the deliberate first cut for that driver
+(it is a bare `os/exec` subprocess with no cgroup). Hard enforcement for
+`host-process` via cgroup v2 is deferred and tracked in issue #718. Operators who
+need a hard per-server memory ceiling should run those servers under the
+`container` driver.
+
+This guarantee covers memory only; CPU and disk quotas remain deferred (epic
+#704, REQUIREMENTS.md Section 2.2).
 
 ### 6.4 Observability
 
