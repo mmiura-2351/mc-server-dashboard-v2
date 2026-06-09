@@ -18,8 +18,11 @@
 // to `docker stop` (SIGTERM with a timeout, escalating to SIGKILL inside the
 // daemon), then a direct `docker kill`. A forced stop skips the RCON step.
 //
-// Resource limits (CPU/memory quotas) are deferred to M2+ (REQUIREMENTS.md
-// Section 2.2); this milestone sets none.
+// Memory is enforced as a hard container limit: the create path sets the Docker
+// host-config Memory field from InstanceSpec.MemoryLimitMB (MiB→bytes) so the
+// kernel OOM-kills a runaway server at the container boundary rather than letting
+// it starve the host (issue #707). An unset limit (0) sets no constraint,
+// preserving the prior behavior. CPU and disk quotas remain deferred.
 package containerdriver
 
 import (
@@ -287,14 +290,15 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 			PortMapping{ContainerPort: rconPort, HostIP: rconBindIP, HostPort: rconPort})
 	}
 	create := CreateSpec{
-		Name:       containerName(spec.ServerID),
-		Image:      image,
-		Cmd:        containerCmd(launchArgs),
-		WorkingDir: containerWorkDir,
-		Binds:      []string{spec.WorkingDir + ":" + containerWorkDir},
-		Ports:      portMappings,
-		Network:    d.network,
-		Labels:     d.labels(spec.ServerID),
+		Name:             containerName(spec.ServerID),
+		Image:            image,
+		Cmd:              containerCmd(launchArgs),
+		WorkingDir:       containerWorkDir,
+		Binds:            []string{spec.WorkingDir + ":" + containerWorkDir},
+		Ports:            portMappings,
+		Network:          d.network,
+		Labels:           d.labels(spec.ServerID),
+		MemoryLimitBytes: memoryLimitBytes(spec.MemoryLimitMB),
 	}
 
 	id, err := d.createContainer(ctx, create)
@@ -317,12 +321,13 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 // step independent of the launch topology.
 func (d *Driver) runInstallContainer(ctx context.Context, spec execution.InstanceSpec, image string, plan execution.LaunchPlan) (string, error) {
 	create := CreateSpec{
-		Name:       installContainerName(spec.ServerID),
-		Image:      image,
-		Cmd:        containerCmd(plan.InstallArgs),
-		WorkingDir: containerWorkDir,
-		Binds:      []string{spec.WorkingDir + ":" + containerWorkDir},
-		Labels:     d.labels(spec.ServerID),
+		Name:             installContainerName(spec.ServerID),
+		Image:            image,
+		Cmd:              containerCmd(plan.InstallArgs),
+		WorkingDir:       containerWorkDir,
+		Binds:            []string{spec.WorkingDir + ":" + containerWorkDir},
+		Labels:           d.labels(spec.ServerID),
+		MemoryLimitBytes: memoryLimitBytes(spec.MemoryLimitMB),
 	}
 	// createContainer carries the #233 wait-for-name-free loop, but the distinct
 	// install name almost never hits it: a leftover install container from a crash
@@ -525,6 +530,13 @@ const containerWorkDir = "/data"
 // against the in-container path resolver, so paths are already /data-relative.
 func containerCmd(args []string) []string {
 	return append([]string{"java"}, args...)
+}
+
+// memoryLimitBytes converts the per-server memory ceiling from mebibytes (the
+// InstanceSpec unit, issue #706) to bytes for the Docker host-config Memory
+// field (issue #707). A zero ceiling stays zero — no constraint.
+func memoryLimitBytes(limitMB uint32) int64 {
+	return int64(limitMB) * 1024 * 1024
 }
 
 // instance is one running container. Across a Forge install+launch it owns two
@@ -766,14 +778,15 @@ func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 			PortMapping{ContainerPort: rconPort, HostIP: rconBindIP, HostPort: rconPort})
 	}
 	create := CreateSpec{
-		Name:       containerName(i.spec.ServerID),
-		Image:      i.image,
-		Cmd:        containerCmd(launchArgs),
-		WorkingDir: containerWorkDir,
-		Binds:      []string{i.spec.WorkingDir + ":" + containerWorkDir},
-		Ports:      portMappings,
-		Network:    i.network,
-		Labels:     i.labels,
+		Name:             containerName(i.spec.ServerID),
+		Image:            i.image,
+		Cmd:              containerCmd(launchArgs),
+		WorkingDir:       containerWorkDir,
+		Binds:            []string{i.spec.WorkingDir + ":" + containerWorkDir},
+		Ports:            portMappings,
+		Network:          i.network,
+		Labels:           i.labels,
+		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
 	}
 	return i.createFn(context.Background(), create)
 }

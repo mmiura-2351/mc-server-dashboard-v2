@@ -100,6 +100,10 @@ type hostConfig struct {
 	// CPUShares is the container's relative CPU weight (issue #518). The Engine
 	// translates it to cpu.weight on cgroup v2.
 	CPUShares int64 `json:"CpuShares,omitempty"`
+	// Memory is the hard container memory limit in bytes (issue #707). The Engine
+	// translates it to memory.max on cgroup v2; the kernel OOM-kills the container
+	// when it exceeds this. Zero (omitted) leaves the container unconstrained.
+	Memory int64 `json:"Memory,omitempty"`
 }
 
 type portBinding struct {
@@ -122,7 +126,7 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 		Cmd:        spec.Cmd,
 		WorkingDir: spec.WorkingDir,
 		Labels:     spec.Labels,
-		HostConfig: hostConfig{Binds: spec.Binds, CPUShares: gameServerCPUShares},
+		HostConfig: hostConfig{Binds: spec.Binds, CPUShares: gameServerCPUShares, Memory: spec.MemoryLimitBytes},
 	}
 	if len(spec.Ports) > 0 {
 		body.ExposedPorts = map[string]struct{}{}

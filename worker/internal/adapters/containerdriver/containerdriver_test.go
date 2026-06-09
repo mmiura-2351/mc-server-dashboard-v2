@@ -556,6 +556,39 @@ func TestStartCreateSpec(t *testing.T) {
 	}
 }
 
+// The launch container carries the per-server memory ceiling as the Docker
+// host-config Memory limit, converted MiB→bytes (issue #707).
+func TestStartLaunchContainerMemoryLimit(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	s := spec()
+	s.MemoryLimitMB = 2048
+	if _, err := d.Start(context.Background(), s); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	const wantBytes = int64(2048) * 1024 * 1024
+	if got := docker.createSpec.MemoryLimitBytes; got != wantBytes {
+		t.Fatalf("MemoryLimitBytes = %d, want %d (2048 MiB)", got, wantBytes)
+	}
+}
+
+// An unset memory ceiling (0) leaves the launch container unconstrained: the
+// create payload carries no memory limit (issue #707).
+func TestStartLaunchContainerNoMemoryLimit(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	if _, err := d.Start(context.Background(), spec()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if got := docker.createSpec.MemoryLimitBytes; got != 0 {
+		t.Fatalf("MemoryLimitBytes = %d, want 0 (unconstrained)", got)
+	}
+}
+
 // Start publishes the game port on the configured GameBindIP while RCON stays on
 // loopback (a control channel that must not be exposed).
 func TestStartGamePortBindIP(t *testing.T) {
