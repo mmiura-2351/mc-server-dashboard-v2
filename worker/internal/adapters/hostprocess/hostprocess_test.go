@@ -751,6 +751,40 @@ func TestStartFeedsDerivedHeapFromMemoryLimit(t *testing.T) {
 	}
 }
 
+// CPUMillis carries no host-process enforcement (container-only, issue #725):
+// unlike MemoryLimitMB there is no derived launch flag to feed, so a CPU
+// allocation must not alter the launch command. This asserts the launch args are
+// identical with and without CPUMillis set — the host-process driver leaves a
+// server CPU-unconstrained. Hard enforcement (cgroup v2) is tracked in #718.
+func TestStartDoesNotAlterLaunchForCPUMillis(t *testing.T) {
+	launchArgs := func(cpuMillis uint32) []string {
+		proc := newFakeProcess()
+		var gotArgs []string
+		spawn := func(_ context.Context, _ string, args []string, _ string) (process, error) {
+			gotArgs = args
+			return proc, nil
+		}
+		d := New(fixedSelector{}, spawn, func(context.Context, execution.InstanceSpec) (execution.ServerControl, error) {
+			return nil, errors.New("no rcon")
+		}, Options{StopTimeout: 50 * time.Millisecond, ReadinessTimeout: 20 * time.Millisecond})
+
+		s := spec()
+		s.JarRelpath = "server.jar"
+		s.CPUMillis = cpuMillis
+		if _, err := d.Start(context.Background(), s); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		proc.exit(nil)
+		return gotArgs
+	}
+
+	withoutCPU := strings.Join(launchArgs(0), " ")
+	withCPU := strings.Join(launchArgs(2000), " ")
+	if withoutCPU != withCPU {
+		t.Fatalf("CPUMillis altered launch args: without = %q, with = %q", withoutCPU, withCPU)
+	}
+}
+
 // Captured stdout/stderr flow through to the Logs() stream as LogEvents tagged
 // with the originating stream; the log channel closes when the process exits.
 func TestLogCaptureFlowsToLogs(t *testing.T) {
