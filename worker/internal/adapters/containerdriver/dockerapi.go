@@ -103,8 +103,8 @@ type ContainerStats struct {
 }
 
 // CreateSpec describes a container to create. Only the fields the driver sets are
-// modelled. Memory is enforced as a hard container limit (issue #707); CPU and
-// disk limits remain deferred.
+// modelled. Memory is enforced as a hard container limit (issue #707); CPU is a
+// soft per-server relative share (issue #724); disk limits remain deferred.
 type CreateSpec struct {
 	Name       string
 	Image      string
@@ -126,6 +126,12 @@ type CreateSpec struct {
 	// killer caps a runaway server at the container boundary rather than starving
 	// the host.
 	MemoryLimitBytes int64
+	// CPUShares is the container's relative CPU weight, derived from
+	// InstanceSpec.CPUMillis (1024 shares = 1 core). It is a SOFT share that only
+	// arbitrates contention — never a hard quota — so MC tick latency is not
+	// throttled (issue #724). An unset allocation (CPUMillis == 0) falls back to
+	// the fixed default weight (issue #518).
+	CPUShares int64
 }
 
 // PortMapping publishes a container TCP port on a host interface/port.

@@ -275,6 +275,40 @@ func TestForgeContainerMemoryLimit(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
+// Both the Forge install container and the post-install launch container carry
+// the per-server CPU weight, proportional to CPUMillis (1024 shares = 1 core),
+// so 2000m → 2048 (issue #724).
+func TestForgeContainerCPUShares(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	d := forgeDriver(docker)
+
+	s := forgeSpec(dir)
+	s.CPUMillis = 2000
+	inst, err := d.Start(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if got := docker.createSpecs[0].CPUShares; got != 2048 {
+		t.Fatalf("install CPUShares = %d, want 2048 (2000m)", got)
+	}
+
+	writeArgsfile(t, dir)
+	docker.exit("mcsd-s1-install", 0, nil)
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if len(docker.createSpecs) < 2 {
+		t.Fatalf("createSpecs = %v, want install + launch", docker.createSpecs)
+	}
+	if got := docker.createSpecs[1].CPUShares; got != 2048 {
+		t.Fatalf("launch CPUShares = %d, want 2048 (2000m)", got)
+	}
+
+	docker.exit("mcsd-s1", 0, nil)
+	drainClosed(inst.Events())
+}
+
 // A Forge install container exiting non-zero reports crashed and never creates the
 // launch container (issue #305). Install failure surfaces as crashed via the
 // status pump, not a command error code.
