@@ -647,8 +647,10 @@ class FakeControlPlane(ControlPlane):
         server_type: ServerType,
         jar_relpath: str,
         minecraft_version: str,
+        memory_limit_bytes: int,
     ) -> CommandOutcome:
         self.start_launch_server_type = server_type
+        self.start_memory_limit_bytes = memory_limit_bytes
         return await self._record("start", worker_id, server_id)
 
     async def stop(

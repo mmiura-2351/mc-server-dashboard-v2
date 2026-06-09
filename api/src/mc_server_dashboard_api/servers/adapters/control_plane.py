@@ -207,6 +207,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         server_type: ServerType,
         jar_relpath: str,
         minecraft_version: str,
+        memory_limit_bytes: int,
     ) -> CommandOutcome:
         return await self._dispatch(
             worker_id,
@@ -216,6 +217,7 @@ class FleetControlPlaneAdapter(ControlPlane):
                 jar_relpath=jar_relpath,
                 minecraft_version=minecraft_version,
                 launch_mode=_launch_mode_for(server_type),
+                memory_limit_bytes=memory_limit_bytes,
             ),
         )
 

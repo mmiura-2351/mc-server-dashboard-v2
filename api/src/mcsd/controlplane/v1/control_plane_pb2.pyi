@@ -629,6 +629,7 @@ class StartServer(_message.Message):
     JAR_RELPATH_FIELD_NUMBER: _builtins.int
     MINECRAFT_VERSION_FIELD_NUMBER: _builtins.int
     LAUNCH_MODE_FIELD_NUMBER: _builtins.int
+    MEMORY_LIMIT_BYTES_FIELD_NUMBER: _builtins.int
     driver: Global___ExecutionDriverKind.ValueType
     """driver is the execution backend to use; it MUST be one the Worker
     advertised (FR-EXE-3 fixes it per server).
@@ -650,6 +651,16 @@ class StartServer(_message.Message):
     backwards compatibility: a Worker launching it behaves exactly as it did
     before this field existed (a `java -jar <jar> nogui` launch).
     """
+    memory_limit_bytes: _builtins.int
+    """memory_limit_bytes is the per-server memory ceiling (the container/process
+    limit) the operator declared on the server config (issue #706, epic #704).
+    It carries operator intent — the LIMIT, not a pre-computed JVM flag — and
+    the Worker derives the JVM heap (`-Xmx = limit − headroom`) from it. 0/unset
+    means "the driver picks a default" (the JVM default heap, today's behavior),
+    so a command from an API that does not set the field is unchanged. Driver
+    enforcement of the ceiling (Docker `Memory`, host limits) is later sub-issues
+    (#707/#708) and not implied by this field alone.
+    """
     def __init__(
         self,
         *,
@@ -657,10 +668,11 @@ class StartServer(_message.Message):
         jar_relpath: _builtins.str = ...,
         minecraft_version: _builtins.str = ...,
         launch_mode: Global___LaunchMode.ValueType = ...,
+        memory_limit_bytes: _builtins.int = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["driver", b"driver", "jar_relpath", b"jar_relpath", "launch_mode", b"launch_mode", "minecraft_version", b"minecraft_version"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["driver", b"driver", "jar_relpath", b"jar_relpath", "launch_mode", b"launch_mode", "memory_limit_bytes", b"memory_limit_bytes", "minecraft_version", b"minecraft_version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

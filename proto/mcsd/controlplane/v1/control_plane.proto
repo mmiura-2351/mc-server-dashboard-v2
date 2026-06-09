@@ -205,6 +205,16 @@ message StartServer {
   // backwards compatibility: a Worker launching it behaves exactly as it did
   // before this field existed (a `java -jar <jar> nogui` launch).
   LaunchMode launch_mode = 4;
+
+  // memory_limit_bytes is the per-server memory ceiling (the container/process
+  // limit) the operator declared on the server config (issue #706, epic #704).
+  // It carries operator intent — the LIMIT, not a pre-computed JVM flag — and
+  // the Worker derives the JVM heap (`-Xmx = limit − headroom`) from it. 0/unset
+  // means "the driver picks a default" (the JVM default heap, today's behavior),
+  // so a command from an API that does not set the field is unchanged. Driver
+  // enforcement of the ceiling (Docker `Memory`, host limits) is later sub-issues
+  // (#707/#708) and not implied by this field alone.
+  uint64 memory_limit_bytes = 5;
 }
 
 // LaunchMode selects how the Worker launches a server's process (issue #305).

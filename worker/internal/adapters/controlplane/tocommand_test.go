@@ -57,6 +57,34 @@ func TestToCommandStartForgeLaunchMode(t *testing.T) {
 	}
 }
 
+// The wire memory_limit_bytes (the per-server ceiling, #706) is carried onto the
+// domain command unchanged; unset (0) stays 0.
+func TestToCommandStartCarriesMemoryLimitBytes(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c1",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_Start{
+			Start: &controlplanev1.StartServer{MemoryLimitBytes: 2048 * 1024 * 1024},
+		},
+	})
+	if cmd.MemoryLimitBytes != 2048*1024*1024 {
+		t.Fatalf("MemoryLimitBytes = %d, want %d", cmd.MemoryLimitBytes, 2048*1024*1024)
+	}
+}
+
+func TestToCommandStartMemoryLimitBytesDefaultsToZero(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c1",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_Start{
+			Start: &controlplanev1.StartServer{},
+		},
+	})
+	if cmd.MemoryLimitBytes != 0 {
+		t.Fatalf("MemoryLimitBytes = %d, want 0 (unset)", cmd.MemoryLimitBytes)
+	}
+}
+
 func TestToCommandMapsHydrateTrigger(t *testing.T) {
 	cmd := toCommand(&controlplanev1.ApiCommand{
 		CommandId: "c1",

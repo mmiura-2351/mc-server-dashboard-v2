@@ -328,6 +328,10 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 		MinecraftVersion: cmd.MinecraftVersion,
 		JarRelpath:       cmd.JarRelpath,
 		LaunchMode:       launchMode,
+		// The wire carries the memory LIMIT in bytes (#706); the spec carries it in
+		// MiB. 0 stays 0 (unset -> default heap). Truncating to MiB is exact for any
+		// real limit (the API only ever sends whole-MiB values).
+		MemoryLimitMB: uint32(cmd.MemoryLimitBytes / (1024 * 1024)),
 	})
 	if err != nil {
 		return fail(cmd.CommandID, startErrorCode(err),

@@ -74,6 +74,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotRunningError,
 )
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioner
+from mc_server_dashboard_api.servers.domain.memory_limit import (
+    memory_limit_from_config,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
@@ -396,6 +399,13 @@ class StartServer:
                 return hydrate
         if dispatch is not None:
             dispatch.attempted = True
+        # Source the per-server memory limit from the config blob (#705 helper) and
+        # convert MiB -> bytes for the wire (#706). Unset -> 0, so the Worker driver
+        # keeps picking a default heap (pre-#706 behavior).
+        memory_limit_mb = memory_limit_from_config(server.config)
+        memory_limit_bytes = (
+            memory_limit_mb * 1024 * 1024 if memory_limit_mb is not None else 0
+        )
         return await self.control_plane.start(
             worker_id=worker_id,
             server_id=server_id,
@@ -403,6 +413,7 @@ class StartServer:
             server_type=server.server_type,
             jar_relpath=_DEFAULT_JAR_RELPATH,
             minecraft_version=server.mc_version,
+            memory_limit_bytes=memory_limit_bytes,
         )
 
     async def _ensure_jar(self, server: Server) -> str:

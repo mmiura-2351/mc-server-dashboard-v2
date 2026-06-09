@@ -125,6 +125,40 @@ func TestStartServerCreatesWorkingDirAndStarts(t *testing.T) {
 	}
 }
 
+// The command's memory limit (bytes on the wire, #706) is converted to MiB on the
+// InstanceSpec ceiling; unset stays 0 (default heap).
+func TestStartConvertsMemoryLimitBytesToSpecMiB(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	cmd := startCmd()
+	cmd.MemoryLimitBytes = 2048 * 1024 * 1024
+
+	if res := m.Handle(context.Background(), cmd); !res.Success {
+		t.Fatalf("StartServer = %+v, want success", res)
+	}
+	d.mu.Lock()
+	got := d.started[0].MemoryLimitMB
+	d.mu.Unlock()
+	if got != 2048 {
+		t.Fatalf("MemoryLimitMB = %d, want 2048", got)
+	}
+}
+
+func TestStartDefaultMemoryLimitIsZero(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("StartServer = %+v, want success", res)
+	}
+	d.mu.Lock()
+	got := d.started[0].MemoryLimitMB
+	d.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("MemoryLimitMB = %d, want 0 (unset)", got)
+	}
+}
+
 // An unset launch mode (the default) launches with the historical JAR mode, so
 // the spec carries LaunchModeJar — the byte-for-byte original behavior (#305).
 func TestStartDefaultLaunchModeIsJar(t *testing.T) {

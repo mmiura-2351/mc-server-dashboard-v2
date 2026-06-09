@@ -88,13 +88,39 @@ func forgePlan(spec InstanceSpec, workingDir string, paths PathResolver) (Launch
 	return LaunchPlan{LaunchArgs: forgeLaunchArgs(spec, jvmArgsPath, paths.Resolve(rel))}, nil
 }
 
-// heapArgs returns the -Xms/-Xmx flags for the spec's MemoryMB, or nil when
-// unset (the driver/JVM picks a default).
+// heapHeadroomMB returns the memory (MiB) to reserve below the memory LIMIT for
+// JVM off-heap + native overhead (metaspace, thread stacks, code cache, GC
+// structures, direct/mapped buffers), so the derived heap plus that overhead
+// stays under the ceiling and the kernel/Docker (set later by #707/#708) does not
+// OOM-kill the process. The reserve is max(20% of the limit, 256 MiB): the 20%
+// scales with the heap (off-heap/native cost grows with workload and heap size),
+// while the 256 MiB floor covers the fixed JVM base for a small server where 20%
+// would be too thin. (The API floors the limit at 512 MiB, #705, so the derived
+// heap is comfortably positive for any accepted limit.)
+func heapHeadroomMB(limitMB uint32) uint32 {
+	headroom := limitMB / 5
+	if headroom < 256 {
+		headroom = 256
+	}
+	return headroom
+}
+
+// heapArgs derives the JVM heap (-Xms/-Xmx) from the spec's memory LIMIT, or nil
+// when unset (limit 0 -> the driver/JVM picks a default, the pre-#706 launch).
+// -Xmx is the limit minus headroom (see heapHeadroomMB); -Xms is pinned equal to
+// -Xmx so the JVM commits its full heap up front rather than growing under load,
+// which keeps a long-running server's footprint predictable against the ceiling.
+// A limit so small that the headroom would consume the whole heap yields no flags
+// (the JVM default is safer than a non-positive -Xmx).
 func heapArgs(spec InstanceSpec) []string {
-	if spec.MemoryMB == 0 {
+	if spec.MemoryLimitMB == 0 {
 		return nil
 	}
-	heap := fmt.Sprintf("%dM", spec.MemoryMB)
+	headroom := heapHeadroomMB(spec.MemoryLimitMB)
+	if headroom >= spec.MemoryLimitMB {
+		return nil
+	}
+	heap := fmt.Sprintf("%dM", spec.MemoryLimitMB-headroom)
 	return []string{"-Xms" + heap, "-Xmx" + heap}
 }
 
