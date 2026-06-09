@@ -89,6 +89,7 @@ def make_worker(
     at: dt.datetime,
     drivers: frozenset[DriverKind] = frozenset({DriverKind.HOST_PROCESS}),
     max_servers: int = 4,
+    resources: HostResources = HostResources(cpu_cores=8, memory_bytes=16_000_000_000),
 ) -> Worker:
     return Worker(
         id=WorkerId(worker_id),
@@ -96,7 +97,7 @@ def make_worker(
         capabilities=WorkerCapabilities(
             drivers=drivers,
             max_servers=max_servers,
-            resources=HostResources(cpu_cores=8, memory_bytes=16_000_000_000),
+            resources=resources,
         ),
         registered_at=at,
         last_heartbeat_at=at,

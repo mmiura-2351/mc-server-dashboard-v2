@@ -18,6 +18,7 @@ mapping is an adapter concern (servers/domain/value_objects.py).
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResult,
@@ -42,10 +43,13 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     FileAccessReason as FleetFileAccessReason,
 )
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
-from mc_server_dashboard_api.fleet.domain.placement import place
+from mc_server_dashboard_api.fleet.domain.placement import PlacementCandidate, place
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
 from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
+from mc_server_dashboard_api.servers.domain.committed_resources import (
+    CommittedResources,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
@@ -164,14 +168,47 @@ class FleetControlPlaneAdapter(ControlPlane):
         self._data_plane_base_url = data_plane_base_url
         self._worker_credential = worker_credential
 
-    async def place(self, *, backend: ExecutionBackend) -> WorkerId | None:
+    async def place(
+        self,
+        *,
+        backend: ExecutionBackend,
+        memory_limit_mb: int | None,
+        committed_by_worker: dict[WorkerId, CommittedResources],
+    ) -> WorkerId | None:
+        # Re-key the commit-based accounting (servers UUID worker ids) by the
+        # registry's fleet worker-id string so it lines up with the advertised
+        # candidates, then fold the committed sums onto each candidate before the
+        # pure placement filter runs.
+        committed_by_fleet_id = {
+            _fleet_worker(worker_id): committed
+            for worker_id, committed in committed_by_worker.items()
+        }
+        candidates = [
+            self._with_committed(candidate, committed_by_fleet_id)
+            for candidate in self._registry.candidates_for_placement()
+        ]
         chosen = place(
-            self._registry.candidates_for_placement(),
+            candidates,
             required_driver=_DRIVER_BY_BACKEND[backend],
+            needed_memory_mb=memory_limit_mb,
         )
         if isinstance(chosen, FleetWorkerId):
             return _servers_worker(chosen)
         return None
+
+    @staticmethod
+    def _with_committed(
+        candidate: PlacementCandidate,
+        committed_by_fleet_id: dict[FleetWorkerId, CommittedResources],
+    ) -> PlacementCandidate:
+        committed = committed_by_fleet_id.get(candidate.worker_id)
+        if committed is None:
+            return candidate
+        return replace(
+            candidate,
+            committed_memory_mb=committed.memory_mb,
+            committed_cpu_millis=committed.cpu_millis,
+        )
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
         # The registry resolves liveness at read time from the heartbeat clock;

@@ -19,6 +19,9 @@ import abc
 import enum
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.domain.committed_resources import (
+    CommittedResources,
+)
 from mc_server_dashboard_api.servers.domain.errors import ServerError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -125,8 +128,21 @@ class ControlPlane(abc.ABC):
     """Port: the lifecycle layer's seam to placement + command dispatch."""
 
     @abc.abstractmethod
-    async def place(self, *, backend: ExecutionBackend) -> WorkerId | None:
+    async def place(
+        self,
+        *,
+        backend: ExecutionBackend,
+        memory_limit_mb: int | None,
+        committed_by_worker: dict[WorkerId, CommittedResources],
+    ) -> WorkerId | None:
         """Choose an eligible Worker offering ``backend``, or ``None`` if none.
+
+        Resource-aware placement (#710): ``memory_limit_mb`` is the new server's
+        declared memory request (``None`` = unset, not memory-gated), and
+        ``committed_by_worker`` is the commit-based per-worker accounting the
+        application layer summed from the assigned servers (it owns the DB read;
+        this seam stays free of persistence). The adapter merges these with the
+        registry's advertised capacity and feeds the pure ``place`` function.
 
         ``None`` is the typed no-eligible-worker outcome (FR-WRK-3); the use case
         maps it to a transport error rather than treating placement failure as

@@ -36,9 +36,13 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     FileListing as FleetFileListing,
 )
+from mc_server_dashboard_api.fleet.domain.value_objects import HostResources
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
+)
+from mc_server_dashboard_api.servers.domain.committed_resources import (
+    CommittedResources,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandStatus,
@@ -445,3 +449,56 @@ def test_holds_working_set_reflects_reported_ids() -> None:
         )
         is False
     )
+
+
+# --- resource-aware placement folds committed accounting in (#710) -----------
+
+# A 4 GiB host: 4096 MiB capacity, reserve max(1024, 410) = 1024 -> 3072 usable.
+_4GIB = HostResources(cpu_cores=4, memory_bytes=4 * 1024 * 1024 * 1024)
+
+
+async def test_place_excludes_worker_over_committed_on_memory() -> None:
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), resources=_4GIB, at=_T0))
+    adapter = _registry_adapter(registry)
+
+    # Committed 2048 + request 2048 = 4096 > 3072 usable -> excluded -> None.
+    chosen = await adapter.place(
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=2048,
+        committed_by_worker={WorkerId(worker_uuid): CommittedResources(memory_mb=2048)},
+    )
+
+    assert chosen is None
+
+
+async def test_place_admits_worker_with_memory_room() -> None:
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), resources=_4GIB, at=_T0))
+    adapter = _registry_adapter(registry)
+
+    # Committed 512 + request 2048 = 2560 <= 3072 usable -> fits.
+    chosen = await adapter.place(
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=2048,
+        committed_by_worker={WorkerId(worker_uuid): CommittedResources(memory_mb=512)},
+    )
+
+    assert chosen == WorkerId(worker_uuid)
+
+
+async def test_place_unset_request_memory_is_not_gated() -> None:
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), resources=_4GIB, at=_T0))
+    adapter = _registry_adapter(registry)
+
+    chosen = await adapter.place(
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=None,
+        committed_by_worker={WorkerId(worker_uuid): CommittedResources(memory_mb=4096)},
+    )
+
+    assert chosen == WorkerId(worker_uuid)

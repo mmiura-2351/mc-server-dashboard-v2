@@ -21,6 +21,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
 )
+from mc_server_dashboard_api.servers.domain.committed_resources import (
+    CommittedResources,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
@@ -138,6 +141,47 @@ async def test_start_places_sets_running_and_dispatches() -> None:
     ]
     assert cp.incremented == [WorkerId(worker)]
     assert cp.decremented == []
+
+
+async def test_start_forwards_request_memory_and_committed_accounting() -> None:
+    # Resource-aware placement (#710): the use case sums the declared resources of
+    # the servers already running on each Worker and forwards them, plus this
+    # server's own memory request, through the control-plane seam.
+    community, server_id, worker = _ids()
+    other_worker = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            config={"memory_limit_mb": 2048, "cpu_millis": 1000},
+        )
+    )
+    # An unrelated server already running on `other_worker` contributes commitments.
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=uuid.uuid4(),
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=other_worker,
+            config={"memory_limit_mb": 4096, "cpu_millis": 1500},
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert cp.place_memory_limit_mb == 2048
+    assert cp.place_committed_by_worker == {
+        WorkerId(other_worker): CommittedResources(memory_mb=4096, cpu_millis=1500)
+    }
 
 
 async def test_start_records_resolved_jar_key_in_config() -> None:

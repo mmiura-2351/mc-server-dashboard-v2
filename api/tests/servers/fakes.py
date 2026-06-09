@@ -25,6 +25,9 @@ from mc_server_dashboard_api.servers.domain.backup_repository import (
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.committed_resources import (
+    CommittedResources,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
@@ -606,7 +609,18 @@ class FakeControlPlane(ControlPlane):
         # use case forwarded the caller's choice (issue #270).
         self.stop_force: bool | None = None
 
-    async def place(self, *, backend: ExecutionBackend) -> WorkerId | None:
+    async def place(
+        self,
+        *,
+        backend: ExecutionBackend,
+        memory_limit_mb: int | None = None,
+        committed_by_worker: dict[WorkerId, CommittedResources] | None = None,
+    ) -> WorkerId | None:
+        # Record the resource-aware placement inputs (#710) so a test can assert
+        # the use case summed the committed accounting and forwarded the request's
+        # memory; the placement decision itself stays the configured stub.
+        self.place_memory_limit_mb = memory_limit_mb
+        self.place_committed_by_worker = committed_by_worker or {}
         return self._place_to
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
