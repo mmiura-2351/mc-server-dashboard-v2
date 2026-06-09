@@ -127,6 +127,13 @@ class InMemoryWorkerRegistry(WorkerRegistry):
                 drivers=worker.capabilities.drivers,
                 capacity=worker.capabilities.max_servers,
                 load=self._assignments[worker.id],
+                # Advertised host resources for resource-aware placement (#710):
+                # memory in MiB (the per-server limit's unit), CPU in millicores
+                # (1 core = 1000). 0 means the worker advertised none, so the
+                # placement filter falls back to count-only for it.
+                memory_capacity_mb=worker.capabilities.resources.memory_bytes
+                // (1024 * 1024),
+                cpu_capacity_millis=worker.capabilities.resources.cpu_cores * 1000,
             )
             for worker in self._workers.values()
             if worker.status(now=now, timeout=self._timeout) is WorkerStatus.ONLINE

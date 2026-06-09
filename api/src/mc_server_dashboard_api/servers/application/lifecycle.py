@@ -59,6 +59,9 @@ from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure as _dispatch_failure,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.committed_resources import (
+    committed_resources_by_worker,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
@@ -149,7 +152,7 @@ class StartServer:
             # the recorded content key is still pooled, so the steady-state cost is a
             # presence check, not a fetch.
             jar_key = await self._ensure_jar(server)
-            worker_id = await self.control_plane.place(backend=server.execution_backend)
+            worker_id = await self._place(server)
             if worker_id is None:
                 raise NoEligibleWorkerError(str(server_id.value))
             server.desired_state = DesiredState.RUNNING
@@ -224,7 +227,7 @@ class StartServer:
                 # nothing for this path to reconcile.
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             jar_key = await self._ensure_jar(server)
-            worker_id = await self.control_plane.place(backend=server.execution_backend)
+            worker_id = await self._place(server)
             if worker_id is None:
                 raise NoEligibleWorkerError(str(server_id.value))
             server.assigned_worker_id = worker_id
@@ -422,6 +425,25 @@ class StartServer:
             minecraft_version=server.mc_version,
             memory_limit_bytes=memory_limit_bytes,
             cpu_millis=cpu_millis,
+        )
+
+    async def _place(self, server: Server) -> WorkerId | None:
+        """Place ``server`` with commit-based resource awareness (#710).
+
+        Sums the declared resources of the servers already running on each Worker
+        (the committed accounting) and passes them, with this server's own memory
+        request, through the control-plane seam so placement can avoid grossly
+        oversubscribing a host's advertised memory. The DB read lives here at the
+        application boundary; the pure placement filter stays free of I/O.
+        """
+
+        committed = committed_resources_by_worker(
+            await self.uow.servers.list_running_assigned()
+        )
+        return await self.control_plane.place(
+            backend=server.execution_backend,
+            memory_limit_mb=memory_limit_from_config(server.config),
+            committed_by_worker=committed,
         )
 
     async def _ensure_jar(self, server: Server) -> str:

@@ -151,7 +151,7 @@ async def test_orphan_start_lost_response_never_replaces_on_another_worker() -> 
             self.places = 0
             self._start_calls = 0
 
-        async def place(self, *, backend: ExecutionBackend) -> WorkerId:
+        async def place(self, **kwargs: object) -> WorkerId:
             self.places += 1
             return _WORKER
 
