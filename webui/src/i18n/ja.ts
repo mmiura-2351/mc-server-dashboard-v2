@@ -289,6 +289,13 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.settings.configRemove": "削除",
   "serverDetail.settings.configHint":
     "値はJSONとして解釈されます: 12 は数値、true は真偽値、それ以外は文字列です。",
+  // Per-server memory limit (issue #709).
+  "serverDetail.settings.memoryLimit": "メモリ上限（MiB）",
+  "serverDetail.settings.memoryLimitDefault": "ドライバー既定値",
+  "serverDetail.settings.memoryLimitHint":
+    "このサーバーに割り当てるメモリの上限（MiB）。空欄にするとドライバーの既定値を使用します。",
+  "serverDetail.settings.memoryLimitRange":
+    "512〜1048576 MiB の整数を入力するか、空欄にしてドライバー既定値を使用してください。",
   "serverDetail.settings.save": "変更を保存",
   "serverDetail.settings.saved": "設定を保存しました。",
   "serverDetail.settings.atRestHint":
@@ -328,6 +335,8 @@ export const ja: Record<TranslationKey, string> = {
     "snapshot_interval_seconds は、設定された下限以上の整数の秒数である必要があります。",
   "serverDetail.error.invalidBackupSchedule":
     "backup_interval_hours は1以上の整数の時間数である必要があります。",
+  "serverDetail.error.invalidMemoryLimit":
+    "メモリ上限は 512〜1048576 MiB の整数である必要があります。",
   "serverDetail.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Backups tab (WEBUI_SPEC.md 6.7).

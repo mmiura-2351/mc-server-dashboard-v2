@@ -335,7 +335,7 @@ assigned Worker.
 | `mc_version` | text | e.g. `1.21.1` (FR-SRV-1) |
 | `server_type` | text | `vanilla` / `paper` / `fabric` / `forge` / `spigot` (CHECK enum). `vanilla`/`paper`/`fabric`/`forge` are resolvable by the version catalog (forge resolves to the installer JAR — the worker runs `--installServer` on first start); `spigot` (no official distribution API) is accepted by the schema but rejected at create-time by version-validation (FR-VER-1) |
 | `execution_backend` | text | `host_process` / `container` (CHECK enum) |
-| `config` | jsonb | server configuration blob (properties, JVM args, snapshot-interval override per FR-DATA-7) |
+| `config` | jsonb | server configuration blob (properties, JVM args, plus the reserved keys catalogued below) |
 | `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
@@ -346,6 +346,24 @@ assigned Worker.
 Constraints: `UNIQUE(community_id, name)`, `UNIQUE(game_port)` (deployment-wide,
 `NULL`s allowed and non-colliding; issue #243). Index on `(assigned_worker_id)`
 for "all servers on Worker X" (used on Worker disconnect, FR-WRK-4).
+
+**Reserved `config` keys.** Alongside the free-form server properties and JVM
+args, the `config` blob carries a small set of **reserved keys** with fixed
+meaning. This table is the canonical list: a new reserved key must be registered
+here when it is added, so the blob does not accumulate undocumented keys.
+
+| Key | Unit / type | Set by | Feature / issue |
+|---|---|---|---|
+| `resolved_jar_sha256` | string (JAR content hash) | **system** — written by the start use case when a JAR is resolved; hidden from the config-overrides editor (issue #701) and never operator-settable | issue #118 |
+| `snapshot_interval_seconds` | integer seconds | **operator** — per-server snapshot-cadence override (FR-DATA-7), clamped up to the configured floor | issue #107 |
+| `backup_interval_hours` | integer hours | **operator** — per-server backup-schedule interval (Section 8); absent means no scheduled backups | issue #117 |
+| `memory_limit_mb` | integer mebibytes (MiB) | **operator** — per-server memory limit; absent means no limit (the worker later picks a proportionate default) | issue #705 |
+
+The operator-settable keys are validated on write (a bad value is `422`), and the
+update permission gate branches on the changed-key set: an edit that touches only
+`backup_interval_hours` needs `backup:schedule`, any other config key needs
+`server:update` (issue #458). The system-written `resolved_jar_sha256` is not
+editable through the config-overrides surface.
 
 **Desired / observed split (FR-SRV-3, FR-SRV-4).** The two state columns are the
 heart of the model. `desired_state` is the **source of truth for intent**, mutated

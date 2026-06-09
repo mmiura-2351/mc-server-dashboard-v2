@@ -892,6 +892,36 @@ function Console({
 // address written by the start path (servers/domain/value_objects.py).
 const SYSTEM_MANAGED_CONFIG_KEYS = new Set(["resolved_jar_sha256"]);
 
+// The per-server memory limit (issue #709) rides the `config` blob as a reserved
+// key (unit: MiB), but it has a dedicated field rather than a raw override row,
+// so it is hidden from the overrides editor and merged back explicitly on save.
+const MEMORY_LIMIT_KEY = "memory_limit_mb";
+// Mirror the API validator (servers/domain/memory_limit.py): a whole number in
+// [512, 1 TiB] MiB; the API rejects out-of-range values as `invalid_memory_limit`.
+const MEMORY_LIMIT_FLOOR_MIB = 512;
+const MEMORY_LIMIT_CEILING_MIB = 1024 * 1024;
+
+// The keys hidden from the overrides editor: system-managed plus the memory
+// limit, which has its own field.
+const HIDDEN_CONFIG_KEYS = new Set([
+  ...SYSTEM_MANAGED_CONFIG_KEYS,
+  MEMORY_LIMIT_KEY,
+]);
+
+// A non-blank memory-limit input is valid only as a whole number within range;
+// blank means "unset → driver default" and is always allowed.
+function memoryLimitValid(value: string): boolean {
+  if (value.trim() === "") {
+    return true;
+  }
+  const parsed = Number(value);
+  return (
+    Number.isInteger(parsed) &&
+    parsed >= MEMORY_LIMIT_FLOOR_MIB &&
+    parsed <= MEMORY_LIMIT_CEILING_MIB
+  );
+}
+
 interface ConfigRow {
   key: string;
   value: string;
@@ -907,7 +937,7 @@ interface ConfigRow {
 
 function toRows(config: Record<string, unknown>): ConfigRow[] {
   return Object.entries(config)
-    .filter(([key]) => !SYSTEM_MANAGED_CONFIG_KEYS.has(key))
+    .filter(([key]) => !HIDDEN_CONFIG_KEYS.has(key))
     .map(([key, value]) => ({
       key,
       value: typeof value === "string" ? value : JSON.stringify(value),
@@ -976,6 +1006,8 @@ function settingsErrorMessage(error: unknown): TranslationKey {
         return "serverDetail.error.invalidSnapshotInterval";
       case "invalid_backup_schedule":
         return "serverDetail.error.invalidBackupSchedule";
+      case "invalid_memory_limit":
+        return "serverDetail.error.invalidMemoryLimit";
     }
   }
   return "serverDetail.error.generic";
@@ -1002,10 +1034,17 @@ function Settings({
   const [rows, setRows] = useState<ConfigRow[]>(() =>
     toRows(server.config as Record<string, unknown>),
   );
+  // Empty string ↔ unset (driver default); a number ↔ the limit in MiB.
+  const [memoryLimit, setMemoryLimit] = useState(
+    typeof server.memory_limit_mb === "number"
+      ? String(server.memory_limit_mb)
+      : "",
+  );
   const [portHint, setPortHint] = useState<TranslationKey | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const canUpdate = can("server:update", { serverId: server.id });
+  const memoryLimitOk = memoryLimitValid(memoryLimit);
   const canDelete = can("server:delete", { serverId: server.id });
   const canExport = can("file:read", { serverId: server.id });
 
@@ -1028,10 +1067,15 @@ function Settings({
             name,
             game_port: port === "" ? null : Number(port),
             // Re-merge the hidden system-managed keys (issue #645) so the full
-            // config replace doesn't drop them.
+            // config replace doesn't drop them, then layer the memory limit
+            // (issue #709): a number when set, omitted when cleared so the
+            // server falls back to the driver default.
             config: {
               ...systemManagedConfig(server.config as Record<string, unknown>),
               ...fromRows(rows),
+              ...(memoryLimit.trim() === ""
+                ? {}
+                : { [MEMORY_LIMIT_KEY]: Number(memoryLimit) }),
             },
           }),
         },
@@ -1150,12 +1194,32 @@ function Settings({
             </span>
           </label>
         </div>
+        <label className="field">
+          {t("serverDetail.settings.memoryLimit")}
+          <input
+            type="number"
+            aria-label={t("serverDetail.settings.memoryLimit")}
+            value={memoryLimit}
+            disabled={!canUpdate}
+            placeholder={t("serverDetail.settings.memoryLimitDefault")}
+            onChange={(e) => setMemoryLimit(e.target.value)}
+          />
+          {memoryLimitOk ? (
+            <span className="field-hint">
+              {t("serverDetail.settings.memoryLimitHint")}
+            </span>
+          ) : (
+            <span className="field-error">
+              {t("serverDetail.settings.memoryLimitRange")}
+            </span>
+          )}
+        </label>
         <ConfigEditor rows={rows} disabled={!canUpdate} onChange={setRows} />
         <p className="field-hint">{t("serverDetail.settings.atRestHint")}</p>
         <button
           type="button"
           className="btn primary"
-          disabled={!canUpdate || save.isPending}
+          disabled={!canUpdate || !memoryLimitOk || save.isPending}
           onClick={() => save.mutate()}
         >
           {t("serverDetail.settings.save")}

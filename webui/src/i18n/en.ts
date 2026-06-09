@@ -283,6 +283,14 @@ export const en = {
   "serverDetail.settings.configRemove": "Remove",
   "serverDetail.settings.configHint":
     "Values are read as JSON: 12 is a number, true a boolean, anything else text.",
+  // Per-server memory limit (issue #709). Unset means the JVM picks its own
+  // default heap, so the field reads as "driver default" rather than 0/blank.
+  "serverDetail.settings.memoryLimit": "Memory limit (MiB)",
+  "serverDetail.settings.memoryLimitDefault": "Driver default",
+  "serverDetail.settings.memoryLimitHint":
+    "Maximum memory for this server, in MiB. Leave blank to use the driver default.",
+  "serverDetail.settings.memoryLimitRange":
+    "Enter a whole number between 512 and 1048576 MiB, or leave blank for the driver default.",
   "serverDetail.settings.save": "Save changes",
   "serverDetail.settings.saved": "Settings saved.",
   "serverDetail.settings.atRestHint":
@@ -321,6 +329,8 @@ export const en = {
     "snapshot_interval_seconds must be a whole number of seconds at or above the configured floor.",
   "serverDetail.error.invalidBackupSchedule":
     "backup_interval_hours must be a whole number of hours of at least 1.",
+  "serverDetail.error.invalidMemoryLimit":
+    "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
 
   // Backups tab (WEBUI_SPEC.md 6.7). One contiguous block to keep merge
