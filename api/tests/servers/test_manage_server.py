@@ -27,6 +27,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
+    InvalidMemoryLimitError,
     InvalidSnapshotIntervalError,
     PermissionDeniedError,
     PortAlreadyTakenError,
@@ -40,6 +41,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownServerTypeError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
+)
+from mc_server_dashboard_api.servers.domain.memory_limit import (
+    MEMORY_LIMIT_CONFIG_KEY,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -155,6 +159,71 @@ async def test_create_accepts_java_edition() -> None:
     )
     assert server.mc_edition == "java"
     assert uow.commits == 1
+
+
+async def test_create_accepts_valid_memory_limit() -> None:
+    # A per-server memory limit on config round-trips through create (#705).
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={MEMORY_LIMIT_CONFIG_KEY: 2048},
+    )
+    assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 2048
+    assert uow.commits == 1
+
+
+async def test_create_rejects_invalid_memory_limit() -> None:
+    # A below-floor memory limit 422s before the row is staged (#705).
+    uow = FakeUnitOfWork()
+    with pytest.raises(InvalidMemoryLimitError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=_PORTS,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={MEMORY_LIMIT_CONFIG_KEY: 1},
+        )
+    assert uow.commits == 0
+
+
+async def test_create_without_memory_limit_writes_no_key() -> None:
+    # Default-unset: no memory_limit_mb key is written, behavior unchanged (#705).
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="host_process",
+        config={"motd": "hi"},
+    )
+    assert MEMORY_LIMIT_CONFIG_KEY not in server.config
 
 
 async def test_create_rejects_non_java_edition() -> None:
@@ -685,6 +754,34 @@ async def test_update_rejects_invalid_backup_schedule_override() -> None:
     assert uow.commits == 0
 
 
+async def test_update_accepts_valid_memory_limit() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        config={MEMORY_LIMIT_CONFIG_KEY: 4096},
+    )
+    assert updated.config[MEMORY_LIMIT_CONFIG_KEY] == 4096
+    assert uow.commits == 1
+
+
+async def test_update_rejects_invalid_memory_limit() -> None:
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(InvalidMemoryLimitError):
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            config={MEMORY_LIMIT_CONFIG_KEY: 1},
+        )
+    assert uow.commits == 0
+
+
 # --- update permission gate (issue #458) -----------------------------------
 #
 # A config edit that touches only the backup-scheduling key
@@ -843,6 +940,24 @@ async def test_update_snapshot_interval_change_requires_server_update() -> None:
             community_id=community,
             server_id=server.id,
             config={"motd": "hi", "snapshot_interval_seconds": 600},
+            authorize=_grant("backup:schedule"),
+        )
+    assert exc.value.permission == "server:update"
+    assert uow.commits == 0
+
+
+async def test_update_memory_limit_change_requires_server_update() -> None:
+    # memory_limit_mb has no dedicated permission code; like any non-scheduling
+    # config key it is gated by server:update (#705 reuses the existing gate).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(PermissionDeniedError) as exc:
+        await _updater(uow)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048},
             authorize=_grant("backup:schedule"),
         )
     assert exc.value.permission == "server:update"

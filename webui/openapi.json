@@ -1521,6 +1521,17 @@
             "title": "Mc Version",
             "type": "string"
           },
+          "memory_limit_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Mb"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -1555,6 +1566,7 @@
           "server_type",
           "execution_backend",
           "config",
+          "memory_limit_mb",
           "game_port",
           "desired_state",
           "observed_state",

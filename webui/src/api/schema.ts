@@ -2118,6 +2118,8 @@ export interface components {
             mc_edition: string;
             /** Mc Version */
             mc_version: string;
+            /** Memory Limit Mb */
+            memory_limit_mb: number | null;
             /** Name */
             name: string;
             /** Observed At */

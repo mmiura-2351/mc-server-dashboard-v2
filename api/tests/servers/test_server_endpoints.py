@@ -58,6 +58,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
+    InvalidMemoryLimitError,
     InvalidSnapshotIntervalError,
     PermissionDeniedError,
     PortAlreadyTakenError,
@@ -69,6 +70,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownServerTypeError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
+)
+from mc_server_dashboard_api.servers.domain.memory_limit import (
+    MEMORY_LIMIT_CONFIG_KEY,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -226,6 +230,52 @@ def test_authorized_member_creates_server() -> None:
     assert resp.status_code == 201
     assert resp.json()["desired_state"] == "stopped"
     assert resp.json()["execution_backend"] == "host_process"
+
+
+def test_create_forwards_and_reads_back_memory_limit() -> None:
+    # The memory limit (#705) is carried on config; the response surfaces it both
+    # in the raw config blob and as the typed memory_limit_mb field.
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.config = {**server.config, MEMORY_LIMIT_CONFIG_KEY: 2048}
+    use_case = _FakeUseCase(result=server)
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{community}/servers",
+        json={
+            **_create_body(),
+            "config": {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048},
+        },
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["memory_limit_mb"] == 2048
+    assert body["config"][MEMORY_LIMIT_CONFIG_KEY] == 2048
+    assert use_case.calls[0]["config"] == {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048}
+
+
+def test_create_without_memory_limit_reads_back_none() -> None:
+    # Default-unset: no key, memory_limit_mb is null (#705).
+    community = uuid.uuid4()
+    use_case = _FakeUseCase(result=_server_entity(community_id=community))
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(f"/api/communities/{community}/servers", json=_create_body())
+    assert resp.status_code == 201
+    assert resp.json()["memory_limit_mb"] is None
+
+
+def test_create_invalid_memory_limit_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=InvalidMemoryLimitError("1")),
+    )
+    client = next(_client(app))
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_memory_limit"
 
 
 def test_create_defaults_accept_eula_to_false() -> None:
@@ -505,6 +555,40 @@ def test_update_backup_interval_invalid_is_422() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_backup_schedule"
+
+
+def test_update_invalid_memory_limit_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=InvalidMemoryLimitError("1")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": {MEMORY_LIMIT_CONFIG_KEY: 1}},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_memory_limit"
+
+
+def test_update_memory_limit_denied_without_permission_is_403() -> None:
+    # Changing the memory limit (#705) is gated by server:update via the existing
+    # changed-key gate; a caller lacking it is denied (issue #458 surface).
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=PermissionDeniedError("server:update")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"config": {MEMORY_LIMIT_CONFIG_KEY: 2048}},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "forbidden"
+    assert body["permission"] == "server:update"
 
 
 def test_update_forwards_game_port() -> None:
