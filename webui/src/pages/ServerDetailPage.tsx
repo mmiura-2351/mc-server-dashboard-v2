@@ -901,11 +901,23 @@ const MEMORY_LIMIT_KEY = "memory_limit_mb";
 const MEMORY_LIMIT_FLOOR_MIB = 512;
 const MEMORY_LIMIT_CEILING_MIB = 1024 * 1024;
 
+// The per-server CPU allocation (issue #726) rides the `config` blob the same
+// way as the memory limit, but the value is a *soft, relative share* (millicores,
+// 1000 = one core), not a hard cap. It has a dedicated field rather than a raw
+// override row, so it is hidden from the overrides editor and merged back on save.
+const CPU_ALLOCATION_KEY = "cpu_millis";
+// Mirror the API validator (servers/domain/cpu_allocation.py): a whole number in
+// [100, 128000] millicores; the API rejects out-of-range values as
+// `invalid_cpu_allocation`.
+const CPU_ALLOCATION_FLOOR_MILLIS = 100;
+const CPU_ALLOCATION_CEILING_MILLIS = 128_000;
+
 // The keys hidden from the overrides editor: system-managed plus the memory
-// limit, which has its own field.
+// limit and CPU allocation, which each have their own field.
 const HIDDEN_CONFIG_KEYS = new Set([
   ...SYSTEM_MANAGED_CONFIG_KEYS,
   MEMORY_LIMIT_KEY,
+  CPU_ALLOCATION_KEY,
 ]);
 
 // A non-blank memory-limit input is valid only as a whole number within range;
@@ -919,6 +931,20 @@ function memoryLimitValid(value: string): boolean {
     Number.isInteger(parsed) &&
     parsed >= MEMORY_LIMIT_FLOOR_MIB &&
     parsed <= MEMORY_LIMIT_CEILING_MIB
+  );
+}
+
+// A non-blank CPU-allocation input is valid only as a whole number within range;
+// blank means "unset → auto" and is always allowed.
+function cpuAllocationValid(value: string): boolean {
+  if (value.trim() === "") {
+    return true;
+  }
+  const parsed = Number(value);
+  return (
+    Number.isInteger(parsed) &&
+    parsed >= CPU_ALLOCATION_FLOOR_MILLIS &&
+    parsed <= CPU_ALLOCATION_CEILING_MILLIS
   );
 }
 
@@ -1008,6 +1034,8 @@ function settingsErrorMessage(error: unknown): TranslationKey {
         return "serverDetail.error.invalidBackupSchedule";
       case "invalid_memory_limit":
         return "serverDetail.error.invalidMemoryLimit";
+      case "invalid_cpu_allocation":
+        return "serverDetail.error.invalidCpuAllocation";
     }
   }
   return "serverDetail.error.generic";
@@ -1040,11 +1068,16 @@ function Settings({
       ? String(server.memory_limit_mb)
       : "",
   );
+  // Empty string ↔ unset (auto); a number ↔ the allocation in millicores.
+  const [cpuAllocation, setCpuAllocation] = useState(
+    typeof server.cpu_millis === "number" ? String(server.cpu_millis) : "",
+  );
   const [portHint, setPortHint] = useState<TranslationKey | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const canUpdate = can("server:update", { serverId: server.id });
   const memoryLimitOk = memoryLimitValid(memoryLimit);
+  const cpuAllocationOk = cpuAllocationValid(cpuAllocation);
   const canDelete = can("server:delete", { serverId: server.id });
   const canExport = can("file:read", { serverId: server.id });
 
@@ -1068,14 +1101,18 @@ function Settings({
             game_port: port === "" ? null : Number(port),
             // Re-merge the hidden system-managed keys (issue #645) so the full
             // config replace doesn't drop them, then layer the memory limit
-            // (issue #709): a number when set, omitted when cleared so the
-            // server falls back to the driver default.
+            // (issue #709) and CPU allocation (issue #726): a number when set,
+            // omitted when cleared so the server falls back to the driver
+            // default / auto share.
             config: {
               ...systemManagedConfig(server.config as Record<string, unknown>),
               ...fromRows(rows),
               ...(memoryLimit.trim() === ""
                 ? {}
                 : { [MEMORY_LIMIT_KEY]: Number(memoryLimit) }),
+              ...(cpuAllocation.trim() === ""
+                ? {}
+                : { [CPU_ALLOCATION_KEY]: Number(cpuAllocation) }),
             },
           }),
         },
@@ -1214,12 +1251,34 @@ function Settings({
             </span>
           )}
         </label>
+        <label className="field">
+          {t("serverDetail.settings.cpuAllocation")}
+          <input
+            type="number"
+            aria-label={t("serverDetail.settings.cpuAllocation")}
+            value={cpuAllocation}
+            disabled={!canUpdate}
+            placeholder={t("serverDetail.settings.cpuAllocationDefault")}
+            onChange={(e) => setCpuAllocation(e.target.value)}
+          />
+          {cpuAllocationOk ? (
+            <span className="field-hint">
+              {t("serverDetail.settings.cpuAllocationHint")}
+            </span>
+          ) : (
+            <span className="field-error">
+              {t("serverDetail.settings.cpuAllocationRange")}
+            </span>
+          )}
+        </label>
         <ConfigEditor rows={rows} disabled={!canUpdate} onChange={setRows} />
         <p className="field-hint">{t("serverDetail.settings.atRestHint")}</p>
         <button
           type="button"
           className="btn primary"
-          disabled={!canUpdate || !memoryLimitOk || save.isPending}
+          disabled={
+            !canUpdate || !memoryLimitOk || !cpuAllocationOk || save.isPending
+          }
           onClick={() => save.mutate()}
         >
           {t("serverDetail.settings.save")}
