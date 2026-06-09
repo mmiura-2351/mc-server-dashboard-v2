@@ -737,6 +737,48 @@ describe("ServerDetailPage settings", () => {
     expect(typeof config.snapshot_interval_seconds).toBe("number");
   });
 
+  it("hides the system-managed resolved_jar_sha256 key from the overrides editor", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        config: { resolved_jar_sha256: "abc123", motd: "hi" },
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect(screen.getByDisplayValue("motd")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("resolved_jar_sha256")).toBeNull();
+    expect(screen.queryByDisplayValue("abc123")).toBeNull();
+  });
+
+  it("preserves the hidden resolved_jar_sha256 key on save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        config: { resolved_jar_sha256: "abc123", motd: "hi" },
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(screen.getByDisplayValue("hi"), {
+      target: { value: "bye" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    // The user only edited `motd`, but the system-managed key round-trips
+    // untouched rather than being dropped from the replaced config blob.
+    expect(config).toEqual({ resolved_jar_sha256: "abc123", motd: "bye" });
+  });
+
   it("surfaces a 422 invalid_snapshot_interval specifically on save", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
     mockApi.patch.mockRejectedValue(

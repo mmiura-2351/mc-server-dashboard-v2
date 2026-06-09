@@ -885,6 +885,13 @@ function Console({
 
 // ── Settings tab ────────────────────────────────────────────────────────────
 
+// Config keys the system manages/derives, not the user: they are hidden from the
+// overrides editor (issue #645) so they can't be edited or deleted, but their
+// values are preserved across a save (see `Settings`) since the PATCH replaces
+// the whole `config` blob. `resolved_jar_sha256` is the resolved-JAR content
+// address written by the start path (servers/domain/value_objects.py).
+const SYSTEM_MANAGED_CONFIG_KEYS = new Set(["resolved_jar_sha256"]);
+
 interface ConfigRow {
   key: string;
   value: string;
@@ -899,11 +906,25 @@ interface ConfigRow {
 }
 
 function toRows(config: Record<string, unknown>): ConfigRow[] {
-  return Object.entries(config).map(([key, value]) => ({
-    key,
-    value: typeof value === "string" ? value : JSON.stringify(value),
-    original: value,
-  }));
+  return Object.entries(config)
+    .filter(([key]) => !SYSTEM_MANAGED_CONFIG_KEYS.has(key))
+    .map(([key, value]) => ({
+      key,
+      value: typeof value === "string" ? value : JSON.stringify(value),
+      original: value,
+    }));
+}
+
+// The system-managed entries (issue #645) the editor hides but a save must carry
+// back unchanged, since the PATCH replaces the whole `config` blob.
+function systemManagedConfig(
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(config).filter(([key]) =>
+      SYSTEM_MANAGED_CONFIG_KEYS.has(key),
+    ),
+  );
 }
 
 // Parse a value-input string with JSON-value semantics: a valid JSON literal
@@ -1006,7 +1027,12 @@ function Settings({
           body: JSON.stringify({
             name,
             game_port: port === "" ? null : Number(port),
-            config: fromRows(rows),
+            // Re-merge the hidden system-managed keys (issue #645) so the full
+            // config replace doesn't drop them.
+            config: {
+              ...systemManagedConfig(server.config as Record<string, unknown>),
+              ...fromRows(rows),
+            },
           }),
         },
       ),
