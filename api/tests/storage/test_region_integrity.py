@@ -98,6 +98,13 @@ def test_zero_size_region_is_flagged(tmp_path: Path) -> None:
     assert check_region_file(path) is ReasonCode.NOT_4096_ALIGNED
 
 
+def test_single_header_sector_region_is_flagged(tmp_path: Path) -> None:
+    # One 4096-byte sector is aligned but lacks the timestamp table (the second
+    # required header sector), so it is structurally corrupt.
+    path = _write(tmp_path / "r.mca", bytes(_SECTOR))
+    assert check_region_file(path) is ReasonCode.NOT_4096_ALIGNED
+
+
 def test_location_entry_past_eof_is_sector_out_of_bounds(tmp_path: Path) -> None:
     # offset+count reaches sector 5 but the file is only 3 sectors long.
     image = _build_region(chunks={0: (4, 1)}, sectors=3)
