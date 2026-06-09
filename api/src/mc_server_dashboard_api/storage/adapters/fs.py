@@ -47,6 +47,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     IncompleteTransferError,
+    IntegrityCheckError,
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
@@ -68,6 +69,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     SnapshotId,
     VersionId,
 )
+from mc_server_dashboard_api.storage.integrity.region import check_working_set
 
 # Read/stream chunk size for hydrate / JAR egress.
 _CHUNK = 1024 * 1024
@@ -360,6 +362,18 @@ class FsStorage(Storage):
         # for a transfer proven complete.
         if not await asyncio.to_thread(_dir_has_entries, staging):
             raise IncompleteTransferError("no staged files to publish")
+        # Content-integrity gate (issue #739): on top of the proven-complete byte
+        # gate, walk the staged working set for structurally corrupt ``.mca`` region
+        # files (issue #738). Fail-closed — any corrupt region refuses the publish:
+        # clean the staging area (mirroring abort) and raise. The ``current`` symlink
+        # is never touched, so the prior good snapshot is retained automatically
+        # (last-known-good, #703).
+        report = await asyncio.to_thread(check_working_set, staging)
+        if not report.healthy:
+            await asyncio.to_thread(_rmtree, staging)
+            self._release_staging(staging)
+            fs_handle.consumed = True
+            raise IntegrityCheckError(report)
         await asyncio.to_thread(
             self._publish, fs_handle.community_id, fs_handle.server_id, staging
         )
@@ -511,6 +525,13 @@ class FsStorage(Storage):
         self, community_id: CommunityId, server_id: ServerId
     ) -> BackupKey:
         current = await asyncio.to_thread(self._current_dir, community_id, server_id)
+        # Content-integrity gate (issue #739): never archive a known-corrupt world.
+        # Walk the authoritative ``current/`` working set for structurally corrupt
+        # ``.mca`` region files (issue #738) BEFORE writing the archive; any corrupt
+        # region refuses the backup and no ``.tar.gz`` is written (fail-closed, #703).
+        report = await asyncio.to_thread(check_working_set, current)
+        if not report.healthy:
+            raise IntegrityCheckError(report)
         backups = self._server_root(community_id, server_id) / "backups"
         await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
         key = BackupKey(uuid.uuid4().hex)

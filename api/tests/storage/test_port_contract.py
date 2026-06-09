@@ -76,7 +76,10 @@ async def test_hydrate_streams_incrementally_not_buffered(
 
     community, server = new_scope()
     payload = b"x" * (3 * 1024 * 1024 + 17)  # larger than the fs/object egress chunk
-    big = {"world/region.mca": payload}
+    # A non-region name: the streaming behaviour under test is file-type-agnostic,
+    # and a ``.mca`` here would trip the fs publish integrity gate (#739) on these
+    # garbage bytes.
+    big = {"world/region.dat": payload}
     # Stage with coarse chunks so the multi-MiB spool write does not dominate.
     handle = await harness.storage.begin_snapshot(community, server)
     await harness.storage.write_snapshot(handle, tar_stream(big, chunk=1024 * 1024))
@@ -413,16 +416,18 @@ async def test_open_file_stream_is_chunked_for_a_multi_chunk_file(
 
     community, server = new_scope()
     payload = b"y" * (3 * 1024 * 1024 + 17)  # larger than the fs/object egress chunk
+    # A non-region name: the multi-chunk egress under test is file-type-agnostic,
+    # and a ``.mca`` here would trip the fs publish integrity gate (#739).
     handle = await harness.storage.begin_snapshot(community, server)
     await harness.storage.write_snapshot(
-        handle, tar_stream({"world/region.mca": payload}, chunk=1024 * 1024)
+        handle, tar_stream({"world/region.dat": payload}, chunk=1024 * 1024)
     )
     await harness.storage.commit_snapshot(handle)
 
     chunks = [
         chunk
         async for chunk in harness.storage.open_file_stream(
-            community, server, RelPath("world/region.mca")
+            community, server, RelPath("world/region.dat")
         )
     ]
     assert len(chunks) > 1  # incremental, not one buffered blob
@@ -794,7 +799,7 @@ async def test_delete_dir_removes_subtree(harness: StorageHarness) -> None:
         server,
         {
             "world/level.dat": b"a",
-            "world/region/r.mca": b"b",
+            "world/region/r.dat": b"b",
             "server.properties": b"keep",
         },
     )
@@ -805,7 +810,7 @@ async def test_delete_dir_removes_subtree(harness: StorageHarness) -> None:
         await harness.storage.list_dir(community, server, RelPath("world"))
     with pytest.raises(NotFoundError):
         await harness.storage.read_file(
-            community, server, RelPath("world/region/r.mca")
+            community, server, RelPath("world/region/r.dat")
         )
     # A sibling outside the deleted subtree survives.
     assert (

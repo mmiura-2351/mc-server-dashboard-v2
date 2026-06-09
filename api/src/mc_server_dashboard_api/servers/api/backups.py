@@ -16,6 +16,7 @@ working set with nothing to archive is 404).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Annotated
 from urllib.parse import quote
@@ -64,6 +65,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupCorruptError,
     BackupNotFoundError,
     BackupUnsettledError,
     CommandDispatchError,
@@ -75,6 +77,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
 router = APIRouter()
+
+_logger = logging.getLogger(__name__)
 
 _SERVER_RESOURCE_TYPE = "server"
 
@@ -202,6 +206,27 @@ async def create_backup(
             server_id,
         )
         raise _conflict("command_failed") from exc
+    except BackupCorruptError as exc:
+        # The working set is structurally corrupt (a crash-during-save truncation,
+        # #703): the integrity gate refused to archive it (#739). This is a
+        # server-side data integrity failure, not a client error, so it is a 500
+        # with a machine-readable reason; the refusal is logged and audited with the
+        # corrupt-file count so an operator can see why no backup was produced.
+        _logger.warning(
+            "backup create refused: corrupt working set for server %s "
+            "(%d corrupt region file(s))",
+            server_id,
+            exc.corrupt_count,
+        )
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            server_id,
+        )
+        raise _integrity_error("working_set_corrupt") from exc
     await _record(
         recorder, ops.BACKUP_CREATE, authorized, community_id, backup.id.value
     )
@@ -549,6 +574,12 @@ async def _record_failure(
 
 def _service_unavailable(reason: str) -> ProblemException:
     return problem(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
+
+
+def _integrity_error(reason: str) -> ProblemException:
+    # A structurally corrupt working set is a server-side data fault, not a client
+    # error (issue #739): a 500 with a machine-readable reason, not a 4xx.
+    return problem(status.HTTP_500_INTERNAL_SERVER_ERROR, reason)
 
 
 def _conflict(reason: str) -> ProblemException:

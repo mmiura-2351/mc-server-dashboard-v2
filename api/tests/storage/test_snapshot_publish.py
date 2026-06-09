@@ -18,12 +18,16 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.domain.errors import IntegrityCheckError
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     ServerId,
 )
+from mc_server_dashboard_api.storage.integrity.region import ReasonCode
 from tests.storage.helpers import (
+    corrupt_region_bytes,
     drain,
+    healthy_region_bytes,
     new_scope,
     read_tar,
     snapshot_dir,
@@ -87,7 +91,10 @@ async def test_hydrate_streams_incrementally_not_buffered(tmp_path: Path) -> Non
 
     storage = FsStorage(tmp_path)
     community, server = new_scope()
-    big = {"world/region.mca": b"x" * (3 * _CHUNK)}
+    # A large non-region payload: the multi-chunk streaming behaviour under test is
+    # unrelated to file type, and a ``.mca`` name would now trip the publish
+    # integrity gate (issue #739) on this garbage-byte fixture.
+    big = {"world/region.dat": b"x" * (3 * _CHUNK)}
 
     async def _coarse() -> AsyncIterator[bytes]:
         async for chunk in stream_of(tar_bytes(big), chunk=_CHUNK):
@@ -139,6 +146,60 @@ async def test_abort_discards_staging_and_leaves_current_untouched(
     incoming = server_root / "incoming"
     assert not incoming.exists() or not any(incoming.iterdir())
     assert snapshot_dir(tmp_path, community, server) == live_before
+
+
+async def test_commit_refuses_a_corrupt_region_and_keeps_prior_snapshot(
+    tmp_path: Path,
+) -> None:
+    """The integrity gate (issue #739): a corrupt ``.mca`` in staging is not published.
+
+    A working set carrying a structurally corrupt region file must be refused at
+    ``commit_snapshot`` with :class:`IntegrityCheckError` carrying the report; the
+    prior ``current`` is left resolving to the last good snapshot and the corrupt
+    staging area is cleaned (last-known-good retention, #703).
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    good_live = snapshot_dir(tmp_path, community, server)
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(
+        handle, tar_stream({"world/region/r.0.0.mca": corrupt_region_bytes()})
+    )
+    with pytest.raises(IntegrityCheckError) as excinfo:
+        await storage.commit_snapshot(handle)
+
+    # The report names the corrupt file and its reason so a caller can surface why.
+    report = excinfo.value.report
+    assert len(report.corrupt) == 1
+    assert report.corrupt[0].reason is ReasonCode.NOT_4096_ALIGNED
+
+    # current still resolves to the prior good snapshot; staging was cleaned.
+    assert snapshot_dir(tmp_path, community, server) == good_live
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"world/region/r.0.0.mca": healthy_region_bytes()}
+    server_root = good_live.parent.parent
+    incoming = server_root / "incoming"
+    assert not incoming.exists() or not any(incoming.iterdir())
+
+
+async def test_commit_publishes_a_healthy_region_unchanged(tmp_path: Path) -> None:
+    """A healthy working set publishes exactly as before (no gate regression)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    files = {
+        "world/region/r.0.0.mca": healthy_region_bytes(),
+        "server.properties": b"x",
+    }
+    await _publish(storage, community, server, files)
+
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == files
 
 
 async def test_write_snapshot_rejects_symlink_escape_member(tmp_path: Path) -> None:

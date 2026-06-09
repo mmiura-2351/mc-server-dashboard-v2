@@ -127,6 +127,29 @@ def bomb_targz(*, decompressed: int = 4096) -> bytes:
     return buf.getvalue()
 
 
+def healthy_region_bytes() -> bytes:
+    """A structurally valid empty ``.mca`` region: two all-zero header sectors.
+
+    The integrity walker (issue #738) accepts a 4096-aligned region whose location
+    table lists no present chunks, so this is a clean region file the publish/backup
+    gates pass.
+    """
+
+    return bytes(2 * 4096)
+
+
+def corrupt_region_bytes() -> bytes:
+    """A structurally corrupt ``.mca`` region: size not a multiple of 4096.
+
+    Models the crash-during-save truncation reproduced in #703 — a torn region
+    whose byte length is not 4096-aligned, which the integrity walker (#738) flags
+    as ``not_4096_aligned``. The publish/backup integrity gate must refuse a working
+    set containing it.
+    """
+
+    return bytes(2 * 4096 + 17)
+
+
 def snapshot_dir(root: Path, community: CommunityId, server: ServerId) -> Path:
     """The directory ``current`` resolves to (the live snapshot), for assertions."""
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hmac
 import io
+import logging
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
@@ -45,6 +46,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
+    IntegrityCheckError,
     NotFoundError,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage
@@ -61,6 +63,8 @@ _JAR_RELPATH = "server.jar"
 _TAR_BLOCK = 512
 
 router = APIRouter(prefix="/data-plane")
+
+_logger = logging.getLogger(__name__)
 
 # Reject an implausibly large snapshot body before it can exhaust the disk. A
 # generous M1 ceiling (a Minecraft working set is well under this); a real-world
@@ -250,6 +254,25 @@ async def publish_snapshot(
         # abort leaves the prior authoritative copy intact.
         await storage.abort_snapshot(handle)
         raise problem(status.HTTP_400_BAD_REQUEST, "empty_snapshot") from None
+    except IntegrityCheckError as exc:
+        # The byte-complete body staged a structurally corrupt working set (a
+        # crash-during-save truncation, #703): the content-integrity gate (#739)
+        # refused to publish it, so ``current`` keeps the prior good snapshot.
+        # commit_snapshot already cleaned the corrupt staging area. Surface a clear
+        # non-2xx with a machine-readable reason and the corrupt-file count so the
+        # worker/operator sees *why* the publish was refused, and log the refusal.
+        corrupt = len(exc.report.corrupt)
+        _logger.warning(
+            "snapshot publish refused: corrupt working set for server %s "
+            "(%d corrupt region file(s))",
+            server_id,
+            corrupt,
+        )
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "working_set_corrupt",
+            extensions={"corrupt_count": corrupt},
+        ) from None
     except BaseException:
         # Any failure mid-transfer (client disconnect, extraction error) discards
         # staging; the authoritative copy is never touched.

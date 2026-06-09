@@ -14,6 +14,7 @@ BackupNotFoundError).
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -23,7 +24,10 @@ import pytest
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
-from mc_server_dashboard_api.servers.domain.errors import BackupNotFoundError
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupCorruptError,
+    BackupNotFoundError,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
@@ -35,7 +39,13 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
-from tests.storage.helpers import drain, read_tar, tar_stream
+from tests.storage.helpers import (
+    corrupt_region_bytes,
+    drain,
+    healthy_region_bytes,
+    read_tar,
+    tar_stream,
+)
 
 
 def _scope() -> tuple[CommunityId, ServerId]:
@@ -94,6 +104,40 @@ async def test_create_with_nothing_published_translates_to_backup_not_found(
     community, server = _scope()
     with pytest.raises(BackupNotFoundError):
         await adapter.create_from_current(community_id=community, server_id=server)
+
+
+async def test_create_against_corrupt_working_set_raises_and_writes_no_archive(
+    tmp_path: Path,
+) -> None:
+    """The integrity gate (#739): a corrupt ``current/`` refuses the backup create.
+
+    A working set carrying a structurally corrupt ``.mca`` must raise
+    :class:`BackupCorruptError` (the seam translation of the storage
+    ``IntegrityCheckError``) and write no ``.tar.gz`` archive — a known-corrupt
+    world is never archived.
+    """
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    # Publish a healthy snapshot, then corrupt the region file in the live
+    # ``current/`` on disk — modelling a crash-corrupted authoritative copy the
+    # publish gate could not have caught (a prior-crash truncation, #703).
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    current = server_root / os.readlink(server_root / "current")
+    (current / "world" / "region" / "r.0.0.mca").write_bytes(corrupt_region_bytes())
+
+    with pytest.raises(BackupCorruptError):
+        await adapter.create_from_current(community_id=community, server_id=server)
+
+    backups = server_root / "backups"
+    archives = list(backups.glob("*.tar.gz")) if backups.is_dir() else []
+    assert archives == []
 
 
 async def test_restore_unknown_ref_translates_to_backup_not_found(

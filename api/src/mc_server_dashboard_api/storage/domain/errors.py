@@ -8,6 +8,11 @@ translated to transport errors at the edge.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
+
 
 class StorageError(Exception):
     """Base class for storage-context invariant/policy violations."""
@@ -62,3 +67,25 @@ class SnapshotHandleError(StorageError):
     Raised when a handle is reused after commit/abort, or when its staging area
     has vanished (already aborted or swept). Keeps the two-phase protocol honest.
     """
+
+
+class IntegrityCheckError(StorageError):
+    """A working set failed the structural ``.mca`` integrity gate (issue #739).
+
+    The authoritative-create direction is fail-closed: before a snapshot is
+    published and before a backup archive is written, the staged/current working
+    set is walked for structurally corrupt region files (issue #738). Any corrupt
+    ``.mca`` refuses the operation so a crash-corrupted world cannot poison the
+    published snapshot or a new backup; the prior ``current`` is left untouched
+    (STORAGE.md, #703 last-known-good retention).
+
+    Carries the structured :class:`~...integrity.region.WorkingSetReport` so a
+    caller can surface *why* — the corrupt-file count and per-file reason codes.
+    """
+
+    def __init__(self, report: WorkingSetReport) -> None:
+        self.report = report
+        corrupt = len(report.corrupt)
+        super().__init__(
+            f"working set failed integrity check: {corrupt} corrupt region file(s)"
+        )
