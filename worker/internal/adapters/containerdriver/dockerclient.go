@@ -35,14 +35,15 @@ const defaultDockerHost = "unix:///var/run/docker.sock"
 // Engine 24+; the endpoints this client uses are stable well below it.
 const apiVersion = "v1.43"
 
-// gameServerCPUShares is the CPU weight every container the driver creates is
-// given, double the Docker default of 1024, so a game server wins CPU contention
-// against batch workloads (CI builds, test suites) sharing the host: under heavy
-// host load the unprioritised MC server thread starved and stalled tens of
-// seconds, dropping players (issue #518). CPUShares is a relative weight, not a
-// cap — the Engine translates it to cpu.weight on cgroup v2 — so it only
-// arbitrates contention and does not change absolute capacity; a constant (not a
-// config knob) suffices because the value has no per-deployment sizing.
+// gameServerCPUShares is the default CPU weight a container gets when the server
+// has no per-server CPU allocation (InstanceSpec.CPUMillis == 0): double the
+// Docker default of 1024, so a game server wins CPU contention against batch
+// workloads (CI builds, test suites) sharing the host: under heavy host load the
+// unprioritised MC server thread starved and stalled tens of seconds, dropping
+// players (issue #518). CPUShares is a relative weight, not a cap — the Engine
+// translates it to cpu.weight on cgroup v2 — so it only arbitrates contention and
+// does not change absolute capacity. A set allocation overrides this with a
+// proportional weight (issue #724); the constant remains the unset fallback.
 const gameServerCPUShares = 2048
 
 // EngineClient speaks the Docker Engine API over a unix socket using net/http.
@@ -97,8 +98,10 @@ type createBody struct {
 type hostConfig struct {
 	Binds        []string                 `json:"Binds,omitempty"`
 	PortBindings map[string][]portBinding `json:"PortBindings,omitempty"`
-	// CPUShares is the container's relative CPU weight (issue #518). The Engine
-	// translates it to cpu.weight on cgroup v2.
+	// CPUShares is the container's relative CPU weight, per-server and
+	// proportional to the CPU allocation (issues #518/#724). The Engine translates
+	// it to cpu.weight on cgroup v2. It is a soft share, not a hard quota — no
+	// NanoCpus is ever set, so MC tick latency is not throttled.
 	CPUShares int64 `json:"CpuShares,omitempty"`
 	// Memory is the hard container memory limit in bytes (issue #707). The Engine
 	// translates it to memory.max on cgroup v2; the kernel OOM-kills the container
@@ -126,7 +129,7 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 		Cmd:        spec.Cmd,
 		WorkingDir: spec.WorkingDir,
 		Labels:     spec.Labels,
-		HostConfig: hostConfig{Binds: spec.Binds, CPUShares: gameServerCPUShares, Memory: spec.MemoryLimitBytes},
+		HostConfig: hostConfig{Binds: spec.Binds, CPUShares: spec.CPUShares, Memory: spec.MemoryLimitBytes},
 	}
 	if len(spec.Ports) > 0 {
 		body.ExposedPorts = map[string]struct{}{}

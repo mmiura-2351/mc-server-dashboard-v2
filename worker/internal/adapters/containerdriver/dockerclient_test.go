@@ -204,24 +204,33 @@ func TestEngineClientCreateOmitsNetworkWhenEmpty(t *testing.T) {
 	}
 }
 
-// Every created container carries an elevated CPU weight (CPUShares) so a game
-// server wins CPU contention against batch workloads sharing the host (issue
-// #518). The Engine translates CPUShares to cpu.weight on cgroup v2.
-func TestEngineClientCreateSetsElevatedCPUShares(t *testing.T) {
+// The CreateSpec's per-server CPU weight rides through to the host-config
+// CpuShares field, the relative weight the Engine translates to cpu.weight on
+// cgroup v2 (issues #518/#724). It is a soft share, never a hard quota: no
+// NanoCpus (or any hard CPU cap) is encoded.
+func TestEngineClientCreateEncodesCPUShares(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
 	})
 	c := d.client(t)
 
-	if _, err := c.Create(context.Background(), CreateSpec{Name: "mcsd-s1", Image: "img"}); err != nil {
+	const wantShares = int64(2048)
+	if _, err := c.Create(context.Background(), CreateSpec{
+		Name:      "mcsd-s1",
+		Image:     "img",
+		CPUShares: wantShares,
+	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	var body createBody
 	if err := json.Unmarshal([]byte(d.requests[0].body), &body); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if body.HostConfig.CPUShares != gameServerCPUShares {
-		t.Fatalf("CPUShares = %d, want %d", body.HostConfig.CPUShares, gameServerCPUShares)
+	if body.HostConfig.CPUShares != wantShares {
+		t.Fatalf("CPUShares = %d, want %d", body.HostConfig.CPUShares, wantShares)
+	}
+	if strings.Contains(d.requests[0].body, "NanoCpus") {
+		t.Fatalf("body carries a hard CPU quota (NanoCpus), want only soft CpuShares: %s", d.requests[0].body)
 	}
 }
 

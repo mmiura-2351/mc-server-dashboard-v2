@@ -22,7 +22,12 @@
 // host-config Memory field from InstanceSpec.MemoryLimitMB (MiB→bytes) so the
 // kernel OOM-kills a runaway server at the container boundary rather than letting
 // it starve the host (issue #707). An unset limit (0) sets no constraint,
-// preserving the prior behavior. CPU and disk quotas remain deferred.
+// preserving the prior behavior. CPU is a per-server SOFT relative share: the
+// create path sets the host-config CpuShares weight proportional to
+// InstanceSpec.CPUMillis (1024 shares = 1 core), so a larger allocation wins more
+// CPU under contention without any hard quota (NanoCpus is never set) that would
+// throttle MC tick latency (issue #724); an unset allocation (0) keeps the fixed
+// default weight (issue #518). Disk quotas remain deferred.
 package containerdriver
 
 import (
@@ -299,6 +304,7 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 		Network:          d.network,
 		Labels:           d.labels(spec.ServerID),
 		MemoryLimitBytes: memoryLimitBytes(spec.MemoryLimitMB),
+		CPUShares:        cpuShares(spec.CPUMillis),
 	}
 
 	id, err := d.createContainer(ctx, create)
@@ -328,6 +334,7 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 		Binds:            []string{spec.WorkingDir + ":" + containerWorkDir},
 		Labels:           d.labels(spec.ServerID),
 		MemoryLimitBytes: memoryLimitBytes(spec.MemoryLimitMB),
+		CPUShares:        cpuShares(spec.CPUMillis),
 	}
 	// createContainer carries the #233 wait-for-name-free loop, but the distinct
 	// install name almost never hits it: a leftover install container from a crash
@@ -537,6 +544,20 @@ func containerCmd(args []string) []string {
 // field (issue #707). A zero ceiling stays zero — no constraint.
 func memoryLimitBytes(limitMB uint32) int64 {
 	return int64(limitMB) * 1024 * 1024
+}
+
+// cpuShares converts the per-server CPU allocation from millicores (the
+// InstanceSpec unit, issue #723) to a Docker relative CPU weight (issue #724),
+// at Docker's baseline of 1024 shares = 1 core: round(millis * 1024 / 1000) (so
+// 2000m → 2048). An unset allocation (0) keeps the fixed default weight
+// (gameServerCPUShares), preserving the pre-#724 behavior for existing servers.
+// The result is a SOFT share that only arbitrates contention; no hard CPU quota
+// (NanoCpus) is set.
+func cpuShares(cpuMillis uint32) int64 {
+	if cpuMillis == 0 {
+		return gameServerCPUShares
+	}
+	return (int64(cpuMillis)*1024 + 500) / 1000
 }
 
 // instance is one running container. Across a Forge install+launch it owns two
@@ -787,6 +808,7 @@ func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 		Network:          i.network,
 		Labels:           i.labels,
 		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
+		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
 	return i.createFn(context.Background(), create)
 }
