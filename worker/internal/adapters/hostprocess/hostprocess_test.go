@@ -696,6 +696,61 @@ func TestStartSpawnFailure(t *testing.T) {
 	}
 }
 
+// A spec carrying MemoryLimitMB launches java with the derived -Xms/-Xmx heap
+// flags; an unset limit launches with none. The host-process driver enforces no
+// hard memory ceiling — the derived heap (best-effort, issue #708) is its only
+// memory control — so this asserts the launch command, the seam where that heap
+// reaches the JVM.
+func TestStartFeedsDerivedHeapFromMemoryLimit(t *testing.T) {
+	cases := []struct {
+		name      string
+		limitMB   uint32
+		wantHeap  bool
+		wantXmx   string
+		wantNoXmx bool
+	}{
+		{name: "limit set derives heap", limitMB: 2048, wantHeap: true, wantXmx: "-Xmx1639M"},
+		{name: "unset limit no heap", limitMB: 0, wantNoXmx: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proc := newFakeProcess()
+			var gotArgs []string
+			spawn := func(_ context.Context, _ string, args []string, _ string) (process, error) {
+				gotArgs = args
+				return proc, nil
+			}
+			d := New(fixedSelector{}, spawn, func(context.Context, execution.InstanceSpec) (execution.ServerControl, error) {
+				return nil, errors.New("no rcon")
+			}, Options{StopTimeout: 50 * time.Millisecond, ReadinessTimeout: 20 * time.Millisecond})
+
+			s := spec()
+			s.JarRelpath = "server.jar"
+			s.MemoryLimitMB = tc.limitMB
+			if _, err := d.Start(context.Background(), s); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			proc.exit(nil)
+
+			hasXmx := false
+			for _, a := range gotArgs {
+				if strings.HasPrefix(a, "-Xmx") {
+					hasXmx = true
+					if tc.wantHeap && a != tc.wantXmx {
+						t.Fatalf("launch args = %v, want -Xmx %q", gotArgs, tc.wantXmx)
+					}
+				}
+			}
+			if tc.wantHeap && !hasXmx {
+				t.Fatalf("launch args = %v, want a derived -Xmx flag", gotArgs)
+			}
+			if tc.wantNoXmx && hasXmx {
+				t.Fatalf("launch args = %v, want no -Xmx flag for an unset limit", gotArgs)
+			}
+		})
+	}
+}
+
 // Captured stdout/stderr flow through to the Logs() stream as LogEvents tagged
 // with the originating stream; the log channel closes when the process exits.
 func TestLogCaptureFlowsToLogs(t *testing.T) {
