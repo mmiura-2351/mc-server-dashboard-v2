@@ -159,6 +159,40 @@ func TestStartDefaultMemoryLimitIsZero(t *testing.T) {
 	}
 }
 
+// The command's CPU allocation (millicores, #723) is carried as-is onto the
+// InstanceSpec; unset stays 0 (default weight). No derivation.
+func TestStartCarriesCPUMillisToSpec(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	cmd := startCmd()
+	cmd.CPUMillis = 2000
+
+	if res := m.Handle(context.Background(), cmd); !res.Success {
+		t.Fatalf("StartServer = %+v, want success", res)
+	}
+	d.mu.Lock()
+	got := d.started[0].CPUMillis
+	d.mu.Unlock()
+	if got != 2000 {
+		t.Fatalf("CPUMillis = %d, want 2000", got)
+	}
+}
+
+func TestStartDefaultCPUMillisIsZero(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("StartServer = %+v, want success", res)
+	}
+	d.mu.Lock()
+	got := d.started[0].CPUMillis
+	d.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("CPUMillis = %d, want 0 (unset)", got)
+	}
+}
+
 // An unset launch mode (the default) launches with the historical JAR mode, so
 // the spec carries LaunchModeJar — the byte-for-byte original behavior (#305).
 func TestStartDefaultLaunchModeIsJar(t *testing.T) {

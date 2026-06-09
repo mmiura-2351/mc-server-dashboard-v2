@@ -56,6 +56,10 @@ type Command struct {
 	// operator-declared limit, issue #706). 0 means unset — the driver picks a
 	// default heap. The instance manager converts it to MiB for the InstanceSpec.
 	MemoryLimitBytes uint64
+	// CPUMillis is the per-server CPU allocation in millicores for StartServer (the
+	// operator-declared soft share, issue #723). 0 means unset — the driver applies
+	// its default weight. Carried as-is onto the InstanceSpec; no derivation.
+	CPUMillis uint32
 	// Force skips the graceful path for StopServer.
 	Force bool
 	// Line is the console/RCON line for ServerCommand.

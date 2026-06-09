@@ -332,6 +332,9 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 		// MiB. 0 stays 0 (unset -> default heap). Truncating to MiB is exact for any
 		// real limit (the API only ever sends whole-MiB values).
 		MemoryLimitMB: uint32(cmd.MemoryLimitBytes / (1024 * 1024)),
+		// The CPU allocation (millicores, #723) is carried as-is onto the spec; no
+		// derivation. 0 stays 0 (unset -> default weight).
+		CPUMillis: cmd.CPUMillis,
 	})
 	if err != nil {
 		return fail(cmd.CommandID, startErrorCode(err),

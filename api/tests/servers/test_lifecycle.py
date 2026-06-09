@@ -1168,6 +1168,54 @@ async def test_start_sends_zero_memory_limit_when_unset() -> None:
     assert cp.start_memory_limit_bytes == 0
 
 
+async def test_start_sources_cpu_millis_from_config() -> None:
+    # The per-server CPU allocation lives in the config blob as millicores (#722);
+    # the start flow sources it via the helper and carries it as-is (#723). No
+    # derivation (unlike the memory -> -Xmx path).
+    from mc_server_dashboard_api.servers.domain.cpu_allocation import (
+        CPU_ALLOCATION_CONFIG_KEY,
+    )
+
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+            config={CPU_ALLOCATION_CONFIG_KEY: 2000},
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    await _start_server(uow, cp).place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert cp.start_cpu_millis == 2000
+
+
+async def test_start_sends_zero_cpu_millis_when_unset() -> None:
+    # No allocation key -> 0 on the wire, so the Worker driver applies its default
+    # weight (existing servers unaffected).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    await _start_server(uow, cp).place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert cp.start_cpu_millis == 0
+
+
 async def test_place_and_start_always_hydrates_even_if_worker_holds_working_set() -> (
     None
 ):

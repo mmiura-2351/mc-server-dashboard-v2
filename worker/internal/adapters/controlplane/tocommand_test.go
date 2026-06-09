@@ -83,6 +83,24 @@ func TestToCommandStartMemoryLimitBytesDefaultsToZero(t *testing.T) {
 	if cmd.MemoryLimitBytes != 0 {
 		t.Fatalf("MemoryLimitBytes = %d, want 0 (unset)", cmd.MemoryLimitBytes)
 	}
+	if cmd.CPUMillis != 0 {
+		t.Fatalf("CPUMillis = %d, want 0 (unset)", cmd.CPUMillis)
+	}
+}
+
+// The wire cpu_millis (the per-server soft CPU allocation, #723) is carried onto
+// the domain command unchanged; unset (0) stays 0.
+func TestToCommandStartCarriesCPUMillis(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c1",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_Start{
+			Start: &controlplanev1.StartServer{CpuMillis: 2000},
+		},
+	})
+	if cmd.CPUMillis != 2000 {
+		t.Fatalf("CPUMillis = %d, want 2000", cmd.CPUMillis)
+	}
 }
 
 func TestToCommandMapsHydrateTrigger(t *testing.T) {

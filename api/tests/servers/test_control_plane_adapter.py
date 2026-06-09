@@ -207,6 +207,7 @@ async def test_sanitized_start_failure_maps_to_status(
         jar_relpath="server.jar",
         minecraft_version="1.21",
         memory_limit_bytes=0,
+        cpu_millis=0,
     )
     assert outcome.status is status
 
@@ -236,6 +237,7 @@ async def test_start_maps_server_type_to_launch_mode(
         jar_relpath="server.jar",
         minecraft_version="1.21",
         memory_limit_bytes=0,
+        cpu_millis=0,
     )
 
     assert isinstance(fleet.last, StartServerCommand)
@@ -256,10 +258,32 @@ async def test_start_threads_memory_limit_bytes_to_the_command() -> None:
         jar_relpath="server.jar",
         minecraft_version="1.21",
         memory_limit_bytes=4096 * 1024 * 1024,
+        cpu_millis=0,
     )
 
     assert isinstance(fleet.last, StartServerCommand)
     assert fleet.last.memory_limit_bytes == 4096 * 1024 * 1024
+
+
+async def test_start_threads_cpu_millis_to_the_command() -> None:
+    # The per-server CPU allocation (#723) is carried straight through onto the fleet
+    # StartServerCommand in millicores; the adapter does not reinterpret it.
+    fleet = _CapturingFleetControlPlane()
+    adapter = _adapter(fleet)
+
+    await adapter.start(
+        worker_id=WorkerId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+        backend=ExecutionBackend.HOST_PROCESS,
+        server_type=ServerType.VANILLA,
+        jar_relpath="server.jar",
+        minecraft_version="1.21",
+        memory_limit_bytes=0,
+        cpu_millis=2000,
+    )
+
+    assert isinstance(fleet.last, StartServerCommand)
+    assert fleet.last.cpu_millis == 2000
 
 
 async def test_file_access_denied_maps_to_status() -> None:
