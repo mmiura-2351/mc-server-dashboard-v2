@@ -21,7 +21,7 @@ from mc_server_dashboard_api.servers.domain.memory_limit import (
 
 def test_absent_limit_returns_none() -> None:
     # Default-unset: no key written, behavior unchanged (the worker picks a
-    # proportionate default via the MemoryMB == 0 path, #706).
+    # proportionate default via the MemoryLimitMB == 0 path, #706).
     assert memory_limit_from_config({}) is None
 
 
