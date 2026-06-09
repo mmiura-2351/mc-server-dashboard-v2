@@ -1041,6 +1041,201 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 });
 
+describe("ServerDetailPage settings CPU allocation", () => {
+  let restoreWs: () => void;
+
+  beforeEach(() => {
+    restoreWs = installMockWebSocket();
+  });
+  afterEach(() => {
+    restoreWs();
+  });
+
+  function openSettings() {
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    );
+  }
+
+  function cpuInput() {
+    return screen.getByLabelText(t("serverDetail.settings.cpuAllocation"));
+  }
+
+  it("shows the auto placeholder when the allocation is unset", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    const input = cpuInput() as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(input).toHaveAttribute(
+      "placeholder",
+      t("serverDetail.settings.cpuAllocationDefault"),
+    );
+  });
+
+  it("shows the current allocation when set", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        cpu_millis: 1500,
+        config: { cpu_millis: 1500 },
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect((cpuInput() as HTMLInputElement).value).toBe("1500");
+  });
+
+  it("does not show cpu_millis as a raw config override row", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        cpu_millis: 1500,
+        config: { cpu_millis: 1500, motd: "hi" },
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect(screen.getByDisplayValue("motd")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("cpu_millis")).toBeNull();
+  });
+
+  it("saves a set CPU allocation into the config blob", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(cpuInput(), { target: { value: "1500" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    expect(config).toEqual({ cpu_millis: 1500 });
+    expect(typeof config.cpu_millis).toBe("number");
+  });
+
+  it("omits the key from the config blob when the allocation is cleared", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        cpu_millis: 1500,
+        config: { cpu_millis: 1500, motd: "hi" },
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(cpuInput(), { target: { value: "" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    expect(config).toEqual({ motd: "hi" });
+  });
+
+  it("rejects a below-floor value and blocks the save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(cpuInput(), { target: { value: "50" } });
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.cpuAllocationRange")),
+    ).toBeInTheDocument();
+    expect(mockApi.patch).not.toHaveBeenCalled();
+  });
+
+  it("rejects an above-ceiling value and blocks the save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(cpuInput(), { target: { value: "128001" } });
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.cpuAllocationRange")),
+    ).toBeInTheDocument();
+    expect(mockApi.patch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-integer value and blocks the save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(cpuInput(), { target: { value: "1500.5" } });
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.cpuAllocationRange")),
+    ).toBeInTheDocument();
+    expect(mockApi.patch).not.toHaveBeenCalled();
+  });
+
+  it("disables the CPU allocation field without server:update", async () => {
+    mockCan = (code) => code !== "server:update";
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", cpu_millis: 1500 }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    expect(cpuInput()).toBeDisabled();
+  });
+
+  it("surfaces a 422 invalid_cpu_allocation specifically on save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
+    );
+    mockApi.patch.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_cpu_allocation" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(cpuInput(), { target: { value: "1500" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(
+      await screen.findByText(t("serverDetail.error.invalidCpuAllocation")),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("ServerDetailPage delete (typed confirm)", () => {
   it("deletes after typed confirm and navigates to the dashboard", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));

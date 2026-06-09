@@ -291,6 +291,14 @@ export const en = {
     "Maximum memory for this server, in MiB. Leave blank to use the driver default.",
   "serverDetail.settings.memoryLimitRange":
     "Enter a whole number between 512 and 1048576 MiB, or leave blank for the driver default.",
+  // Per-server CPU allocation (issue #726). A soft, relative share of host CPU
+  // in millicores (1000 = one core), not a hard cap; unset reads as "auto".
+  "serverDetail.settings.cpuAllocation": "CPU allocation (millicores)",
+  "serverDetail.settings.cpuAllocationDefault": "Auto",
+  "serverDetail.settings.cpuAllocationHint":
+    "Soft share of CPU for this server, in millicores (1000 = one core). A relative weight under load, not a hard cap — the server can use more when the host is idle. Leave blank for auto.",
+  "serverDetail.settings.cpuAllocationRange":
+    "Enter a whole number between 100 and 128000 millicores, or leave blank for auto.",
   "serverDetail.settings.save": "Save changes",
   "serverDetail.settings.saved": "Settings saved.",
   "serverDetail.settings.atRestHint":
@@ -331,6 +339,8 @@ export const en = {
     "backup_interval_hours must be a whole number of hours of at least 1.",
   "serverDetail.error.invalidMemoryLimit":
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
+  "serverDetail.error.invalidCpuAllocation":
+    "The CPU allocation must be a whole number between 100 and 128000 millicores.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
 
   // Backups tab (WEBUI_SPEC.md 6.7). One contiguous block to keep merge

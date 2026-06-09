@@ -296,6 +296,13 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーに割り当てるメモリの上限（MiB）。空欄にするとドライバーの既定値を使用します。",
   "serverDetail.settings.memoryLimitRange":
     "512〜1048576 MiB の整数を入力するか、空欄にしてドライバー既定値を使用してください。",
+  // Per-server CPU allocation (issue #726).
+  "serverDetail.settings.cpuAllocation": "CPU割り当て（ミリコア）",
+  "serverDetail.settings.cpuAllocationDefault": "自動",
+  "serverDetail.settings.cpuAllocationHint":
+    "このサーバーへのCPUの割り当て（ミリコア、1000＝1コア）。上限ではなく負荷時の相対的な割り当てで、ホストに余裕があればこれを超えて使用できます。空欄にすると自動になります。",
+  "serverDetail.settings.cpuAllocationRange":
+    "100〜128000 ミリコアの整数を入力するか、空欄にして自動にしてください。",
   "serverDetail.settings.save": "変更を保存",
   "serverDetail.settings.saved": "設定を保存しました。",
   "serverDetail.settings.atRestHint":
@@ -337,6 +344,8 @@ export const ja: Record<TranslationKey, string> = {
     "backup_interval_hours は1以上の整数の時間数である必要があります。",
   "serverDetail.error.invalidMemoryLimit":
     "メモリ上限は 512〜1048576 MiB の整数である必要があります。",
+  "serverDetail.error.invalidCpuAllocation":
+    "CPU割り当ては 100〜128000 ミリコアの整数である必要があります。",
   "serverDetail.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Backups tab (WEBUI_SPEC.md 6.7).
