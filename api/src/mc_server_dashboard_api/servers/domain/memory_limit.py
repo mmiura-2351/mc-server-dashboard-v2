@@ -15,8 +15,8 @@ later sub-issues (#706+) and does not touch this module.
 MiB is the natural granularity for a container/cgroup memory ceiling.
 
 **Default: unset.** An absent key means "no per-server limit" — the worker driver
-later picks a proportionate default via its ``InstanceSpec.MemoryMB == 0`` path,
-so existing servers are unaffected and the key is never retro-written.
+later picks a proportionate default via its ``InstanceSpec.MemoryLimitMB == 0``
+path, so existing servers are unaffected and the key is never retro-written.
 
 **Range.** Validation here is only the value's shape/range, not host capacity
 (that is the deferred placement sub-issue #710).
