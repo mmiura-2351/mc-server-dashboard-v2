@@ -7,9 +7,18 @@ since the fleet is cross-community infrastructure, not community-scoped:
   capabilities, current liveness, and load (FR-WRK-2).
 - ``PUT``/``DELETE /workers/{worker_id}/drain`` set or clear a Worker's drain
   flag (FR-WRK-5, worker:manage); a draining Worker is excluded from placement
-  AND its assigned servers are marked ``desired=stopped`` (the reconciler then
-  drives the graceful stop + final snapshot). Clearing the flag only re-enables
+  AND its assigned servers are marked ``desired=stopped``. The reconciler then
+  drives the graceful stop, which since #849 also takes the final snapshot (the
+  stop scratch is held for it since #845). Clearing the flag only re-enables
   placement; it does not restart the servers drain stopped.
+
+  Convergence is ASYNCHRONOUS: ``PUT`` returns immediately with the count it
+  *marked*, not stopped. The stops (and snapshots) happen only after the
+  reconciler's grace window and only while the Worker stays connected — an
+  operator MUST keep the Worker up until the stops converge, since shutting the
+  host down first defers every stop and snapshot until reconnect. Confirm
+  convergence by watching ``GET /workers`` assigned load (or per-server states)
+  drop to zero.
 """
 
 from __future__ import annotations
@@ -65,8 +74,10 @@ class WorkersResponse(BaseModel):
 
 
 class DrainResponse(BaseModel):
-    # The number of assigned servers this drain call marked desired=stopped; the
-    # reconciler then drives the graceful stop + final snapshot (FR-WRK-5).
+    # The number of assigned servers this drain call MARKED desired=stopped — an
+    # async intent count, not the number already stopped. The reconciler then
+    # drives the graceful stop + final snapshot while the Worker stays connected
+    # (FR-WRK-5); watch GET /workers assigned load drop to confirm convergence.
     servers_stopped: int
 
 

@@ -139,7 +139,7 @@ Execution backends: `host_process` / `container`.
 | GET | `/versions/jar-pool/stats` `[A]` · POST `/versions/jar-pool/gc` `[A]` | JAR pool size / garbage collection. |
 | GET | `/ports/available?count=` · `/ports/check/{port}` | Free-port discovery / conflict check. |
 | GET | `/workers` `[A]` | Fleet list: status, capabilities (drivers, max_servers, cpu/mem), assigned_count, heartbeat. |
-| PUT / DELETE | `/workers/{wid}/drain` `[A]` | Set / clear drain. Set stops the worker's running servers (final snapshot via the stop path) and returns `servers_stopped`; clear only re-enables placement (does not restart them). |
+| PUT / DELETE | `/workers/{wid}/drain` `[A]` | Set / clear drain. Set MARKS the worker's running servers `desired=stopped` and returns `servers_stopped` (the count marked, not yet stopped); the reconciler then stops each + takes the final snapshot (#845/#849) ASYNCHRONOUSLY and only while the worker stays connected — keep the worker up until assigned load drops to 0, or stops+snapshots defer to reconnect. Clear only re-enables placement (does not restart them). |
 | GET | `/audit` `[A]` | Global audit (`community`, `operation`, `actor`, `since`, `until`, `limit`, `offset`). |
 | GET | `/communities/{cid}/audit` | Community-scoped audit (same filters minus `community`). |
 | GET | `/backups/statistics` `[A]` | Global backup statistics. |

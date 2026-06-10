@@ -15,6 +15,11 @@ import uuid
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from mc_server_dashboard_api.servers.application.lifecycle import (
+    StartServer,
+    StopServer,
+)
+from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -30,7 +35,12 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.fleet.fakes import FakeClock, make_worker
 from tests.servers.fakes import FakeClock as ServersFakeClock
-from tests.servers.fakes import FakeUnitOfWork
+from tests.servers.fakes import (
+    FakeControlPlane,
+    FakeJarProvisioner,
+    FakeStoreGenerationReader,
+    FakeUnitOfWork,
+)
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _WORKER_UUID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -73,6 +83,12 @@ def _registry() -> InMemoryWorkerRegistry:
 
 def _use_case(registry: InMemoryWorkerRegistry, uow: FakeUnitOfWork) -> SetWorkerDrain:
     return SetWorkerDrain(registry=registry, uow=uow, clock=ServersFakeClock(_T0))
+
+
+def _assigned_count(registry: InMemoryWorkerRegistry, worker_id: WorkerId) -> int:
+    snapshot = registry.get(worker_id)
+    assert snapshot is not None
+    return snapshot.assigned_count
 
 
 async def test_drain_stops_assigned_running_servers_only() -> None:
@@ -189,3 +205,83 @@ async def test_drain_unknown_worker_returns_none() -> None:
     )
 
     assert result is None
+
+
+async def test_drain_decrements_placement_load_per_stopped_server() -> None:
+    # I1: drain owns the desired=running -> stopped flip, so it owns the placement
+    # decrement that pairs with it (mirroring StopServer.__call__). Without this the
+    # registry load stays inflated until the Worker reconnects and the tally is
+    # rebuilt, skewing GET /workers and placement.
+    uow = FakeUnitOfWork()
+    s = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker_uuid=_WORKER_UUID,
+    )
+    uow.servers.seed(s)
+    registry = _registry()
+    worker_id = WorkerId(str(_WORKER_UUID))
+    # Seed the worker's committed load to 1 (one assigned, desired-running server),
+    # the truth the drain is about to flip.
+    registry.set_assignment(worker_id, {str(s.id.value)})
+    assert _assigned_count(registry, worker_id) == 1
+
+    count = await _use_case(registry, uow)(worker_id=worker_id, draining=True)
+
+    assert count == 1
+    # The decrement dropped the load to 0 right after the flip, without waiting on a
+    # reconnect rebuild.
+    assert _assigned_count(registry, worker_id) == 0
+
+
+async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:
+    # B1: prove the drain use case + the reconciler tick (driven against the SAME
+    # uow) produce the final snapshot by composition (#845 holds the stop scratch,
+    # #849 gave redispatch_stop the snapshot leg). Drain marks desired=stopped while
+    # observed=running; the reconciler then redispatch_stops, and that stop now
+    # dispatches the post-stop final snapshot to the assigned Worker.
+    uow = FakeUnitOfWork()
+    s = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker_uuid=_WORKER_UUID,
+    )
+    uow.servers.seed(s)
+
+    await _use_case(_registry(), uow)(
+        worker_id=WorkerId(str(_WORKER_UUID)), draining=True
+    )
+    # Drain only marked the intent; nothing has been dispatched to the Worker yet.
+    assert uow.servers.by_id[s.id].desired_state is DesiredState.STOPPED
+    assert uow.servers.by_id[s.id].observed_state is ObservedState.RUNNING
+
+    # Run a reconciler tick well past the grace window against the same fakes.
+    now = _T0 + dt.timedelta(seconds=3600)
+    cp = FakeControlPlane()
+    clock = ServersFakeClock(now)
+    reconciler = RunReconcilerTick(
+        uow=uow,
+        start_server=StartServer(
+            uow=uow,
+            control_plane=cp,
+            clock=clock,
+            jar_provisioner=FakeJarProvisioner(),
+            store_generation=FakeStoreGenerationReader(),
+        ),
+        stop_server=StopServer(uow=uow, control_plane=cp, clock=clock),
+        control_plane=cp,
+        clock=clock,
+        grace_seconds=60,
+        backoff_base_seconds=30,
+        backoff_max_seconds=3600,
+    )
+    await reconciler.tick()
+
+    # The reconciler stopped the drain-marked server AND took the final snapshot,
+    # both targeting the assigned Worker (the FR-WRK-5 promise the review's B1 said
+    # was missing). Convergence also cleared the assignment. The control plane
+    # records the server-domain WorkerId the reconciler dispatched to.
+    server_worker = ServersWorkerId(_WORKER_UUID)
+    assert ("stop", server_worker, s.id) in cp.dispatched
+    assert ("snapshot", server_worker, s.id) in cp.dispatched
+    assert uow.servers.by_id[s.id].assigned_worker_id is None
