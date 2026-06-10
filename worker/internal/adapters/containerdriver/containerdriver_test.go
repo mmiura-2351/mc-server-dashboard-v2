@@ -1597,3 +1597,34 @@ func TestStartConflictLoopDeadlineFails(t *testing.T) {
 		t.Fatalf("err = %v, want the last decline reason in the message", err)
 	}
 }
+
+// TestEmitCoalescesTerminalEventOnFullBuffer bursts more events than the 8-slot
+// buffer with no consumer, then drains. The latest-state-wins coalescing must
+// have kept the terminal event so it is never dropped (issue #790).
+func TestEmitCoalescesTerminalEventOnFullBuffer(t *testing.T) {
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "srv-790"},
+		events: make(chan execution.StatusEvent, 8),
+	}
+
+	// Burst well past the buffer capacity, ending on the terminal state.
+	for i := 0; i < 32; i++ {
+		inst.emit(execution.StateRunning, "")
+	}
+	inst.emit(execution.StateCrashed, "process exited unexpectedly")
+
+	// Drain the buffer; the last buffered event must be the terminal one.
+	var last execution.StatusEvent
+	for {
+		select {
+		case ev := <-inst.events:
+			last = ev
+			continue
+		default:
+		}
+		break
+	}
+	if last.State != execution.StateCrashed {
+		t.Fatalf("terminal event dropped: last buffered state = %v, want %v", last.State, execution.StateCrashed)
+	}
+}
