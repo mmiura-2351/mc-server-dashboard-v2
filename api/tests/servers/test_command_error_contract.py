@@ -55,8 +55,9 @@ _FILE_READ_KINDS = ("ReadFile", "ListFiles")
 # special-case logic matches on, mirroring the source. Each MUST be a code the
 # Worker actually emits for that kind, i.e. present in the contract table.
 API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
-    # lifecycle.py: redispatch_start -- INVALID_STATE means the Worker already
-    # runs the server (its start guard rejected a live instance).
+    # lifecycle.py: redispatch_start AND __call__ (#773/#774) -- INVALID_STATE on a
+    # start means the Worker already runs the server (its start guard rejected a
+    # live instance), so both treat it as convergence rather than a failure.
     ("StartServer", CommandStatus.INVALID_STATE),
     # lifecycle.py: stop convergence -- SERVER_NOT_FOUND means no live instance;
     # converge observed=stopped instead of failing. The graceful-stop path also
@@ -107,15 +108,16 @@ def test_no_undeclared_match_sites() -> None:
         len(pattern.findall(path.read_text()))
         for path in (_LIFECYCLE, _FILES, _COMMAND_DISPATCH)
     )
-    # lifecycle.py has 4 CommandStatus.<NAME> references (redispatch_start,
+    # lifecycle.py has 5 CommandStatus.<NAME> references (redispatch_start and
+    # __call__ both read an INVALID_STATE start as already-running (#773/#774),
     # stop convergence, graceful-stop "not SERVER_NOT_FOUND", SendServerCommand);
     # files.py has 2 (_map_file_status); command_dispatch.py has 2 (the sanitized
     # start-failure reason map, issue #225). Bump this with intent when a genuinely
     # new convergence/special-case match is added -- and add it to API_MATCH_SITES
     # so it is checked against the contract table.
-    assert found == 8, (
+    assert found == 9, (
         f"found {found} CommandStatus references in lifecycle.py/files.py/"
-        "command_dispatch.py, expected 8. A convergence/special-case match was "
+        "command_dispatch.py, expected 9. A convergence/special-case match was "
         "added or removed: update API_MATCH_SITES (so it is checked against the "
         "contract table) and this count."
     )

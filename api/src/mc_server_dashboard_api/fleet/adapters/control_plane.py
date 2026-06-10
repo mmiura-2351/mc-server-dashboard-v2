@@ -21,6 +21,7 @@ domain Port stays transport-free (ARCHITECTURE.md Section 2.1).
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 from mc_server_dashboard_api.fleet.domain.control_plane import (
@@ -47,6 +48,8 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
 from mc_server_dashboard_api.fleet.domain.registry import SessionToken
 from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, WorkerId
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
+
+_LOG = logging.getLogger(__name__)
 
 # Map the domain driver kind to the wire enum at the transport edge (the servers
 # context's underscore spelling is mapped to ``DriverKind`` upstream; here we go
@@ -156,18 +159,39 @@ class ControlPlaneState:
 
         self._pending.pop(command_id, None)
 
-    def resolve(self, command_id: str, result: pb.CommandResult) -> None:
+    def resolve(
+        self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
+    ) -> None:
         """Resolve the future waiting on ``command_id`` with ``result``.
 
         A result for an unknown/already-resolved command is ignored, so a late
         or duplicate ``CommandResult`` never crashes the inbound loop.
+
+        ``worker_id`` is the worker that reported the result. A result from a
+        worker that does not own the command is dropped with a warning and the
+        command is left in flight to time out normally, mirroring the status
+        sink's non-owning-worker guard (defense-in-depth, issue #789). A fresh
+        uuid4 ``command_id`` is never shared across workers, so this only fires
+        on a forged report; the owning worker's later result still resolves.
         """
 
-        entry = self._pending.pop(command_id, None)
-        if entry is not None:
-            _, future = entry
-            if not future.done():
-                future.set_result(result)
+        entry = self._pending.get(command_id)
+        if entry is None:
+            return
+        owning_worker, future = entry
+        if owning_worker != worker_id:
+            _LOG.warning(
+                "dropping command result from non-owning worker",
+                extra={
+                    "command_id": command_id,
+                    "reporting_worker_id": worker_id.value,
+                    "owning_worker_id": owning_worker.value,
+                },
+            )
+            return
+        del self._pending[command_id]
+        if not future.done():
+            future.set_result(result)
 
     def fail_worker_pending(
         self, worker_id: WorkerId, session: SessionToken, error: BaseException

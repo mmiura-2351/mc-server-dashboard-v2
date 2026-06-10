@@ -318,9 +318,11 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
-    # Hydrate succeeds, then the launch fails: both dispatches ran, and the
-    # committed intent must still be compensated.
-    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
+    # Hydrate succeeds, then the launch fails with a genuine refusal (e.g.
+    # INTERNAL — NOT an INVALID_STATE, which means already-running and is treated
+    # as convergence): both dispatches ran, and the committed intent must still be
+    # compensated.
+    busy = CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
     cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": busy})
     use_case = StartServer(
         uow=uow,
@@ -343,6 +345,121 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
+async def test_start_lost_response_after_dispatch_keeps_assignment() -> None:
+    # The lost-response case for the normal start (#773, mirroring #101's fix to
+    # place_and_start): hydrate succeeds, the start command is SENT, then its
+    # response is lost (WorkerUnavailableError, i.e. a CommandTimedOut / stream
+    # death). The Worker MAY have applied it, so __call__ must NOT compensate —
+    # keep desired=running and the assignment so the reconciler redispatches to
+    # the SAME Worker (an INVALID_STATE there resolves it as already-running).
+    # Compensating here would orphan a live instance and let a later start place
+    # a second one on a different Worker.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"start"})
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    with pytest.raises(WorkerUnavailableError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The start command was attempted (sent) before the response was lost.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate", "start"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    # No compensation: the load increment stands, nothing is decremented.
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == []
+
+
+async def test_start_pre_dispatch_unavailable_compensates() -> None:
+    # A WorkerUnavailableError BEFORE the start was sent (here a failed hydrate)
+    # means the start never reached the Worker, so __call__ must compensate the
+    # committed intent it created: revert desired->stopped, unassign, and
+    # decrement the load (#773). Mirrors the pre-dispatch leg of place_and_start.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"hydrate"})
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    with pytest.raises(WorkerUnavailableError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The start was never sent — only the hydrate was attempted.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate"]
+    reverted = uow.servers.by_id[ServerId(server_id)]
+    assert reverted.desired_state is DesiredState.STOPPED
+    assert reverted.assigned_worker_id is None
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_start_invalid_state_outcome_keeps_assignment_as_running() -> None:
+    # INVALID_STATE returned to __call__ is not a "nothing started" refusal: the
+    # Worker rejects a start only when an instance for this server is ALREADY live
+    # on the assigned Worker (already running, or a pending failed-stop orphan;
+    # instancemanager handleStart). Compensating (desired->stopped + unassign +
+    # decrement) would orphan that live instance and let a later start place a
+    # SECOND one on a different Worker (#773/#774). So __call__ must converge like
+    # redispatch_start (#213): keep desired=running + the assignment, record
+    # observed=running, and return success — no compensation, no decrement.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="already running"
+            )
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    # Success returned, with observed=running reflected on the entity.
+    assert result.desired_state is DesiredState.RUNNING
+    assert result.observed_state is ObservedState.RUNNING
+    assert result.observed_at == _NOW
+    # The start was sent; no compensation followed.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate", "start"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.observed_state is ObservedState.RUNNING
+    assert stored.observed_at == _NOW
+    # No accounting drift: the load increment stands, nothing is decremented.
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == []
+
+
 async def test_start_failure_logs_warning_with_server_and_kind(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -353,7 +470,7 @@ async def test_start_failure_logs_warning_with_server_and_kind(
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
-    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="instance busy")
+    busy = CommandOutcome(status=CommandStatus.INTERNAL, message="instance busy")
     cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": busy})
     use_case = StartServer(
         uow=uow,
@@ -421,7 +538,7 @@ async def test_start_compensation_decrements_only_when_revert_applies() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
-    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
+    busy = CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
     cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": busy})
     use_case = StartServer(
         uow=uow,
@@ -474,7 +591,7 @@ async def test_start_compensation_skips_decrement_when_revert_loses_race() -> No
 
     uow = FakeUnitOfWork(servers=_StopRacesCompensation())
     uow.servers.seed(_server(community_id=community, server_id=server_id))
-    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
+    busy = CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
     cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": busy})
     use_case = StartServer(
         uow=uow,
