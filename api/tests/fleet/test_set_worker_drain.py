@@ -12,6 +12,8 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
+import pytest
+
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
@@ -89,6 +91,13 @@ def _assigned_count(registry: InMemoryWorkerRegistry, worker_id: WorkerId) -> in
     snapshot = registry.get(worker_id)
     assert snapshot is not None
     return snapshot.assigned_count
+
+
+class _FailingCommitUnitOfWork(FakeUnitOfWork):
+    """A FakeUnitOfWork whose commit raises, to exercise the rollback path."""
+
+    async def commit(self) -> None:
+        raise RuntimeError("forced commit failure")
 
 
 async def test_drain_stops_assigned_running_servers_only() -> None:
@@ -229,9 +238,33 @@ async def test_drain_decrements_placement_load_per_stopped_server() -> None:
     count = await _use_case(registry, uow)(worker_id=worker_id, draining=True)
 
     assert count == 1
-    # The decrement dropped the load to 0 right after the flip, without waiting on a
-    # reconnect rebuild.
+    # The decrement (run after the commit lands) dropped the load to 0 within the
+    # PUT, without waiting on a reconnect rebuild.
     assert _assigned_count(registry, worker_id) == 0
+
+
+async def test_drain_does_not_decrement_when_commit_fails() -> None:
+    # I1 (round 2): the decrement runs AFTER commit, so a failed commit (which
+    # rolls back the CAS flips) must NOT leak decrements. Otherwise the registry
+    # load would understate the still-running assignment until a reconnect rebuild.
+    uow = _FailingCommitUnitOfWork()
+    s = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker_uuid=_WORKER_UUID,
+    )
+    uow.servers.seed(s)
+    registry = _registry()
+    worker_id = WorkerId(str(_WORKER_UUID))
+    registry.set_assignment(worker_id, {str(s.id.value)})
+    assert _assigned_count(registry, worker_id) == 1
+
+    with pytest.raises(RuntimeError, match="forced commit failure"):
+        await _use_case(registry, uow)(worker_id=worker_id, draining=True)
+
+    # The CAS flips rolled back with the commit; the load stays at its pre-drain
+    # value rather than leaking a decrement.
+    assert _assigned_count(registry, worker_id) == 1
 
 
 async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:

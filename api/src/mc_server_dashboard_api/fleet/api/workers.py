@@ -14,11 +14,18 @@ since the fleet is cross-community infrastructure, not community-scoped:
 
   Convergence is ASYNCHRONOUS: ``PUT`` returns immediately with the count it
   *marked*, not stopped. The stops (and snapshots) happen only after the
-  reconciler's grace window and only while the Worker stays connected — an
-  operator MUST keep the Worker up until the stops converge, since shutting the
-  host down first defers every stop and snapshot until reconnect. Confirm
-  convergence by watching ``GET /workers`` assigned load (or per-server states)
-  drop to zero.
+  reconciler's grace window (120s default) plus a tick, and only while the Worker
+  stays connected — an operator MUST keep the Worker up until the stops converge,
+  since shutting the host down first defers every stop and snapshot until
+  reconnect (which never happens in a decommission). Confirm convergence PER
+  SERVER — each drain-marked server reaching ``observed=stopped`` and unassigned
+  — NOT by assigned load: drain decrements the placement load synchronously, so
+  ``GET /workers`` assigned load drops to 0 before any stop runs.
+
+  Clearing the drain flag before convergence opens a transient oversubscription
+  window: the load was freed at drain time, so the re-enabled Worker can take new
+  placements while its drained instances are still stopping. Wait for convergence
+  before un-draining.
 """
 
 from __future__ import annotations
@@ -77,7 +84,9 @@ class DrainResponse(BaseModel):
     # The number of assigned servers this drain call MARKED desired=stopped — an
     # async intent count, not the number already stopped. The reconciler then
     # drives the graceful stop + final snapshot while the Worker stays connected
-    # (FR-WRK-5); watch GET /workers assigned load drop to confirm convergence.
+    # (FR-WRK-5); confirm convergence per server (each reaching observed=stopped
+    # and unassigned), NOT by assigned load — drain decrements the load
+    # synchronously, so it drops to 0 before any stop runs.
     servers_stopped: int
 
 

@@ -12,13 +12,18 @@ snapshot (the stop scratch is held for it since #845) — the HTTP call does not
 block on the stops completing, and no new orchestration loop is introduced.
 
 Convergence is ASYNCHRONOUS and needs the Worker connected: the actual stop +
-snapshot only happen after the reconciler's grace window and only while the
-Worker stays heartbeating (the reconciler skips disconnected Workers). An
-operator following the FR-WRK-5 workflow MUST keep the Worker up until the stops
-converge — shutting the host down immediately defers every stop (and its
-snapshot) until the Worker reconnects. The returned count is the number of
-servers this call *marked*, not the number already stopped; watch ``GET
-/workers`` assigned load (or the per-server states) drop to confirm convergence.
+snapshot only happen after the reconciler's grace window (``grace_seconds``,
+120s default) plus a reconciler tick, and only while the Worker stays
+heartbeating (the reconciler skips disconnected Workers). An operator following
+the FR-WRK-5 workflow MUST keep the Worker up until the stops converge —
+shutting the host down immediately defers every stop (and its final snapshot)
+until the Worker reconnects, which in a decommission never happens. The returned
+count is the number of servers this call *marked*, not the number already
+stopped. Confirm convergence PER SERVER, not by assigned load: this call's
+placement-load decrement (see :meth:`_stop_assigned_servers`) drops ``GET
+/workers`` assigned load to 0 synchronously, before any stop runs, so load is not
+a convergence signal. Instead watch each drain-marked server reach
+``observed=stopped`` and unassigned (the admin servers list / per-server detail).
 
 A start racing the drain can leak: if a start was already in flight when drain
 ran (placement chose this Worker before the flag flipped), it can commit
@@ -31,6 +36,13 @@ Un-draining (``draining=False``) only re-enables placement: it clears the flag
 and does NOT resurrect ``desired=running`` on the servers drain stopped. Drain's
 stops are explicit operator intents (a final snapshot was taken); restarting them
 is a deliberate per-server start, not a side effect of clearing the flag.
+Un-draining BEFORE the drained set has converged opens a transient
+oversubscription window: drain freed the placement load at flip time, so a
+re-enabled Worker can take new placements while its drained instances are still
+winding down (until ``redispatch_stop`` converges, ~grace + a tick per server).
+This matches the normal stop path's "load = assigned with desired=running"
+window (seconds there, minutes here); wait for convergence before un-draining to
+avoid it.
 """
 
 from __future__ import annotations
@@ -83,12 +95,19 @@ class SetWorkerDrain:
         pairs with it — the in-memory load is "servers assigned with
         desired=running" (the tally rebuilt on reconnect via ``set_assignment``),
         so flipping desired=stopped without decrementing leaves the load inflated
-        until the next reconnect. The reconciler's ``redispatch_stop`` deliberately
-        does NOT decrement again (it assumes the original stop already did), so
-        this is the single decrement for the drain path. ``decrement_assignment``
-        floors at zero, so a same-instant reconnect rebuild that already excluded
-        this (now desired=stopped) server makes the decrement a harmless no-op
-        rather than a double-count — the same race StopServer's decrement carries.
+        until the next reconnect. The decrements run AFTER ``commit`` returns
+        (like ``StopServer.__call__``): a failed commit rolls back the CAS flips,
+        so decrementing only the committed flips keeps the in-memory load in step
+        with the persisted desired states rather than leaking decrements on a
+        rollback. The reconciler's ``redispatch_stop`` deliberately does NOT
+        decrement again (it assumes the original stop already did), so this is the
+        single decrement for the drain path. ``decrement_assignment`` floors at
+        zero; that floor makes the decrement a harmless no-op only when a
+        same-instant reconnect rebuild already zeroed this Worker's count. With
+        other desired-running servers still assigned the floor does not engage, so
+        a rebuild that already excluded this (now desired=stopped) server followed
+        by the decrement can under-count by one until the next rebuild — the same
+        self-healing race class StopServer's decrement carries.
         """
         try:
             servers_worker_id = ServersWorkerId(uuid.UUID(worker_id.value))
@@ -112,6 +131,10 @@ class SetWorkerDrain:
                 )
                 if applied:
                     stopped += 1
-                    self.registry.decrement_assignment(worker_id)
             await self.uow.commit()
+        # Decrement only the committed flips, after the commit lands: a failed
+        # commit rolls back the CAS flips above, so the decrements must not run
+        # before it (mirroring StopServer.__call__'s post-commit decrement).
+        for _ in range(stopped):
+            self.registry.decrement_assignment(worker_id)
         return stopped
