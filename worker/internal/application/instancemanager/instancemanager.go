@@ -454,7 +454,33 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: stop: %v", err))
 	}
+	// A confirmed StopServer is an AUTHORITATIVE stop: every API path that sends a
+	// bare StopServer to the Worker (StopServer, redispatch_stop) clears the
+	// server's assignment on the confirmed stop, so the Worker no longer owns this
+	// working set. GC the local scratch dir to reclaim disk and shrink the
+	// stale-leftover surface the #698 hydrate-skip reasons about (issue #762). This
+	// is distinct from a TRANSIENT restart, which arrives as RestartServer
+	// (handleRestart, internal stop+start) and a same-Worker redispatch_start, which
+	// arrives as HydrateTrigger+StartServer — neither sends a bare StopServer, so
+	// both correctly RETAIN the scratch and #698 hydrate-skip keeps working.
+	//
+	// GC runs only on a CONFIRMED stop (attemptStop returned nil): a failed-stop
+	// orphan may still be alive and writing the working set (issue #251), so the
+	// failure path above leaves the scratch in place.
+	m.removeScratch(cmd.ServerID)
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// removeScratch deletes the server's local working-set scratch dir. It is
+// best-effort: a removal failure is logged, never surfaced — the authoritative
+// stop already succeeded, and leftover scratch is a hygiene problem, not a
+// stop failure. A missing dir is a no-op (os.RemoveAll returns nil).
+func (m *Manager) removeScratch(serverID string) {
+	dir := filepath.Join(m.scratchDir, serverID)
+	if err := os.RemoveAll(dir); err != nil {
+		m.logger.Warn("failed to remove scratch dir on authoritative stop",
+			"server_id", serverID, "dir", dir, "error", err)
+	}
 }
 
 // takeStoppable returns the instance to stop for serverID, draining either a
