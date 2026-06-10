@@ -48,16 +48,22 @@ class _EmptyRegistry(WorkerRegistry):
     def reserved_memory_mb(self, worker_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
+    def committed_memory_mb(self, worker_id):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    def assignment_epoch(self, worker_id):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
     def release_reservation(self, worker_id, server_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     def increment_assignment(self, worker_id, server_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    def decrement_assignment(self, worker_id):  # type: ignore[no-untyped-def]
+    def decrement_assignment(self, worker_id, server_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    def set_assignment(self, worker_id, server_ids):  # type: ignore[no-untyped-def]
+    def set_assignment(self, worker_id, assignments, snapshot_epoch):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     def candidates_for_placement(self):  # type: ignore[no-untyped-def]

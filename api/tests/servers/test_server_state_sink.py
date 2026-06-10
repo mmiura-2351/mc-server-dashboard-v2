@@ -57,5 +57,5 @@ async def test_running_assignment_ids_logs_on_non_uuid_worker_id(
 ) -> None:
     with caplog.at_level(logging.ERROR):
         ids = await _sink().running_assignment_ids(worker_id="worker-1")
-    assert ids == set()
+    assert ids == {}
     assert any(record.levelno == logging.ERROR for record in caplog.records)

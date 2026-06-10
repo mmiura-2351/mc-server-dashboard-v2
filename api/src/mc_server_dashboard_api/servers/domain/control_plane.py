@@ -206,8 +206,12 @@ class ControlPlane(abc.ABC):
         """
 
     @abc.abstractmethod
-    def decrement_assignment(self, *, worker_id: WorkerId) -> None:
-        """Record one server removed from ``worker_id`` (placement load--)."""
+    def decrement_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
+        """Record ``server_id`` removed from ``worker_id`` (load--, committed mem--).
+
+        Carries ``server_id`` so the registry sheds that assignment's declared memory
+        with its count (#843), keeping the committed-memory axis in step.
+        """
 
     @abc.abstractmethod
     async def start(

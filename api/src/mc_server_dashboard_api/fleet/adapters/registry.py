@@ -45,17 +45,32 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # fresh tokens so a reconnect always supersedes the prior Session.
         self._sessions: dict[WorkerId, SessionToken] = {}
         self._next_session: SessionToken = 0
-        # Per-worker COMMITTED assigned-server count, the placement 'load' axis
-        # (FR-WRK-3). Reset on (re)registration: a fresh connection starts with no
-        # servers placed on it (epic #7 will re-place after hydrate).
-        self._assignments: dict[WorkerId, int] = {}
+        # Per-worker COMMITTED assignments: server id -> declared memory request in
+        # MiB (0 = unset / not memory-gated). This is BOTH the placement 'load' axis
+        # (FR-WRK-3, the count is len) AND the committed-memory axis (#843). Tracking
+        # committed memory HERE — rather than reading it from a DB snapshot taken one
+        # await earlier — means the count and the memory gate are read in the SAME
+        # synchronous section as the reservations, so the cross-axis race (a confirm
+        # popping A's reserved memory between B's snapshot read and B's placement)
+        # cannot leave a server's memory counted in NEITHER source. Reset on
+        # (re)registration: a fresh connection starts with no servers placed on it;
+        # the lifecycle layer rebuilds it from the authoritative tally via
+        # set_assignment (epic #7 reconciliation).
+        self._committed: dict[WorkerId, dict[str, int]] = {}
+        # Monotonic confirm sequence and the sequence at which each committed id was
+        # confirmed (#844). set_assignment (the reconnect rebuild) reads its DB tally
+        # one await before it runs; a commit+confirm landing in that window stamps the
+        # newly-committed id with a sequence past the snapshot's, so the rebuild keeps
+        # it instead of letting the stale tally overwrite the +1.
+        self._next_seq: int = 0
+        self._confirmed_seq: dict[WorkerId, dict[str, int]] = {}
         # Per-worker RESERVED-but-uncommitted placements: server id -> declared
         # memory request in MiB (0 = unset / not memory-gated), the slot held
         # atomically at placement decision time (#778). A concurrent placement sees
         # each reservation counted toward load AND its memory folded into committed
         # memory, so neither the count cap nor the memory gate can be oversubscribed
         # by two starts racing for a Worker's last slot. The slot is confirmed (moved
-        # into _assignments) by increment_assignment after the lifecycle commit, or
+        # into _committed) by increment_assignment after the lifecycle commit, or
         # released by release_reservation if the placement loses its commit race.
         self._reserved: dict[WorkerId, dict[str, int]] = {}
         # Worker ids an operator has drained. This outlives connections so the
@@ -83,14 +98,15 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # fewer ids, so a stale "held" claim never survives a re-register and the
         # lifecycle layer hydrates rather than booting an empty working set.
         self._held[worker.id] = dict(held_servers)
-        # Assignment counts reset on (re)register; the server-lifecycle layer
-        # (epic #7) MUST reconcile counts from worker status reports after
-        # reconnect — a reconnected worker may still be running servers. Reserved
-        # placements are NOT reset: a placement reserved before the reconnect may
-        # still commit, and set_assignment (the rebuild) drops only those already
-        # reflected in the tally, leaving still-uncommitted ones pending so their
-        # later confirm counts (#778). Ensure the key exists for a brand-new worker.
-        self._assignments[worker.id] = 0
+        # Committed assignments reset on (re)register; the server-lifecycle layer
+        # (epic #7) MUST reconcile them from worker status reports after reconnect —
+        # a reconnected worker may still be running servers. Reserved placements are
+        # NOT reset: a placement reserved before the reconnect may still commit, and
+        # set_assignment (the rebuild) drops only those already reflected in the
+        # tally, leaving still-uncommitted ones pending so their later confirm counts
+        # (#778). Ensure the keys exist for a brand-new worker.
+        self._committed[worker.id] = {}
+        self._confirmed_seq[worker.id] = {}
         self._reserved.setdefault(worker.id, {})
         session = self._next_session
         self._next_session += 1
@@ -128,39 +144,72 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         return True
 
     def reserve(self, worker_id: WorkerId, server_id: str, memory_mb: int) -> None:
-        if worker_id in self._assignments:
+        if worker_id in self._committed:
             self._reserved[worker_id][server_id] = memory_mb
 
     def reserved_memory_mb(self, worker_id: WorkerId) -> int:
         return sum(self._reserved.get(worker_id, {}).values())
+
+    def committed_memory_mb(self, worker_id: WorkerId) -> int:
+        return sum(self._committed.get(worker_id, {}).values())
+
+    def assignment_epoch(self, worker_id: WorkerId) -> int:
+        return self._next_seq
 
     def release_reservation(self, worker_id: WorkerId, server_id: str) -> None:
         if worker_id in self._reserved:
             self._reserved[worker_id].pop(server_id, None)
 
     def increment_assignment(self, worker_id: WorkerId, server_id: str) -> None:
-        if worker_id not in self._assignments:
+        if worker_id not in self._committed:
             return
-        # Confirm the reservation -> committed. If it is already gone, a rebuild
-        # (set_assignment) between the commit and this call counted it in the
-        # tally and dropped the reservation, so incrementing again would
-        # double-count: treat the missing reservation as already-counted (#778).
-        if self._reserved[worker_id].pop(server_id, None) is not None:
-            self._assignments[worker_id] += 1
+        # Confirm the reservation -> committed, carrying its declared memory (#843)
+        # so the committed-memory axis is maintained in lock-step with the count. If
+        # the reservation is already gone, a rebuild (set_assignment) between the
+        # commit and this call counted it in the tally and dropped the reservation,
+        # so confirming again would double-count: treat the missing reservation as
+        # already-counted (#778).
+        memory_mb = self._reserved[worker_id].pop(server_id, None)
+        if memory_mb is not None:
+            self._committed[worker_id][server_id] = memory_mb
+            # Stamp the confirm sequence so a concurrent rebuild whose tally was read
+            # before this confirm keeps the row instead of overwriting it (#844).
+            self._confirmed_seq[worker_id][server_id] = self._next_seq
+            self._next_seq += 1
 
-    def decrement_assignment(self, worker_id: WorkerId) -> None:
-        if self._assignments.get(worker_id, 0) > 0:
-            self._assignments[worker_id] -= 1
+    def decrement_assignment(self, worker_id: WorkerId, server_id: str) -> None:
+        # Drop the committed row (and its memory) for ``server_id`` (#843); idempotent
+        # if it is already gone (e.g. a rebuild between the desired-state flip and
+        # this call already excluded it), mirroring the count's floor-at-zero.
+        if worker_id in self._committed:
+            self._committed[worker_id].pop(server_id, None)
+            self._confirmed_seq[worker_id].pop(server_id, None)
 
-    def set_assignment(self, worker_id: WorkerId, server_ids: set[str]) -> None:
-        if worker_id not in self._assignments:
+    def set_assignment(
+        self, worker_id: WorkerId, assignments: Mapping[str, int], snapshot_epoch: int
+    ) -> None:
+        if worker_id not in self._committed:
             return
-        self._assignments[worker_id] = len(server_ids)
-        # Drop reservations now reflected in the authoritative tally so their
-        # pending increment_assignment becomes a no-op (no double-count); keep
-        # reservations not yet in the tally (their commit is not yet visible) so
-        # their later confirm still counts (#778).
-        for committed_id in server_ids:
+        # Preserve any committed row whose confirm landed AFTER the snapshot the
+        # caller's DB tally was read at (#844): the rebuild reads the tally one await
+        # before it calls here, and a commit+confirm in that window is not yet visible
+        # in ``assignments`` — without this it would be overwritten by the stale
+        # tally and undercounted until the next reconnect.
+        preserved = {
+            server_id: memory_mb
+            for server_id, memory_mb in self._committed[worker_id].items()
+            if self._confirmed_seq[worker_id].get(server_id, -1) >= snapshot_epoch
+        }
+        self._committed[worker_id] = {**dict(assignments), **preserved}
+        self._confirmed_seq[worker_id] = {
+            server_id: self._confirmed_seq[worker_id].get(server_id, -1)
+            for server_id in self._committed[worker_id]
+        }
+        # Drop reservations now reflected in the authoritative tally so their pending
+        # increment_assignment becomes a no-op (no double-count); keep reservations
+        # not yet in the tally (their commit is not yet visible) so their later
+        # confirm still counts (#778).
+        for committed_id in assignments:
             self._reserved[worker_id].pop(committed_id, None)
 
     def candidates_for_placement(self) -> list[PlacementCandidate]:
@@ -180,6 +229,14 @@ class InMemoryWorkerRegistry(WorkerRegistry):
                 # count-only for it.
                 memory_capacity_mb=worker.capabilities.resources.memory_bytes
                 // (1024 * 1024),
+                # Committed memory: the declared memory of confirmed assignments
+                # PLUS in-flight reservations, read here in the same synchronous
+                # section as the load count so the memory gate cannot be raced by a
+                # confirm popping reserved memory between a DB snapshot and the
+                # placement decision (#843). CPU stays a soft tie-break the adapter
+                # folds from the DB snapshot.
+                committed_memory_mb=self.committed_memory_mb(worker.id)
+                + self.reserved_memory_mb(worker.id),
             )
             for worker in self._workers.values()
             if worker.status(now=now, timeout=self._timeout) is WorkerStatus.ONLINE
@@ -211,4 +268,4 @@ class InMemoryWorkerRegistry(WorkerRegistry):
     def _load(self, worker_id: WorkerId) -> int:
         """Placement load: committed assignments plus in-flight reservations (#778)."""
 
-        return self._assignments[worker_id] + len(self._reserved.get(worker_id, ()))
+        return len(self._committed[worker_id]) + len(self._reserved.get(worker_id, ()))

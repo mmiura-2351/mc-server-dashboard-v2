@@ -457,10 +457,23 @@ def test_held_generation_reflects_reported_servers() -> None:
 _4GIB = HostResources(cpu_cores=4, memory_bytes=4 * 1024 * 1024 * 1024)
 
 
+def _commit_memory(
+    registry: InMemoryWorkerRegistry, worker_uuid: uuid.UUID, memory_mb: int
+) -> None:
+    # Seed committed memory registry-side (#843): a confirmed assignment carries its
+    # declared memory, which the placement gate now reads from the registry rather
+    # than from the DB committed_by_worker snapshot.
+    fleet_id = FleetWorkerId(str(worker_uuid))
+    server_id = str(uuid.uuid4())
+    registry.reserve(fleet_id, server_id, memory_mb)
+    registry.increment_assignment(fleet_id, server_id)
+
+
 async def test_place_excludes_worker_over_committed_on_memory() -> None:
     worker_uuid = uuid.uuid4()
     registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
     registry.register(make_worker(worker_id=str(worker_uuid), resources=_4GIB, at=_T0))
+    _commit_memory(registry, worker_uuid, 2048)
     adapter = _registry_adapter(registry)
 
     # Committed 2048 + request 2048 = 4096 > 3072 usable -> excluded -> None.
@@ -468,7 +481,7 @@ async def test_place_excludes_worker_over_committed_on_memory() -> None:
         server_id=ServerId(uuid.uuid4()),
         backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
-        committed_by_worker={WorkerId(worker_uuid): CommittedResources(memory_mb=2048)},
+        committed_by_worker={},
     )
 
     assert chosen is None
@@ -478,6 +491,7 @@ async def test_place_admits_worker_with_memory_room() -> None:
     worker_uuid = uuid.uuid4()
     registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
     registry.register(make_worker(worker_id=str(worker_uuid), resources=_4GIB, at=_T0))
+    _commit_memory(registry, worker_uuid, 512)
     adapter = _registry_adapter(registry)
 
     # Committed 512 + request 2048 = 2560 <= 3072 usable -> fits.
@@ -485,7 +499,7 @@ async def test_place_admits_worker_with_memory_room() -> None:
         server_id=ServerId(uuid.uuid4()),
         backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
-        committed_by_worker={WorkerId(worker_uuid): CommittedResources(memory_mb=512)},
+        committed_by_worker={},
     )
 
     assert chosen == WorkerId(worker_uuid)
@@ -495,16 +509,41 @@ async def test_place_unset_request_memory_is_not_gated() -> None:
     worker_uuid = uuid.uuid4()
     registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
     registry.register(make_worker(worker_id=str(worker_uuid), resources=_4GIB, at=_T0))
+    _commit_memory(registry, worker_uuid, 4096)
     adapter = _registry_adapter(registry)
 
     chosen = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
         backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=None,
-        committed_by_worker={WorkerId(worker_uuid): CommittedResources(memory_mb=4096)},
+        committed_by_worker={},
     )
 
     assert chosen == WorkerId(worker_uuid)
+
+
+async def test_place_cpu_tie_break_still_uses_db_committed() -> None:
+    # Committed memory now comes from the registry (#843), but committed CPU is still
+    # folded from the DB committed_by_worker snapshot as the soft tie-break: with two
+    # equally-loaded, memory-eligible workers the one carrying less declared CPU wins.
+    worker_a = uuid.uuid4()
+    worker_b = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_a), resources=_4GIB, at=_T0))
+    registry.register(make_worker(worker_id=str(worker_b), resources=_4GIB, at=_T0))
+    adapter = _registry_adapter(registry)
+
+    chosen = await adapter.place(
+        server_id=ServerId(uuid.uuid4()),
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=512,
+        committed_by_worker={
+            WorkerId(worker_a): CommittedResources(cpu_millis=3000),
+            WorkerId(worker_b): CommittedResources(cpu_millis=1000),
+        },
+    )
+
+    assert chosen == WorkerId(worker_b)
 
 
 # --- placement reservation closes the capacity race (#778) -------------------
@@ -562,3 +601,40 @@ async def test_place_reservation_folds_memory_into_the_gate() -> None:
 
     assert first == WorkerId(worker_uuid)
     assert second is None
+
+
+async def test_place_memory_gate_survives_confirm_between_snapshot_and_place() -> None:
+    # #843 cross-axis race: B reads its DB committed-memory snapshot one await before
+    # placing; A then commits AND confirms, popping A's reserved memory. With the old
+    # split (DB snapshot + live reservations) A's memory landed in NEITHER source for
+    # B, so B oversubscribed. Now committed memory is registry-side, read in B's sync
+    # section, so A's confirmed 2048 is counted and B is excluded.
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), resources=_4GIB, at=_T0))
+    adapter = _registry_adapter(registry)
+
+    # B's stale committed-memory snapshot (taken before A's commit): empty.
+    b_committed_snapshot: dict[WorkerId, CommittedResources] = {}
+
+    # A places, commits, and confirms — A's 2048 moves reserved -> committed.
+    a_server = ServerId(uuid.uuid4())
+    chosen_a = await adapter.place(
+        server_id=a_server,
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=2048,
+        committed_by_worker={},
+    )
+    assert chosen_a == WorkerId(worker_uuid)
+    adapter.increment_assignment(worker_id=WorkerId(worker_uuid), server_id=a_server)
+
+    # B now places with its stale snapshot; the gate must still see A's 2048.
+    # 2048 committed + 2048 requested = 4096 > 3072 usable -> excluded.
+    chosen_b = await adapter.place(
+        server_id=ServerId(uuid.uuid4()),
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=2048,
+        committed_by_worker=b_committed_snapshot,
+    )
+
+    assert chosen_b is None
