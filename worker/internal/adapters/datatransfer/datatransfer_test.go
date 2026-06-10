@@ -318,3 +318,111 @@ func TestSnapshotPropagatesServerError(t *testing.T) {
 		t.Fatal("expected an error for a 400 response")
 	}
 }
+
+// fakeInfo wraps a real os.FileInfo but overrides Size() so we can simulate a
+// file that grew or shrank between the ReadDir stat and the actual copy.
+type fakeInfo struct {
+	os.FileInfo
+	size int64
+}
+
+func (f fakeInfo) Size() int64 { return f.size }
+
+// TestWriteRegularGrowingFile verifies that a file that grows between the stat
+// and the copy does not cause ErrWriteTooLong: the tar entry must be exactly
+// the header-declared size and the archive must untar cleanly.
+func TestWriteRegularGrowingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "latest.log")
+	// Write 5 bytes to disk.
+	original := []byte("hello")
+	if err := os.WriteFile(path, original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Stat reports only 3 bytes (simulating the ReadDir-time snapshot before the
+	// file grew to 5 bytes).
+	realInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := fakeInfo{FileInfo: realInfo, size: 3}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := writeRegular(tw, "latest.log", path, info); err != nil {
+		t.Fatalf("writeRegular with grown file: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tw.Close with grown file: %v", err)
+	}
+
+	// The archive must untar cleanly and the entry must be exactly 3 bytes.
+	tr := tar.NewReader(&buf)
+	h, err := tr.Next()
+	if err != nil {
+		t.Fatalf("tar.Next: %v", err)
+	}
+	if h.Size != 3 {
+		t.Fatalf("header.Size = %d, want 3", h.Size)
+	}
+	content, err := io.ReadAll(tr)
+	if err != nil {
+		t.Fatalf("read entry: %v", err)
+	}
+	if int64(len(content)) != h.Size {
+		t.Fatalf("entry bytes = %d, want %d", len(content), h.Size)
+	}
+	// Content must be the first 3 bytes of the file (the file grew, we capped).
+	if string(content) != "hel" {
+		t.Fatalf("entry content = %q, want %q", string(content), "hel")
+	}
+}
+
+// TestWriteRegularShrinkingFile verifies that a file that shrinks between the
+// stat and the copy does not leave the tar in an inconsistent state: the entry
+// is zero-padded to the header-declared size and the archive untars cleanly.
+func TestWriteRegularShrinkingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "latest.log")
+	// Write 3 bytes to disk.
+	if err := os.WriteFile(path, []byte("hi!"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Stat reports 6 bytes (simulating the ReadDir-time snapshot before the
+	// file shrank from 6 bytes to 3 bytes).
+	realInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := fakeInfo{FileInfo: realInfo, size: 6}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := writeRegular(tw, "latest.log", path, info); err != nil {
+		t.Fatalf("writeRegular with shrunk file: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tw.Close with shrunk file: %v", err)
+	}
+
+	// The archive must untar cleanly and the entry must be exactly 6 bytes.
+	tr := tar.NewReader(&buf)
+	h, err := tr.Next()
+	if err != nil {
+		t.Fatalf("tar.Next: %v", err)
+	}
+	if h.Size != 6 {
+		t.Fatalf("header.Size = %d, want 6", h.Size)
+	}
+	content, err := io.ReadAll(tr)
+	if err != nil {
+		t.Fatalf("read entry: %v", err)
+	}
+	if int64(len(content)) != h.Size {
+		t.Fatalf("entry bytes = %d, want %d", len(content), h.Size)
+	}
+	// First 3 bytes are the file content; last 3 are zero-padding.
+	if string(content) != "hi!\x00\x00\x00" {
+		t.Fatalf("entry content = %q, want %q", content, "hi!\x00\x00\x00")
+	}
+}
