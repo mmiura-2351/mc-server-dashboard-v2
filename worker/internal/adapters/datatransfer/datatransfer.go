@@ -24,8 +24,10 @@ package datatransfer
 import (
 	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -62,15 +64,27 @@ func parseGeneration(h http.Header) uint64 {
 }
 
 // Client moves working sets over the API HTTP data plane. It is safe for
-// concurrent use (it holds only an *http.Client).
+// concurrent use (it holds only an *http.Client and a *slog.Logger).
 type Client struct {
-	http *http.Client
+	http   *http.Client
+	logger *slog.Logger
 }
 
 // New builds a Client over the given *http.Client (built with the control
 // channel's TLS posture in the wiring layer).
 func New(httpClient *http.Client) *Client {
-	return &Client{http: httpClient}
+	return &Client{http: httpClient, logger: slog.Default()}
+}
+
+// WithLogger sets the logger used for pack-time observability (cap/pad
+// adjustments and vanished-file skips). The default is slog.Default(). l must
+// not be nil; pass slog.Default() explicitly if no custom logger is available.
+func (c *Client) WithLogger(l *slog.Logger) *Client {
+	if l == nil {
+		l = slog.Default()
+	}
+	c.logger = l
+	return c
 }
 
 // Hydrate downloads the working-set tar from url into destDir, REPLACING its
@@ -167,7 +181,7 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) (uint6
 		_ = os.Remove(spool.Name())
 	}()
 
-	if err := packTar(srcDir, spool); err != nil {
+	if err := packTar(srcDir, spool, c.logger); err != nil {
 		return 0, fmt.Errorf("datatransfer: pack: %w", err)
 	}
 	size, err := spool.Seek(0, io.SeekCurrent)
@@ -290,6 +304,12 @@ func unpackAndSwap(r io.Reader, destDir string) error {
 // renames within one parent dir are symmetric, so there is no static-perms way to
 // fail only this one). Production always uses os.Rename.
 var swapRename = os.Rename
+
+// openFile is the function used by writeRegular to open a file for reading. It
+// is indirected through a package var so a test can inject ENOENT for a specific
+// path (simulating log-rotation deletion between the walk and the open) without
+// needing to race real filesystem timings. Production always uses os.Open.
+var openFile = os.Open
 
 // fsyncTree fsyncs every directory in the tree rooted at dir (post-order, so a
 // child dir is durable before its parent's entry for it). File contents are already
@@ -444,8 +464,9 @@ func safeJoin(root, name string) (string, error) {
 
 // packTar writes a tar of srcDir's contents (entries relative to srcDir) into w,
 // in a deterministic (lexicographic) order. The Worker-private generation marker
-// at the scratch root is excluded (issue #763); nothing else is.
-func packTar(srcDir string, w io.Writer) error {
+// at the scratch root is excluded (issue #763); nothing else is. log is used to
+// emit observability lines for vanished-file skips and cap/pad adjustments.
+func packTar(srcDir string, w io.Writer, log *slog.Logger) error {
 	root, err := filepath.Abs(srcDir)
 	if err != nil {
 		return err
@@ -463,7 +484,7 @@ func packTar(srcDir string, w io.Writer) error {
 	}
 
 	tw := tar.NewWriter(w)
-	if err := walkInto(tw, root, root); err != nil {
+	if err := walkInto(tw, root, root, log); err != nil {
 		_ = tw.Close()
 		return err
 	}
@@ -472,7 +493,7 @@ func packTar(srcDir string, w io.Writer) error {
 
 // walkInto adds the contents of dir (relative to root) to tw, recursing in
 // lexicographic order for a deterministic-ish archive.
-func walkInto(tw *tar.Writer, root, dir string) error {
+func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -511,7 +532,7 @@ func walkInto(tw *tar.Writer, root, dir string) error {
 			}); err != nil {
 				return err
 			}
-			if err := walkInto(tw, root, full); err != nil {
+			if err := walkInto(tw, root, full, log); err != nil {
 				return err
 			}
 			continue
@@ -519,7 +540,7 @@ func walkInto(tw *tar.Writer, root, dir string) error {
 		if !info.Mode().IsRegular() {
 			continue
 		}
-		if err := writeRegular(tw, rel, full, info); err != nil {
+		if err := writeRegular(tw, rel, full, info, log); err != nil {
 			return err
 		}
 	}
@@ -532,13 +553,36 @@ func walkInto(tw *tar.Writer, root, dir string) error {
 // shrink between that stat and the actual read (e.g. logs/latest.log written by
 // a running Minecraft server even while save-off is active).
 //
+//   - Vanished: if the file is gone by the time we open it (ENOENT — log
+//     rotation, atomic replace), it is skipped with a log line and no tar entry
+//     is written. Only ENOENT on the open triggers a skip; other open errors
+//     still fail the snapshot.
 //   - Growth: io.LimitedReader caps the read at Size bytes, so extra bytes that
-//     arrive after the header was committed are silently ignored. Without this,
-//     the tar writer returns ErrWriteTooLong and aborts the whole snapshot.
+//     arrive after the header was committed are silently ignored. The cap is
+//     logged so a later 422 working_set_corrupt is diagnosable.
 //   - Shrink: after the LimitedReader drains the (shorter) file, the remaining
 //     byte count is padded with zeros so bytes-written == header.Size (the tar
-//     must be internally consistent: header size == bytes in the entry).
-func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo) error {
+//     must be internally consistent: header size == bytes in the entry). The
+//     pad delta is logged for the same reason.
+func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo, log *slog.Logger) error {
+	// Open before writing the header so a vanished file can be skipped cleanly
+	// without leaving an uncommitted partial entry in the archive.
+	f, err := openFile(full)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// File vanished between the walk and the open (e.g. log rotation).
+			// Minecraft never unlinks region files mid-write, and quiesce is
+			// best-effort (RCON failure leaves the server running unbracketed),
+			// so a vanished .mca would not be caught by any downstream integrity
+			// gate. Warn so the event clears alerting thresholds if it occurs.
+			log.Warn("snapshot: file vanished between walk and open; skipping",
+				"path", rel)
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
 	size := info.Size()
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     rel,
@@ -548,11 +592,6 @@ func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo) error {
 	}); err != nil {
 		return err
 	}
-	f, err := os.Open(full)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 
 	// Copy exactly Size bytes: a LimitedReader caps a grown file at Size so the
 	// tar writer never sees more bytes than the header declared.
@@ -561,10 +600,21 @@ func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo) error {
 	if err != nil {
 		return err
 	}
-	// If the file shrank, pad with zeros so the tar entry equals header.Size.
 	if remaining := size - written; remaining > 0 {
-		if _, err := io.Copy(tw, io.LimitReader(zeroReader{}, remaining)); err != nil {
+		// File shrank between the walk stat and the copy: pad with zeros so the
+		// tar entry equals header.Size (the tar must be internally consistent).
+		log.Info("snapshot: file shrank between walk and copy; zero-padded",
+			"path", rel, "bytes", remaining)
+		if _, err := io.CopyN(tw, zeroReader{}, remaining); err != nil {
 			return err
+		}
+	} else {
+		// lr.N reaches 0 when the file had >= Size bytes: either exactly Size
+		// (no adjustment) or larger (capped). Peek one byte to distinguish.
+		var peek [1]byte
+		if n, _ := f.Read(peek[:]); n > 0 {
+			log.Info("snapshot: file grew between walk and copy; capped",
+				"path", rel, "bytes_declared", size)
 		}
 	}
 	return nil
