@@ -222,7 +222,9 @@ describe("admin overview stats", () => {
 
     const callsBefore = fetchMock.mock.calls.filter((c) => {
       const url =
-        typeof c[0] === "string" ? c[0] : (c[0] as { toString(): string }).toString();
+        typeof c[0] === "string"
+          ? c[0]
+          : (c[0] as { toString(): string }).toString();
       return url === "/api/workers";
     }).length;
 
@@ -232,7 +234,9 @@ describe("admin overview stats", () => {
 
     const callsAfter = fetchMock.mock.calls.filter((c) => {
       const url =
-        typeof c[0] === "string" ? c[0] : (c[0] as { toString(): string }).toString();
+        typeof c[0] === "string"
+          ? c[0]
+          : (c[0] as { toString(): string }).toString();
       return url === "/api/workers";
     }).length;
 

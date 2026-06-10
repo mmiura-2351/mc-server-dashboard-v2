@@ -428,7 +428,10 @@ describe("CommunityGrantsTab", () => {
         if (groupsTabServersCallCount === 1) {
           // First call comes from grants tab; 403 to force the fallback.
           return Promise.reject(
-            new ApiError(403, { reason: "forbidden", permission: "server:read" }),
+            new ApiError(403, {
+              reason: "forbidden",
+              permission: "server:read",
+            }),
           );
         }
         // Subsequent calls (e.g., from groups tab) return real data.

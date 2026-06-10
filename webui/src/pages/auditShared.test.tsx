@@ -69,8 +69,12 @@ describe("applyAuditParams", () => {
     expect(params.has("since")).toBe(true);
     expect(params.has("until")).toBe(true);
     // Must be valid ISO 8601 (parseable without throwing).
-    expect(() => new Date(params.get("since")!).toISOString()).not.toThrow();
-    expect(() => new Date(params.get("until")!).toISOString()).not.toThrow();
+    expect(() =>
+      new Date(params.get("since") ?? "").toISOString(),
+    ).not.toThrow();
+    expect(() =>
+      new Date(params.get("until") ?? "").toISOString(),
+    ).not.toThrow();
   });
 
   it("ignores an invalid since value instead of throwing (#791)", () => {
