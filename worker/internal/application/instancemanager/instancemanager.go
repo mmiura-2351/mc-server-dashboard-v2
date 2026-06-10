@@ -330,6 +330,26 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// restore is always non-nil; it re-enables auto-save (when it was disabled)
 		// and releases the RCON connection. Deferring it guarantees save-on runs on
 		// every return path below, including the transfer-error path and a panic.
+		//
+		// The running-id snapshot takes NO reservation across its quiesce window, and
+		// that is safe (issue #829, item 4):
+		//   - Same stream: SnapshotTrigger and a StopServer/RestartServer for one id are
+		//     queued on the same per-server lane (session dispatcher, #95) and run
+		//     serially in FIFO order; the snapshot runs inline holding a concurrency
+		//     slot and does not detach, so a same-stream stop cannot overlap it.
+		//   - Cross stream: an old dropped stream's snapshot can still be running when a
+		//     new stream's lane runs a stop/restart, which (holding no reservation here)
+		//     evicts and terminates the process mid-tar. The worst this yields is a TORN
+		//     capture — the stop's shutdown re-saves regions while the tar reads them.
+		//     A tear that happens DURING the tar is caught downstream by the API's #739
+		//     content-integrity gate, which refuses the publish and aborts the staging
+		//     area, so current/ keeps the last good generation: no silent corruption and
+		//     no overwrite. And this is a PERIODIC snapshot of a still-running server, not
+		//     the post-stop FINAL one (a stopped-id snapshot, which DOES reserve below),
+		//     so a refused capture simply retries on the next tick — nothing is lost.
+		// A reservation would only convert that refused-and-retried outcome into an
+		// INVALID_STATE-rejected one — same net effect, more coordination state — so it
+		// is intentionally not taken.
 		restore := m.quiesceRunning(ctx, cmd.ServerID)
 		defer restore()
 	} else {
@@ -663,12 +683,22 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 		m.reserved[serverID] = true
 		return inst, takeFound
 	}
+	// Check the reservation BEFORE the orphan branch. A failed-stop orphan retains
+	// its instance record while a stop for the id is in flight (attemptStop deletes
+	// the orphan only on a confirmed termination), so an orphan-retry stop1 holds
+	// the reservation AND keeps the orphan recorded across its inst.Stop. If a
+	// re-sent stop2 walked into the orphan branch here it would take the same orphan
+	// instance a second time; both stops then run their deferred release, and stop1's
+	// release steals the reservation out from under the still-running stop2 — worst
+	// case leaving stop2 to drive removeScratch unreserved. Honoring the reservation
+	// first rejects stop2 with takeInFlight (-> INVALID_STATE) instead, exactly as it
+	// already does for a detached running-instance stop (issue #780).
+	if m.reserved[serverID] {
+		return nil, takeInFlight
+	}
 	if inst, ok := m.orphans[serverID]; ok {
 		m.reserved[serverID] = true
 		return inst, takeFound
-	}
-	if m.reserved[serverID] {
-		return nil, takeInFlight
 	}
 	return nil, takeNotFound
 }
@@ -715,7 +745,51 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 	return inst, start, takeFound
 }
 
+// peekStartCmd returns the recorded StartServer spec for a currently-tracked
+// running instance WITHOUT evicting or reserving it, so handleRestart can resolve
+// the driver/launch mode while the instance is still live and tracked. ok is false
+// when no instance is tracked for the id (the caller then runs the eviction path
+// to distinguish not-found from a reserved in-flight command).
+func (m *Manager) peekStartCmd(serverID string) (session.Command, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.instances[serverID]; !ok {
+		return session.Command{}, false
+	}
+	return m.startCmds[serverID], true
+}
+
 func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) session.CommandResult {
+	// Resolve the driver and launch mode from the recorded StartServer spec BEFORE
+	// evicting/reserving the instance, so a resolution failure surfaces while the
+	// instance is still tracked and live — no release of an already-evicted process
+	// that nothing else is tracking. This path is defensive (the recorded spec came
+	// from a StartServer that already validated both), but resolving first keeps the
+	// failure mode honest if it ever does fail.
+	start, ok := m.peekStartCmd(cmd.ServerID)
+	if !ok {
+		// No tracked running instance: takeRunningReserve distinguishes a genuinely
+		// unknown id (SERVER_NOT_FOUND) from a reserved in-flight command — a detached
+		// stop or a start/hydrate mid-operation (INVALID_STATE, issue #780).
+		_, _, outcome := m.takeRunningReserve(cmd.ServerID)
+		if outcome == takeInFlight {
+			return fail(cmd.CommandID, session.CommandErrorInvalidState,
+				"instancemanager: a lifecycle command is already in flight for this server")
+		}
+		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+			"instancemanager: server not running")
+	}
+	driver, ok := m.drivers[start.Driver]
+	if !ok {
+		return fail(cmd.CommandID, session.CommandErrorDriverUnavailable,
+			fmt.Sprintf("instancemanager: driver %q not offered by this Worker", start.Driver))
+	}
+	launchMode, ok := launchModeFor(start.LaunchMode)
+	if !ok {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: unknown launch mode %q", start.LaunchMode))
+	}
+
 	inst, start, outcome := m.takeRunningReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
@@ -733,18 +807,7 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	// to the re-registered instance on a successful relaunch (launchReserved) and
 	// released on every failure path so the id is never left unclaimed under the still-
 	// stopping process (issue #780).
-	driver, ok := m.drivers[start.Driver]
-	if !ok {
-		m.release(cmd.ServerID)
-		return fail(cmd.CommandID, session.CommandErrorDriverUnavailable,
-			fmt.Sprintf("instancemanager: driver %q not offered by this Worker", start.Driver))
-	}
-	launchMode, ok := launchModeFor(start.LaunchMode)
-	if !ok {
-		m.release(cmd.ServerID)
-		return fail(cmd.CommandID, session.CommandErrorInternal,
-			fmt.Sprintf("instancemanager: unknown launch mode %q", start.LaunchMode))
-	}
+	//
 	// A restart whose stop cannot confirm termination leaves the same failed-stop
 	// orphan as a plain StopServer would, so the reconciler's retry path can still
 	// terminate it rather than double-instancing over it (issue #251). The reservation
