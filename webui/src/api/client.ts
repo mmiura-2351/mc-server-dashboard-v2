@@ -101,6 +101,10 @@ export function setRefresher(fn: Refresher): void {
   refresher = fn;
 }
 
+export function getRefresher(): Refresher | null {
+  return refresher;
+}
+
 /**
  * Reset the injected refresher for tests. It is a module-level singleton that
  * otherwise survives across test cases/files; clearing it per case keeps the
