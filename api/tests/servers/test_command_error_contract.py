@@ -61,7 +61,8 @@ API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     ("StartServer", CommandStatus.INVALID_STATE),
     # lifecycle.py: stop convergence -- SERVER_NOT_FOUND means no live instance;
     # converge observed=stopped instead of failing. The graceful-stop path also
-    # special-cases the same status ("not SERVER_NOT_FOUND" raises).
+    # special-cases the same status ("not SERVER_NOT_FOUND" raises), and
+    # redispatch_stop special-cases it again to skip the final snapshot (#846).
     ("StopServer", CommandStatus.SERVER_NOT_FOUND),
     # lifecycle.py: SendServerCommand -- the server stopped between the
     # observed-running check and dispatch; the Worker emits SERVER_NOT_FOUND.
@@ -108,16 +109,17 @@ def test_no_undeclared_match_sites() -> None:
         len(pattern.findall(path.read_text()))
         for path in (_LIFECYCLE, _FILES, _COMMAND_DISPATCH)
     )
-    # lifecycle.py has 5 CommandStatus.<NAME> references (redispatch_start and
+    # lifecycle.py has 6 CommandStatus.<NAME> references (redispatch_start and
     # __call__ both read an INVALID_STATE start as already-running (#773/#774),
-    # stop convergence, graceful-stop "not SERVER_NOT_FOUND", SendServerCommand);
-    # files.py has 2 (_map_file_status); command_dispatch.py has 2 (the sanitized
-    # start-failure reason map, issue #225). Bump this with intent when a genuinely
-    # new convergence/special-case match is added -- and add it to API_MATCH_SITES
-    # so it is checked against the contract table.
-    assert found == 9, (
+    # stop convergence, graceful-stop "not SERVER_NOT_FOUND", redispatch_stop's
+    # snapshot-skip "not SERVER_NOT_FOUND" (#846), SendServerCommand); files.py has 2
+    # (_map_file_status); command_dispatch.py has 2 (the sanitized start-failure
+    # reason map, issue #225). Bump this with intent when a genuinely new
+    # convergence/special-case match is added -- and add it to API_MATCH_SITES so it
+    # is checked against the contract table.
+    assert found == 10, (
         f"found {found} CommandStatus references in lifecycle.py/files.py/"
-        "command_dispatch.py, expected 9. A convergence/special-case match was "
+        "command_dispatch.py, expected 10. A convergence/special-case match was "
         "added or removed: update API_MATCH_SITES (so it is checked against the "
         "contract table) and this count."
     )

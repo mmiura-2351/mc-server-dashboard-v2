@@ -2092,7 +2092,9 @@ async def test_redispatch_stop_replays_stop_without_decrement() -> None:
     await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW)).redispatch_stop(
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
-    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+    # A confirmed stop takes the same post-stop final snapshot as StopServer.__call__
+    # (issue #846); the decrement is not repeated here.
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
     assert cp.decremented == []
     # A confirmed stop clears the assignment so a later start can re-place it
     # (issue #206); the decrement is not repeated here.
@@ -2122,6 +2124,96 @@ async def test_redispatch_stop_server_not_found_unassigns() -> None:
     )
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.assigned_worker_id is None
+    # No live instance remained, so there is no working set to capture: no snapshot
+    # is dispatched on the SERVER_NOT_FOUND path (issue #846).
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+
+
+async def test_redispatch_stop_takes_final_snapshot_on_success() -> None:
+    # A confirmed reconciler-driven stop must take the same post-stop final snapshot
+    # StopServer.__call__ takes, targeting the assigned Worker and the (community,
+    # server) scope (issue #846, FR-DATA-7) — otherwise the world progression since
+    # the last periodic snapshot is lost and the Worker strands the stop scratch.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _RecordsScope(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.snapshot_scope = (worker_id, community_id, server_id)
+            return await super().snapshot(
+                worker_id=worker_id, community_id=community_id, server_id=server_id
+            )
+
+    cp = _RecordsScope()
+    await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW)).redispatch_stop(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+    assert cp.snapshot_scope == (
+        WorkerId(worker),
+        CommunityId(community),
+        ServerId(server_id),
+    )
+
+
+async def test_redispatch_stop_final_snapshot_failure_logs_error_and_converges(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A failing final snapshot must not fail the reconciler tick: the stop already
+    # succeeded and the server is down. The failure is logged LOUD (error level,
+    # issue #841) but convergence (observed=stopped, unassigned) still lands (#846).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotFails(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            return CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED, message="empty_snapshot"
+            )
+
+    cp = _SnapshotFails()
+    with caplog.at_level(logging.ERROR):
+        result = await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).redispatch_stop(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The tick did not raise and convergence is unaffected by the snapshot failure.
+    assert result.observed_state is ObservedState.STOPPED
+    assert result.assigned_worker_id is None
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id is None
+    record = next(
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
+    )
+    assert str(server_id) in record.getMessage()
 
 
 async def test_redispatch_stop_returned_entity_honest_when_write_dropped() -> None:
