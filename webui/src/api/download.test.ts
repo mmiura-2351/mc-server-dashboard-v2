@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
-import { ApiError } from "./client.ts";
+import { ApiError, resetForTesting, setRefresher } from "./client.ts";
 import { downloadFile } from "./download.ts";
 
 describe("downloadFile", () => {
@@ -18,10 +18,13 @@ describe("downloadFile", () => {
     ) {
       clicks.push(this);
     });
+    // Default refresher: no-op failure, so tests opt into a working refresh.
+    setRefresher(() => Promise.resolve(false));
   });
 
   afterEach(() => {
     clearAccessToken();
+    resetForTesting();
     vi.restoreAllMocks();
   });
 
@@ -91,5 +94,82 @@ describe("downloadFile", () => {
       downloadFile("/api/communities/c1/servers/s1/export", "x.zip"),
     ).rejects.toBeInstanceOf(ApiError);
     expect(clicks).toHaveLength(0);
+  });
+
+  describe("transparent 401 refresh", () => {
+    it("refreshes once and retries the download on a 401", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(null, { status: 401 }))
+        .mockResolvedValueOnce(
+          new Response(new Blob(["zip-bytes"]), { status: 200 }),
+        );
+      vi.stubGlobal("fetch", fetchMock);
+      const refresher = vi.fn(() => Promise.resolve(true));
+      setRefresher(refresher);
+
+      await downloadFile("/api/communities/c1/servers/s1/export", "out.zip");
+
+      expect(refresher).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(clicks).toHaveLength(1);
+    });
+
+    it("does not retry when the refresh fails", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response(null, { status: 401 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const refresher = vi.fn(() => Promise.resolve(false));
+      setRefresher(refresher);
+
+      const error = await downloadFile(
+        "/api/communities/c1/servers/s1/export",
+        "out.zip",
+      ).catch((e) => e);
+
+      expect(refresher).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error.status).toBe(401);
+      expect(clicks).toHaveLength(0);
+    });
+
+    it("retries only once: a second 401 after refresh surfaces the error", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response(null, { status: 401 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const refresher = vi.fn(() => Promise.resolve(true));
+      setRefresher(refresher);
+
+      const error = await downloadFile(
+        "/api/communities/c1/servers/s1/export",
+        "out.zip",
+      ).catch((e) => e);
+
+      expect(refresher).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error.status).toBe(401);
+      expect(clicks).toHaveLength(0);
+    });
+
+    it("does not retry when no refresher is registered", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response(null, { status: 401 }));
+      vi.stubGlobal("fetch", fetchMock);
+      resetForTesting();
+
+      const error = await downloadFile(
+        "/api/communities/c1/servers/s1/export",
+        "out.zip",
+      ).catch((e) => e);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error.status).toBe(401);
+    });
   });
 });
