@@ -944,6 +944,24 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	}
 
 	if err := i.docker.Kill(stopCtx, id); err != nil {
+		// The kill call itself errored (e.g. a hung or erroring daemon), so this Stop
+		// failed without confirming the container died. Reset the stopping latch (and
+		// restore the pre-stop state) so a retried Stop re-runs the full sequence
+		// instead of short-circuiting on the entry guard and returning a false nil
+		// success — which would otherwise let the API remove the orphan record and GC
+		// the authoritative-stop scratch (#766) while the container may still be alive
+		// (issue #816). Mirror the survived-kill reset (#253): keep the same
+		// exitObserved guard, since the container can exit concurrently and supervise
+		// then owns the terminal state (#392), and leave stopRequested sticky so a
+		// later exit is recorded stopped rather than a spurious crash (#257).
+		i.mu.Lock()
+		if i.exitObserved {
+			i.mu.Unlock()
+			return nil
+		}
+		i.stopping = false
+		i.state = prior
+		i.mu.Unlock()
 		return fmt.Errorf("containerdriver: kill: %w", err)
 	}
 	// Confirm the kill actually terminated the container. A container that survives
