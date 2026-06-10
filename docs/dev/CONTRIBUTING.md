@@ -61,7 +61,16 @@ worktrees. Edge cases:
   `git checkout main`.
 - **Intentional override** — set `MCSD_ALLOW_PRIMARY_BRANCH=1` in the
   environment to suppress auto-restore for a single checkout (e.g. to inspect a
-  branch directly). A notice is still printed; restore manually when done.
+  branch directly). A notice is still printed; restore manually when done. Note:
+  this variable persists for the lifetime of the shell process — unset it
+  explicitly (`unset MCSD_ALLOW_PRIMARY_BRANCH`) when the inspection is done,
+  or subsequent checkouts in the same shell will also be permitted.
+- **git bisect / git rebase** — the hook is silently skipped during in-progress
+  `git bisect`, `git rebase`, `git cherry-pick`, and `git merge` operations on
+  the primary checkout. These operations invoke `post-checkout` internally, and
+  restoring to `main` mid-operation would corrupt them. The auto-restore
+  adversary (an agent accidentally running `git checkout` or `gh pr checkout`)
+  does not create those in-progress state files.
 
 - Don't bypass failing pre-commit / pre-push hooks; fix the cause. If a hook
   fails, the commit did not happen — make a **new** commit rather than

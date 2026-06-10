@@ -20,6 +20,10 @@
 # Detached HEAD: treated the same as a named branch -- auto-restored to main,
 # or refused when dirty.
 #
+# In-operation guard: git rebase, bisect, cherry-pick, and merge all invoke
+# post-checkout internally. Auto-restoring during these operations would corrupt
+# them. The hook exits silently when any of their marker files/dirs are present.
+#
 # Args (git post-checkout): $1 prev HEAD, $2 new HEAD, $3 flag (1 = branch
 # checkout, 0 = file checkout).
 set -euo pipefail
@@ -31,12 +35,24 @@ toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
 # Worktrees live under .claude/worktrees/; their checkouts are expected to leave
 # main and must stay silent. Only the primary checkout is the deploy source.
+# Note: this exemption is path-convention-based, not structural — it matches
+# repos whose toplevel happens to contain /.claude/worktrees/ in their path.
 case "$toplevel" in
 	*/.claude/worktrees/*) exit 0 ;;
 esac
 
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")"
 [ "$branch" = "main" ] && exit 0
+
+# In-operation guard: skip auto-restore when git is mid-rebase, mid-bisect,
+# mid-cherry-pick, or mid-merge. These operations invoke post-checkout internally;
+# restoring to main would corrupt the in-progress operation.
+gitdir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+if [ -d "$gitdir/rebase-merge" ] || [ -d "$gitdir/rebase-apply" ] \
+   || [ -f "$gitdir/BISECT_LOG" ] || [ -f "$gitdir/CHERRY_PICK_HEAD" ] \
+   || [ -f "$gitdir/MERGE_HEAD" ]; then
+	exit 0
+fi
 
 # Colour helpers (only when stderr is a terminal).
 if [ -t 2 ]; then

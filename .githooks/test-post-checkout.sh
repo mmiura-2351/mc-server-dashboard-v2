@@ -5,17 +5,11 @@
 # Creates an isolated temporary git repo to simulate the primary checkout
 # (toplevel path does NOT contain .claude/worktrees/) and exercises the four
 # behaviours: worktree exemption, clean-tree auto-restore, dirty-tree refusal,
-# and MCSD_ALLOW_PRIMARY_BRANCH override.
+# MCSD_ALLOW_PRIMARY_BRANCH override, in-operation guard (rebase/bisect), and
+# staged-only / dirty-detached-HEAD edge cases.
 #
 # Exit code: 0 = all pass, non-zero = first failure (set -e).
 set -euo pipefail
-
-# When invoked from inside a git hook (pre-push runs `make check` -> `make
-# test` -> this script), git exports GIT_DIR (and friends) pointing at the
-# REAL repository. Those leak into every git command below and would redirect
-# the test's init/commit/checkout calls onto the real repo instead of the
-# temp repos. Drop all GIT_* variables so the temp repos are truly isolated.
-unset "${!GIT_@}"
 
 HOOK="$(cd "$(dirname "$0")" && pwd)/post-checkout"
 if [ ! -x "$HOOK" ]; then
@@ -155,7 +149,7 @@ echo "=== post-checkout tests ==="
 	rm -rf "$repo"
 }
 
-# --- 6. Dirty working tree: auto-restore refused, exits non-zero ---
+# --- 6. Dirty working tree (unstaged): auto-restore refused, exits non-zero ---
 {
 	repo="$(make_repo)"
 	main_sha="$(git -C "$repo" rev-parse HEAD)"
@@ -255,6 +249,107 @@ echo "=== post-checkout tests ==="
 		ok "detached HEAD: auto-restored to main"
 	else
 		fail_test "detached HEAD: expected main, got $current"
+	fi
+	rm -rf "$repo"
+}
+
+# --- 11. In-operation guard: rebase-merge dir present → hook skips ---
+{
+	repo="$(make_repo)"
+	main_sha="$(git -C "$repo" rev-parse HEAD)"
+	git -C "$repo" checkout -q -b feature-rebase
+	feature_sha="$(git -C "$repo" rev-parse HEAD)"
+	# Simulate a rebase in progress by creating the rebase-merge marker dir.
+	mkdir -p "$repo/.git/rebase-merge"
+	out="$(run_hook_stderr "$repo" "$main_sha" "$feature_sha" "1")"
+	hook_exit=0
+	(
+		cd "$repo"
+		bash "$HOOK" "$main_sha" "$feature_sha" "1" 2>/dev/null
+	) || hook_exit=$?
+	current="$(git -C "$repo" symbolic-ref --short HEAD 2>/dev/null)"
+	if [ "$hook_exit" -eq 0 ] && [ "$current" = "feature-rebase" ]; then
+		ok "rebase-merge in progress: hook skips (branch unchanged)"
+	else
+		fail_test "rebase-merge guard: expected skip, got exit=$hook_exit branch=$current"
+	fi
+	rm -rf "$repo"
+}
+
+# --- 12. In-operation guard: BISECT_LOG present → hook skips ---
+{
+	repo="$(make_repo)"
+	main_sha="$(git -C "$repo" rev-parse HEAD)"
+	git -C "$repo" checkout -q -b feature-bisect
+	feature_sha="$(git -C "$repo" rev-parse HEAD)"
+	# Simulate a bisect session by creating the BISECT_LOG marker file.
+	touch "$repo/.git/BISECT_LOG"
+	hook_exit=0
+	(
+		cd "$repo"
+		bash "$HOOK" "$main_sha" "$feature_sha" "1" 2>/dev/null
+	) || hook_exit=$?
+	current="$(git -C "$repo" symbolic-ref --short HEAD 2>/dev/null)"
+	if [ "$hook_exit" -eq 0 ] && [ "$current" = "feature-bisect" ]; then
+		ok "bisect in progress: hook skips (branch unchanged)"
+	else
+		fail_test "bisect guard: expected skip, got exit=$hook_exit branch=$current"
+	fi
+	rm -rf "$repo"
+}
+
+# --- 13. Staged-only dirty tree: auto-restore refused ---
+{
+	repo="$(make_repo)"
+	main_sha="$(git -C "$repo" rev-parse HEAD)"
+	git -C "$repo" checkout -q -b feature-staged
+	feature_sha="$(git -C "$repo" rev-parse HEAD)"
+	# Stage a change without committing (staged-only dirty).
+	echo "staged change" >> "$repo/file.txt"
+	git -C "$repo" add file.txt
+	exit_code=0
+	(
+		cd "$repo"
+		bash "$HOOK" "$main_sha" "$feature_sha" "1" 2>/dev/null
+	) || exit_code=$?
+	if [ "$exit_code" -ne 0 ]; then
+		ok "staged-only dirty tree: hook exits non-zero (refused)"
+	else
+		fail_test "staged-only dirty tree: expected non-zero exit, got 0"
+	fi
+	current="$(git -C "$repo" symbolic-ref --short HEAD 2>/dev/null)"
+	if [ "$current" = "feature-staged" ]; then
+		ok "staged-only dirty tree: HEAD not changed"
+	else
+		fail_test "staged-only dirty tree: HEAD changed unexpectedly to $current"
+	fi
+	rm -rf "$repo"
+}
+
+# --- 14. Dirty detached HEAD: auto-restore refused ---
+{
+	repo="$(make_repo)"
+	main_sha="$(git -C "$repo" rev-parse HEAD)"
+	# Detach HEAD.
+	git -C "$repo" checkout -q --detach HEAD
+	detached_sha="$(git -C "$repo" rev-parse HEAD)"
+	# Make the working tree dirty (unstaged change).
+	echo "dirty" >> "$repo/file.txt"
+	exit_code=0
+	(
+		cd "$repo"
+		bash "$HOOK" "$main_sha" "$detached_sha" "1" 2>/dev/null
+	) || exit_code=$?
+	if [ "$exit_code" -ne 0 ]; then
+		ok "dirty detached HEAD: hook exits non-zero (refused)"
+	else
+		fail_test "dirty detached HEAD: expected non-zero exit, got 0"
+	fi
+	current="$(git -C "$repo" symbolic-ref --short HEAD 2>/dev/null || echo "detached")"
+	if [ "$current" = "detached" ]; then
+		ok "dirty detached HEAD: stays detached (not restored)"
+	else
+		fail_test "dirty detached HEAD: HEAD changed unexpectedly to $current"
 	fi
 	rm -rf "$repo"
 }
