@@ -150,6 +150,23 @@ def corrupt_region_bytes() -> bytes:
     return bytes(2 * 4096 + 17)
 
 
+def region_targz(files: dict[str, bytes]) -> bytes:
+    """A self-contained ``tar.gz`` of ``{rel_path: content}`` (a backup archive).
+
+    Mirrors the adapter-internal backup codec (gzip tar, STORAGE.md Section 2) so a
+    restore-gate test can stage a backup carrying a chosen — healthy or corrupt —
+    region file without going through the gated create path.
+    """
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for rel, content in files.items():
+            info = tarfile.TarInfo(name=rel)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    return buf.getvalue()
+
+
 def snapshot_dir(root: Path, community: CommunityId, server: ServerId) -> Path:
     """The directory ``current`` resolves to (the live snapshot), for assertions."""
 

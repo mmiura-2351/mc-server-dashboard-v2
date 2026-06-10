@@ -51,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupCorruptError,
     BackupNotFoundError,
     BackupUnsettledError,
     CommandDispatchError,
@@ -381,10 +382,120 @@ async def test_restore_at_rest_republishes_known_ref() -> None:
     archive.archives.add("ref")
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
-    await RestoreBackup(uow=uow, backup_store=archive)(
+    result = await RestoreBackup(uow=uow, backup_store=archive)(
         community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
     )
     assert archive.restored == [(server.id, "ref")]
+    # A healthy restore is not forced-corrupt, force defaults to False, and the
+    # backup's health is unchanged.
+    assert result.forced_corrupt is False
+    assert archive.restore_calls == [(server.id, "ref", False)]
+    persisted = await backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.health is BackupHealth.HEALTHY
+
+
+def _restore_fixture(
+    server: Server, *, health: BackupHealth = BackupHealth.HEALTHY
+) -> tuple[FakeBackupRepository, Backup]:
+    backups = FakeBackupRepository()
+    backup = Backup(
+        id=BackupId.new(),
+        server_id=server.id,
+        storage_ref="ref",
+        size_bytes=None,
+        source=BackupSource.MANUAL,
+        health=health,
+        created_by=None,
+        created_at=_NOW,
+    )
+    backups.seed(backup)
+    return backups, backup
+
+
+async def test_restore_corrupt_backup_without_force_quarantines_and_raises() -> None:
+    """A corrupt backup without force is refused, quarantined, not published (#743).
+
+    The default restore is fail-closed: the integrity gate raises
+    :class:`BackupCorruptError`, the use case marks that backup ``QUARANTINED`` so
+    an operator does not unknowingly retry it, and ``current`` is untouched (the
+    archive seam never recorded a publish).
+    """
+
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups, backup = _restore_fixture(server)
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    archive.corrupt_refs.add("ref")
+    archive.corrupt_count = 4
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    with pytest.raises(BackupCorruptError) as excinfo:
+        await RestoreBackup(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+        )
+    assert excinfo.value.corrupt_count == 4
+    # Refused: nothing published, force was False, the backup is now quarantined.
+    assert archive.restored == []
+    assert archive.restore_calls == [(server.id, "ref", False)]
+    persisted = await backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.health is BackupHealth.QUARANTINED
+
+
+async def test_restore_corrupt_backup_with_force_publishes_and_quarantines() -> None:
+    """``force=True`` publishes a known-corrupt backup and quarantines it (#743).
+
+    The operator override (#703) proceeds despite corruption; the backup is
+    marked ``QUARANTINED`` (it IS known-corrupt) and the result flags a forced
+    corrupt restore so the edge can audit who forced it.
+    """
+
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups, backup = _restore_fixture(server)
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    archive.corrupt_refs.add("ref")
+    archive.corrupt_count = 2
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    result = await RestoreBackup(uow=uow, backup_store=archive)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id, force=True
+    )
+
+    assert archive.restored == [(server.id, "ref")]
+    assert archive.restore_calls == [(server.id, "ref", True)]
+    assert result.forced_corrupt is True
+    assert result.corrupt_count == 2
+    persisted = await backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.health is BackupHealth.QUARANTINED
+
+
+async def test_restore_healthy_backup_with_force_stays_healthy() -> None:
+    """Forcing a healthy backup restores normally and leaves it HEALTHY (#743)."""
+
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups, backup = _restore_fixture(server)
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    result = await RestoreBackup(uow=uow, backup_store=archive)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id, force=True
+    )
+
+    assert result.forced_corrupt is False
+    assert archive.restored == [(server.id, "ref")]
+    persisted = await backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.health is BackupHealth.HEALTHY
 
 
 async def test_restore_unknown_backup_is_not_found() -> None:

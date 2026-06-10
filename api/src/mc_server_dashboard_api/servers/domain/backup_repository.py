@@ -12,6 +12,7 @@ import abc
 
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
+    BackupHealth,
     BackupId,
     BackupStatistics,
 )
@@ -42,6 +43,17 @@ class BackupRepository(abc.ABC):
     @abc.abstractmethod
     async def delete(self, backup_id: BackupId) -> None:
         """Delete the backup row (the archive bytes are removed separately)."""
+
+    @abc.abstractmethod
+    async def update_health(self, backup_id: BackupId, health: BackupHealth) -> None:
+        """Set an existing backup's structural health (issue #743).
+
+        Used by the restore gate to mark a backup ``QUARANTINED`` once a check
+        found its contents corrupt — on a refused restore (corrupt, no force) and
+        on a forced restore of a known-corrupt backup. A missing id is a no-op
+        (the caller has already loaded the row, so this is staged within the same
+        unit of work).
+        """
 
     @abc.abstractmethod
     async def global_statistics(self) -> BackupStatistics:

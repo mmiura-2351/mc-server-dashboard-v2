@@ -44,6 +44,7 @@ from mc_server_dashboard_api.dependencies import (
     get_server_backup_statistics,
     get_upload_backup,
 )
+from mc_server_dashboard_api.servers.application.backups import RestoreResult
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
@@ -302,11 +303,37 @@ def test_restore_unknown_backup_is_404() -> None:
 
 
 def test_restore_at_rest_is_204() -> None:
-    use_case = _FakeUseCase()
+    use_case = _FakeUseCase(result=RestoreResult(forced_corrupt=False, corrupt_count=0))
     app = _app(member=True, allow=True, restore=use_case)
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 204
+    # force defaults to False when the query param is absent.
+    assert use_case.calls[0]["force"] is False
+
+
+def test_restore_corrupt_without_force_is_500_with_reason() -> None:
+    # The restore gate (#743) refused a corrupt backup without force: a server-side
+    # data fault surfaced as a 500 with a machine-readable reason, matching the
+    # create-direction gate (#749).
+    use_case = _FakeUseCase(error=BackupCorruptError("x", corrupt_count=3))
+    app = _app(member=True, allow=True, restore=use_case)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
+    assert resp.status_code == 500
+    assert resp.json()["reason"] == "working_set_corrupt"
+
+
+def test_restore_with_force_query_param_passes_force_true() -> None:
+    use_case = _FakeUseCase(result=RestoreResult(forced_corrupt=True, corrupt_count=2))
+    app = _app(member=True, allow=True, restore=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore?force=true")
+    )
+    # A forced corrupt restore still publishes -> 204; force was forwarded.
+    assert resp.status_code == 204
+    assert use_case.calls[0]["force"] is True
 
 
 # --- delete ----------------------------------------------------------------

@@ -20,6 +20,7 @@ import pytest
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.errors import IntegrityCheckError
 from mc_server_dashboard_api.storage.domain.value_objects import (
+    BackupKey,
     CommunityId,
     ServerId,
 )
@@ -30,6 +31,7 @@ from tests.storage.helpers import (
     healthy_region_bytes,
     new_scope,
     read_tar,
+    region_targz,
     snapshot_dir,
     tar_stream,
 )
@@ -200,6 +202,103 @@ async def test_commit_publishes_a_healthy_region_unchanged(tmp_path: Path) -> No
 
     blob = await drain(storage.open_hydrate_source(community, server))
     assert read_tar(blob) == files
+
+
+async def _put_backup(
+    storage: FsStorage,
+    community: CommunityId,
+    server: ServerId,
+    files: dict[str, bytes],
+) -> BackupKey:
+    """Stage a backup archive of ``files`` verbatim, bypassing the create gate.
+
+    ``put_backup`` stores the bytes as-is, so a corrupt region can be parked in a
+    backup that the restore gate must later catch (a legacy/uploaded archive).
+    """
+
+    async def _stream() -> AsyncIterator[bytes]:
+        yield region_targz(files)
+
+    return await storage.put_backup(community, server, _stream())
+
+
+async def test_restore_corrupt_backup_without_force_refuses_and_keeps_current(
+    tmp_path: Path,
+) -> None:
+    """The restore gate (issue #743): a corrupt backup is refused without ``force``.
+
+    Restoring a backup whose extracted working set is structurally corrupt must
+    raise :class:`IntegrityCheckError` (carrying the report), clean the restore
+    staging, and leave ``current`` resolving to the prior good snapshot — the
+    publish never runs (last-known-good, #703).
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    good_live = snapshot_dir(tmp_path, community, server)
+    key = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+    )
+
+    with pytest.raises(IntegrityCheckError) as excinfo:
+        await storage.restore_backup(community, server, key)
+    assert len(excinfo.value.report.corrupt) == 1
+    assert excinfo.value.report.corrupt[0].reason is ReasonCode.NOT_4096_ALIGNED
+
+    # current still resolves to the prior good snapshot; restore staging was cleaned.
+    assert snapshot_dir(tmp_path, community, server) == good_live
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"world/region/r.0.0.mca": healthy_region_bytes()}
+    incoming = good_live.parent.parent / "incoming"
+    assert not incoming.exists() or not any(incoming.iterdir())
+
+
+async def test_restore_corrupt_backup_with_force_publishes_and_reports_corruption(
+    tmp_path: Path,
+) -> None:
+    """``force=True`` publishes a corrupt backup but still surfaces the corruption.
+
+    The operator override (#703: better a corrupt restore on purpose than no
+    restore): the corrupt working set is published to ``current`` anyway, and the
+    returned report is non-healthy so the caller can quarantine + audit (#743).
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    key = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+    )
+
+    report = await storage.restore_backup(community, server, key, force=True)
+
+    assert not report.healthy
+    assert len(report.corrupt) == 1
+    # The corrupt backup was published despite the corruption.
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"world/region/r.0.0.mca": corrupt_region_bytes()}
+
+
+async def test_restore_healthy_backup_returns_healthy_report(tmp_path: Path) -> None:
+    """A healthy restore publishes as before and returns a healthy report (#743)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(storage, community, server, {"server.properties": b"motd=original"})
+    key = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+
+    report = await storage.restore_backup(community, server, key)
+
+    assert report.healthy
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"world/region/r.0.0.mca": healthy_region_bytes()}
 
 
 async def test_write_snapshot_rejects_symlink_escape_member(tmp_path: Path) -> None:

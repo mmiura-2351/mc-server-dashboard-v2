@@ -17,6 +17,7 @@ from dataclasses import replace
 
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
+    BackupHealth,
     BackupId,
     BackupStatistics,
 )
@@ -35,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupCorruptError,
     BackupNotFoundError,
     ServerFileNotFoundError,
 )
@@ -436,6 +438,11 @@ class FakeBackupRepository(BackupRepository):
     async def delete(self, backup_id: BackupId) -> None:
         self.by_id.pop(backup_id, None)
 
+    async def update_health(self, backup_id: BackupId, health: BackupHealth) -> None:
+        backup = self.by_id.get(backup_id)
+        if backup is not None:
+            self.by_id[backup_id] = replace(backup, health=health)
+
     async def global_statistics(self) -> BackupStatistics:
         rows = list(self.by_id.values())
         known = [b.size_bytes for b in rows if b.size_bytes is not None]
@@ -733,6 +740,13 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.bytes_by_ref: dict[str, bytes] = {}
         self.created: list[ServerId] = []
         self.restored: list[tuple[ServerId, str]] = []
+        # restore calls with their force flag, for the #743 gate tests.
+        self.restore_calls: list[tuple[ServerId, str, bool]] = []
+        # refs whose extracted working set is structurally corrupt (#743): without
+        # force the restore raises BackupCorruptError; with force it publishes and
+        # reports corruption. ``corrupt_count`` is the count carried on the error.
+        self.corrupt_refs: set[str] = set()
+        self.corrupt_count = 1
         self.deleted: list[tuple[ServerId, str]] = []
         self.stored: list[ServerId] = []
         self._counter = 0
@@ -750,11 +764,20 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         return ref
 
     async def restore(
-        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
-    ) -> None:
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        storage_ref: str,
+        force: bool = False,
+    ) -> int:
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
+        self.restore_calls.append((server_id, storage_ref, force))
+        if storage_ref in self.corrupt_refs and not force:
+            raise BackupCorruptError(storage_ref, corrupt_count=self.corrupt_count)
         self.restored.append((server_id, storage_ref))
+        return self.corrupt_count if storage_ref in self.corrupt_refs else 0
 
     async def delete(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str

@@ -4908,7 +4908,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/restore": {
       "post": {
-        "description": "Restore a backup; requires the server stopped (FR-BAK-4 -> 409 if running).",
+        "description": "Restore a backup; requires the server stopped (FR-BAK-4 -> 409 if running).\n\nThe restore validates the extracted backup against the integrity gate (#743): a\ncorrupt backup is refused with 500 ``working_set_corrupt`` (the use case has\nquarantined it). ``?force=true`` is the operator override \u2014 it publishes a\nknown-corrupt backup anyway (#703), records a distinct ``backup:force_restore``\naudit entry naming who forced it and the corrupt count, and quarantines it. The\ncreate-direction gate (#749) has no such override.",
         "operationId": "restore_backup_api_communities__community_id__servers__server_id__backups__backup_id__restore_post",
         "parameters": [
           {
@@ -4939,6 +4939,16 @@
               "format": "uuid",
               "title": "Backup Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],

@@ -44,6 +44,7 @@ from tests.storage.helpers import (
     drain,
     healthy_region_bytes,
     read_tar,
+    region_targz,
     tar_stream,
 )
 
@@ -138,6 +139,97 @@ async def test_create_against_corrupt_working_set_raises_and_writes_no_archive(
     backups = server_root / "backups"
     archives = list(backups.glob("*.tar.gz")) if backups.is_dir() else []
     assert archives == []
+
+
+async def _put_backup(
+    storage: FsStorage,
+    community: CommunityId,
+    server: ServerId,
+    files: dict[str, bytes],
+) -> str:
+    """Store a backup archive of ``files`` verbatim, bypassing the create gate."""
+
+    s_com = StorageCommunityId(community.value)
+    s_srv = StorageServerId(server.value)
+
+    async def _stream() -> AsyncIterator[bytes]:
+        yield region_targz(files)
+
+    key = await storage.put_backup(s_com, s_srv, _stream())
+    return key.value
+
+
+async def test_restore_corrupt_backup_without_force_translates_to_corrupt_error(
+    tmp_path: Path,
+) -> None:
+    """The restore gate (#743): a corrupt backup without force is BackupCorruptError.
+
+    The seam translates the storage ``IntegrityCheckError`` to
+    :class:`BackupCorruptError` (carrying the corrupt count), and ``current`` is
+    left resolving to the prior good snapshot — the publish never ran.
+    """
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+    )
+
+    with pytest.raises(BackupCorruptError) as excinfo:
+        await adapter.restore(community_id=community, server_id=server, storage_ref=ref)
+    assert excinfo.value.corrupt_count == 1
+    # current still hydrates the prior healthy region.
+    assert (await _hydrate(storage, community, server)) == {
+        "world/region/r.0.0.mca": healthy_region_bytes()
+    }
+
+
+async def test_restore_corrupt_backup_with_force_publishes_and_reports_corrupt(
+    tmp_path: Path,
+) -> None:
+    """``force=True`` publishes a corrupt backup, returning the corrupt count (#743)."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+    )
+
+    corrupt_count = await adapter.restore(
+        community_id=community, server_id=server, storage_ref=ref, force=True
+    )
+
+    assert corrupt_count == 1
+    # The corrupt backup was published despite the corruption.
+    assert (await _hydrate(storage, community, server)) == {
+        "world/region/r.0.0.mca": corrupt_region_bytes()
+    }
+
+
+async def test_restore_healthy_backup_reports_not_corrupt(tmp_path: Path) -> None:
+    """A healthy restore returns a zero corrupt count (#743)."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"server.properties": b"motd=original"})
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+
+    corrupt_count = await adapter.restore(
+        community_id=community, server_id=server, storage_ref=ref
+    )
+
+    assert corrupt_count == 0
 
 
 async def test_restore_unknown_ref_translates_to_backup_not_found(

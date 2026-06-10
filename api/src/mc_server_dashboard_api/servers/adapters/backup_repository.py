@@ -8,7 +8,7 @@ entity here.
 
 from __future__ import annotations
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.backup_models import BackupModel
@@ -73,6 +73,17 @@ class SqlAlchemyBackupRepository(BackupRepository):
 
     async def delete(self, backup_id: BackupId) -> None:
         stmt = delete(BackupModel).where(BackupModel.id == backup_id.value)
+        await self._session.execute(stmt)
+
+    async def update_health(self, backup_id: BackupId, health: BackupHealth) -> None:
+        # Set just the health column on an existing row (issue #743). A staged
+        # UPDATE within the enclosing unit of work; commit is the unit of work's
+        # job. A missing id matches no row — a harmless no-op.
+        stmt = (
+            update(BackupModel)
+            .where(BackupModel.id == backup_id.value)
+            .values(health=health.value)
+        )
         await self._session.execute(stmt)
 
     async def global_statistics(self) -> BackupStatistics:

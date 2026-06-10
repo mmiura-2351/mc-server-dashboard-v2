@@ -94,6 +94,12 @@ BACKUP_RESTORE: Final = "backup:restore"
 BACKUP_DELETE: Final = "backup:delete"
 BACKUP_UPLOAD: Final = "backup:upload"
 BACKUP_DOWNLOAD: Final = "backup:download"
+# An operator forcing the restore of a known-corrupt backup over the integrity
+# gate (issue #743). A distinct code so the deliberate corrupt restore is
+# queryable apart from a routine restore; gated by the same backup:restore
+# permission, so it names the operation, not a permission (free-text column, see
+# module docstring).
+BACKUP_FORCE_RESTORE: Final = "backup:force_restore"
 
 # File upload / download / rename / delete / mkdir / search (FR-FILE-*, issue
 # #259) plus write / rollback (issue #263). Recorded under the file:edit /
