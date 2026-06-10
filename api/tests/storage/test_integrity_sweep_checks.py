@@ -106,6 +106,42 @@ async def test_check_backup_health_cleans_its_staging(tmp_path: Path) -> None:
     assert not incoming.exists() or not any(incoming.iterdir())
 
 
+async def test_check_backup_health_leases_staging_during_fsck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fsck staging dir is pinned by an active-staging lease while it exists, so
+    a concurrent orphan-staging sweep skips it instead of _rmtree-ing it mid-extract
+    (issue #183), and the lease is dropped once the check returns."""
+
+    from mc_server_dashboard_api.storage.adapters import fs as fs_module
+    from mc_server_dashboard_api.storage.integrity.region import (
+        WorkingSetReport,
+        check_working_set,
+    )
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    key = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+
+    leased_during_fsck: list[bool] = []
+
+    def _spy(staging: Path) -> WorkingSetReport:
+        # The extracted staging must be pinned at the moment it is being scanned, so a
+        # concurrent sweep would skip it (issue #183).
+        leased_during_fsck.append(storage._is_staging_active(staging))
+        return check_working_set(staging)
+
+    monkeypatch.setattr(fs_module, "check_working_set", _spy)
+
+    await storage.check_backup_health(community, server, key)
+
+    assert leased_during_fsck == [True]
+    # The lease is released in the finally, leaving no dangling pin.
+    assert storage._active_staging == set()
+
+
 async def test_check_backup_health_unknown_key_raises_not_found(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = new_scope()

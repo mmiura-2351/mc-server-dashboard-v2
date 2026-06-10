@@ -630,6 +630,10 @@ class FsStorage(Storage):
             / f"fsck-{key.value}-{uuid.uuid4().hex}"
         )
         await asyncio.to_thread(staging.mkdir, parents=True, exist_ok=False)
+        # The staging dir lives under incoming/ exactly like a restore, so pin it
+        # with the same active-staging lease for the life of the fsck — otherwise a
+        # concurrent orphan-staging sweep would _rmtree it mid-extract (issue #183).
+        self._register_staging(staging)
         try:
             await asyncio.to_thread(
                 _extract_tar_gz_into, archive, staging, self._max_restore_bytes
@@ -637,6 +641,7 @@ class FsStorage(Storage):
             return await asyncio.to_thread(check_working_set, staging)
         finally:
             await asyncio.to_thread(_rmtree, staging)
+            self._release_staging(staging)
 
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId
