@@ -319,13 +319,22 @@ func TestContainerSample(t *testing.T) {
 type fakeControl struct {
 	stopCalled bool
 	onStop     func()
+	// hangUntilCtxDone models a pathological peer that drags the RCON "stop"
+	// exchange: Execute blocks until the call's ctx is cancelled (the stop-path
+	// phase deadline), then returns its error. tryRCONStop must give up at the
+	// phase budget rather than ride the whole escalation deadline (issue #832).
+	hangUntilCtxDone bool
 }
 
-func (c *fakeControl) Execute(_ context.Context, line string) (string, error) {
+func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) {
 	if line == "stop" {
 		c.stopCalled = true
 		if c.onStop != nil {
 			c.onStop()
+		}
+		if c.hangUntilCtxDone {
+			<-ctx.Done()
+			return "", ctx.Err()
 		}
 	}
 	return "", nil
@@ -909,6 +918,42 @@ func TestGracefulStopFallsBackToDockerStop(t *testing.T) {
 	}
 	if docker.killWasCalled() {
 		t.Fatal("docker kill should not be needed when docker stop exits the container")
+	}
+}
+
+// A pathological RCON peer that drags the "stop" exchange must not consume the
+// whole escalation budget: tryRCONStop runs under its own phase deadline, so it
+// gives up promptly and the docker stop/kill steps keep their full grace (issue
+// #832). Here the peer hangs the "stop" until its phase ctx fires; the docker
+// stop then exits the container, so Stop completes without escalating to docker
+// kill.
+func TestStopRCONPhaseBudgetPreservesEscalationGrace(t *testing.T) {
+	prev := rconPhaseCap
+	rconPhaseCap = 20 * time.Millisecond
+	t.Cleanup(func() { rconPhaseCap = prev })
+
+	docker := newFakeDocker()
+	ctrl := &fakeControl{hangUntilCtxDone: true}
+	d := newTestDriver(docker, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if !ctrl.stopCalled {
+		t.Fatal("expected RCON stop to be attempted")
+	}
+	if !docker.stopWasCalled() {
+		t.Fatal("expected docker stop after the hung RCON phase gave up")
+	}
+	if docker.killWasCalled() {
+		t.Fatal("Stop escalated to docker kill: the stop grace was collapsed by the hung RCON")
 	}
 }
 
