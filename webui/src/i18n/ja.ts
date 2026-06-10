@@ -1113,6 +1113,11 @@ export const ja: Record<TranslationKey, string> = {
     "ドレインを解除すると、このWorkerは再び新規配置を受け入れられるようになります。",
   "admin.workers.undrainConfirm": "Workerのドレインを解除",
   "admin.workers.drained": "Workerをドレインしました。",
+  // Appended after "Workerをドレインしました。" when servers_stopped > 0.
+  "admin.workers.drainedCountSuffix":
+    " 台のサーバーを停止対象としてマークしました — 各サーバーが停止済み・未割り当てになるまでこのWorkerを接続したままにしてください。",
+  "admin.workers.drainDialogConvergenceWarning":
+    "停止と最終スナップショットはWorkerが接続している間のみ、グレース期間（約120秒）＋各サーバー1ティック後に非同期で実行されます。廃止する場合、すべての割り当て済みサーバーが停止済み・未割り当てになるまでこのWorkerを起動し続けてください。接続を早期に切断すると、停止とスナップショットが次の再接続まで延期されますが、廃止シナリオでは再接続が行われない可能性があります。収束の確認はサーバー一覧で個別に行ってください（Workerの負荷カウンターは停止前にゼロになるため、目安にはなりません）。",
   "admin.workers.undrained": "Workerのドレインを解除しました。",
   "admin.workers.drainError": "Workerをドレインできませんでした。",
   "admin.workers.undrainError": "Workerのドレインを解除できませんでした。",
