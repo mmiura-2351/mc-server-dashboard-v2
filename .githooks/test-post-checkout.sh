@@ -11,6 +11,13 @@
 # Exit code: 0 = all pass, non-zero = first failure (set -e).
 set -euo pipefail
 
+# When invoked from inside a git hook (pre-push runs `make check` -> `make
+# test` -> this script), git exports GIT_DIR (and friends) pointing at the
+# REAL repository. Those leak into every git command below and redirect the
+# test init/commit/checkout calls onto the real repo instead of temp repos.
+# Drop all GIT_* variables so the temp repos are truly isolated.
+unset "${!GIT_@}"
+
 HOOK="$(cd "$(dirname "$0")" && pwd)/post-checkout"
 if [ ! -x "$HOOK" ]; then
 	echo "FAIL: hook not found or not executable: $HOOK" >&2
