@@ -11,7 +11,7 @@
 
 .PHONY: all check lint format test docs-check \
 	api-env-check api-lint api-format api-test \
-	worker-lint worker-format worker-test worker-test-race \
+	worker-lint worker-format worker-test worker-test-race worker-e2e-compile \
 	webui-lint webui-format webui-test webui-build webui-e2e \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
@@ -48,7 +48,7 @@ lint: api-lint worker-lint webui-lint proto-lint
 
 format: api-format worker-format webui-format
 
-test: api-test worker-test webui-test
+test: api-test worker-test worker-e2e-compile webui-test
 
 # docs/ convention gate (docs/README.md Conventions): relative links resolve,
 # no section-mark glyph, no 'v1' versioning term. Pure stdlib python3, no deps.
@@ -115,6 +115,18 @@ worker-test:
 # the supervision/pump/session/driver code.
 worker-test-race:
 	cd worker && go test -race ./...
+
+# Compile-only check of the `-tags e2e` worker sources (worker/test/e2e/,
+# //go:build e2e). The e2e suite itself needs the live stack (real API +
+# Docker) and runs only in the dedicated CI jobs (.github/workflows/e2e.yml),
+# so `make check` must NOT run it. But those files build with `-tags e2e`,
+# which `worker-test` (no tag) never compiles -- a worker signature change that
+# strands an e2e consumer passes the local gate and only fails later in CI
+# (#768, most recently #767). `go vet` type-checks the tagged test files
+# without running them: no API, no containers, no env, fast. Wired into `test`
+# so the pre-push hook catches the dangling consumer the way CI does.
+worker-e2e-compile:
+	cd worker && go vet -tags e2e ./test/e2e/...
 
 # ---------------------------------------------------------------------------
 # webui/ (Node via npm)
