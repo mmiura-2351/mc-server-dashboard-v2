@@ -1,4 +1,5 @@
 /// <reference types="vitest/config" />
+import os from "node:os";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
@@ -55,5 +56,13 @@ export default defineConfig({
     // Playwright (npm run e2e), not Vitest — scope the include so Vitest does
     // not try to load e2e/*.spec.ts (which import @playwright/test).
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    // Raise per-test/hook timeouts so CPU starvation on a loaded box (multiple
+    // concurrent agent worktrees, load average 20+) doesn't fail otherwise-green
+    // tests.  The limits are generous enough to catch genuine hangs.
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
+    // Cap the worker pool so a loaded machine degrades gracefully rather than
+    // thrashing.  Half of logical CPUs, minimum 1.
+    maxWorkers: Math.max(1, Math.floor(os.cpus().length / 2)),
   },
 });

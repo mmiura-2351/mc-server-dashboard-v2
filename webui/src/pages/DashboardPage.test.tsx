@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
@@ -61,15 +61,20 @@ function server(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage() {
+// The page derives its community from the URL `:cid` (#784), so mount it under a
+// matching route. Default to the member community; pass another cid to exercise
+// the not-found state for a community outside the caller's membership.
+function renderPage(path = `/communities/${CID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
-          <DashboardPage />
+          <Routes>
+            <Route path="/communities/:cid" element={<DashboardPage />} />
+          </Routes>
         </ToastProvider>
       </QueryClientProvider>
     </MemoryRouter>,
@@ -150,6 +155,19 @@ describe("DashboardPage empty state", () => {
       name: t("dashboard.createServer"),
     });
     expect(cta).toHaveAttribute("href", `/communities/${CID}/servers/new`);
+  });
+});
+
+describe("DashboardPage community-not-found (#784)", () => {
+  it("shows the not-found state for a URL cid outside the membership list", async () => {
+    renderPage("/communities/other");
+
+    expect(
+      await screen.findByText(t("community.notFound.title")),
+    ).toBeInTheDocument();
+    expect(screen.getByText(t("community.notFound.body"))).toBeInTheDocument();
+    // It must not silently fall back to listing the member community's servers.
+    expect(mockApi.get).not.toHaveBeenCalled();
   });
 });
 
