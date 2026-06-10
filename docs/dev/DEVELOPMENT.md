@@ -23,6 +23,7 @@ Install these once on your machine. Toolchain versions are pinned per module
 |---|---|---|
 | [uv](https://docs.astral.sh/uv/) | `api/` Python toolchain + dependencies (Python is pinned in `api/.python-version`) | per the uv docs |
 | [Go](https://go.dev/dl/) 1.26 | `worker/` (pinned in `worker/go.mod`) | per the Go docs |
+| [Node.js](https://nodejs.org/) ≥ 24 (+ npm 11) | `webui/` build, lint, and test (pinned in `webui/package.json`) | per the Node.js docs; npm comes bundled |
 | [buf](https://buf.build) 1.70.0 | `proto/` lint + code generation | see [`../../proto/README.md`](../../proto/README.md) |
 | GNU Make | the root unified commands | usually preinstalled; otherwise your OS package manager |
 
@@ -60,10 +61,10 @@ covered here.
 
 | Task | Command | Does |
 |---|---|---|
-| Format both modules | `make format` | ruff format + `ruff check --fix` (api), `gofmt -w` (worker) |
-| Lint + typecheck | `make lint` | ruff, mypy, import-linter (api); gofmt-check, `go vet`, golangci-lint (worker); `buf lint` (proto) |
-| Test | `make test` | `pytest` (api), `go test ./...` (worker) |
-| Full gate | `make check` | `lint` + `test` + `openapi-check` + `proto-check` — what pre-push and CI run |
+| Format both modules | `make format` | ruff format + `ruff check --fix` (api), `gofmt -w` (worker), biome (webui) |
+| Lint + typecheck | `make lint` | ruff, mypy, import-linter (api); gofmt-check, `go vet`, golangci-lint (worker); `buf lint` (proto); biome + tsc (webui) |
+| Test | `make test` | `pytest` (api), `go test ./...` + `worker-e2e-compile` (worker), vitest (webui) |
+| Full gate | `make check` | `hooks-check` + `lint` + `test` + `webui-build` + `openapi-check` + `proto-check` + `docs-check` — what pre-push and CI run |
 | Regenerate proto stubs | `make proto-gen` | regenerate the Go + Python control-plane stubs (Section 6) |
 | Check proto stubs are current | `make proto-check` | regenerate and fail if the committed stubs drift |
 | Regenerate webui OpenAPI client | `make openapi-gen` | regenerate `webui/openapi.json` + `webui/src/api/schema.ts` from the api routes |

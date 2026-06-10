@@ -457,8 +457,10 @@ branch on server state. This policy is shared by 6.10 (File Management) and
   Storage copy when stopped, or via `save-all` → on-demand snapshot → archive
   when running. A backup is effectively a retained snapshot and does not depend
   on a specific Worker.
-- FR-BAK-3: Scheduled backups are supported (cron-like schedule with execution
-  history).
+- FR-BAK-3: Scheduled backups are supported. The M1 schedule is a per-server
+  `backup_interval_hours` integer (stored in `server.config`; absent = no scheduled
+  backups); a cron-style expression is a follow-on (epic #649). Execution history
+  is the ordered set of `backup` rows with `source = scheduled`.
 - FR-BAK-4: Restore replaces a server's authoritative working set and **requires
   the server to be stopped** (per the 6.9 policy); hot-restore of a running
   server is not supported.

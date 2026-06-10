@@ -192,7 +192,7 @@ revocation/expiry record.
 | `issued_at` | timestamptz | |
 | `expires_at` | timestamptz | |
 | `revoked_at` | timestamptz nullable | set on logout; non-null ⇒ invalid |
-| `revoked_reason` | text nullable | why revoked (`rotated` / `family` / `logout`); null exactly when `revoked_at` is null |
+| `revoked_reason` | text nullable | why revoked (`rotated` / `family` / `logout` / `user_revoked` / `superseded`); null exactly when `revoked_at` is null |
 
 Constraints: `UNIQUE(token_hash)`. Index on `(user_id)` for "revoke all sessions"
 and a partial index on `expires_at` for expiry sweeps. A token is valid iff

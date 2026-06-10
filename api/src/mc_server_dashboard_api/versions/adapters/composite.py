@@ -2,9 +2,10 @@
 
 The endpoint and the ensure-on-start use case depend on one
 :class:`VersionCatalog`; this adapter routes ``(server_type, ...)`` to the
-matching per-type catalog (vanilla -> Mojang, paper -> PaperMC). A server type
-with no registered catalog is :class:`UnknownServerTypeError` — this is the seam
-where ``forge`` is rejected as unsupported at M1 (it has no catalog).
+matching per-type catalog (vanilla -> Mojang, paper -> PaperMC, fabric ->
+meta.fabricmc.net, forge -> Forge Maven). A server type with no registered
+catalog is :class:`UnknownServerTypeError` — ``spigot`` is the only type
+that routes here (REQUIREMENTS.md FR-VER-1).
 """
 
 from __future__ import annotations
