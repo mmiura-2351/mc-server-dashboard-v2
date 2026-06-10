@@ -100,6 +100,14 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint6
 	case http.StatusNoContent:
 		// No published working set yet; nothing to unpack. The store generation is
 		// 0 (the API serves no generation header on a 204), so the Worker records 0.
+		//
+		// IMPLICIT CALLER DEPENDENCY: this returns WITHOUT touching destDir, so a
+		// retained stale destDir from a prior placement is left in place (not
+		// replaced). That is safe only because the caller never reaches a 204 with a
+		// stale destDir to displace: store generation 0 + a held working set means the
+		// API gates this off with skip_hydrate (lifecycle.py), so a 204 here only ever
+		// hydrates onto an empty/absent destDir. Leaving the retained destDir is
+		// intentional — do not add a blind destDir wipe here.
 		return parseGeneration(resp.Header), nil
 	case http.StatusOK:
 	default:
@@ -114,15 +122,43 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint6
 	return parseGeneration(resp.Header), nil
 }
 
+// snapshotSpoolPrefix is the temp-file prefix Snapshot uses for its tar spool in
+// the scratch root. SweepSnapshotSpools matches it at startup to reclaim spools a
+// crash mid-snapshot left behind.
+const snapshotSpoolPrefix = "snapshot-"
+
+// SweepSnapshotSpools removes snapshot-*.tar spool files a crash mid-Snapshot left
+// in scratchRoot (issue #787). Snapshot spools its tar to a temp file there and
+// removes it on every return path, but a worker death between create and that
+// deferred remove leaks a world-sized file permanently: ScanHeldServers only walks
+// directories, so the orphan is invisible while consuming disk per crash. This runs
+// at startup alongside the held-server scan (cmd/worker/main.go). It is best-effort:
+// an unreadable root or a failed remove is ignored (a leftover is wasted disk, never
+// a correctness problem). Only top-level files matching the spool prefix and .tar
+// suffix are touched, so a server's working-set subdir is never entered.
+func SweepSnapshotSpools(scratchRoot string) {
+	entries, err := os.ReadDir(scratchRoot)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() && strings.HasPrefix(name, snapshotSpoolPrefix) && strings.HasSuffix(name, ".tar") {
+			_ = os.Remove(filepath.Join(scratchRoot, name))
+		}
+	}
+}
+
 // Snapshot packs srcDir into a tar and uploads it to url. The tar is spooled to a
 // temp file (in srcDir's parent, i.e. the scratch root, so it shares srcDir's
 // filesystem) rather than a memory buffer: a multi-GB world times the bounded
 // concurrent transfers would otherwise pin gigabytes of RAM. The file is Stat'd
 // for the Content-Length the API's proven-complete gate matches, streamed as the
 // request body, and removed on every path (delta/streamed snapshot is deferred,
-// FR-DATA-5).
+// FR-DATA-5). A crash before that deferred remove leaks the spool; SweepSnapshotSpools
+// reclaims such leftovers at startup (issue #787).
 func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) (uint64, error) {
-	spool, err := os.CreateTemp(filepath.Dir(srcDir), "snapshot-*.tar")
+	spool, err := os.CreateTemp(filepath.Dir(srcDir), snapshotSpoolPrefix+"*.tar")
 	if err != nil {
 		return 0, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
 	}
@@ -177,8 +213,10 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) (uint6
 // scratch root). ScanHeldServers (scratchscan.go) reports every scratch subdir as
 // a held server, but the API only consults that list for ids it assigned, so a
 // crash-leftover .hydrate-* sibling is never matched; a stale one is also reclaimed
-// by the next hydrate's leftover sweep below and by the authoritative-stop scratch
-// GC (issue #766, os.RemoveAll over the whole scratch subtree on stop).
+// by the next hydrate's leftover sweep below (if the id is re-placed here) and by
+// the post-final-snapshot scratch GC, which sweeps this id's .hydrate-<id>-* siblings
+// alongside removing scratchDir/<id> once the stopped-id final snapshot publishes
+// (issue #766/#841/#842, instancemanager.removeScratch).
 //
 // Crash safety: the temp tree is built fully before any rename. The swap then does
 // (1) rename destDir -> trash, (2) rename temp -> destDir, (3) remove trash. A
@@ -207,6 +245,17 @@ func unpackAndSwap(r io.Reader, destDir string) error {
 		return err
 	}
 
+	// Durability ordering (issue #787): make the fully built temp tree durable
+	// BEFORE the swap renames. unpackTar already fsynced each file's contents; this
+	// fsyncs every directory in the tree so the dir entries (the names pointing at
+	// those files) are durable too. A power loss after the swap must never persist
+	// the new destDir (and the generation marker the caller then writes) over a tree
+	// whose files or names are not yet on disk — the #767 skip gate would boot that
+	// torn world.
+	if err := fsyncTree(tmpDir); err != nil {
+		return err
+	}
+
 	trashDir := tmpDir + ".trash"
 	swapped := false
 	if err := os.Rename(destDir, trashDir); err != nil {
@@ -217,17 +266,59 @@ func unpackAndSwap(r io.Reader, destDir string) error {
 	} else {
 		swapped = true
 	}
-	if err := os.Rename(tmpDir, destDir); err != nil {
+	if err := swapRename(tmpDir, destDir); err != nil {
 		if swapped {
 			// Restore the old working set so the failure does not lose both copies.
 			_ = os.Rename(trashDir, destDir)
 		}
 		return err
 	}
+	// fsync the scratch root so the swap renames themselves are durable: the marker
+	// the caller writes next (writeGeneration, also fsynced) can then never become
+	// durable before the destDir tree it describes (issue #787).
+	if err := fsyncDir(parent); err != nil {
+		return err
+	}
 	if swapped {
 		_ = os.RemoveAll(trashDir)
 	}
 	return nil
+}
+
+// swapRename is the final temp->destDir swap rename, indirected through a package
+// var so a test can force it to fail and exercise the trash-restore path (the swap
+// renames within one parent dir are symmetric, so there is no static-perms way to
+// fail only this one). Production always uses os.Rename.
+var swapRename = os.Rename
+
+// fsyncTree fsyncs every directory in the tree rooted at dir (post-order, so a
+// child dir is durable before its parent's entry for it). File contents are already
+// fsynced as written (writeFile); this makes the directory entries durable so a
+// crash cannot lose a just-created name. Issue #787.
+func fsyncTree(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			if err := fsyncTree(filepath.Join(dir, e.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return fsyncDir(dir)
+}
+
+// fsyncDir fsyncs a directory so renames/creates within it are durable. The dir is
+// opened read-only (the only mode a directory fsync needs).
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
 }
 
 // hydrateTmpPrefix is the dot-prefixed name prefix for the per-hydrate temp dir,
@@ -301,7 +392,14 @@ func unpackTar(r io.Reader, destDir string) error {
 	}
 }
 
-// writeFile creates target and copies the member body into it.
+// writeFile creates target, copies the member body into it, and fsyncs the
+// contents before close (issue #787): the unpacked tree is swapped into place with
+// renames, and a rename only orders metadata — without this fsync a power loss
+// could persist the swap (and the generation marker) while a just-written file is
+// still all zeros or truncated, and the #767 skip gate would then boot that torn
+// world. fsyncing per file as it is written keeps the cost proportional to the data
+// already streamed (one extra flush per file, not a re-read of the whole tree); the
+// per-dir entries are made durable by a single recursive dir-fsync after unpack.
 func writeFile(target string, src io.Reader, mode os.FileMode) error {
 	if mode == 0 {
 		mode = 0o640
@@ -315,6 +413,9 @@ func writeFile(target string, src io.Reader, mode os.FileMode) error {
 	}
 	defer func() { _ = out.Close() }()
 	if _, err := io.Copy(out, src); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
 		return err
 	}
 	return out.Close()

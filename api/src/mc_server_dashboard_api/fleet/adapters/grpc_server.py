@@ -91,6 +91,19 @@ _BEARER_PREFIX = "Bearer "
 # (CONTROL_PLANE.md Section 4.3).
 _HEARTBEAT_INTERVAL_DIVISOR = 3
 
+# Cap on consecutive per-message handler failures before the session is treated
+# as terminal (issue #807). The per-message log-and-continue (issue #776)
+# contains a single bad event, but an unbounded skip keeps the session alive
+# against a permanently poisoned sink (e.g. the DB is down): every StatusChange
+# is discarded while the worker stays "online" and its servers are never marked
+# unknown, silently hiding the outage from the reconciler. After this many
+# consecutive failures, letting the next one propagate ends the session, which
+# marks the worker disconnected and surfaces the outage. The counter resets on
+# any successful handle, so transient blips never accumulate to the cap. The
+# value is small enough to fail fast yet absorbs a short burst of transient
+# errors without bouncing a healthy session.
+_MAX_CONSECUTIVE_HANDLER_FAILURES = 5
+
 _DRIVER_BY_KIND: dict[int, DriverKind] = {
     pb.EXECUTION_DRIVER_KIND_HOST_PROCESS: DriverKind.HOST_PROCESS,
     pb.EXECUTION_DRIVER_KIND_CONTAINER: DriverKind.CONTAINER,
@@ -231,6 +244,15 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # the write deliberately bypasses the per-server monotonic guard, so a
             # stale teardown after a reconnect would otherwise clobber the NEW
             # session's live server states (issue #775, CONTROL_PLANE.md 4.4).
+            # There is an accepted one-roundtrip TOCTOU window here: a reconnect
+            # on a newer Session could win the is_current_session check between
+            # this read and the bulk unknown-write below, so the write could
+            # still clobber the NEW session's live states with unknown. The
+            # window is judged acceptable (PR #802 review): it is bounded to a
+            # single observation and the reconciler self-heals — the live worker
+            # re-reports its servers' states on its next StatusChange, restoring
+            # them. Closing it fully would need the write itself to be guarded by
+            # the session token atomically, which is not worth the complexity.
             if self._registry.is_current_session(worker_id, session):
                 await self._state_sink.mark_worker_servers_unknown(
                     worker_id=worker_id.value
@@ -242,6 +264,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         worker_id: WorkerId,
         request_iterator: AsyncIterator[pb.WorkerMessage],
     ) -> None:
+        consecutive_failures = 0
         async for message in request_iterator:
             # Contain a per-message handler failure (e.g. a transient DB error
             # while recording one StatusChange) so a single bad event is logged
@@ -249,16 +272,36 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # (issue #776). Stream-level errors from iterating request_iterator
             # are not caught here, so a real transport drop still ends the loop;
             # CancelledError propagates so teardown is not swallowed.
+            #
+            # The skip is bounded (issue #807): a permanently poisoned sink would
+            # otherwise keep discarding every event while the session stays alive
+            # and the worker's servers are never marked unknown. Once the failures
+            # have already reached the cap, the next failure is allowed to
+            # propagate, ending the session so teardown marks the worker
+            # disconnected and surfaces the outage to the reconciler. Any success
+            # resets the streak, so only a sustained outage trips the cap.
             try:
                 await self._handle(worker_id, message)
             except asyncio.CancelledError:
                 raise
             except Exception:
+                consecutive_failures += 1
+                if consecutive_failures > _MAX_CONSECUTIVE_HANDLER_FAILURES:
+                    _LOG.error(
+                        "ending worker session after %d consecutive handler "
+                        "failures; the state sink looks unavailable",
+                        consecutive_failures,
+                        extra={"worker_id": worker_id.value},
+                        exc_info=True,
+                    )
+                    raise
                 _LOG.warning(
                     "dropping a worker message after a handler error",
                     extra={"worker_id": worker_id.value},
                     exc_info=True,
                 )
+            else:
+                consecutive_failures = 0
 
     async def _rebuild_assignments(self, worker_id: WorkerId) -> None:
         server_ids = await self._state_sink.running_assignment_ids(

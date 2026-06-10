@@ -1223,6 +1223,51 @@ async def test_stop_succeeds_even_when_final_snapshot_fails() -> None:
     assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
 
 
+async def test_stop_final_snapshot_failure_logs_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The final-stop snapshot is the ONLY final-snapshot path and the server is now
+    # stopped+unassigned, so a failure here is unrecoverable data loss — it must be
+    # logged LOUD (error level), not swallowed as a warning (issue #841). A silent
+    # warning is what hid the regression where the worker packed an empty snapshot.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotFails(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            return CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED, message="empty_snapshot"
+            )
+
+    use_case = StopServer(
+        uow=uow, control_plane=_SnapshotFails(), clock=FakeClock(_NOW)
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    record = next(
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
+    )
+    assert str(server_id) in record.getMessage()
+
+
 async def test_stop_when_already_stopped_is_conflict() -> None:
     community, server_id, _ = _ids()
     uow = FakeUnitOfWork()

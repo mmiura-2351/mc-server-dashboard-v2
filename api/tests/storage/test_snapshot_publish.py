@@ -324,3 +324,57 @@ async def test_write_snapshot_rejects_symlink_escape_member(tmp_path: Path) -> N
     )
     staging_links = list((server_root / "incoming").rglob("escape_link"))
     assert staging_links == []
+
+
+def _prune_server_root(
+    tmp_path: Path, community: CommunityId, server: ServerId
+) -> Path:
+    return (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+
+
+async def test_prune_packs_final_targz_and_drops_the_tree(tmp_path: Path) -> None:
+    # fs realization of the DeleteServer reclaim (#777): current/ is packed into
+    # final.tar.gz at the server root and the working-set tree is removed.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    files = {"server.properties": b"motd=hi", "world/level.dat": b"w"}
+    await _publish(storage, community, server, files)
+
+    await storage.prune_to_final_snapshot(community, server)
+
+    root = _prune_server_root(tmp_path, community, server)
+    final = root / "final.tar.gz"
+    assert final.is_file()
+    assert read_tar(final.read_bytes()) == files
+    # The unpacked working-set tree is gone; backups/ would survive (none here).
+    assert not (root / "snapshots").exists()
+    assert not (root / "current").exists()
+    assert not (root / "versions").exists()
+
+
+async def test_prune_failclosed_keeps_tree_when_pack_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If packing raises, the working-set tree is left intact and the error
+    # propagates — a failed delete never silently loses the latest state (#777).
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(storage, community, server, {"world/level.dat": b"w"})
+
+    import mc_server_dashboard_api.storage.adapters.fs as fs_mod
+
+    def _boom(directory: Path, archive: Path) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fs_mod, "_write_tar_gz", _boom)
+    with pytest.raises(OSError):
+        await storage.prune_to_final_snapshot(community, server)
+
+    root = _prune_server_root(tmp_path, community, server)
+    assert not (root / "final.tar.gz").exists()
+    # The working set is still published and hydrates unchanged.
+    assert read_tar(await drain(storage.open_hydrate_source(community, server))) == {
+        "world/level.dat": b"w"
+    }

@@ -28,6 +28,7 @@ from mc_server_dashboard_api.servers.domain.backup_schedule import (
     BACKUP_INTERVAL_CONFIG_KEY,
     schedule_from_config,
 )
+from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.cpu_allocation import (
     cpu_allocation_from_config,
@@ -600,9 +601,46 @@ class UpdateServer:
 
 @dataclass(frozen=True)
 class DeleteServer:
-    """Delete a stopped server and sweep its resource grants (server:delete)."""
+    """Delete a stopped server, prune its Storage, and sweep its grants (server:delete).
+
+    Storage retention (issue #777): a deleted server keeps exactly two artifacts,
+    neither with a DB row (rows cascade with the server delete):
+
+    1. **The latest backup archive, if any** — the newest backup by ``created_at``
+       is retained; all older archives are deleted (archive-first per the
+       DeleteBackup convention, so an archive is never orphaned with a live row).
+       Selection is the literal latest-by-``created_at`` regardless of ``health``
+       (owner ruling on #777: "latest existing"): a QUARANTINED newest archive is
+       still the one kept. The mandatory working-set tar.gz below is the safety net
+       — it is strictly newer and always healthy enough to re-import.
+    2. **The current working set, packed as a final tar.gz** — mandatory and
+       fail-closed: the pack runs through the backup seam BEFORE the row delete, so
+       a pack failure aborts the whole delete and the working set is never silently
+       lost. A server with no published snapshot has nothing to pack (no-op).
+
+    The pack and the archive prune happen before the row delete so a crash between
+    the Storage work and the commit leaves the server row intact (the delete is
+    simply retried), never a server whose Storage is pruned but row survives with a
+    dangling backup index.
+
+    Two-transaction shape (the DeleteBackup pattern): the at-rest check and the
+    destructive prune live in separate transactions with a potentially minutes-long
+    pack between them. The final transaction re-checks ``is_at_rest()`` before the
+    row delete to bound the worst case, but a residual TOCTOU window remains — a
+    start that lands AFTER that re-check but before the commit yields a running
+    server whose working set was already pruned. Closing it fully needs a per-server
+    lifecycle lock that does not yet exist project-wide; this is the same residual
+    window DeleteBackup carries.
+
+    The backups list is read in that SAME final transaction (not before the pack):
+    a backup created during the pack window would otherwise be neither the head nor
+    in the deletable tail and would survive as a third orphan archive. Reading it
+    fresh keeps the "latest existing at delete time" head and prunes every other
+    archive before the rows cascade.
+    """
 
     uow: UnitOfWork
+    backup_store: BackupArchiveStore
 
     async def __call__(self, *, community_id: CommunityId, server_id: ServerId) -> None:
         async with self.uow:
@@ -611,6 +649,37 @@ class DeleteServer:
                 raise ServerNotFoundError(str(server_id.value))
             if not server.is_at_rest():
                 raise ServerNotStoppedError(str(server_id.value))
+        # Pack the working set into the retained final tar.gz first. This is
+        # mandatory and fail-closed (#777): if it raises, the row is untouched and
+        # the whole delete fails rather than dropping the latest state.
+        await self.backup_store.prune_to_final_snapshot(
+            community_id=community_id, server_id=server_id
+        )
+        async with self.uow:
+            # Re-check at-rest in the final transaction: a start could have landed
+            # in the (possibly minutes-long) pack window above. Re-checking bounds
+            # the worst case to the small TOCTOU window between here and the commit
+            # (see the class docstring); without a per-server lifecycle lock it
+            # cannot be fully closed.
+            server = await self.uow.servers.get_by_id(server_id)
+            if server is None or server.community_id != community_id:
+                raise ServerNotFoundError(str(server_id.value))
+            if not server.is_at_rest():
+                raise ServerNotStoppedError(str(server_id.value))
+            # Re-list backups HERE, not before the pack: a backup created during the
+            # (minutes-long) pack window would otherwise be neither the snapshotted
+            # head nor in the snapshotted tail, surviving as a third orphan archive
+            # (#777 review). The fresh list keeps the "latest existing at delete time"
+            # semantics — the head is the newest row at this point — and archive-first
+            # ordering holds because the tail is deleted before the row delete below
+            # cascades the rows away. Newest-first; head retained, tail deleted.
+            backups = await self.uow.backups.list_for_server(server_id)
+            for backup in backups[1:]:
+                await self.backup_store.delete(
+                    community_id=community_id,
+                    server_id=server_id,
+                    storage_ref=backup.storage_ref,
+                )
             await self.uow.servers.delete(server_id)
             # No FK on resource_grant.resource_id, so the server delete does not
             # cascade; sweep the grants in the same transaction (Section 10).

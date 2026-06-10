@@ -181,6 +181,27 @@ describe("Step 1 — type & version", () => {
       expect(screen.getByText(t("serverCreate.next"))).toBeEnabled(),
     );
   });
+
+  it("falls back to the raw type string for a catalog type not in TYPE_LABEL (#791)", async () => {
+    // A future catalog type unknown to the hardcoded TYPE_LABEL map must not
+    // render a blank card — it must show the raw type string instead.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === "/api/versions") {
+        return Promise.resolve({
+          server_types: ["vanilla", "paper", "future_engine"],
+        });
+      }
+      return defaultGet(path);
+    });
+    renderPage();
+
+    // Known types still show their translated labels.
+    expect(
+      await screen.findByText(t("serverCreate.type.vanilla")),
+    ).toBeInTheDocument();
+    // The unmapped type falls back to its raw string — the card is not blank.
+    expect(screen.getByText("future_engine")).toBeInTheDocument();
+  });
 });
 
 describe("Step 2 — runtime port check", () => {

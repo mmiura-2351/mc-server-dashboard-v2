@@ -17,10 +17,20 @@
     "  instance_running   - a tracked running instance exists for the server id",
     "  instance_stopped   - no tracked instance and no orphan for the id",
     "  instance_absent    - the server id is unknown to this Worker",
+    "  command_in_flight  - a mutating lifecycle command is reserved in flight for",
+    "                       the id but no instance/orphan is tracked yet (issue #780):",
+    "                       a detached stop still confirming termination, or a start/",
+    "                       hydrate mid driver.Start / transfer after a stream reconnect",
     "  orphan_pending     - a failed-stop orphan is recorded (issue #251/#253)",
     "  driver_unavailable - the requested driver is not offered by this Worker",
     "  missing_path       - the file/dir target does not exist in the working set",
     "  unsafe_path        - a traversal-rejected path (FR-FILE-4)",
+    "  unsafe_server_id   - a server id rejected at command intake before any",
+    "                       scratch-path join: empty, '.'/'..', or one bearing a",
+    "                       path separator / NUL (issue #782). The guard fires in",
+    "                       Manager.Handle ahead of the kind switch, so it applies",
+    "                       identically to every kind; pinned once on SnapshotTrigger",
+    "                       (the kind whose empty-id hit tars the scratch ROOT).",
     "  port_conflict      - the driver Start failed on a host-port collision (#225)",
     "  image_missing      - the driver Start failed on a missing container image (#225)",
     "The port_conflict / image_missing rows are sanitized categories the container",
@@ -42,6 +52,7 @@
 
     {"kind": "StopServer", "precondition": "instance_running", "code": "ok"},
     {"kind": "StopServer", "precondition": "instance_absent", "code": "server_not_found"},
+    {"kind": "StopServer", "precondition": "command_in_flight", "code": "invalid_state"},
 
     {"kind": "RestartServer", "precondition": "instance_running", "code": "ok"},
     {"kind": "RestartServer", "precondition": "instance_absent", "code": "server_not_found"},
@@ -54,6 +65,7 @@
     {"kind": "HydrateTrigger", "precondition": "orphan_pending", "code": "invalid_state"},
 
     {"kind": "SnapshotTrigger", "precondition": "instance_stopped", "code": "ok"},
+    {"kind": "SnapshotTrigger", "precondition": "unsafe_server_id", "code": "file_access_denied"},
 
     {"kind": "ReadFile", "precondition": "missing_path", "code": "server_not_found"},
     {"kind": "ReadFile", "precondition": "unsafe_path", "code": "file_access_denied"},

@@ -132,6 +132,16 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         # is a no-op, so no NotFoundError translation is needed here.
         await self._storage.delete_backup(community, server, BackupKey(storage_ref))
 
+    async def prune_to_final_snapshot(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        community, server = _scope(community_id, server_id)
+        # The DeleteServer reclaim path (issue #777): Storage packs ``current/`` into
+        # a retained final tar.gz and drops the working-set tree, fail-closed on a
+        # pack failure. No NotFoundError translation: an unpublished snapshot is a
+        # no-op on Storage, not an error.
+        await self._storage.prune_to_final_snapshot(community, server)
+
     def open(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> AsyncIterator[bytes]:
