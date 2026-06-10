@@ -26,9 +26,11 @@ silently corrected here — there is no in-line retry — but it is observable: 
 divergence shows up as ``desired_state`` not matching the Worker-reported
 ``observed_state``. Closing the window (re-dispatching durable-but-unsent intent)
 is a reconciler's job, tracked separately; the in-line compensation above covers
-only failures where the start command demonstrably never reached the Worker (a
-pre-dispatch failure, or the Worker explicitly refused the start). A
-timeout/lost-response AFTER the start was sent does NOT compensate — see the
+only pre-dispatch failures — failures where the start command demonstrably never
+reached the Worker (placement, jar provisioning, a failed hydrate, or a
+pre-dispatch ``WorkerUnavailableError``). A timeout/lost-response AFTER the start
+was sent, and an ``INVALID_STATE`` outcome (the Worker refusing because an
+instance is already live there), both do NOT compensate — see the
 assignment-stickiness note below.
 
 Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
@@ -37,9 +39,8 @@ Storage (a server with no published working set yet hydrates to an empty dir, th
 data-plane endpoint being 204), then dispatches the launch; a failure before the
 start command is sent (a failed hydrate, or a pre-dispatch
 ``WorkerUnavailableError``) compensates the committed intent. The launch carries a
-conventional ``server.jar``
-relpath and the server's recorded MC version (FR-EXE-5: the Worker picks the Java
-runtime).
+conventional ``server.jar`` relpath and the server's recorded MC version
+(FR-EXE-5: the Worker picks the Java runtime).
 
 Assignment stickiness after dispatch (the orphan-placement invariant, issue #101).
 ONCE A START COMMAND HAS BEEN SENT FOR A SERVER, THE RECONCILER NEVER PLACES IT ON
@@ -50,9 +51,14 @@ pre-dispatch failure (placement, jar provisioning, a failed hydrate) is safe to
 revert, but a post-dispatch timeout/lost-response ``WorkerUnavailableError`` whose
 command MAY have been applied KEEPS the assignment and ``desired=running`` so the
 next reconcile tick redispatches to the SAME Worker (where an ``INVALID_STATE``
-resolves the lost-response case as already-running). The Worker's double-start guard
-is per-process, so reverting a possibly-started server — and letting a later start
-place it elsewhere — would spawn a second live instance (issue #773).
+resolves the lost-response case as already-running). An ``INVALID_STATE`` outcome
+returned straight to ``__call__`` is the same case observed synchronously: the
+instance is DEFINITELY live on the assigned Worker (already running, or a pending
+failed-stop orphan), so it likewise keeps the assignment and ``desired=running``
+and records observed=running rather than compensating. The Worker's double-start
+guard is per-process, so reverting a possibly-started or definitely-running server
+— and letting a later start place it elsewhere — would spawn a second live
+instance (issue #773/#774).
 """
 
 from __future__ import annotations
@@ -198,13 +204,44 @@ class StartServer:
             if not dispatch.attempted:
                 await self._compensate(community_id, server_id, worker_id, original=exc)
             raise
-        if not outcome.success:
-            failure = _dispatch_failure(
-                server_id=server_id, kind="StartServer", outcome=outcome
-            )
-            await self._compensate(community_id, server_id, worker_id, original=failure)
-            raise failure
-        return server
+        if outcome.success:
+            return server
+        if dispatch.attempted and outcome.status is CommandStatus.INVALID_STATE:
+            # The Worker refused the START because an instance for this server is
+            # ALREADY live on the assigned Worker — INVALID_STATE on a start is only
+            # "already running" or a pending failed-stop orphan, never a "nothing
+            # started" refusal (instancemanager handleStart). (Gate on
+            # ``dispatch.attempted`` so a PRE-dispatch INVALID_STATE — a failed
+            # hydrate — still compensates: that one never reached the start.)
+            # Compensating here (desired=stopped + unassign) would orphan that live
+            # instance: its StatusChange(running) is dropped at the ownership guard
+            # once unassigned, the row wedges at
+            # desired=stopped/observed=running/unassigned (which the reconciler skips
+            # forever), and a later start would place a SECOND instance on a different
+            # Worker (issue #773/#774). So converge exactly as redispatch_start does
+            # (#213): record observed=running and KEEP desired=running + the
+            # assignment — the user's start IS satisfied.
+            observed_at = self.clock.now()
+            async with self.uow:
+                applied = await self.uow.servers.record_observed_state(
+                    server_id,
+                    observed_state=ObservedState.RUNNING,
+                    observed_at=observed_at,
+                )
+                await self.uow.commit()
+            # Keep the return honest (issue #292): reflect the observed state on the
+            # entity only when the guarded write landed; if a same-instant/fresher
+            # write won the #216 guard, leave the as-read fields rather than claim a
+            # write that did not happen.
+            if applied:
+                server.observed_state = ObservedState.RUNNING
+                server.observed_at = observed_at
+            return server
+        failure = _dispatch_failure(
+            server_id=server_id, kind="StartServer", outcome=outcome
+        )
+        await self._compensate(community_id, server_id, worker_id, original=failure)
+        raise failure
 
     async def place_and_start(
         self, *, community_id: CommunityId, server_id: ServerId
