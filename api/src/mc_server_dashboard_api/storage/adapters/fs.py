@@ -713,6 +713,78 @@ class FsStorage(Storage):
         current = await asyncio.to_thread(self._current_dir, community_id, server_id)
         return await asyncio.to_thread(check_working_set, current)
 
+    async def prune_to_final_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        # The DeleteServer reclaim path (issue #777): pack ``current/`` into a single
+        # retained ``final.tar.gz`` at the server root, then drop the working-set
+        # tree. Backups are pruned by the caller and are left untouched here.
+        await asyncio.to_thread(self._prune_to_final_snapshot, community_id, server_id)
+
+    def _prune_to_final_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        server_root = self._server_root(community_id, server_id)
+        # Sweep any ``.final.*.tmp`` left by an earlier crash mid-pack (the
+        # BaseException cleanup never ran), mirroring the tmp hygiene the publish
+        # path applies to its staging dirs. Keeps a crash-loop from leaking spools.
+        if server_root.is_dir():
+            for stale in server_root.glob(".final.*.tmp"):
+                stale.unlink(missing_ok=True)
+        try:
+            current = self._current_dir(community_id, server_id)
+        except NotFoundError:
+            # No live ``current`` symlink: nothing to pack. This is also the no-op
+            # branch a retried delete lands in (the symlink is unlinked the instant
+            # final.tar.gz is durable, below), so it must never re-pack — it only GCs
+            # any leftover working-set tree and the generation marker, leaving exactly
+            # backups/ + the (possibly already-written) final archive. Idempotent.
+            for sub in ("snapshots", "incoming", "versions"):
+                _rmtree(server_root / sub)
+            _rmtree(server_root / "current")
+            _rmtree(self._generation_path(server_root))
+            return
+        # Pack to a temp sibling first, then atomically rename into place: the tree
+        # is removed ONLY after a complete final.tar.gz exists, so a pack failure
+        # leaves the working set intact and the error propagates (fail-closed, #777).
+        final = server_root / "final.tar.gz"
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(server_root), prefix=".final.", suffix=".tmp"
+        )
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            _write_tar_gz(current, tmp)
+            # Make final.tar.gz durable BEFORE the ``current`` unlink below destroys
+            # the only re-packable source: fsync the tar's data blocks (the tmp file)
+            # before the rename, then fsync server_root after it. Without this, a power
+            # cut could commit the unlink/GC (journaled metadata) while the tar's data
+            # blocks were never flushed — a retried prune would find the marker gone,
+            # take the GC-only branch, finish reclaiming the tree, and leave a
+            # torn/empty final with no source: latest state lost (#777 review). Mirrors
+            # put_backup's tmp fsync (fs.py:818) and commit_snapshot's dir fsync.
+            tmp_fd = os.open(tmp, os.O_RDONLY)
+            try:
+                os.fsync(tmp_fd)
+            finally:
+                os.close(tmp_fd)
+            os.replace(tmp, final)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        _fsync_dir(server_root)
+        # Unlink the ``current`` symlink FIRST, the instant final.tar.gz is durable:
+        # it is the one marker that says the working set is still live and re-packable.
+        # A crash after this point leaves no symlink, so a retried delete raises
+        # NotFoundError from ``_current_dir`` above and takes the GC-only branch — it
+        # never re-packs a half-removed snapshot tree over the good final.tar.gz (#777).
+        _rmtree(server_root / "current")
+        # The final archive is durable and ``current`` is gone; reclaim the unpacked
+        # working-set tree and the generation marker.
+        for sub in ("snapshots", "incoming", "versions"):
+            _rmtree(server_root / sub)
+        _rmtree(self._generation_path(server_root))
+
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> None:

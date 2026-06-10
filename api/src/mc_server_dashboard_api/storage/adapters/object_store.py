@@ -553,6 +553,54 @@ class ObjectStorage(Storage):
         del community_id, server_id
         return WorkingSetReport()
 
+    async def prune_to_final_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        # The DeleteServer reclaim path (issue #777): pack the live snapshot into a
+        # single retained ``final.tar.gz`` object at the server prefix, then drop the
+        # working-set objects (snapshots/, incoming/, versions/) plus the pointer and
+        # generation markers. ``backups/`` is left untouched — the caller prunes
+        # archives through its own seam.
+        server_prefix = self._server_prefix(community_id, server_id)
+        async with self._client_factory() as client:
+            snapshot_prefix = await self._read_pointer(client, server_prefix)
+            if snapshot_prefix is not None:
+                objs = sorted(
+                    await client.list_objects(snapshot_prefix), key=lambda o: o.key
+                )
+                # Build the self-contained tar.gz to local scratch (gzip streams, so
+                # the bodies are not all held at once), then upload it as one object.
+                # The upload makes ``final.tar.gz`` appear atomically BEFORE any
+                # working-set object is deleted, so a pack/upload failure leaves the
+                # working set intact and the error propagates (fail-closed, #777).
+                fd, spool_name = await asyncio.to_thread(
+                    tempfile.mkstemp, prefix=".final.", suffix=".tar.gz"
+                )
+                await asyncio.to_thread(_close_fd, fd)
+                spool = Path(spool_name)
+                try:
+                    await _write_backup_targz(client, snapshot_prefix, objs, spool)
+                    await client.upload_multipart(
+                        server_prefix + "final.tar.gz", _file_parts(spool)
+                    )
+                finally:
+                    await asyncio.to_thread(spool.unlink, missing_ok=True)
+                # Invalidate the pointer FIRST, the instant final.tar.gz is durable:
+                # it is the one marker that says the working set is still live and
+                # re-packable. A crash after this point leaves no pointer, so a
+                # retried delete reads ``snapshot_prefix is None`` and takes the GC-
+                # only branch below — it never re-lists a half-deleted prefix and
+                # overwrites the good final.tar.gz with an empty/partial pack (#777).
+                await client.delete_object(server_prefix + _POINTER)
+            # The final archive is durable and the pointer is gone (or nothing was
+            # published); reclaim the remaining working-set objects and the generation
+            # marker. Idempotent: a retry that found no pointer arrives here directly
+            # and completes the GC without re-packing.
+            await _delete_prefix(client, server_prefix + "snapshots/")
+            await _delete_prefix(client, server_prefix + "incoming/")
+            await _delete_prefix(client, server_prefix + "versions/")
+            await client.delete_object(server_prefix + _GENERATION)
+
     async def _check_staged_regions(
         self, client: S3Client, staged_prefix: str, staged: list[S3Object]
     ) -> WorkingSetReport:

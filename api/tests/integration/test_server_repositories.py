@@ -58,6 +58,7 @@ from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import (
+    FakeBackupArchiveStore,
     FakeClock,
     FakeFileStore,
     FakeVersionValidator,
@@ -225,9 +226,10 @@ async def test_delete_sweeps_resource_grants(engine: AsyncEngine) -> None:
         await uow.commit()
 
     # Delete the server: the grant on it must be swept in the same transaction.
-    await DeleteServer(uow=ServersUnitOfWork(factory))(
-        community_id=CommunityId(community_id), server_id=server.id
-    )
+    await DeleteServer(
+        uow=ServersUnitOfWork(factory),
+        backup_store=FakeBackupArchiveStore(),
+    )(community_id=CommunityId(community_id), server_id=server.id)
 
     async with ServersUnitOfWork(factory) as uow:
         assert await uow.servers.get_by_id(server.id) is None

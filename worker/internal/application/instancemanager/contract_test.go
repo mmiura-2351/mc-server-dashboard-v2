@@ -154,6 +154,13 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		cmd.Path = "../escape"
 		return m.Handle(ctx, cmd)
 
+	case "unsafe_server_id":
+		// An empty server id collapses every scratch-path join onto the scratch
+		// ROOT; the intake guard must reject it before any handler runs (issue
+		// #782). Driven with the empty id since that is the most dangerous shape.
+		m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{})
+		return m.Handle(ctx, contractCmd(t, row.Kind, ""))
+
 	default:
 		t.Fatalf("contract table: unknown precondition %q", row.Precondition)
 		return session.CommandResult{}

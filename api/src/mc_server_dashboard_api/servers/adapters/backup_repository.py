@@ -66,7 +66,7 @@ class SqlAlchemyBackupRepository(BackupRepository):
         stmt = (
             select(BackupModel)
             .where(BackupModel.server_id == server_id.value)
-            .order_by(BackupModel.created_at.desc())
+            .order_by(BackupModel.created_at.desc(), BackupModel.id.desc())
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_backup(row) for row in rows]

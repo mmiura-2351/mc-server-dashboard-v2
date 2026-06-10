@@ -215,6 +215,9 @@ func (m *Manager) Metrics() <-chan session.MetricsEvent { return m.metrics }
 
 // Handle dispatches one command (session.CommandHandler).
 func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.CommandResult {
+	if err := validateServerID(cmd.ServerID); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied, err.Error())
+	}
 	switch cmd.Kind {
 	case "StartServer":
 		return m.handleStart(ctx, cmd)
@@ -1002,6 +1005,32 @@ func readDirEntries(dirFd int) (*session.FileListing, error) {
 		entries = append(entries, session.FileEntry{Name: name, IsDir: isDir, Size: size})
 	}
 	return &session.FileListing{Entries: entries, Truncated: truncated}, nil
+}
+
+// validateServerID rejects a ServerID that is unsafe to join into a scratch
+// path before any handler does so (issue #782). The API sends the canonical
+// text form of a UUID (str(uuid)); every legitimate id is therefore a single
+// non-empty path component with no separator and no "." / ".." meaning. An
+// empty id would make a filepath.Join collapse onto the scratch ROOT (so
+// SnapshotTrigger would tar every server's world) and a "../x" id would escape
+// it. This is defense-in-depth on a trusted control plane: it rejects the
+// dangerous shapes without pinning to strict UUID syntax, so a future id scheme
+// that stays a sane single component keeps working. Mirrors safeJoin's lexical
+// discipline.
+func validateServerID(id string) error {
+	if id == "" {
+		return errors.New("refusing empty server id")
+	}
+	if id == "." || id == ".." {
+		return fmt.Errorf("refusing server id %q", id)
+	}
+	if strings.ContainsAny(id, `/\`) {
+		return fmt.Errorf("refusing server id with a path separator %q", id)
+	}
+	if strings.ContainsRune(id, 0) {
+		return fmt.Errorf("refusing server id with a NUL byte %q", id)
+	}
+	return nil
 }
 
 // safeJoin joins name under root and verifies the result stays inside root.

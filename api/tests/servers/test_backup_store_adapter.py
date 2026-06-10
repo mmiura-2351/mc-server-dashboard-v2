@@ -256,6 +256,35 @@ async def test_delete_is_idempotent(tmp_path: Path) -> None:
     await adapter.delete(community_id=community, server_id=server, storage_ref=ref)
 
 
+async def test_prune_to_final_snapshot_packs_and_drops_working_set(
+    tmp_path: Path,
+) -> None:
+    # The seam delegates to Storage's reclaim (#777): after the prune the working
+    # set is gone and a final.tar.gz of it remains at the server root.
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"world/level.dat": b"w"})
+
+    await adapter.prune_to_final_snapshot(community_id=community, server_id=server)
+
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    final = server_root / "final.tar.gz"
+    assert final.is_file()
+    assert read_tar(final.read_bytes()) == {"world/level.dat": b"w"}
+    assert not (server_root / "current").exists()
+
+
+async def test_prune_to_final_snapshot_unpublished_is_a_noop(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    # No published snapshot: prune is a no-op rather than an error.
+    await adapter.prune_to_final_snapshot(community_id=community, server_id=server)
+
+
 async def test_open_then_store_to_another_server_restores(tmp_path: Path) -> None:
     """The seam's download (open) + upload (store) round-trip across servers: the
     archive bytes stream out of one server and into another, restorable there."""
