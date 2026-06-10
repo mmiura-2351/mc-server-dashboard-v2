@@ -80,6 +80,7 @@ across servers (FR-VER-3) and contain no Community data.
 │       └── servers/
 │           └── <server-id>/
 │               ├── current -> snapshots/<snapshot-id>/  # symlink to the live snapshot; the publish pointer (Section 4)
+│               ├── generation                # monotonic working-set generation counter (Section 3.1); bumped on each commit_snapshot
 │               ├── snapshots/                # published working-set snapshots; current points at the live one
 │               │   └── <snapshot-id>/        # the full working directory for one published state
 │               │       ├── world/
@@ -125,6 +126,14 @@ Notes:
   republishes it into `current/`. The archive codec (`<archive-ext>`) is
   **adapter-internal** — callers hold only the opaque `BackupKey` and never the
   on-disk name; the M1 `fs` adapter uses gzip (`.tar.gz`), with zstd deferred.
+- `generation` is a plain-text file holding the current authoritative
+  working-set generation counter (a monotonically increasing integer, starting
+  at 1 after the first publish). It is bumped atomically with the `current`
+  pointer flip inside `commit_snapshot` so the persisted generation and
+  `current/` never disagree. A server with no published snapshot has no
+  `generation` file; reading it in that state returns 0. On object backends
+  it is a single key `generation` under the server prefix. Removed together
+  with the rest of the working-set tree by the post-delete prune (Section 2.1).
 - On object backends the tree above is a **key prefix scheme**, not real
   directories (Section 7.3); the same logical layout applies.
 
@@ -140,8 +149,7 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
    archive-first per the `delete_backup` ordering convention (Section 3.3). (The
    per-file `versions/` tree is not pruned here — it is removed by the working-set
    prune in point 2, before any archive delete.) Selection is the literal
-   latest-by-`created_at`
-   **regardless of `health`** (owner ruling on #777: "latest existing"): a
+   latest-by-`created_at` **regardless of `health`** (owner ruling on #777: "latest existing"): a
    QUARANTINED newest archive is still the one kept. The mandatory `final.tar.gz`
    below is the safety net — it is strictly newer and is the recommended recovery
    source if the retained backup is suspect.
@@ -200,8 +208,10 @@ authoritative-side stream and the atomic-publish handshake.
 | `open_hydrate_source(community_id, server_id) -> ReadStream` | Open a read stream over the current authoritative working set | The data plane reads from this to feed a Worker on start/relocation (hydrate). Reads `current/`. |
 | `begin_snapshot(community_id, server_id) -> SnapshotHandle` | Start an incoming snapshot transfer | Allocates an isolated `incoming/<transfer-id>/` staging area. |
 | `write_snapshot(handle, WriteStream)` | Stream the Worker's working set into staging | Writes only into staging, never `current/`. May be called incrementally. |
-| `commit_snapshot(handle)` | Atomically publish the staged snapshot as the new authoritative copy | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. |
+| `commit_snapshot(handle) -> int` | Atomically publish the staged snapshot as the new authoritative copy; return the new generation | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. Bumps and returns the working-set generation counter (the new integer the Worker records as the generation its scratch is at). Refuses with `IncompleteTransferError` if the transfer was not signalled complete. Refuses with `IntegrityCheckError` if the staged set contains corrupt `.mca` region files (issue #739); refused publishes do NOT bump the generation. |
 | `abort_snapshot(handle)` | Discard an incomplete/failed transfer | Deletes the staging area; `current/` is untouched. Also the cleanup path for crash recovery (Section 4.3). |
+| `current_generation(community_id, server_id) -> int` | Return the current authoritative working-set generation | The counter `commit_snapshot` bumps, read back so the hydrate data plane can stamp the generation it serves (Section 8). Returns 0 when no snapshot has been published. |
+| `check_current_health(community_id, server_id) -> WorkingSetReport` | Structurally fsck the on-disk authoritative snapshot | Walk `current/` for corrupt `.mca` region files (issue #744). Read-only — never mutates `current/`. Raises `NotFoundError` if no snapshot has been published. |
 | `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1, issue #777). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, the `current` pointer, and the generation marker; leaves `backups/`. The pointer/symlink is invalidated the instant `final.tar.gz` is durable, so a crash-retry is idempotent and never re-packs over a good final. Fail-closed on a pack failure; bypasses the #764 `.mca` gate so a corrupt server stays deletable; no-op if nothing is published. |
 
 The hydrate/snapshot **wire transport** (how `ReadStream`/`WriteStream` bytes
@@ -258,7 +268,7 @@ depend on a Worker.
 |---|---|---|
 | `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (Section 6.9). For a **running** server the application first does `save-all` → on-demand snapshot (`commit_snapshot`) → then calls this; `Storage` only ever archives the authoritative copy. |
 | `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (#15); this returns the keys. |
-| `restore_backup(community_id, server_id, BackupKey)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. |
+| `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. The extracted backup is validated through the integrity gate (issue #743): a corrupt backup is refused with `BackupCorruptError` and the backup is quarantined. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and records a distinct `backup:force_restore` audit entry naming the corrupt-file count. |
 | `delete_backup(community_id, server_id, BackupKey)` | Remove a backup archive | Idempotent. |
 | `open_backup(community_id, server_id, BackupKey) -> ReadStream` | Stream a stored archive in its native format | Download (issue #281): yields the archive bytes **verbatim** — the adapter-internal `tar.gz` (Section 2), no recompression. `NotFoundError` for an unknown key. |
 | `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload (issue #281): the **application** has already validated the archive (opens + traversal-safe entries) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. |
@@ -502,7 +512,9 @@ ARCHITECTURE.md Section 6 (e.g. `FsStorage`, `ObjectStorage`).
 
 `remote-fs` may share most code with `fs` (both are path-based); they are
 distinct entries because their **operational guarantees and failure modes
-differ**, and #16 selects between them explicitly.
+differ**, and #16 selects between them explicitly. Config: set
+`storage.backend = remote-fs` and point `storage.fs.root` at the mount path
+(CONFIGURATION.md Section 5.2).
 
 ### 7.3 object (object storage)
 
@@ -558,8 +570,8 @@ whatever path the API emits:
 
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
-| `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present, #118). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir); `401` |
-| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `411` no `Content-Length`; `413` over the size cap; `401` |
+| `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present, #118). Response always carries `X-Working-Set-Generation: <n>` (the generation of the snapshot served; 0 when no snapshot has been published). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir, generation header still present); `401` |
+| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set, #739); `401` |
 
 **JAR posture (M1).** ARCHITECTURE.md Section 7.3 says the resolved server JAR
 reaches the Worker as part of hydrate. As of issue #118 (version catalog + JAR
@@ -600,7 +612,14 @@ from the tar it buffered, so the count matches a complete upload exactly.
 off the gRPC stream: hydrate = GET + stream-unpack into the instance working dir
 (members path-sanitized — absolute paths, `..`, and symlink/hardlink members are
 rejected, mirroring the API-side `filter="data"` discipline); snapshot = pack the
-working dir into a tar and POST it with a `Content-Length`. Transport security
+working dir into a tar and POST it with a `Content-Length`. Before packing, the
+Worker runs a structural region fsck over the working set (issue #765): if any
+`.mca` file is found corrupt, the snapshot is refused at source with a
+`TRANSFER_FAILED` outcome — a clear failure with no wasted tar+upload — rather
+than shipping a corrupt set the API gate (the `422` above) would reject after a
+full round-trip. A fsck I/O error is best-effort (logged, transfer proceeds) so
+the fsck never wedges a snapshot; the API integrity gate is the correctness
+guarantee. Transport security
 (CA bundle / mTLS / dev-insecure) mirrors the control channel
 (CONFIGURATION.md Section 6.1). The session routes every server-scoped command —
 hydrate/snapshot as well as lifecycle/file commands — to a per-server lane off
