@@ -1346,9 +1346,16 @@ function ConfigEditor({
   disabled: boolean;
   onChange: (rows: ConfigRow[]) => void;
 }) {
+  // Only mark a row edited when its VALUE changes; a key-only rename must not
+  // trigger re-parsing of the display string, so a stored "12" (string) stays
+  // a string and doesn't silently coerce to the number 12 on save (#791).
   const update = (i: number, patch: Partial<ConfigRow>) =>
     onChange(
-      rows.map((r, j) => (j === i ? { ...r, ...patch, edited: true } : r)),
+      rows.map((r, j) =>
+        j === i
+          ? { ...r, ...patch, edited: r.edited === true || "value" in patch }
+          : r,
+      ),
     );
   return (
     <div className="field config-editor">

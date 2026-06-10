@@ -11,18 +11,25 @@ import { t } from "../i18n/index.ts";
 
 type WorkerResponse = components["schemas"]["WorkerResponse"];
 
+// Matches AdminWorkersPage's interval so heartbeat ages and load stay fresh
+// without a separate polling policy (#791).
+const REFRESH_INTERVAL_MS = 12_000;
+
 export function AdminOverviewPage() {
   const workersQuery = useQuery({
     queryKey: ["workers"],
     queryFn: () => api.get("/api/workers"),
+    refetchInterval: REFRESH_INTERVAL_MS,
   });
   const backupsQuery = useQuery({
     queryKey: ["backups", "statistics"],
     queryFn: () => api.get("/api/backups/statistics"),
+    refetchInterval: REFRESH_INTERVAL_MS,
   });
   const jarPoolQuery = useQuery({
     queryKey: ["versions", "jar-pool", "stats"],
     queryFn: () => api.get("/api/versions/jar-pool/stats"),
+    refetchInterval: REFRESH_INTERVAL_MS,
   });
 
   const isPending =

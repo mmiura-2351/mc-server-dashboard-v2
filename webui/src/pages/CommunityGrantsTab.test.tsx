@@ -412,6 +412,58 @@ describe("CommunityGrantsTab", () => {
     expect(screen.queryByText("s1")).not.toBeInTheDocument();
   });
 
+  it("403 on servers label in grants tab does not poison the shared servers cache (#791)", async () => {
+    // The grants tab uses a distinct query key ("grants-labels" suffix) so a
+    // 403→[] fallback is isolated and does not write [] into the shared
+    // ["communities", cid, "servers"] key that the Groups/Dashboard use.
+    // Simulate: grants tab gets a 403 on servers; groups tab (which uses the
+    // shared key) must still see real server data, not [].
+    let groupsTabServersCallCount = 0;
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === `/api/communities/${CID}/members`) {
+        return Promise.resolve([member()]);
+      }
+      if (path === `/api/communities/${CID}/servers`) {
+        groupsTabServersCallCount++;
+        if (groupsTabServersCallCount === 1) {
+          // First call comes from grants tab; 403 to force the fallback.
+          return Promise.reject(
+            new ApiError(403, { reason: "forbidden", permission: "server:read" }),
+          );
+        }
+        // Subsequent calls (e.g., from groups tab) return real data.
+        return Promise.resolve([server({ id: "s1", name: "survival" })]);
+      }
+      if (path.startsWith(`/api/communities/${CID}/grants`)) {
+        return Promise.resolve([grant()]);
+      }
+      if (path.startsWith(`/api/communities/${CID}/groups`)) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(community());
+    });
+    renderPage();
+    await openGrants();
+
+    // Grants tab is visible with degraded raw ids (403 on servers).
+    await screen.findAllByText(t("communitySettings.grants.colMember"));
+
+    // The shared cache key must NOT have been poisoned with []. Switching to
+    // the Groups tab should trigger a fresh fetch (distinct key → no stale hit)
+    // and successfully load the server list.
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("communitySettings.tab.groups") }),
+    );
+
+    // Groups tab loads without showing a "no servers" error caused by stale [].
+    expect(
+      await screen.findByText(t("communitySettings.groups.heading")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("communitySettings.grants.loadError")),
+    ).not.toBeInTheDocument();
+  });
+
   it("routes a 403 on revoke through onForbidden (named-permission toast)", async () => {
     routeGet({
       members: [member()],
