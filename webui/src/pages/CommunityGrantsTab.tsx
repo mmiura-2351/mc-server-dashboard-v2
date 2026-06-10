@@ -67,7 +67,10 @@ export function CommunityGrantsTab({
     ),
   });
   const servers = useQuery({
-    queryKey: ["communities", communityId, "servers"] as const,
+    // Use a "grants-labels" suffix so a 403→[] fallback is isolated to this
+    // query and does not pollute the shared ["communities", cid, "servers"] key
+    // that DashboardPage and CommunityGroupsTab consume (#791).
+    queryKey: ["communities", communityId, "servers", "grants-labels"] as const,
     queryFn: labelQueryFn(
       () =>
         api.get(
