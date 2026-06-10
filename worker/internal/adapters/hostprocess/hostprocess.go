@@ -514,6 +514,24 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	}
 
 	if err := proc.Kill(); err != nil {
+		// The kill call itself errored, so this Stop failed without confirming the
+		// process died. Reset the stopping latch (and restore the pre-stop state) so a
+		// retried Stop re-runs the full sequence instead of short-circuiting on the
+		// entry guard and returning a false nil success — which would otherwise let the
+		// API remove the orphan record and GC the authoritative-stop scratch (#766)
+		// while the process may still be alive (issue #816). Mirror the survived-kill
+		// reset (#253): keep the same exitObserved guard, since the process can exit
+		// concurrently and supervise then owns the terminal state (#392), and leave
+		// stopRequested sticky so a later exit is recorded stopped, not a spurious
+		// crash (#257).
+		i.mu.Lock()
+		if i.exitObserved {
+			i.mu.Unlock()
+			return nil
+		}
+		i.stopping = false
+		i.state = prior
+		i.mu.Unlock()
 		return fmt.Errorf("hostprocess: kill: %w", err)
 	}
 	// Confirm the kill actually terminated the process. A process that survives

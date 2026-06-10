@@ -31,10 +31,15 @@ type fakeProcess struct {
 	// driving the re-attemptable-Stop path (issue #253).
 	killSurvive int
 	killCalls   int
-	startErr    error
-	startedAt   bool
-	stdout      io.Reader
-	stderr      io.Reader
+	// killErrs scripts per-call Kill errors (the last entry repeats once exhausted);
+	// a nil entry lets that Kill proceed normally. It models a Kill() that errors on
+	// the first attempt and succeeds on a retry, driving the kill-error
+	// re-attemptable-Stop path (issue #816).
+	killErrs  []error
+	startErr  error
+	startedAt bool
+	stdout    io.Reader
+	stderr    io.Reader
 }
 
 func newFakeProcess() *fakeProcess {
@@ -79,6 +84,16 @@ func (p *fakeProcess) Kill() error {
 	p.mu.Lock()
 	p.killed = true
 	p.killCalls++
+	if len(p.killErrs) > 0 {
+		err := p.killErrs[0]
+		if len(p.killErrs) > 1 {
+			p.killErrs = p.killErrs[1:]
+		}
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+	}
 	survive := p.killNoExit || p.killSurvive > 0
 	if p.killSurvive > 0 {
 		p.killSurvive--
@@ -588,6 +603,36 @@ func TestRetryStopStillSurvivingFailsAgain(t *testing.T) {
 	if proc.killCount() != 2 {
 		t.Fatalf("Kill called %d times, want 2 (the retry must re-issue the kill, not short-circuit)", proc.killCount())
 	}
+}
+
+// When the Kill() call itself errors, Stop must fail without leaving the stopping
+// latch set: a retried Stop has to re-run the full kill sequence rather than
+// short-circuit on the entry guard and return a false nil success, which would let
+// the API remove the orphan and GC its scratch while the process may still be
+// alive (issue #816). Here the retry kill succeeds.
+func TestStopReattemptableAfterKillError(t *testing.T) {
+	proc := newFakeProcess()
+	// First Kill errors, the retry Kill proceeds normally and exits the process.
+	proc.killErrs = []error{errors.New("kill failed"), nil}
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected first Stop to fail when Kill errors")
+	}
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("retry Stop = %v, want success once the retry kill succeeds", err)
+	}
+	if proc.killCount() != 2 {
+		t.Fatalf("Kill called %d times, want 2 (initial errors + retry re-issues the kill)", proc.killCount())
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
 }
 
 // Stopping a crashed instance is a prompt no-op success: the process is already

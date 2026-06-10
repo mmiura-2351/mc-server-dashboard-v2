@@ -57,7 +57,12 @@ type fakeDocker struct {
 	// container that lingers through the first kill(s) and dies on a later retry,
 	// driving the re-attemptable-Stop path (issue #253).
 	killSurvive int
-	removed     []string
+	// killErrs scripts per-call Kill errors (the last entry repeats once exhausted);
+	// a nil entry lets that Kill proceed normally. It models a docker kill call that
+	// errors (hung/erroring daemon) on the first attempt and succeeds on a retry,
+	// driving the kill-error re-attemptable-Stop path (issue #816).
+	killErrs []error
+	removed  []string
 
 	listResult []Container
 	listErr    error
@@ -164,6 +169,16 @@ func (f *fakeDocker) Kill(_ context.Context, _ string) error {
 	f.mu.Lock()
 	f.killCalled = true
 	f.killCalls++
+	if len(f.killErrs) > 0 {
+		err := f.killErrs[0]
+		if len(f.killErrs) > 1 {
+			f.killErrs = f.killErrs[1:]
+		}
+		if err != nil {
+			f.mu.Unlock()
+			return err
+		}
+	}
 	survive := f.killNoExit || f.killSurvive > 0
 	if f.killSurvive > 0 {
 		f.killSurvive--
@@ -1113,6 +1128,38 @@ func TestRetryStopStillSurvivingFailsAgain(t *testing.T) {
 	if docker.killCount() != 2 {
 		t.Fatalf("docker kill called %d times, want 2 (the retry must re-issue the kill, not short-circuit)", docker.killCount())
 	}
+}
+
+// When the docker kill call itself errors (hung/erroring daemon), Stop must fail
+// without leaving the stopping latch set: a retried Stop has to re-run the full
+// kill sequence rather than short-circuit on the entry guard and return a false
+// nil success, which would let the API remove the orphan and GC its scratch while
+// the container may still be alive (issue #816). Here the retry kill succeeds.
+func TestStopReattemptableAfterKillError(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
+	// docker stop never exits the container, so each Stop falls through to docker
+	// kill; the first kill errors and the retry kill exits the container.
+	docker.stopNoExit = true
+	docker.killErrs = []error{errors.New("daemon hung"), nil}
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected first Stop to fail when docker kill errors")
+	}
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("retry Stop = %v, want success once the retry kill succeeds", err)
+	}
+	if docker.killCount() != 2 {
+		t.Fatalf("docker kill called %d times, want 2 (initial errors + retry re-issues the kill)", docker.killCount())
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
 }
 
 // A forced stop skips RCON and goes straight to docker stop.
