@@ -747,6 +747,53 @@ func TestStopDetachesEscalationFromContextCancellation(t *testing.T) {
 	}
 }
 
+// A pathological RCON peer that drags the "stop" exchange must not consume the
+// whole escalation budget: tryRCONStop runs under its own phase deadline, so it
+// gives up promptly and the SIGTERM→SIGKILL waits keep their full stopTimeout
+// grace (issue #832). Here the peer hangs the "stop" until its phase ctx fires;
+// the process then exits on SIGTERM well inside the stop timeout, so Stop
+// completes via SIGTERM without ever escalating to SIGKILL.
+func TestStopRCONPhaseBudgetPreservesEscalationGrace(t *testing.T) {
+	prev := rconPhaseCap
+	rconPhaseCap = 20 * time.Millisecond
+	t.Cleanup(func() { rconPhaseCap = prev })
+
+	proc := newFakeProcess()
+	ctrl := &fakeControl{hangUntilCtxDone: true}
+	d := newTestDriver(t, proc, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// The process exits on SIGTERM after a short delay, well inside stopTimeout
+	// (50ms). Pre-fix, a hung RCON under the whole stopCtx left this SIGTERM wait
+	// near-zero grace; the phase budget restores it.
+	go func() {
+		for !proc.gotSignal(syscall.SIGTERM) {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(5 * time.Millisecond)
+		proc.exit(nil)
+	}()
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if !ctrl.stopCalled {
+		t.Fatal("expected RCON stop to be attempted")
+	}
+	if !proc.gotSignal(syscall.SIGTERM) {
+		t.Fatal("expected SIGTERM after the hung RCON phase gave up")
+	}
+	if proc.killed {
+		t.Fatal("Stop escalated to SIGKILL: the SIGTERM grace was collapsed by the hung RCON")
+	}
+}
+
 func TestStartSpawnFailure(t *testing.T) {
 	proc := newFakeProcess()
 	proc.startErr = errors.New("exec: java not found")
@@ -913,13 +960,22 @@ func TestSampleErrorsForUnknownPid(t *testing.T) {
 type fakeControl struct {
 	stopCalled bool
 	onStop     func()
+	// hangUntilCtxDone models a pathological peer that drags the RCON "stop"
+	// exchange: Execute blocks until the call's ctx is cancelled (the stop-path
+	// phase deadline), then returns its error. tryRCONStop must give up at the
+	// phase budget rather than ride the whole escalation deadline (issue #832).
+	hangUntilCtxDone bool
 }
 
-func (c *fakeControl) Execute(_ context.Context, line string) (string, error) {
+func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) {
 	if line == "stop" {
 		c.stopCalled = true
 		if c.onStop != nil {
 			c.onStop()
+		}
+		if c.hangUntilCtxDone {
+			<-ctx.Done()
+			return "", ctx.Err()
 		}
 	}
 	return "", nil

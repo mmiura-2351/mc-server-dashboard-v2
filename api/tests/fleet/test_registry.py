@@ -240,7 +240,7 @@ def test_increment_and_decrement_assignment() -> None:
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
     registry.reserve(WorkerId("worker-1"), "server-b", 0)
     registry.increment_assignment(WorkerId("worker-1"), "server-b")
-    registry.decrement_assignment(WorkerId("worker-1"))
+    registry.decrement_assignment(WorkerId("worker-1"), "server-a")
 
     assert registry.list_workers()[0].assigned_count == 1
 
@@ -336,7 +336,8 @@ def test_rebuild_drops_committed_reservation_so_later_confirm_no_ops() -> None:
     # Re-register (resets committed count) then rebuild from the tally, which now
     # already includes server-a (its commit landed before the rebuild ran).
     registry.register(make_worker(at=_T0))
-    registry.set_assignment(WorkerId("worker-1"), {"server-a"})
+    epoch = registry.assignment_epoch(WorkerId("worker-1"))
+    registry.set_assignment(WorkerId("worker-1"), {"server-a": 0}, epoch)
     # The deferred confirm now arrives; it must NOT add a second count.
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
 
@@ -353,12 +354,112 @@ def test_rebuild_keeps_uncommitted_reservation_pending() -> None:
 
     registry.register(make_worker(at=_T0))
     # The tally does NOT yet include server-a (its commit has not landed).
-    registry.set_assignment(WorkerId("worker-1"), set())
+    epoch = registry.assignment_epoch(WorkerId("worker-1"))
+    registry.set_assignment(WorkerId("worker-1"), {}, epoch)
     # Reservation still counts as load while pending.
     assert registry.list_workers()[0].assigned_count == 1
     # When the commit finally lands, the confirm counts it as committed.
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
     assert registry.list_workers()[0].assigned_count == 1
+
+
+# --- committed-memory axis (#843) -------------------------------------------
+
+
+def test_committed_memory_tracks_confirmed_assignments() -> None:
+    # A confirmed reservation carries its declared memory into the committed-memory
+    # axis (#843), read in the same synchronous section as the load count.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    # The memory moved from reserved to committed; the gate-facing sum is unchanged.
+    assert registry.reserved_memory_mb(WorkerId("worker-1")) == 0
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
+
+
+def test_candidate_committed_memory_sums_committed_and_reserved() -> None:
+    # The placement candidate carries committed + reserved declared memory, read
+    # registry-side so the memory gate cannot be raced across an await (#843).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+    registry.reserve(WorkerId("worker-1"), "server-b", 256)
+
+    assert registry.candidates_for_placement()[0].committed_memory_mb == 768
+
+
+def test_decrement_sheds_committed_memory() -> None:
+    # Decrement drops the per-server committed row AND its declared memory (#843).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    registry.decrement_assignment(WorkerId("worker-1"), "server-a")
+
+    assert registry.list_workers()[0].assigned_count == 0
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 0
+
+
+def test_rebuild_restores_committed_memory_from_the_tally() -> None:
+    # The reconnect rebuild restores committed memory, not just the count (#843).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    epoch = registry.assignment_epoch(WorkerId("worker-1"))
+    registry.set_assignment(WorkerId("worker-1"), {"server-a": 1024}, epoch)
+
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 1024
+
+
+# --- rebuild epoch guard (#844) ---------------------------------------------
+
+
+def test_rebuild_keeps_a_confirm_that_landed_after_the_tally_snapshot() -> None:
+    # #844: the rebuild reads its DB tally one await before calling set_assignment; a
+    # commit+confirm landing in that window is not yet in the tally. Without the epoch
+    # guard the stale tally would overwrite the +1, undercounting until the next
+    # reconnect. The snapshot epoch is read BEFORE the (here-empty) tally; the confirm
+    # then lands and must be preserved.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    # Rebuild snapshots the epoch, then (the await) the tally read returns empty.
+    snapshot_epoch = registry.assignment_epoch(WorkerId("worker-1"))
+    # A placement commits AND confirms in the await window.
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+    # The stale tally (no server-a) lands; the confirm must survive.
+    registry.set_assignment(WorkerId("worker-1"), {}, snapshot_epoch)
+
+    assert registry.list_workers()[0].assigned_count == 1
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
+
+
+def test_rebuild_drops_a_committed_row_confirmed_before_the_snapshot() -> None:
+    # The mirror of the epoch guard: a row confirmed BEFORE the snapshot that the
+    # authoritative tally omits (the server has since stopped) is dropped, not
+    # spuriously preserved (#844). Otherwise a stopped server would inflate load.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    snapshot_epoch = registry.assignment_epoch(WorkerId("worker-1"))
+    registry.set_assignment(WorkerId("worker-1"), {}, snapshot_epoch)
+
+    assert registry.list_workers()[0].assigned_count == 0
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 0
 
 
 # --- per-id lookup (#322) --------------------------------------------------

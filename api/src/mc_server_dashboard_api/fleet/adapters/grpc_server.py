@@ -304,10 +304,15 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 consecutive_failures = 0
 
     async def _rebuild_assignments(self, worker_id: WorkerId) -> None:
-        server_ids = await self._state_sink.running_assignment_ids(
+        # Snapshot the confirm epoch BEFORE reading the DB tally (#844): a placement
+        # that commits AND confirms in the await below stamps a later epoch, so
+        # set_assignment keeps that +1 rather than overwriting it with this stale
+        # tally (which cannot yet see the just-landed commit).
+        snapshot_epoch = self._registry.assignment_epoch(worker_id)
+        assignments = await self._state_sink.running_assignment_ids(
             worker_id=worker_id.value
         )
-        self._registry.set_assignment(worker_id, server_ids)
+        self._registry.set_assignment(worker_id, assignments, snapshot_epoch)
 
     async def _authenticate(
         self,

@@ -591,8 +591,34 @@ class FsStorage(Storage):
         await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
         key = BackupKey(uuid.uuid4().hex)
         archive = backups / f"{key.value}.tar.gz"
-        await asyncio.to_thread(_write_tar_gz, current, archive)
+        await asyncio.to_thread(self._write_backup_archive, current, archive)
         return key
+
+    @staticmethod
+    def _write_backup_archive(source: Path, archive: Path) -> None:
+        # Single-file write discipline (STORAGE.md Section 4.4): pack ``source`` into a
+        # temp sibling in the same directory, fsync the tar's data blocks, atomically
+        # rename it into place, then fsync the directory. A power cut mid-pack leaves
+        # only a ``.backup.*.tmp`` spool — never a torn ``<key>.tar.gz`` listed as a
+        # normal backup (issue #837). Mirrors ``put_backup`` (the upload path) and
+        # ``_prune_to_final_snapshot`` (the final-archive path).
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(archive.parent), prefix=".backup.", suffix=".tmp"
+        )
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            _write_tar_gz(source, tmp)
+            tmp_fd = os.open(tmp, os.O_RDONLY)
+            try:
+                os.fsync(tmp_fd)
+            finally:
+                os.close(tmp_fd)
+            os.replace(tmp, archive)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        _fsync_dir(archive.parent)
 
     async def list_backups(
         self, community_id: CommunityId, server_id: ServerId

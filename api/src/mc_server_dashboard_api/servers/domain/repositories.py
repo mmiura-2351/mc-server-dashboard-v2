@@ -166,13 +166,17 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def running_assignment_ids_for_worker(self, worker_id: WorkerId) -> set[str]:
-        """Return the ids of servers assigned to ``worker_id`` with desired=running.
+    async def running_assignment_ids_for_worker(
+        self, worker_id: WorkerId
+    ) -> dict[str, int]:
+        """Return ``worker_id``'s desired=running assignments, id -> declared memory.
 
-        The placement-load tally used to rebuild a reconnected Worker's assignment
-        count (epic #7 reconciliation obligation). Returns ids (not just a count) so
-        the registry can reconcile the rebuild against reserved-but-uncommitted
-        placements (#778); the count is ``len`` of this set.
+        Maps each assigned server id to its declared ``memory_limit_mb`` (0 = unset,
+        #843). The placement tally used to rebuild a reconnected Worker's assignments
+        (epic #7 reconciliation obligation). Returns ids (not just a count) so the
+        registry can reconcile the rebuild against reserved-but-uncommitted
+        placements (#778) and restore committed memory; the count is ``len`` of this
+        mapping.
         """
 
     @abc.abstractmethod
