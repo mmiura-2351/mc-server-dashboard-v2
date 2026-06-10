@@ -117,6 +117,24 @@ describe("AppShell community switcher", () => {
     expect(dashboardLink()).toHaveAttribute("href", "/communities/beta");
   });
 
+  it("a deep link to a non-member community renders not-found, not another community (#784)", async () => {
+    signedInWith([ALPHA, BETA]);
+
+    // `gamma` is not in the caller's membership (stale bookmark / left
+    // community). The dashboard must show the not-found state and the shell must
+    // not adopt the stale cid — the switcher stays on the default first
+    // community rather than silently listing it under the wrong URL.
+    renderAt("/communities/gamma");
+
+    expect(
+      await screen.findByText(t("community.notFound.title")),
+    ).toBeInTheDocument();
+    const switcher = await screen.findByRole("combobox", {
+      name: t("shell.switchCommunity"),
+    });
+    expect((switcher as HTMLSelectElement).value).toBe("alpha");
+  });
+
   it("renders chrome in Japanese when the language override is ja", async () => {
     localStorage.setItem("mcsd.lang", "ja");
     initLanguage();
