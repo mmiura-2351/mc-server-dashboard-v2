@@ -44,6 +44,75 @@ func TestStopRemovesScratch(t *testing.T) {
 	}
 }
 
+// A crash mid-hydrate (datatransfer.unpackAndSwap, issue #772) leaves
+// .hydrate-<id>-* temp/trash siblings in the scratch root. The next start's
+// leftover sweep only clears them if the id is re-placed onto this Worker, so an
+// authoritative stop (server delete / re-placed elsewhere) must sweep this id's
+// siblings too — otherwise the world-sized orphan leaks permanently (issue #806).
+func TestStopSweepsHydrateLeftovers(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	_ = m.Handle(context.Background(), startCmd())
+	seedScratch(t, m, "s1")
+
+	// A leftover temp/trash sibling for s1 from a crashed hydrate.
+	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Another server's leftover must NOT be touched (exact-prefix match for s1 only).
+	otherLeftover := filepath.Join(m.scratchDir, ".hydrate-s2-stale")
+	if err := os.MkdirAll(otherLeftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success", res)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("s1 hydrate leftover still present after authoritative stop: stat err = %v", err)
+	}
+	if _, err := os.Stat(otherLeftover); err != nil {
+		t.Fatalf("another server's hydrate leftover was swept (must match s1's prefix only): %v", err)
+	}
+}
+
+// sweepHydrateLeftovers removes only the .hydrate-<id>-* siblings for the given id,
+// leaving the server's own scratch dir and unrelated entries untouched (issue #806).
+func TestSweepHydrateLeftovers(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+
+	staleA := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	staleB := filepath.Join(m.scratchDir, ".hydrate-s1-other")
+	if err := os.MkdirAll(staleA, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(staleB, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	keep := seedScratch(t, m, "s1") // the live working dir, must be retained
+	otherID := filepath.Join(m.scratchDir, ".hydrate-s11-stale")
+	if err := os.MkdirAll(otherID, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	m.sweepHydrateLeftovers("s1")
+
+	for _, p := range []string{staleA, staleB} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("leftover %s not removed: stat err = %v", p, err)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("live scratch dir wrongly removed: %v", err)
+	}
+	if _, err := os.Stat(otherID); err != nil {
+		t.Fatalf("different-id leftover (.hydrate-s11-) wrongly removed by s1 sweep: %v", err)
+	}
+}
+
 // A RestartServer is a TRANSIENT restart: the API's RestartServer keeps the
 // assignment (desired stays running) and the same Worker keeps its live working
 // set so the #698 hydrate-skip still applies on the next start. The Worker must

@@ -568,15 +568,39 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// removeScratch deletes the server's local working-set scratch dir. It is
-// best-effort: a removal failure is logged, never surfaced — the authoritative
-// stop already succeeded, and leftover scratch is a hygiene problem, not a
-// stop failure. A missing dir is a no-op (os.RemoveAll returns nil).
+// removeScratch deletes the server's local working-set scratch dir, plus any
+// .hydrate-<id>-* temp/trash siblings a crash mid-hydrate left behind for this
+// id (datatransfer.unpackAndSwap, issue #772). It is best-effort: a removal
+// failure is logged, never surfaced — the authoritative stop already succeeded,
+// and leftover scratch is a hygiene problem, not a stop failure. A missing dir
+// is a no-op (os.RemoveAll returns nil).
 func (m *Manager) removeScratch(serverID string) {
 	dir := filepath.Join(m.scratchDir, serverID)
 	if err := os.RemoveAll(dir); err != nil {
 		m.logger.Warn("failed to remove scratch dir on authoritative stop",
 			"server_id", serverID, "dir", dir, "error", err)
+	}
+	m.sweepHydrateLeftovers(serverID)
+}
+
+// sweepHydrateLeftovers removes the .hydrate-<id>-* temp/trash siblings a crashed
+// hydrate for serverID left in the scratch root. The next start's leftover sweep
+// (datatransfer.sweepHydrateLeftovers) clears them too, but only if the server is
+// re-placed onto this Worker; a deleted/re-placed-elsewhere id would otherwise leak
+// the world-sized orphan permanently. The prefix matches datatransfer.hydrateTmpPrefix
+// exactly (".hydrate-<id>-"), so only this id's leftovers are touched — not another
+// server's dir or a similarly named one. Best-effort: a removal failure is ignored
+// (a leftover is wasted disk, never a correctness problem).
+func (m *Manager) sweepHydrateLeftovers(serverID string) {
+	entries, err := os.ReadDir(m.scratchDir)
+	if err != nil {
+		return
+	}
+	prefix := ".hydrate-" + serverID + "-"
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			_ = os.RemoveAll(filepath.Join(m.scratchDir, e.Name()))
+		}
 	}
 }
 
