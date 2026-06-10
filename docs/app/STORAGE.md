@@ -128,9 +128,11 @@ Notes:
   on-disk name; the M1 `fs` adapter uses gzip (`.tar.gz`), with zstd deferred.
 - `generation` is a plain-text file holding the current authoritative
   working-set generation counter (a monotonically increasing integer, starting
-  at 1 after the first publish). It is bumped atomically with the `current`
-  pointer flip inside `commit_snapshot` so the persisted generation and
-  `current/` never disagree. A server with no published snapshot has no
+  at 1 after the first publish). It is bumped immediately after the `current`
+  pointer flip inside `commit_snapshot` as a separate sequential write; a crash
+  in the window between the two writes leaves the file one behind (under-states
+  by one — the safe direction). After any successful `commit_snapshot` return
+  the two are in agreement. A server with no published snapshot has no
   `generation` file; reading it in that state returns 0. On object backends
   it is a single key `generation` under the server prefix. Removed together
   with the rest of the working-set tree by the post-delete prune (Section 2.1).
@@ -268,7 +270,7 @@ depend on a Worker.
 |---|---|---|
 | `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (Section 6.9). For a **running** server the application first does `save-all` → on-demand snapshot (`commit_snapshot`) → then calls this; `Storage` only ever archives the authoritative copy. |
 | `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (#15); this returns the keys. |
-| `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. The extracted backup is validated through the integrity gate (issue #743): a corrupt backup is refused with `BackupCorruptError` and the backup is quarantined. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and records a distinct `backup:force_restore` audit entry naming the corrupt-file count. |
+| `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. The extracted backup is validated through the integrity gate (issue #743): a corrupt backup is refused with `IntegrityCheckError` (carrying the `WorkingSetReport`); `current/` is left untouched. Quarantining the backup is an application-layer concern — the caller receives the report and decides what to do. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and returns the `WorkingSetReport` so the caller can quarantine and audit. |
 | `delete_backup(community_id, server_id, BackupKey)` | Remove a backup archive | Idempotent. |
 | `open_backup(community_id, server_id, BackupKey) -> ReadStream` | Stream a stored archive in its native format | Download (issue #281): yields the archive bytes **verbatim** — the adapter-internal `tar.gz` (Section 2), no recompression. `NotFoundError` for an unknown key. |
 | `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload (issue #281): the **application** has already validated the archive (opens + traversal-safe entries) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. |
@@ -629,10 +631,12 @@ concurrency cap, so a slow transfer or graceful stop never delays another
 server's command (issue #95).
 
 **Lifecycle wiring (FR-DATA-4).** `StartServer` hydrates before the launch (the
-API issues a hydrate trigger, then `StartServer`); a graceful `StopServer` takes
-a final snapshot after the process exits and before reporting stopped (the API
-issues the stop, then a snapshot trigger; the snapshot is best-effort — its
-failure does not fail the stop). A `HydrateTrigger` is only valid for a stopped
+API issues a hydrate trigger, then `StartServer`); a graceful `StopServer` records observed=stopped and clears the assignment first
+(once the Worker confirms the process is gone), then takes a final snapshot
+best-effort (the API issues the stop, then — after the Worker confirms exit —
+records stopped, clears the assignment, and issues a snapshot trigger; the
+snapshot failure does not fail the stop; scratch is reclaimed only after the
+snapshot publishes, issue #845). A `HydrateTrigger` is only valid for a stopped
 server (refreshing a running server's working set would corrupt live state).
 
 ---

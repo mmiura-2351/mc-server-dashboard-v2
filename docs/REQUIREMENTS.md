@@ -402,9 +402,10 @@ Requirements:
     generation at least as fresh as the authoritative store generation —
     otherwise it hydrates first, so a stale or absent scratch never silently
     boots out-of-date world data (issues #696, #763). Each published snapshot
-    increments a monotonic generation counter; the Worker reports the generation
-    it holds at registration and after each snapshot commit, and the skip is
-    gated on `held_generation >= store_generation`.
+    increments a monotonic generation counter; the Worker records the generation
+    locally after each snapshot commit and reports it to the API at
+    (re-)registration via `Register.held_servers`; the skip is gated on
+    `held_generation >= store_generation`.
   - **Running**: MC writes to the Worker's local scratch; the authoritative copy
     is temporarily stale.
   - **Stop / interval**: the Worker's working set is snapshotted back to Storage.
