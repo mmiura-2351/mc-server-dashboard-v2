@@ -52,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     JarProvisioningError,
 )
+from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
@@ -388,9 +389,11 @@ class FakeServerRepository(ServerRepository):
                 count += 1
         return count
 
-    async def running_assignment_ids_for_worker(self, worker_id: WorkerId) -> set[str]:
+    async def running_assignment_ids_for_worker(
+        self, worker_id: WorkerId
+    ) -> dict[str, int]:
         return {
-            str(server.id.value)
+            str(server.id.value): memory_limit_from_config(server.config) or 0
             for server in self.by_id.values()
             if server.assigned_worker_id == worker_id
             and server.desired_state is DesiredState.RUNNING
@@ -673,7 +676,7 @@ class FakeControlPlane(ControlPlane):
     def release_reservation(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
         self.released.append((worker_id, server_id))
 
-    def decrement_assignment(self, *, worker_id: WorkerId) -> None:
+    def decrement_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
         self.decremented.append(worker_id)
 
     async def _record(

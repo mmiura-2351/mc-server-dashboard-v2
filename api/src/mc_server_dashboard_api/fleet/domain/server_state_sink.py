@@ -42,14 +42,15 @@ class ServerStateSink(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def running_assignment_ids(self, *, worker_id: str) -> set[str]:
-        """Return the ids of the servers assigned to ``worker_id`` with desired=running.
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        """Return ``worker_id``'s desired=running assignments, id -> declared memory.
 
-        The registry resets assignment counts on (re)registration; the lifecycle
-        layer rebuilds them from this authoritative tally so placement load is
-        correct after a reconnect (epic #7 reconciliation obligation). The ids (not
-        just a count) let the registry reconcile against reserved-but-uncommitted
-        placements: a reservation whose server is already in this set is dropped (the
-        commit landed and is counted here), while one not yet in the set stays
-        pending so its confirm still counts (#778).
+        Maps each assigned server id to its declared ``memory_limit_mb`` (0 = unset,
+        #843). The registry resets assignments on (re)registration; the lifecycle
+        layer rebuilds them from this authoritative tally so both placement load and
+        committed memory are correct after a reconnect (epic #7 reconciliation
+        obligation). The ids (not just a count) let the registry reconcile against
+        reserved-but-uncommitted placements: a reservation whose server is already in
+        this map is dropped (the commit landed and is counted here), while one not yet
+        in the map stays pending so its confirm still counts (#778).
         """

@@ -664,7 +664,8 @@ async def test_sink_returns_running_assignment_ids(engine: AsyncEngine) -> None:
 
     sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
     ids = await sink.running_assignment_ids(worker_id=str(worker))
-    assert ids == {str(running.value)}
+    # id -> declared memory (#843); these servers declare no limit, so 0.
+    assert ids == {str(running.value): 0}
 
 
 async def test_repository_running_assignment_ids_for_worker(
@@ -687,11 +688,10 @@ async def test_repository_running_assignment_ids_for_worker(
     async with factory() as session:
         repo = SqlAlchemyServerRepository(session)
         assert await repo.running_assignment_ids_for_worker(WorkerId(worker)) == {
-            str(server_id.value)
+            str(server_id.value): 0
         }
         assert (
-            await repo.running_assignment_ids_for_worker(WorkerId(uuid.uuid4()))
-            == set()
+            await repo.running_assignment_ids_for_worker(WorkerId(uuid.uuid4())) == {}
         )
 
 

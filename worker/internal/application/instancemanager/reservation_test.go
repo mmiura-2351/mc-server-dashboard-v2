@@ -2,6 +2,7 @@ package instancemanager
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -256,5 +257,152 @@ func TestConcurrentDuplicateHydrateRunsOnce(t *testing.T) {
 	}
 	if tr.hydrateCount() != 1 {
 		t.Fatalf("transfer hydrated %d times, want exactly 1", tr.hydrateCount())
+	}
+}
+
+// gatedOrphanInstance is a fakeInstance whose FIRST Stop fails (recording a
+// failed-stop orphan) and whose RETRY Stop blocks until stopRelease is closed,
+// modeling an orphan-retry stop that is still confirming termination. The orphan
+// record therefore stays in place AND the id stays reserved across the retry's
+// inst.Stop — the exact window issue #829 item 1 guards.
+type gatedOrphanInstance struct {
+	*fakeInstance
+	stopCalls   int
+	stopEntered chan struct{}
+	stopRelease chan struct{}
+}
+
+func newGatedOrphanInstance(id string) *gatedOrphanInstance {
+	return &gatedOrphanInstance{
+		fakeInstance: newFakeInstance(id),
+		stopEntered:  make(chan struct{}, 1),
+		stopRelease:  make(chan struct{}),
+	}
+}
+
+func (i *gatedOrphanInstance) Stop(ctx context.Context, graceful bool) error {
+	i.mu.Lock()
+	i.stopCalls++
+	call := i.stopCalls
+	i.mu.Unlock()
+	if call == 1 {
+		// First stop fails: the manager records the orphan and releases the reservation.
+		return errors.New("driver: process survived kill")
+	}
+	// Retry stop: block so it stays in flight (reserved held, orphan still recorded).
+	i.stopEntered <- struct{}{}
+	<-i.stopRelease
+	return i.fakeInstance.Stop(ctx, graceful)
+}
+
+func (i *gatedOrphanInstance) stopCount() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.stopCalls
+}
+
+// gatedOrphanDriver hands out a single gatedOrphanInstance.
+type gatedOrphanDriver struct {
+	inst *gatedOrphanInstance
+}
+
+func (d *gatedOrphanDriver) Start(_ context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
+	d.inst = newGatedOrphanInstance(spec.ServerID)
+	return d.inst, nil
+}
+
+// A StopServer re-sent while an orphan-RETRY stop is still confirming termination
+// must be rejected with INVALID_STATE, not walk into the orphan branch and take the
+// same orphan a second time (issue #829 item 1). If it did, both stops' deferred
+// release would fire and the first to return would steal the still-running stop's
+// reservation — worst case leaving an unreserved id. takeStoppableReserve must
+// honor the reservation before the orphan branch.
+func TestResentStopDuringOrphanRetryRejectedInvalidState(t *testing.T) {
+	d := &gatedOrphanDriver{}
+	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	// First stop fails -> the id is now a recorded failed-stop orphan, reservation released.
+	if res := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); res.Success {
+		t.Fatalf("first stop unexpectedly succeeded: %+v", res)
+	}
+
+	// Retry stop walks the orphan branch (reserving the id) and blocks inside inst.Stop.
+	retryDone := make(chan session.CommandResult, 1)
+	go func() {
+		retryDone <- m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	}()
+	awaitEnter(t, d.inst.stopEntered)
+
+	// A re-sent stop arriving while the retry is in flight must be rejected with
+	// INVALID_STATE (the reservation is honored before the orphan branch), never
+	// SERVER_NOT_FOUND, and must not Stop the orphan a third time. Run it off the
+	// test goroutine with a deadline: with the bug it would walk the orphan branch
+	// and BLOCK inside inst.Stop, so a clean timeout failure beats a 10-minute hang.
+	dupDone := make(chan session.CommandResult, 1)
+	go func() {
+		dupDone <- m.Handle(context.Background(), session.Command{CommandID: "stop3", ServerID: "s1", Kind: "StopServer"})
+	}()
+	var dup session.CommandResult
+	select {
+	case dup = <-dupDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("re-sent stop blocked: it walked the orphan branch past the live reservation instead of being rejected (issue #829 item 1)")
+	}
+	if dup.Success {
+		t.Fatalf("re-sent stop during orphan retry = %+v, want failure", dup)
+	}
+	if dup.ErrorCode != session.CommandErrorInvalidState {
+		t.Fatalf("re-sent stop = %+v, want INVALID_STATE (issue #829)", dup)
+	}
+
+	// Let the retry confirm termination; it must still succeed.
+	close(d.inst.stopRelease)
+	retry := <-retryDone
+	if !retry.Success {
+		t.Fatalf("orphan retry stop = %+v, want success once termination confirmed", retry)
+	}
+	if d.inst.stopCount() != 2 {
+		t.Fatalf("driver Stop called %d times, want exactly 2 (first fail + retry); the re-sent stop must not have taken the orphan", d.inst.stopCount())
+	}
+	// The retry released the reservation on success: the id is now genuinely unknown.
+	after := m.Handle(context.Background(), session.Command{CommandID: "stop4", ServerID: "s1", Kind: "StopServer"})
+	if after.Success || after.ErrorCode != session.CommandErrorServerNotFound {
+		t.Fatalf("stop after orphan retry confirmed = %+v, want SERVER_NOT_FOUND", after)
+	}
+}
+
+// A RestartServer whose recorded driver is no longer offered by this Worker must
+// fail WITHOUT evicting the live running instance (issue #829 item 3): the
+// driver/launch-mode resolution happens before takeRunningReserve, so the failure
+// leaves the process tracked rather than releasing an already-evicted live process
+// untracked. The server stays running and a subsequent stop still terminates it.
+func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	// Drop the driver the recorded StartServer used so the restart's resolution fails.
+	delete(m.drivers, "host-process")
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
+	if res.Success || res.ErrorCode != session.CommandErrorDriverUnavailable {
+		t.Fatalf("restart with unavailable driver = %+v, want DRIVER_UNAVAILABLE", res)
+	}
+
+	// The instance must still be tracked and live: a ServerCommand reaches it (a
+	// running instance), proving the failed restart did not evict it.
+	if sc := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s1", Kind: "ServerCommand", Line: "list"}); sc.ErrorCode == session.CommandErrorServerNotFound {
+		t.Fatalf("ServerCommand after failed restart = %+v, want the instance still tracked (not evicted)", sc)
+	}
+	// And the id must not be left reserved: restore the driver and confirm a stop
+	// still cleanly terminates the still-tracked instance.
+	m.drivers["host-process"] = d
+	if stop := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"}); !stop.Success {
+		t.Fatalf("stop after failed restart = %+v, want success (instance was still tracked, id not wedged)", stop)
 	}
 }

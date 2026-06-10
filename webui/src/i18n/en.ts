@@ -1097,6 +1097,12 @@ export const en = {
     "Undraining lets this worker accept new placements again.",
   "admin.workers.undrainConfirm": "Undrain worker",
   "admin.workers.drained": "Worker draining.",
+  // Appended after "Worker draining." when servers_stopped > 0, e.g.
+  // "Worker draining. 3 servers marked — keep this worker connected until each is stopped and unassigned."
+  "admin.workers.drainedCountSuffix":
+    " servers marked — keep this worker connected until each is stopped and unassigned.",
+  "admin.workers.drainDialogConvergenceWarning":
+    "Stops and final snapshots run asynchronously (~120 s grace + a tick per server) and only while the worker stays connected. Keep this worker up until every formerly-assigned server reaches stopped and unassigned — shutting down early defers stops and snapshots to a reconnect that never happens in a decommission. Confirm convergence per server in the server list, not by the worker's load counter (which drops to 0 before any stop runs).",
   "admin.workers.undrained": "Worker undrained.",
   "admin.workers.drainError": "Could not drain the worker.",
   "admin.workers.undrainError": "Could not undrain the worker.",

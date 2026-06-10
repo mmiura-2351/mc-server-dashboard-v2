@@ -39,7 +39,8 @@ class WorkerSnapshot:
 
     ``assigned_count`` is the Worker's current load: the number of servers
     assigned to it (the placement 'load' axis, FR-WRK-3). At M1 it is tracked by
-    the registry via :meth:`WorkerRegistry.increment_assignment` /
+    the registry as committed assignments via
+    :meth:`WorkerRegistry.increment_assignment` /
     :meth:`WorkerRegistry.decrement_assignment`.
 
     It deliberately includes in-flight placement reservations (#778), so the read
@@ -162,6 +163,27 @@ class WorkerRegistry(abc.ABC):
         """
 
     @abc.abstractmethod
+    def committed_memory_mb(self, worker_id: WorkerId) -> int:
+        """Return the summed declared memory of ``worker_id``'s committed assignments.
+
+        Tracked registry-side (#843) so the memory gate reads committed AND reserved
+        memory in the SAME synchronous section as the load count, closing the
+        cross-axis race where a confirm popped reserved memory between a DB
+        committed-memory snapshot and the placement decision. ``0`` for an unknown
+        Worker or one with no committed assignments.
+        """
+
+    @abc.abstractmethod
+    def assignment_epoch(self, worker_id: WorkerId) -> int:
+        """Return the current confirm sequence, to snapshot before a rebuild (#844).
+
+        The reconnect rebuild reads its DB tally one await before calling
+        :meth:`set_assignment`; it snapshots this BEFORE that read and passes it back
+        as ``snapshot_epoch`` so :meth:`set_assignment` keeps any assignment confirmed
+        in the gap rather than overwriting it with the stale tally.
+        """
+
+    @abc.abstractmethod
     def release_reservation(self, worker_id: WorkerId, server_id: str) -> None:
         """Drop the reservation for ``server_id`` made by :meth:`reserve` (#778).
 
@@ -176,36 +198,50 @@ class WorkerRegistry(abc.ABC):
         """Confirm ``server_id``'s reserved slot as a committed assignment (#778).
 
         Called after the lifecycle commit lands. Converts the reservation made by
-        :meth:`reserve` into a committed assignment (load is unchanged — the
-        reservation already counted it). If no reservation is outstanding for
-        ``server_id``, this is a NO-OP: a re-registration between the commit and
-        this call already rebuilt the count from the authoritative tally
-        (:meth:`set_assignment`), which dropped this reservation because the
-        committed row was in the tally — so incrementing again would double-count
-        (#778). A call for an unknown Worker is ignored.
+        :meth:`reserve` into a committed assignment, carrying its declared memory
+        into the committed-memory axis (#843); load is unchanged — the reservation
+        already counted it. If no reservation is outstanding for ``server_id``, this
+        is a NO-OP: a re-registration between the commit and this call already
+        rebuilt the count from the authoritative tally (:meth:`set_assignment`),
+        which dropped this reservation because the committed row was in the tally —
+        so incrementing again would double-count (#778). A call for an unknown
+        Worker is ignored.
         """
 
     @abc.abstractmethod
-    def decrement_assignment(self, worker_id: WorkerId) -> None:
-        """Record that one server has left the Worker (load--, not below zero).
+    def decrement_assignment(self, worker_id: WorkerId, server_id: str) -> None:
+        """Record that ``server_id`` has left the Worker (load--, memory--).
 
-        A call for an unknown Worker is ignored.
+        Drops the committed row for ``server_id`` so both the count and the
+        committed-memory axis (#843) shed it together. Idempotent if the row is
+        already gone (e.g. a reconnect rebuild between the desired-state flip and
+        this call already excluded it), mirroring the prior count's floor-at-zero. A
+        call for an unknown Worker is ignored.
         """
 
     @abc.abstractmethod
-    def set_assignment(self, worker_id: WorkerId, server_ids: set[str]) -> None:
+    def set_assignment(
+        self, worker_id: WorkerId, assignments: Mapping[str, int], snapshot_epoch: int
+    ) -> None:
         """Rebuild the Worker's committed assignments from the authoritative tally.
 
-        Used after a (re)registration reset the count to zero: the lifecycle layer
-        tallies the server ids the Worker is running from authoritative storage and
-        writes the truth back here, so placement load is correct after a reconnect
-        (epic #7 reconciliation obligation). The committed count becomes
-        ``len(server_ids)``; any RESERVED placement whose server is already in
-        ``server_ids`` is dropped (the commit landed and is now counted in the
-        tally, so its pending :meth:`increment_assignment` must become a no-op to
-        avoid double-counting, #778), while a reservation NOT yet in the tally (its
-        commit not yet visible) is kept so its later confirm still counts. A call
-        for an unknown Worker is ignored.
+        Used after a (re)registration reset the assignments: the lifecycle layer
+        tallies the server ids the Worker is running from authoritative storage,
+        each mapped to its declared memory in MiB (0 = unset, #843), and writes the
+        truth back here so both placement load and committed memory are correct after
+        a reconnect (epic #7 reconciliation obligation).
+
+        ``snapshot_epoch`` is the :meth:`assignment_epoch` value the caller read
+        BEFORE it read its DB tally. Any assignment confirmed at or after that epoch
+        (a commit+confirm that landed in the gap between the tally read and this call)
+        is KEPT rather than overwritten by the stale tally (#844).
+
+        Any RESERVED placement whose server is in ``assignments`` is dropped (the
+        commit landed and is now counted in the tally, so its pending
+        :meth:`increment_assignment` must become a no-op to avoid double-counting,
+        #778), while a reservation NOT yet in the tally (its commit not yet visible)
+        is kept so its later confirm still counts. A call for an unknown Worker is
+        ignored.
         """
 
     @abc.abstractmethod
