@@ -361,10 +361,20 @@ export const en = {
   // Table.
   "backups.col.created": "Created",
   "backups.col.source": "Source",
+  "backups.col.condition": "Condition",
   "backups.col.size": "Size",
   "backups.col.creator": "By",
   "backups.unknownSize": "unknown",
   "backups.unknownCreator": "—",
+  // Condition badge (API `health`: healthy / quarantined / unknown). Plain
+  // language — no internal jargon. A healthy backup shows nothing, keeping the
+  // row quiet; only the at-risk states are flagged.
+  "backups.health.quarantined": "Damaged",
+  "backups.health.quarantinedTitle":
+    "This backup's data is known to be damaged. Restoring it may produce a broken world.",
+  "backups.health.unknown": "Unverified",
+  "backups.health.unknownTitle":
+    "This backup has not been checked, so its condition is unknown.",
   // Actions.
   "backups.create": "+ Create backup",
   "backups.upload": "Upload",
@@ -391,6 +401,12 @@ export const en = {
   "backups.restoreDialog.prompt": "Type RESTORE to confirm",
   "backups.restoreDialog.phrase": "RESTORE",
   "backups.restoreDialog.confirm": "Restore backup",
+  // Force-restore warning shown only when the chosen backup is quarantined
+  // (health === "quarantined"). It restores anyway with force=true, so the copy
+  // makes the deliberate, damaged-data nature explicit (#745).
+  "backups.restoreDialog.damagedWarning":
+    "This backup's data is known to be damaged. Restoring it may leave the server with a broken world, and there is no way to repair it afterwards.",
+  "backups.restoreDialog.damagedConfirm": "Restore the damaged backup anyway",
   // Delete dialog (typed confirm).
   "backups.deleteDialog.title": "Delete backup",
   "backups.deleteDialog.body":
