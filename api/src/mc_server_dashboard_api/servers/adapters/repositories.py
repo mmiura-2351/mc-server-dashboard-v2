@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
 from mc_server_dashboard_api.servers.domain.repositories import ServerRepository
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -257,13 +258,20 @@ class SqlAlchemyServerRepository(ServerRepository):
         result = await self._session.execute(stmt)
         return cast("CursorResult[Any]", result).rowcount
 
-    async def running_assignment_ids_for_worker(self, worker_id: WorkerId) -> set[str]:
-        stmt = select(ServerModel.id).where(
+    async def running_assignment_ids_for_worker(
+        self, worker_id: WorkerId
+    ) -> dict[str, int]:
+        # Also read each server's config blob so the rebuild restores committed
+        # memory, not just the count (#843); the declared limit is derived with the
+        # same validator the placement path uses (0 = unset).
+        stmt = select(ServerModel.id, ServerModel.config).where(
             ServerModel.assigned_worker_id == worker_id.value,
             ServerModel.desired_state == DesiredState.RUNNING.value,
         )
-        rows = (await self._session.execute(stmt)).scalars().all()
-        return {str(row) for row in rows}
+        rows = (await self._session.execute(stmt)).all()
+        return {
+            str(row.id): memory_limit_from_config(dict(row.config)) or 0 for row in rows
+        }
 
     async def list_running_assigned(self) -> list[Server]:
         stmt = select(ServerModel).where(

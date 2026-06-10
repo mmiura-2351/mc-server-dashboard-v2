@@ -42,6 +42,7 @@ from tests.fleet.fakes import (
     FakeClock,
     FakeServerStateSink,
     RecordingRealTimeEvents,
+    make_worker,
 )
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -648,6 +649,43 @@ async def test_reregister_rebuilds_assignment_count_from_tally() -> None:
         await call.done_writing()
     finally:
         await h.stop()
+
+
+async def test_rebuild_keeps_a_confirm_that_lands_during_the_tally_read() -> None:
+    # #844: _rebuild_assignments reads the DB tally across an await; a placement that
+    # commits AND confirms in that window must not be overwritten by the stale tally.
+    # The servicer snapshots the confirm epoch BEFORE the await, so set_assignment
+    # keeps the just-confirmed row even though it is absent from the (empty) tally.
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=_WORKER_ID, at=_T0))
+    worker = WorkerId(_WORKER_ID)
+    server_id = "33333333-3333-3333-3333-333333333333"
+
+    class _ConfirmDuringReadSink(FakeServerStateSink):
+        async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+            # The await window: a concurrent placement commits and confirms here,
+            # AFTER the servicer snapshotted the epoch but BEFORE set_assignment runs.
+            registry.reserve(worker, server_id, 512)
+            registry.increment_assignment(worker, server_id)
+            await asyncio.sleep(0)
+            # The DB tally does not yet see the just-landed commit.
+            return {}
+
+    servicer = WorkerSessionServicer(
+        registry=registry,
+        clock=FakeClock(_T0),
+        worker_credential=_CREDENTIAL,
+        heartbeat_timeout=_TIMEOUT,
+        control_plane=ControlPlaneState(),
+        state_sink=_ConfirmDuringReadSink(),
+        real_time_events=RecordingRealTimeEvents(),
+    )
+
+    await servicer._rebuild_assignments(worker)
+
+    # The +1 (and its committed memory) survived the stale-tally rebuild.
+    assert registry.list_workers()[0].assigned_count == 1
+    assert registry.committed_memory_mb(worker) == 512
 
 
 async def _drain_until_heartbeat_recorded(harness: _Harness) -> None:
