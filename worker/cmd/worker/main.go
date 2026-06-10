@@ -69,6 +69,10 @@ func run(ctx context.Context) error {
 
 	sysClock := clock.System{}
 	dialer := controlplane.NewDialer(conn, cfg.API.Credential, sysClock)
+	// Reclaim any snapshot-*.tar spool a crash mid-snapshot left in the scratch root
+	// (issue #787): nothing else GCs them, and each leaks a world-sized file. Run
+	// before the held-server scan, which only walks directories and never sees them.
+	datatransfer.SweepSnapshotSpools(cfg.Worker.ScratchDir)
 	// Advertise the working sets already on the persistent scratch, each tagged
 	// with its generation, so the API skips the destructive hydrate on a same-worker
 	// restart only when the held generation is fresh enough (issue #763): a hydrate

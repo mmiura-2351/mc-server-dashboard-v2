@@ -17,6 +17,10 @@
     "  instance_running   - a tracked running instance exists for the server id",
     "  instance_stopped   - no tracked instance and no orphan for the id",
     "  instance_absent    - the server id is unknown to this Worker",
+    "  command_in_flight  - a mutating lifecycle command is reserved in flight for",
+    "                       the id but no instance/orphan is tracked yet (issue #780):",
+    "                       a detached stop still confirming termination, or a start/",
+    "                       hydrate mid driver.Start / transfer after a stream reconnect",
     "  orphan_pending     - a failed-stop orphan is recorded (issue #251/#253)",
     "  driver_unavailable - the requested driver is not offered by this Worker",
     "  missing_path       - the file/dir target does not exist in the working set",
@@ -42,6 +46,7 @@
 
     {"kind": "StopServer", "precondition": "instance_running", "code": "ok"},
     {"kind": "StopServer", "precondition": "instance_absent", "code": "server_not_found"},
+    {"kind": "StopServer", "precondition": "command_in_flight", "code": "invalid_state"},
 
     {"kind": "RestartServer", "precondition": "instance_running", "code": "ok"},
     {"kind": "RestartServer", "precondition": "instance_absent", "code": "server_not_found"},
