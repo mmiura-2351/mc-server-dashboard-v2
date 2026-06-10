@@ -63,6 +63,137 @@ func TestHydrateUnpacksWorkingSet(t *testing.T) {
 	}
 }
 
+func TestHydrateReplacesStaleWorkingSet(t *testing.T) {
+	// Hydrate must REPLACE the dest's contents, not merge: a file present in the
+	// stale working set but absent from the served tar must be gone afterwards
+	// (the A->B->A stale-generation case, issue #772). A merge would leave the
+	// stale file behind, producing an internally inconsistent mixed-generation
+	// world that region fsck cannot detect.
+	body := tarOf(map[string]string{
+		"server.properties": "new",
+		"world/level.dat":   "new-world",
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	// A pre-existing (stale) working set: a file the new tar does NOT carry, plus
+	// an old copy of one it does.
+	dest := filepath.Join(t.TempDir(), "server")
+	if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "stale-plugin.jar"), []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "world", "old-region.mca"), []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "server.properties"), []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	// The stale, upstream-deleted files must be gone.
+	if _, err := os.Stat(filepath.Join(dest, "stale-plugin.jar")); !os.IsNotExist(err) {
+		t.Fatal("stale-plugin.jar survived the hydrate (merge, not replace)")
+	}
+	if _, err := os.Stat(filepath.Join(dest, "world", "old-region.mca")); !os.IsNotExist(err) {
+		t.Fatal("world/old-region.mca survived the hydrate (merge, not replace)")
+	}
+	// The served working set must be present and current.
+	got, err := os.ReadFile(filepath.Join(dest, "server.properties"))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("server.properties = %q, %v (want %q)", got, err, "new")
+	}
+	got, err = os.ReadFile(filepath.Join(dest, "world", "level.dat"))
+	if err != nil || string(got) != "new-world" {
+		t.Fatalf("world/level.dat = %q, %v (want %q)", got, err, "new-world")
+	}
+}
+
+func TestHydrateDoesNotFollowPreexistingSymlink(t *testing.T) {
+	// A pre-existing symlink in the working set at a path a tar member also names
+	// must NOT be followed: hydrating into a brand-new tree means the planted link
+	// is never traversed, so the link's target is left untouched (issue #772).
+	body := tarOf(map[string]string{"server.properties": "from-tar"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	// The out-of-sandbox file a malicious symlink would target.
+	outside := filepath.Join(tmp, "outside-secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The working set carries a planted symlink at the path the tar will write.
+	dest := filepath.Join(tmp, "server")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dest, "server.properties")); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	// The symlink target outside the sandbox must be untouched.
+	got, err := os.ReadFile(outside)
+	if err != nil || string(got) != "secret" {
+		t.Fatalf("outside target = %q, %v (want %q, must not be written through)", got, err, "secret")
+	}
+	// The dest now holds the served file as a plain regular file.
+	info, err := os.Lstat(filepath.Join(dest, "server.properties"))
+	if err != nil {
+		t.Fatalf("Lstat server.properties: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("server.properties is still a symlink after hydrate")
+	}
+	got, err = os.ReadFile(filepath.Join(dest, "server.properties"))
+	if err != nil || string(got) != "from-tar" {
+		t.Fatalf("server.properties = %q, %v (want %q)", got, err, "from-tar")
+	}
+}
+
+func TestHydrateLeavesNoTempSiblingsInScratch(t *testing.T) {
+	// The temp/trash dirs the swap uses live in the scratch root next to dest; a
+	// successful hydrate must clean them all up so ScanHeldServers does not later
+	// see bogus held-server entries (issue #772, scratchscan.go interplay).
+	body := tarOf(map[string]string{"server.properties": "x"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "server" {
+			t.Fatalf("leftover entry in scratch root after hydrate: %q", e.Name())
+		}
+	}
+}
+
 func TestHydrateNoContentLeavesDestEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

@@ -17,7 +17,7 @@
  */
 
 import { getAccessToken } from "../auth/tokenStore.ts";
-import { ApiError } from "./client.ts";
+import { ApiError, getRefresher } from "./client.ts";
 
 /**
  * Fetch `path` with the current access token and save the response as a file
@@ -25,16 +25,32 @@ import { ApiError } from "./client.ts";
  * branch on `status` (403 → permission glue, 409 → state-changed) exactly like
  * the JSON client.
  */
-export async function downloadFile(
-  path: string,
-  filename: string,
-): Promise<void> {
+async function fetchDownload(path: string): Promise<Response> {
   const token = getAccessToken();
-  const response = await fetch(path, {
+  return fetch(path, {
     method: "GET",
     credentials: "same-origin",
     headers: token != null ? { authorization: `Bearer ${token}` } : {},
   });
+}
+
+export async function downloadFile(
+  path: string,
+  filename: string,
+): Promise<void> {
+  let response = await fetchDownload(path);
+
+  // Transparent refresh: a 401 means the access token expired. Run the shared
+  // single-flight refresh (registered by the session layer) and retry once,
+  // mirroring the JSON client's behaviour (client.ts:164-172).
+  const currentRefresher = getRefresher();
+  if (response.status === 401 && currentRefresher !== null) {
+    const refreshed = await currentRefresher();
+    if (refreshed) {
+      response = await fetchDownload(path);
+    }
+  }
+
   if (!response.ok) {
     throw new ApiError(response.status, await readProblem(response));
   }

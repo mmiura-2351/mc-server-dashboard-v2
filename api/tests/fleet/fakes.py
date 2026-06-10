@@ -39,15 +39,27 @@ class FakeServerStateSink(ServerStateSink):
     disconnect (mark unknown), and on register (rebuild assignment count).
     """
 
-    def __init__(self, *, running_counts: dict[str, int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        running_counts: dict[str, int] | None = None,
+        fail_observed_for: set[str] | None = None,
+    ) -> None:
         self.observed: list[tuple[str, str, str]] = []
         self.unknown_for: list[str] = []
         self.counted_for: list[str] = []
         self._running_counts = running_counts or {}
+        # Server ids whose next record_observed_state call raises, simulating a
+        # transient DB error while handling one StatusChange; the id is dropped
+        # after raising so a later report for the same server succeeds.
+        self._fail_observed_for = fail_observed_for or set()
 
     async def record_observed_state(
         self, *, server_id: str, worker_id: str, state: str
     ) -> None:
+        if server_id in self._fail_observed_for:
+            self._fail_observed_for.discard(server_id)
+            raise RuntimeError("transient observed-state write failure")
         self.observed.append((server_id, worker_id, state))
 
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
