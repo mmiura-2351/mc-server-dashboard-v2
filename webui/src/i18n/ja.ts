@@ -65,6 +65,14 @@ export const ja: Record<TranslationKey, string> = {
     "プラットフォーム管理者は、最初のコミュニティを作成できます。",
   "noCommunity.adminCta": "コミュニティを作成",
 
+  // Community-not-found state (#784): shown when a URL `:cid` is not one the
+  // signed-in account belongs to (stale bookmark, or a community the user has
+  // left). The dashboard and server-create pages derive their community from the
+  // URL, so they render this instead of silently falling back to another one.
+  "community.notFound.title": "コミュニティが見つかりません",
+  "community.notFound.body":
+    "このコミュニティは存在しないか、あなたはメンバーではありません。",
+
   // Auth links
   "auth.toRegister": "アカウントがない場合は登録",
   "auth.toLogin": "アカウントがある場合はサインイン",

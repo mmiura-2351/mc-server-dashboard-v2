@@ -114,6 +114,21 @@ def test_stale_session_disconnect_does_not_offline_reregistered_worker() -> None
     assert workers[0].version == "2.0.0"
 
 
+def test_is_current_session_tracks_the_latest_registration() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    # A reconnect supersedes the prior Session: only the latest token is current,
+    # so a stale teardown's bulk observed=unknown write is suppressed (issue #775).
+    session_a = registry.register(make_worker(at=_T0))
+    assert registry.is_current_session(WorkerId("worker-1"), session_a) is True
+
+    session_b = registry.register(make_worker(at=_T0, version="2.0.0"))
+    assert registry.is_current_session(WorkerId("worker-1"), session_a) is False
+    assert registry.is_current_session(WorkerId("worker-1"), session_b) is True
+    # An unknown worker is never the current session.
+    assert registry.is_current_session(WorkerId("ghost"), session_b) is False
+
+
 def test_heartbeat_for_unknown_worker_is_ignored() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
