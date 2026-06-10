@@ -34,6 +34,10 @@ const ADMIN = {
 };
 const MEMBER = { ...ADMIN, is_platform_admin: false };
 
+// Pinned "now" so heartbeatAge calls in the rendered table are deterministic
+// under load — same technique as AdminWorkersPage (#817).
+const NOW = new Date("2026-01-01T00:00:00Z");
+
 const WORKERS = {
   workers: [
     {
@@ -41,8 +45,8 @@ const WORKERS = {
       version: "0.9.2",
       status: "online",
       assigned_count: 2,
-      last_heartbeat_at: new Date().toISOString(),
-      registered_at: new Date().toISOString(),
+      last_heartbeat_at: NOW.toISOString(),
+      registered_at: NOW.toISOString(),
       capabilities: { drivers: ["container"], max_servers: 8, resources: {} },
     },
     {
@@ -50,8 +54,8 @@ const WORKERS = {
       version: "0.9.2",
       status: "draining",
       assigned_count: 1,
-      last_heartbeat_at: new Date().toISOString(),
-      registered_at: new Date().toISOString(),
+      last_heartbeat_at: NOW.toISOString(),
+      registered_at: NOW.toISOString(),
       capabilities: { drivers: ["container"], max_servers: 4, resources: {} },
     },
     {
@@ -59,8 +63,8 @@ const WORKERS = {
       version: "0.9.2",
       status: "offline",
       assigned_count: 0,
-      last_heartbeat_at: new Date(Date.now() - 3_600_000).toISOString(),
-      registered_at: new Date().toISOString(),
+      last_heartbeat_at: new Date(NOW.getTime() - 3_600_000).toISOString(),
+      registered_at: NOW.toISOString(),
       capabilities: { drivers: ["container"], max_servers: 4, resources: {} },
     },
   ],
@@ -103,6 +107,10 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // Clear any pending fake timers (e.g. react-query refetchInterval) before
+  // restoring the real clock so vitest worker teardown does not time out (#817).
+  vi.clearAllTimers();
+  vi.useRealTimers();
 });
 
 describe("admin gating", () => {
@@ -211,8 +219,10 @@ describe("admin overview stats", () => {
 
   it("re-fetches worker data after 12 s so heartbeat ages do not freeze (#791)", async () => {
     // shouldAdvanceTime lets react-query timers fire while async utilities still
-    // resolve (mirrors the AdminWorkersPage timer pattern).
+    // resolve (mirrors the AdminWorkersPage timer pattern). Clock is restored in
+    // afterEach along with vi.clearAllTimers() to prevent timer leaks (#817).
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
     signedInAs(ADMIN);
 
     renderApp({ path: "/admin" });
@@ -241,7 +251,5 @@ describe("admin overview stats", () => {
     }).length;
 
     expect(callsAfter).toBeGreaterThan(callsBefore);
-
-    vi.useRealTimers();
   });
 });
