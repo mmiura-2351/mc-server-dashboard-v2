@@ -336,8 +336,16 @@ function NewServerWizard({ communityId }: { communityId: string }) {
                       setVersion("");
                     }}
                   >
-                    <div className="t-name">{t(TYPE_LABEL[typeOption])}</div>
-                    <div className="t-sub">{t(TYPE_SUB[typeOption])}</div>
+                    <div className="t-name">
+                      {TYPE_LABEL[typeOption] !== undefined
+                        ? t(TYPE_LABEL[typeOption])
+                        : typeOption}
+                    </div>
+                    <div className="t-sub">
+                      {TYPE_SUB[typeOption] !== undefined
+                        ? t(TYPE_SUB[typeOption])
+                        : ""}
+                    </div>
                   </button>
                 ))}
                 <button
