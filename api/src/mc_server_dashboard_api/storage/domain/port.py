@@ -139,11 +139,13 @@ class WorkingSetStore(abc.ABC):
 
         Bumps and returns the per-server working-set GENERATION (issue #763): a
         monotonically increasing counter the adapter persists alongside the server's
-        snapshots, incremented on each successful publish. The caller records it as
-        the authoritative store generation (a DB column) and hands it to the Worker
-        over the data plane, so the reconciler can hydrate only when a Worker holds a
-        STALE generation (presence at a fresh-enough generation, generalizing the
-        presence-only skip of issue #698). The bump is part of the publish, so the
+        snapshots, incremented on each successful publish. The caller hands it to
+        the Worker over the data plane as the ``X-Working-Set-Generation`` response
+        header, so the reconciler can hydrate only when a Worker holds a STALE
+        generation (presence at a fresh-enough generation, generalizing the
+        presence-only skip of issue #698). The reconciler reads the authoritative
+        generation directly from Storage (``Storage.current_generation``), not from
+        a DB column. The bump is part of the publish, so the
         persisted generation and ``current/`` never disagree. Refused publishes
         (integrity gate, incomplete transfer) do NOT bump.
         """
