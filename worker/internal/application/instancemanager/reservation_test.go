@@ -148,6 +148,86 @@ func TestReservationReleasedAfterStartFailure(t *testing.T) {
 	}
 }
 
+// gatedStopInstance is a fakeInstance whose Stop blocks until stopRelease is
+// closed, modeling a DETACHED stop from a dropped stream's lane that keeps running
+// (up to ~3x stopTimeout) after takeStoppableReserve has already evicted the
+// instance (issue #780). stopEntered signals when Stop has been entered.
+type gatedStopInstance struct {
+	*fakeInstance
+	stopEntered chan struct{}
+	stopRelease chan struct{}
+}
+
+func newGatedStopInstance(id string) *gatedStopInstance {
+	return &gatedStopInstance{
+		fakeInstance: newFakeInstance(id),
+		stopEntered:  make(chan struct{}, 1),
+		stopRelease:  make(chan struct{}),
+	}
+}
+
+func (i *gatedStopInstance) Stop(ctx context.Context, graceful bool) error {
+	i.stopEntered <- struct{}{}
+	<-i.stopRelease
+	return i.fakeInstance.Stop(ctx, graceful)
+}
+
+// gatedStopDriver hands out a single gatedStopInstance so a test can hold the
+// original stop in flight while issuing the re-sent duplicate.
+type gatedStopDriver struct {
+	inst *gatedStopInstance
+}
+
+func (d *gatedStopDriver) Start(_ context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
+	d.inst = newGatedStopInstance(spec.ServerID)
+	return d.inst, nil
+}
+
+// A StopServer re-sent while a DETACHED stop is still confirming termination — the
+// reconnect-redelivery window of issue #780 — must be rejected with INVALID_STATE,
+// never SERVER_NOT_FOUND: the latter makes the API unassign while the old process is
+// still alive, after which a re-placed start's hydrate clobbers the live working set.
+func TestResentStopDuringDetachedStopRejectedInvalidState(t *testing.T) {
+	d := &gatedStopDriver{}
+	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	stopCmd := session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}
+	firstDone := make(chan session.CommandResult, 1)
+	go func() { firstDone <- m.Handle(context.Background(), stopCmd) }()
+
+	// The original stop is now blocked inside inst.Stop with the id evicted from
+	// instances but reserved across the eviction -> stop-confirmed window.
+	awaitEnter(t, d.inst.stopEntered)
+
+	dup := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	if dup.Success {
+		t.Fatalf("re-sent stop during detached stop = %+v, want failure", dup)
+	}
+	if dup.ErrorCode == session.CommandErrorServerNotFound {
+		t.Fatal("re-sent stop returned SERVER_NOT_FOUND: the API would unassign over a still-live process (issue #780)")
+	}
+	if dup.ErrorCode != session.CommandErrorInvalidState {
+		t.Fatalf("re-sent stop = %+v, want INVALID_STATE", dup)
+	}
+
+	// Let the detached stop confirm; it must still succeed and release the id.
+	close(d.inst.stopRelease)
+	first := <-firstDone
+	if !first.Success {
+		t.Fatalf("original detached stop = %+v, want success", first)
+	}
+	// Once the detached stop has confirmed, the id is genuinely gone: a later stop
+	// is SERVER_NOT_FOUND (the reservation was released), so the API converges.
+	after := m.Handle(context.Background(), session.Command{CommandID: "stop3", ServerID: "s1", Kind: "StopServer"})
+	if after.Success || after.ErrorCode != session.CommandErrorServerNotFound {
+		t.Fatalf("stop after detached stop confirmed = %+v, want SERVER_NOT_FOUND", after)
+	}
+}
+
 // A duplicate HydrateTrigger re-issued while the original is mid-transfer is
 // rejected with INVALID_STATE and the transfer runs exactly once, so the two do
 // not write the same working set concurrently (issue #780).
