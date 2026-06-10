@@ -801,20 +801,9 @@ func TestSnapshotSkipsVanishedFilesAndSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Use a custom Client that uses an openFile hook so we can delete the file
-	// just before it is opened, simulating log rotation.
-	//
-	// Since openFile is not injectable, we instead write the file, stat it, then
-	// delete it before the Snapshot call, and rely on os.ReadDir seeing the entry
-	// (via a separate file that we delete after ReadDir but before Open).
-	//
-	// The simplest approach: write the file, take note of its path, then in the
-	// HTTP server delete it (the Snapshot call happens synchronously and the walk
-	// happens inside Snapshot). Instead, we simulate via walkInto's indirect path:
-	// we inject openFile via a package-level var (see packOpenFile below).
-
-	// Override openFile so the vanished.log entry is seen by ReadDir (we create
-	// it before Snapshot) but deleted before Open.
+	// Inject a vanished-file via the package-level openFile var: the file exists
+	// when ReadDir walks the directory but returns ENOENT when opened, simulating
+	// log rotation between walk and open.
 	vanished := filepath.Join(srcDir, "vanished.log")
 	if err := os.WriteFile(vanished, []byte("log line\n"), 0o640); err != nil {
 		t.Fatal(err)

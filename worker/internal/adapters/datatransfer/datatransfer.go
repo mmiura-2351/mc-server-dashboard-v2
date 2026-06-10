@@ -77,8 +77,12 @@ func New(httpClient *http.Client) *Client {
 }
 
 // WithLogger sets the logger used for pack-time observability (cap/pad
-// adjustments and vanished-file skips). The default is slog.Default().
+// adjustments and vanished-file skips). The default is slog.Default(). l must
+// not be nil; pass slog.Default() explicitly if no custom logger is available.
 func (c *Client) WithLogger(l *slog.Logger) *Client {
+	if l == nil {
+		l = slog.Default()
+	}
 	c.logger = l
 	return c
 }
@@ -567,8 +571,11 @@ func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo, log *slog.
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			// File vanished between the walk and the open (e.g. log rotation).
-			// By definition this is not a quiesced or world file; skip it.
-			log.Info("snapshot: file vanished between walk and open; skipping",
+			// Minecraft never unlinks region files mid-write, and quiesce is
+			// best-effort (RCON failure leaves the server running unbracketed),
+			// so a vanished .mca would not be caught by any downstream integrity
+			// gate. Warn so the event clears alerting thresholds if it occurs.
+			log.Warn("snapshot: file vanished between walk and open; skipping",
 				"path", rel)
 			return nil
 		}
