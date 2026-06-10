@@ -98,6 +98,9 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         if worker is not None and self._sessions.get(worker_id) == session:
             self._workers[worker_id] = worker.disconnect()
 
+    def is_current_session(self, worker_id: WorkerId, session: SessionToken) -> bool:
+        return self._sessions.get(worker_id) == session
+
     def set_draining(self, worker_id: WorkerId, draining: bool) -> bool:
         worker = self._workers.get(worker_id)
         if worker is None:

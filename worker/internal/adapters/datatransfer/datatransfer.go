@@ -426,12 +426,24 @@ func walkInto(tw *tar.Writer, root, dir string) error {
 }
 
 // writeRegular writes one regular file as a tar member.
+//
+// The header Size comes from the ReadDir-time stat, but the file may grow or
+// shrink between that stat and the actual read (e.g. logs/latest.log written by
+// a running Minecraft server even while save-off is active).
+//
+//   - Growth: io.LimitedReader caps the read at Size bytes, so extra bytes that
+//     arrive after the header was committed are silently ignored. Without this,
+//     the tar writer returns ErrWriteTooLong and aborts the whole snapshot.
+//   - Shrink: after the LimitedReader drains the (shorter) file, the remaining
+//     byte count is padded with zeros so bytes-written == header.Size (the tar
+//     must be internally consistent: header size == bytes in the entry).
 func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo) error {
+	size := info.Size()
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     rel,
 		Typeflag: tar.TypeReg,
 		Mode:     int64(info.Mode().Perm()),
-		Size:     info.Size(),
+		Size:     size,
 	}); err != nil {
 		return err
 	}
@@ -440,8 +452,29 @@ func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	if _, err := io.Copy(tw, f); err != nil {
+
+	// Copy exactly Size bytes: a LimitedReader caps a grown file at Size so the
+	// tar writer never sees more bytes than the header declared.
+	lr := &io.LimitedReader{R: f, N: size}
+	written, err := io.Copy(tw, lr)
+	if err != nil {
 		return err
 	}
+	// If the file shrank, pad with zeros so the tar entry equals header.Size.
+	if remaining := size - written; remaining > 0 {
+		if _, err := io.Copy(tw, io.LimitReader(zeroReader{}, remaining)); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// zeroReader is an infinite source of zero bytes used to pad shrunk files.
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
