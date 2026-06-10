@@ -44,6 +44,7 @@ class FakeServerStateSink(ServerStateSink):
         *,
         running_counts: dict[str, int] | None = None,
         fail_observed_for: set[str] | None = None,
+        always_fail_observed: bool = False,
     ) -> None:
         self.observed: list[tuple[str, str, str]] = []
         self.unknown_for: list[str] = []
@@ -53,10 +54,16 @@ class FakeServerStateSink(ServerStateSink):
         # transient DB error while handling one StatusChange; the id is dropped
         # after raising so a later report for the same server succeeds.
         self._fail_observed_for = fail_observed_for or set()
+        # When set, every record_observed_state call raises, simulating a sink
+        # that is permanently down (e.g. the DB is unreachable); used to exercise
+        # the consecutive-failure containment cap (issue #807).
+        self._always_fail_observed = always_fail_observed
 
     async def record_observed_state(
         self, *, server_id: str, worker_id: str, state: str
     ) -> None:
+        if self._always_fail_observed:
+            raise RuntimeError("observed-state sink unavailable")
         if server_id in self._fail_observed_for:
             self._fail_observed_for.discard(server_id)
             raise RuntimeError("transient observed-state write failure")
