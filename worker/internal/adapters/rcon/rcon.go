@@ -36,6 +36,13 @@ const maxBodyLen = 4096 + 16
 // id = -1).
 var ErrAuthFailed = errors.New("rcon: authentication failed")
 
+// defaultExecuteTimeout bounds a single Execute round trip when the caller's
+// ctx carries no deadline. In practice RCON replies are sub-second; 30s is a
+// generous ceiling that still guarantees a hung server (one that accepts the
+// TCP connect but never replies) cannot wedge the call — and thus the lane or a
+// global concurrency slot — forever. A var (not a const) so tests can shrink it.
+var defaultExecuteTimeout = 30 * time.Second
+
 // Client is a single authenticated RCON connection. It is not safe for
 // concurrent use; callers serialize commands per server.
 type Client struct {
@@ -65,12 +72,38 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 }
 
 // Execute sends one command line and returns the server's reply body. It honours
-// ctx's deadline for the round trip.
+// ctx's deadline for the round trip, and falls back to defaultExecuteTimeout when
+// ctx carries none, so a server that accepts the connection but never replies
+// cannot block the call forever. A watcher goroutine also honours ctx
+// cancellation: on ctx.Done() it sets an immediate connection deadline, which is
+// the standard net.Conn idiom for unblocking an in-flight read from another
+// goroutine.
 func (c *Client) Execute(ctx context.Context, line string) (string, error) {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = c.conn.SetDeadline(deadline)
-		defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(defaultExecuteTimeout)
 	}
+	_ = c.conn.SetDeadline(deadline)
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+
+	// Unblock a hung read promptly on ctx cancellation by tripping an immediate
+	// deadline. stop closes the watcher and waits for it so the goroutine never
+	// touches the connection after Execute returns.
+	watcherDone := make(chan struct{})
+	stop := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			_ = c.conn.SetDeadline(time.Now())
+		case <-stop:
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-watcherDone
+	}()
+
 	id := c.id()
 	if err := c.write(id, typeExecCommand, line); err != nil {
 		return "", err
