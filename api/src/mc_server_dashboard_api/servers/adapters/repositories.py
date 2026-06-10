@@ -48,7 +48,6 @@ def _to_server(row: ServerModel) -> Server:
         ),
         created_at=row.created_at,
         updated_at=row.updated_at,
-        store_generation=row.store_generation,
     )
 
 
@@ -80,7 +79,6 @@ class SqlAlchemyServerRepository(ServerRepository):
                 ),
                 created_at=server.created_at,
                 updated_at=server.updated_at,
-                store_generation=server.store_generation,
             )
         )
 
@@ -212,22 +210,6 @@ class SqlAlchemyServerRepository(ServerRepository):
         # when the guard drops the write (0 rows; a same-instant or fresher write
         # already landed) the caller must not optimistically mutate the entity.
         return cast("CursorResult[Any]", result).rowcount == 1
-
-    async def set_store_generation(self, server_id: ServerId, generation: int) -> None:
-        # Persist the authoritative working-set generation the snapshot publish
-        # produced (issue #763). Monotonic guard: only advance the column, never
-        # lower it, so a delayed/out-of-order publish cannot clobber a fresher
-        # generation already recorded (Storage assigns strictly increasing values).
-        # A row that does not exist (deleted concurrently) is a harmless no-op.
-        stmt = (
-            update(ServerModel)
-            .where(
-                ServerModel.id == server_id.value,
-                ServerModel.store_generation < generation,
-            )
-            .values(store_generation=generation)
-        )
-        await self._session.execute(stmt)
 
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime

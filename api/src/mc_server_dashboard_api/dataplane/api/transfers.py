@@ -47,11 +47,9 @@ from fastapi.responses import StreamingResponse
 
 from mc_server_dashboard_api.dependencies import (
     ResolvedJarLookup,
-    StoreGenerationRecorder,
     get_resolved_jar_lookup,
     get_settings,
     get_storage,
-    get_store_generation_recorder,
 )
 from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.storage.domain.errors import (
@@ -229,9 +227,6 @@ async def publish_snapshot(
     request: Request,
     response: Response,
     storage: Annotated[Storage, Depends(get_storage)],
-    record_generation: Annotated[
-        StoreGenerationRecorder, Depends(get_store_generation_recorder)
-    ],
     content_length: Annotated[int | None, Header()] = None,
 ) -> None:
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
@@ -266,11 +261,10 @@ async def publish_snapshot(
             await storage.abort_snapshot(handle)
             raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch")
         generation = await storage.commit_snapshot(handle)
-        # Persist the new authoritative generation onto the server row and stamp it
-        # on the response (issue #763): the reconciler reads the column to decide a
-        # same-worker restart's hydrate, and the Worker records the header as the
-        # generation its scratch is now at (the source of this published snapshot).
-        await record_generation(community_id, server_id, generation)
+        # Stamp the new authoritative generation on the response (issue #763): the
+        # Worker records the header as the generation its scratch is now at (the
+        # source of this published snapshot). The reconciler reads the authoritative
+        # value back from Storage directly, so there is no DB mirror to write here.
         response.headers[_GENERATION_HEADER] = str(generation)
     except HTTPException:
         raise

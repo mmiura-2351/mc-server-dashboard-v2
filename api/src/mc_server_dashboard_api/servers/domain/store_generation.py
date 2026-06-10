@@ -6,14 +6,11 @@ working-set generation. That authoritative value is Storage's own
 ``current_generation`` — the counter ``commit_snapshot`` bumps atomically with
 publishing the new working set.
 
-The reconciler reads Storage directly (this Port) rather than the
-``server.store_generation`` DB mirror so there is no lag window: the snapshot
-endpoint publishes (Storage generation advances) and only afterwards mirrors the
-new generation onto the DB row in a SEPARATE transaction. If that mirror write
-ever fails after a durable publish, the DB would lag Storage — and a Worker
-holding the prior generation would then satisfy ``held >= db_generation`` and
-wrongly SKIP a hydrate it needs, rolling the world back (#696-class data loss).
-Reading the single authoritative source closes that window.
+The reconciler reads Storage directly (this Port) — the single authoritative
+source — so there is no lag window. The generation advances atomically with the
+working set it names on ``commit_snapshot``, so a Worker holding the prior
+generation can never satisfy ``held >= store`` and wrongly SKIP a hydrate it
+needs, which would roll the world back (#696-class data loss).
 
 The servers domain/application may not import the storage context (import-linter
 contract), so they depend on this narrow Port; the wiring binds it to a

@@ -137,17 +137,6 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def set_store_generation(self, server_id: ServerId, generation: int) -> None:
-        """Persist the authoritative working-set generation (issue #763).
-
-        Records the generation a ``commit_snapshot`` produced so the reconciler can
-        compare it against the generation a Worker reports holding. Monotonic: the
-        column is only advanced, never lowered, so a delayed/out-of-order publish
-        cannot clobber a fresher generation already recorded (Storage assigns
-        strictly increasing values). A no-op if the server is absent.
-        """
-
-    @abc.abstractmethod
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:

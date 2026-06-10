@@ -55,14 +55,6 @@ class Server:
     # rows that predate port tracking. Defaulted so existing constructions (tests,
     # other use cases) need not pass it; the create flow sets it explicitly.
     game_port: int | None = None
-    # The authoritative working-set GENERATION (issue #763): a monotonically
-    # increasing counter Storage bumps on each ``commit_snapshot`` and the data plane
-    # persists here. The reconciler compares it against the generation a Worker
-    # reports holding to decide whether a same-worker restart must hydrate (a Worker
-    # holding a STALE generation must hydrate). 0 means no snapshot has been
-    # published yet, matching the Worker's "nothing held" default. Defaulted so
-    # existing constructions need not pass it.
-    store_generation: int = 0
 
     def is_at_rest(self) -> bool:
         """Return whether the server is fully stopped for edits/deletion.

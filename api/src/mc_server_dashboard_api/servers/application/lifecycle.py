@@ -332,14 +332,11 @@ class StartServer:
         # generation, e.g. an A->B->A leftover scratch B has since advanced past) —
         # never silently boot an empty/absent/stale working set.
         #
-        # The threshold is Storage's authoritative current_generation, NOT the
-        # server.store_generation DB mirror. The snapshot endpoint publishes (Storage
-        # advances) and only then mirrors the new generation onto the DB row in a
-        # SEPARATE transaction; if that mirror write ever fails after a durable
-        # publish, the DB would lag Storage, and a Worker holding the prior generation
-        # would then satisfy held >= db_generation and WRONGLY skip a hydrate it needs
-        # — a #696-class world rollback. Reading Storage directly closes that lag
-        # window: the generation advances atomically with the working set it names.
+        # The threshold is Storage's authoritative current_generation, read straight
+        # from Storage (the single source of truth). The generation advances
+        # atomically with the working set it names, so there is no lag window in which
+        # a Worker holding the prior generation could satisfy held >= store and
+        # WRONGLY skip a hydrate it needs — a #696-class world rollback.
         held_generation = self.control_plane.held_generation(
             worker_id=worker_id, server_id=server_id
         )

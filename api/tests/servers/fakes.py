@@ -103,32 +103,19 @@ class FakeJarProvisioner(JarProvisioner):
 class FakeStoreGenerationReader(StoreGenerationReader):
     """Authoritative store-generation seam double for the skip-hydrate decision.
 
-    By default it mirrors the server row's ``store_generation`` (the normal case,
-    DB mirror == Storage), reading it from the shared fake repo so the existing
-    seeded-generation tests drive it unchanged. Pass ``generation`` to pin a fixed
-    value that DIVERGES from the row — e.g. Storage ahead of a lagging DB mirror
-    (issue #763) — so a test can prove the reconciler compares against Storage, not
-    the DB column.
+    Returns a fixed generation for every server (default 0, the "no snapshot
+    published" case). Pass ``generation`` to pin a non-zero authoritative store
+    generation (issue #763) so a test can drive the reconciler's
+    ``held >= store`` comparison.
     """
 
-    def __init__(
-        self,
-        servers: "FakeServerRepository | None" = None,
-        *,
-        generation: int | None = None,
-    ) -> None:
-        self._servers = servers
+    def __init__(self, *, generation: int = 0) -> None:
         self._generation = generation
 
     async def current_generation(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> int:
-        if self._generation is not None:
-            return self._generation
-        if self._servers is None:
-            return 0
-        server = self._servers.by_id.get(server_id)
-        return server.store_generation if server is not None else 0
+        return self._generation
 
 
 class FakeVersionValidator(VersionValidator):
@@ -374,13 +361,6 @@ class FakeServerRepository(ServerRepository):
         if unassign:
             server.assigned_worker_id = None
         return True
-
-    async def set_store_generation(self, server_id: ServerId, generation: int) -> None:
-        # Mirror the real adapter's monotonic guard (issue #763): only advance the
-        # generation, never lower it; an absent row is a no-op.
-        server = self.by_id.get(server_id)
-        if server is not None and server.store_generation < generation:
-            server.store_generation = generation
 
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime

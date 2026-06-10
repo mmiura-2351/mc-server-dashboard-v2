@@ -88,7 +88,7 @@ def _reconciler(
             control_plane=cp,
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
-            store_generation=FakeStoreGenerationReader(uow.servers),
+            store_generation=FakeStoreGenerationReader(),
         ),
         stop_server=StopServer(uow=uow, control_plane=cp, clock=clock),
         control_plane=cp,

@@ -2,10 +2,9 @@
 
 Binds the reconciler's skip-hydrate threshold (issue #763) to Storage's
 authoritative ``current_generation`` — the single source of truth that advances
-atomically with the published working set — instead of the lag-prone
-``server.store_generation`` DB mirror. It maps the servers value objects onto the
-storage value objects at the bounded-context boundary (the lifecycle layer never
-imports the storage domain).
+atomically with the published working set. It maps the servers value objects onto
+the storage value objects at the bounded-context boundary (the lifecycle layer
+never imports the storage domain).
 """
 
 from __future__ import annotations
