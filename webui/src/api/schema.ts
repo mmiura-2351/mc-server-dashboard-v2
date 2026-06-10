@@ -1808,6 +1808,11 @@ export interface components {
              */
             truncated: boolean;
         };
+        /** DrainResponse */
+        DrainResponse: {
+            /** Servers Stopped */
+            servers_stopped: number;
+        };
         /**
          * EffectivePermissionsResponse
          * @description The caller's community-wide codes and per-resource grants (issue #354).
@@ -5201,11 +5206,13 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Successful Response */
-            204: {
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["DrainResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

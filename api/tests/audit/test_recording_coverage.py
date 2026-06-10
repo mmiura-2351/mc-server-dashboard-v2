@@ -99,14 +99,6 @@ class _FakeUseCase:
         return self._result
 
 
-class _FakeSyncUseCase:
-    def __init__(self, *, result: bool) -> None:
-        self._result = result
-
-    def __call__(self, **kwargs: object) -> bool:
-        return self._result
-
-
 def _client(app: object) -> Iterator[TestClient]:
     with TestClient(app) as client:  # type: ignore[arg-type]
         yield client
@@ -366,14 +358,12 @@ def test_start_server_no_eligible_worker_records_error() -> None:
 def test_set_worker_drain_records_success() -> None:
     recorder = RecordingAuditRecorder()
     app, user = _base_app(recorder, platform_admin=True)
-    app.dependency_overrides[get_set_worker_drain] = lambda: _FakeSyncUseCase(
-        result=True
-    )
+    app.dependency_overrides[get_set_worker_drain] = lambda: _FakeUseCase(result=0)
     client = next(_client(app))
 
     resp = client.put("/api/workers/worker-1/drain")
 
-    assert resp.status_code == 204
+    assert resp.status_code == 200
     assert len(recorder.events) == 1
     event = recorder.events[0]
     assert event.operation == ops.WORKER_DRAIN_SET
@@ -384,9 +374,7 @@ def test_set_worker_drain_records_success() -> None:
 def test_set_worker_drain_unknown_worker_records_nothing() -> None:
     recorder = RecordingAuditRecorder()
     app, _ = _base_app(recorder, platform_admin=True)
-    app.dependency_overrides[get_set_worker_drain] = lambda: _FakeSyncUseCase(
-        result=False
-    )
+    app.dependency_overrides[get_set_worker_drain] = lambda: _FakeUseCase(result=None)
     client = next(_client(app))
 
     resp = client.put("/api/workers/ghost/drain")

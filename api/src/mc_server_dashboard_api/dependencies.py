@@ -500,11 +500,17 @@ def get_list_workers(
 
 
 def get_set_worker_drain(
+    request: Request,
     registry: Annotated[WorkerRegistry, Depends(get_worker_registry)],
 ) -> SetWorkerDrain:
     """Assemble the :class:`SetWorkerDrain` use case (platform-admin only)."""
 
-    return SetWorkerDrain(registry=registry)
+    session_factory = create_session_factory(get_engine(request))
+    return SetWorkerDrain(
+        registry=registry,
+        uow=ServersUnitOfWork(session_factory),
+        clock=ServersSystemClock(),
+    )
 
 
 def get_database_ping(request: Request) -> DatabasePing:

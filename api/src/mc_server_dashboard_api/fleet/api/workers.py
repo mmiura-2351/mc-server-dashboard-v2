@@ -6,7 +6,10 @@ since the fleet is cross-community infrastructure, not community-scoped:
 - ``GET /workers`` lists the registered Workers with their advertised
   capabilities, current liveness, and load (FR-WRK-2).
 - ``PUT``/``DELETE /workers/{worker_id}/drain`` set or clear a Worker's drain
-  flag (FR-WRK-5, worker:manage); a draining Worker is excluded from placement.
+  flag (FR-WRK-5, worker:manage); a draining Worker is excluded from placement
+  AND its assigned servers are marked ``desired=stopped`` (the reconciler then
+  drives the graceful stop + final snapshot). Clearing the flag only re-enables
+  placement; it does not restart the servers drain stopped.
 """
 
 from __future__ import annotations
@@ -61,6 +64,12 @@ class WorkersResponse(BaseModel):
     workers: list[WorkerResponse]
 
 
+class DrainResponse(BaseModel):
+    # The number of assigned servers this drain call marked desired=stopped; the
+    # reconciler then drives the graceful stop + final snapshot (FR-WRK-5).
+    servers_stopped: int
+
+
 def _to_response(snapshot: WorkerSnapshot) -> WorkerResponse:
     caps = snapshot.capabilities
     return WorkerResponse(
@@ -88,17 +97,15 @@ async def list_workers(
     return WorkersResponse(workers=[_to_response(w) for w in use_case()])
 
 
-@router.put(
-    "/workers/{worker_id}/drain",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
+@router.put("/workers/{worker_id}/drain")
 async def set_worker_drain(
     worker_id: str,
     use_case: Annotated[SetWorkerDrain, Depends(get_set_worker_drain)],
     user: Annotated[User, Depends(require_platform_admin)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
-) -> None:
-    if not use_case(worker_id=WorkerId(worker_id), draining=True):
+) -> DrainResponse:
+    servers_stopped = await use_case(worker_id=WorkerId(worker_id), draining=True)
+    if servers_stopped is None:
         raise problem(status.HTTP_404_NOT_FOUND, "not_found")
     # Worker ids are not UUIDs; the worker is named by the operation code, not a
     # UUID target_id (DATABASE.md Section 9 target_id is a UUID soft reference).
@@ -110,6 +117,7 @@ async def set_worker_drain(
             target_type=ops.TARGET_WORKER,
         )
     )
+    return DrainResponse(servers_stopped=servers_stopped)
 
 
 @router.delete(
@@ -122,7 +130,7 @@ async def clear_worker_drain(
     user: Annotated[User, Depends(require_platform_admin)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
-    if not use_case(worker_id=WorkerId(worker_id), draining=False):
+    if await use_case(worker_id=WorkerId(worker_id), draining=False) is None:
         raise problem(status.HTTP_404_NOT_FOUND, "not_found")
     await recorder.record(
         AuditEvent(
