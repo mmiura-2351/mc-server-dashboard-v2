@@ -241,12 +241,28 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
+// restoreSaveTimeout bounds the re-enable-auto-save RCON call on the snapshot
+// exit path. It runs on a context detached from the request's (so a cancelled or
+// timed-out request still re-enables auto-save), and must therefore carry its own
+// deadline so the call cannot hang the goroutine forever.
+const restoreSaveTimeout = 30 * time.Second
+
 // handleSnapshot packs the server's working dir and uploads it. For a running
-// server it first issues a non-blocking save-all over RCON (best-effort; a
-// failure is logged, not fatal) to initiate a chunk save so the captured copy is
-// as fresh as possible (CONTROL_PLANE.md Section 6.9). It deliberately does not
-// flush: a synchronous main-thread flush can occupy a tick past max-tick-time and
-// trip the server watchdog, crashing a running server (#693).
+// server it brackets the working-dir copy with RCON save-off / save-on so the
+// Minecraft server does not write to the world mid-copy and a region file cannot
+// be captured torn (#694, CONTROL_PLANE.md Section 6.9): it issues save-off to
+// disable auto-save, a non-blocking save-all to refresh the on-disk copy, runs the
+// transfer over the now-quiescent working dir, then save-on to re-enable
+// auto-save. The save-all deliberately does not flush — a synchronous main-thread
+// flush can occupy a tick past max-tick-time and trip the server watchdog,
+// crashing a running server (#693).
+//
+// The bracket is best-effort: if opening RCON or the save-off toggle fails, the
+// snapshot still proceeds without the consistency guarantee (logged, not fatal).
+// But once save-off succeeds, save-on is guaranteed on every exit path — success,
+// transfer error, or a cancelled/timed-out request context — via a deferred
+// restore that runs on a detached context, so the server is never left with
+// auto-save disabled (which would risk data loss on a later crash).
 func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) session.CommandResult {
 	if m.transfer == nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -256,7 +272,11 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	_, running := m.instances[cmd.ServerID]
 	m.mu.Unlock()
 	if running {
-		m.flushRunning(ctx, cmd.ServerID)
+		// restore is always non-nil; it re-enables auto-save (when it was disabled)
+		// and releases the RCON connection. Deferring it guarantees save-on runs on
+		// every return path below, including the transfer-error path and a panic.
+		restore := m.quiesceRunning(ctx, cmd.ServerID)
+		defer restore()
 	}
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
@@ -267,21 +287,52 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// flushRunning issues a non-blocking save-all over RCON before a snapshot of a
-// running server: it initiates a chunk save so the captured copy is fresh, but
-// does not flush — a synchronous main-thread flush can occupy a tick past
-// max-tick-time and trip the server watchdog (#693). Failures are logged, not
-// propagated: a snapshot of a not-quite-saved working set is still useful and
-// bounded by FR-DATA-5. (Name is historical; this no longer issues a flush.)
-func (m *Manager) flushRunning(ctx context.Context, serverID string) {
+// quiesceRunning brackets a running-server snapshot so the world is not written
+// during the working-dir copy (#694). It opens RCON, disables auto-save
+// (save-off), and issues a non-blocking save-all to refresh the on-disk copy, then
+// returns a restore func the caller defers. The save-all does not flush — a
+// synchronous main-thread flush can trip the server watchdog (#693).
+//
+// All steps are best-effort: an open or save-off failure is logged, not
+// propagated, and leaves the server unbracketed (auto-save was never disabled, so
+// the snapshot just forfeits the torn-read guarantee for this run). The returned
+// restore re-enables auto-save with save-on only when save-off actually
+// succeeded, and always closes the RCON connection if one was opened. It runs
+// save-on on a context detached from ctx (carrying restoreSaveTimeout) so a
+// cancelled or timed-out request still re-enables auto-save rather than leaving
+// the server unable to persist.
+func (m *Manager) quiesceRunning(ctx context.Context, serverID string) func() {
 	ctrl, err := m.openControl(ctx, serverID, m.driverFor(serverID))
 	if err != nil {
-		m.logger.Warn("snapshot save-all: open rcon failed", "server_id", serverID, "error", err)
-		return
+		m.logger.Warn("snapshot quiesce: open rcon failed", "server_id", serverID, "error", err)
+		return func() {}
 	}
-	defer func() { _ = ctrl.Close() }()
+
+	saveOff := true
+	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
+		// Could not disable auto-save: proceed without the bracket. Do not run
+		// save-on on exit — auto-save was never turned off.
+		m.logger.Warn("snapshot save-off failed; snapshot will not be quiesced",
+			"server_id", serverID, "error", err)
+		saveOff = false
+	}
 	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
 		m.logger.Warn("snapshot save-all failed", "server_id", serverID, "error", err)
+	}
+
+	return func() {
+		defer func() { _ = ctrl.Close() }()
+		if !saveOff {
+			return
+		}
+		// Detach from the request context so a cancelled/timed-out snapshot still
+		// re-enables auto-save; bound it so the RCON call cannot hang.
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
+		defer cancel()
+		if _, err := ctrl.Execute(restoreCtx, "save-on"); err != nil {
+			m.logger.Warn("snapshot save-on failed; server may have auto-save disabled",
+				"server_id", serverID, "error", err)
+		}
 	}
 }
 
