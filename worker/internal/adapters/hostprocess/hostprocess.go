@@ -514,6 +514,24 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	}
 
 	if err := proc.Kill(); err != nil {
+		// The kill call itself errored, so this Stop failed without confirming the
+		// process died. Reset the stopping latch (and restore the pre-stop state) so a
+		// retried Stop re-runs the full sequence instead of short-circuiting on the
+		// entry guard and returning a false nil success — which would otherwise let the
+		// API remove the orphan record and GC the authoritative-stop scratch (#766)
+		// while the process may still be alive (issue #816). Mirror the survived-kill
+		// reset (#253): keep the same exitObserved guard, since the process can exit
+		// concurrently and supervise then owns the terminal state (#392), and leave
+		// stopRequested sticky so a later exit is recorded stopped, not a spurious
+		// crash (#257).
+		i.mu.Lock()
+		if i.exitObserved {
+			i.mu.Unlock()
+			return nil
+		}
+		i.stopping = false
+		i.state = prior
+		i.mu.Unlock()
 		return fmt.Errorf("hostprocess: kill: %w", err)
 	}
 	// Confirm the kill actually terminated the process. A process that survives
@@ -593,10 +611,37 @@ func isTerminal(s execution.ServerState) bool {
 	return s == execution.StateStopped || s == execution.StateCrashed
 }
 
+// rconPhaseCap bounds the RCON open+"stop" exchange to its own slice of the stop
+// budget. It mirrors rcon's defaultExecuteTimeout: a healthy exchange is
+// sub-second, so this ceiling never trips a real stop; it only caps a hung peer.
+// A var (not a const) so tests can shrink it.
+var rconPhaseCap = 30 * time.Second
+
+// rconStopDeadline gives the RCON phase its own sub-budget within the detached
+// stopCtx. stopCtx carries the whole escalation deadline, so rcon's own 30s
+// fallback never fires there; a pathological peer could otherwise drag the
+// exchange to just under the full budget and leave the SIGTERM→SIGKILL waits
+// near-zero grace (the #703-adjacent shape, issue #832). Cap the phase at
+// min(rconPhaseCap, remaining/3): the /3 reserves the bulk of the remaining
+// budget for the two escalation waits that follow, and the cap keeps the phase
+// short on a large budget.
+func rconStopDeadline(ctx context.Context) time.Time {
+	phase := rconPhaseCap
+	if deadline, ok := ctx.Deadline(); ok {
+		if third := time.Until(deadline) / 3; third < phase {
+			phase = third
+		}
+	}
+	return time.Now().Add(phase)
+}
+
 // tryRCONStop opens RCON and sends "stop", reporting whether the in-band stop was
 // issued successfully. A failure (no RCON, send error) returns false so Stop
-// falls back to signals.
+// falls back to signals. The exchange runs under a phase deadline so a hung peer
+// cannot consume the whole stop budget (issue #832).
 func (i *instance) tryRCONStop(ctx context.Context) bool {
+	ctx, cancel := context.WithDeadline(ctx, rconStopDeadline(ctx))
+	defer cancel()
 	ctrl, err := i.openControl(ctx, i.spec)
 	if err != nil {
 		return false

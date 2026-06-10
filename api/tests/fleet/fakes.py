@@ -72,9 +72,11 @@ class FakeServerStateSink(ServerStateSink):
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
         self.unknown_for.append(worker_id)
 
-    async def running_assignment_ids(self, *, worker_id: str) -> set[str]:
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
         self.counted_for.append(worker_id)
-        return set(self._running_ids.get(worker_id, set()))
+        # Configured by id only; declared memory is unset (0) for these fakes —
+        # the rebuild's memory-restore path is exercised by the registry unit tests.
+        return {server_id: 0 for server_id in self._running_ids.get(worker_id, set())}
 
 
 class RecordingRealTimeEvents(RealTimeEvents):

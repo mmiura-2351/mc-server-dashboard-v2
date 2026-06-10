@@ -218,6 +218,32 @@ func TestDialAuthFailure(t *testing.T) {
 	}
 }
 
+// With no deadline on ctx, Dial against an address that never completes the SYN
+// handshake (firewalled / blackholed) must bound the TCP connect at the default
+// fallback rather than ride the OS's ~2-minute SYN timeout (issue #832). It uses
+// a TEST-NET-3 address (RFC 5737, guaranteed non-routable) so the SYN is dropped
+// with no RST, exercising the connect bound rather than a fast refusal.
+func TestDialDefaultDeadlineBoundsConnect(t *testing.T) {
+	prev := defaultExecuteTimeout
+	defaultExecuteTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { defaultExecuteTimeout = prev })
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Dial(context.Background(), "203.0.113.1:25575", "secret")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Dial returned nil against a non-accepting address, want timeout error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Dial hung past the default deadline against a non-accepting address")
+	}
+}
+
 // With no deadline on ctx, Dial against a peer that TCP-accepts but never sends
 // an AUTH_RESPONSE must not block forever: the handshake falls back to the
 // default per-call deadline and returns an error.
@@ -238,9 +264,14 @@ func TestDialDefaultDeadlineUnblocksSilentAuthServer(t *testing.T) {
 		got:        make(chan string, 8),
 	}
 	go fs.serve()
+
+	// Cleanups run LIFO: register wg.Wait first so ln.Close (registered after)
+	// runs before it. A hung Dial would otherwise block wg.Wait forever with no
+	// unblock; closing the listener first lets a regression fail cleanly.
+	var wg sync.WaitGroup
+	t.Cleanup(func() { wg.Wait() })
 	t.Cleanup(func() { _ = ln.Close() })
 
-	var wg sync.WaitGroup
 	done := make(chan error, 1)
 	wg.Add(1)
 	go func() {
@@ -248,7 +279,6 @@ func TestDialDefaultDeadlineUnblocksSilentAuthServer(t *testing.T) {
 		_, err := Dial(context.Background(), fs.addr(), "secret")
 		done <- err
 	}()
-	t.Cleanup(func() { wg.Wait() })
 
 	select {
 	case err := <-done:

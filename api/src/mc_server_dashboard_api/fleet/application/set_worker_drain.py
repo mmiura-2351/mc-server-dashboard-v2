@@ -101,19 +101,16 @@ class SetWorkerDrain:
         with the persisted desired states rather than leaking decrements on a
         rollback. The reconciler's ``redispatch_stop`` deliberately does NOT
         decrement again (it assumes the original stop already did), so this is the
-        single decrement for the drain path. ``decrement_assignment`` floors at
-        zero; that floor makes the decrement a harmless no-op only when a
-        same-instant reconnect rebuild already zeroed this Worker's count. With
-        other desired-running servers still assigned the floor does not engage, so
-        a rebuild that already excluded this (now desired=stopped) server followed
-        by the decrement can under-count by one until the next rebuild — the same
+        single decrement for the drain path. ``decrement_assignment`` drops the
+        per-server committed row; it is a harmless no-op when a same-instant
+        reconnect rebuild already excluded this server (idempotent pop), the same
         self-healing race class StopServer's decrement carries.
         """
         try:
             servers_worker_id = ServersWorkerId(uuid.UUID(worker_id.value))
         except ValueError:
             return 0
-        stopped = 0
+        stopped_ids: list[str] = []
         async with self.uow:
             assigned = [
                 server
@@ -130,11 +127,13 @@ class SetWorkerDrain:
                     server, expected_from=DesiredState.RUNNING
                 )
                 if applied:
-                    stopped += 1
+                    stopped_ids.append(str(server.id.value))
             await self.uow.commit()
         # Decrement only the committed flips, after the commit lands: a failed
         # commit rolls back the CAS flips above, so the decrements must not run
-        # before it (mirroring StopServer.__call__'s post-commit decrement).
-        for _ in range(stopped):
-            self.registry.decrement_assignment(worker_id)
-        return stopped
+        # before it (mirroring StopServer.__call__'s post-commit decrement). Pass the
+        # per-server id so the registry sheds each assignment's committed memory with
+        # its count (#843).
+        for server_id in stopped_ids:
+            self.registry.decrement_assignment(worker_id, server_id)
+        return len(stopped_ids)
