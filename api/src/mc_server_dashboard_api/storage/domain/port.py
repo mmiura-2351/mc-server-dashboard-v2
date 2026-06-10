@@ -184,6 +184,27 @@ class WorkingSetStore(abc.ABC):
         snapshot has been published.
         """
 
+    @abc.abstractmethod
+    async def prune_to_final_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        """Collapse a server's working set to one retained final-state archive (#777).
+
+        The DeleteServer reclaim path: pack the current authoritative working set
+        (``current/``) into a single self-contained ``tar.gz`` retained at the
+        server root, then remove the unpacked working-set tree (``snapshots/``,
+        ``incoming/``, ``versions/``, and the ``current`` pointer). ``backups/`` is
+        left untouched — the caller prunes archives (keep newest, delete the rest)
+        through its own seam. After return, the server's only working-set artifact
+        is the final tar.gz, which carries no DB row.
+
+        Packing is mandatory and fail-closed: if the pack fails the working-set tree
+        is left intact and the error propagates, so a failed delete never silently
+        loses the latest state. A server with no published snapshot has nothing to
+        pack and is a no-op (idempotent). The retained tar.gz uses the same codec as
+        a backup archive (Section 2), so an operator can re-import it.
+        """
+
 
 class JarStore(abc.ABC):
     """Port slice: content-addressed JAR store/reuse (STORAGE.md Section 3.2)."""

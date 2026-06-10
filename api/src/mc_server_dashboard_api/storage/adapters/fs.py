@@ -713,6 +713,48 @@ class FsStorage(Storage):
         current = await asyncio.to_thread(self._current_dir, community_id, server_id)
         return await asyncio.to_thread(check_working_set, current)
 
+    async def prune_to_final_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        # The DeleteServer reclaim path (issue #777): pack ``current/`` into a single
+        # retained ``final.tar.gz`` at the server root, then drop the working-set
+        # tree. Backups are pruned by the caller and are left untouched here.
+        await asyncio.to_thread(self._prune_to_final_snapshot, community_id, server_id)
+
+    def _prune_to_final_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        server_root = self._server_root(community_id, server_id)
+        try:
+            current = self._current_dir(community_id, server_id)
+        except NotFoundError:
+            # No published snapshot: nothing to pack. Still drop any leftover
+            # working-set tree (a never-published incoming/versions) so the prune is
+            # idempotent and leaves only backups/ + an absent final archive.
+            for sub in ("snapshots", "incoming", "versions"):
+                _rmtree(server_root / sub)
+            _rmtree(server_root / "current")
+            return
+        # Pack to a temp sibling first, then atomically rename into place: the tree
+        # is removed ONLY after a complete final.tar.gz exists, so a pack failure
+        # leaves the working set intact and the error propagates (fail-closed, #777).
+        final = server_root / "final.tar.gz"
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(server_root), prefix=".final.", suffix=".tmp"
+        )
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            _write_tar_gz(current, tmp)
+            os.replace(tmp, final)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        # The final archive is durable; reclaim the unpacked working-set tree.
+        for sub in ("snapshots", "incoming", "versions"):
+            _rmtree(server_root / sub)
+        _rmtree(server_root / "current")
+
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> None:

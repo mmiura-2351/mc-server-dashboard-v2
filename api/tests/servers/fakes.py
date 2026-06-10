@@ -756,8 +756,12 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     no-working-set error.
     """
 
-    def __init__(self, *, missing: bool = False) -> None:
+    def __init__(self, *, missing: bool = False, pack_fails: bool = False) -> None:
         self._missing = missing
+        # When set, ``prune_to_final_snapshot`` raises so a test can assert the
+        # DeleteServer pack is fail-closed (#777).
+        self.pack_fails = pack_fails
+        self.pruned: list[ServerId] = []
         self.archives: set[str] = set()
         # Bytes per stored archive, so open/store/size round-trip in tests.
         self.bytes_by_ref: dict[str, bytes] = {}
@@ -824,6 +828,15 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.archives.discard(storage_ref)
         self.bytes_by_ref.pop(storage_ref, None)
         self.deleted.append((server_id, storage_ref))
+
+    async def prune_to_final_snapshot(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        # The DeleteServer reclaim path (#777). ``pack_fails`` makes it raise so a
+        # test can assert the delete aborts with the working set intact.
+        if self.pack_fails:
+            raise RuntimeError("pack failed")
+        self.pruned.append(server_id)
 
     async def open(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str

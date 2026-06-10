@@ -437,3 +437,36 @@ async def test_create_backup_refuses_corrupt_live_snapshot() -> None:
         await storage.create_backup_from_current(community, server)
     # Fail-closed: no ``.tar.gz`` backup object was uploaded.
     assert not any(k.startswith(backups_prefix) for k in store.objects)
+
+
+async def test_prune_uploads_final_targz_and_drops_working_set_objects() -> None:
+    # Object realization of the DeleteServer reclaim (#777): the live snapshot is
+    # packed into a single final.tar.gz object at the server prefix, and the
+    # snapshots/, incoming/, versions/ objects plus the pointer/generation markers
+    # are deleted. backups/ is left untouched.
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    files = {"server.properties": b"motd=hi", "world/level.dat": b"w"}
+    await _publish(storage, community, server, files)
+    backup_key = await storage.create_backup_from_current(community, server)
+
+    await storage.prune_to_final_snapshot(community, server)
+
+    prefix = _server_prefix(community, server)
+    final_key = prefix + "final.tar.gz"
+    assert final_key in store.objects
+    assert read_tar(store.objects[final_key]) == files
+    # Working-set objects and markers are gone; the backup object survives.
+    assert not any(k.startswith(prefix + "snapshots/") for k in store.objects)
+    assert not any(k.startswith(prefix + "incoming/") for k in store.objects)
+    assert (prefix + _POINTER) not in store.objects
+    assert (prefix + _GENERATION) not in store.objects
+    assert (prefix + f"backups/{backup_key.value}.tar.gz") in store.objects
+
+
+async def test_prune_without_publish_uploads_no_final_object() -> None:
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await storage.prune_to_final_snapshot(community, server)  # no raise
+    prefix = _server_prefix(community, server)
+    assert (prefix + "final.tar.gz") not in store.objects

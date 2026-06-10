@@ -92,9 +92,10 @@ across servers (FR-VER-3) and contain no Community data.
 │               │   └── <relative-file-path>/
 │               │       ├── <version-id>      # an immutable prior content of that file
 │               │       └── ...
-│               └── backups/
-│                   ├── <backup-id>.<archive-ext>  # a retained, self-contained snapshot archive
-│                   └── ...
+│               ├── backups/
+│               │   ├── <backup-id>.<archive-ext>  # a retained, self-contained snapshot archive
+│               │   └── ...
+│               └── final.tar.gz                # post-delete retained working set (Section 2.1); no DB row
 └── jars/                                     # shared, content-addressed server JARs (FR-VER-3)
     └── <sha256>.jar
 ```
@@ -127,6 +128,35 @@ Notes:
 - On object backends the tree above is a **key prefix scheme**, not real
   directories (Section 7.3); the same logical layout applies.
 
+### 2.1 Post-delete retention (issue #777)
+
+Deleting a server cascades its DB rows (the server row, its backup rows) but does
+**not** wipe its Storage. To bound the disk cost while never destroying the latest
+state, `DeleteServer` retains **exactly two** artifacts under the server directory,
+**neither of which has a DB row** (they are operator-level artifacts):
+
+1. **The latest backup archive, if one exists** — `backups/<newest-id>.tar.gz`. The
+   newest backup by `created_at` is kept; every older archive (and all retained
+   per-file `versions/`) is deleted, archive-first per the `delete_backup` ordering
+   convention (Section 3.3).
+2. **The current working set, packed as `final.tar.gz`** — mandatory. The live
+   `current/` snapshot is packed into a single self-contained `tar.gz` at the server
+   root, then the unpacked working-set tree (`snapshots/`, `incoming/`, `versions/`,
+   the `current` pointer) is removed. Packing is **fail-closed**: if it fails, the
+   working set is left intact and the delete fails, so a deletion never silently
+   loses the latest state. A server that never published a snapshot has no
+   `final.tar.gz`.
+
+Everything else for the server is removed. The retained archives are unreferenced
+orphans by design (not the bug the `delete_backup` ordering guards against).
+
+**Operator recovery / disk reclaim.** Both retained artifacts are plain `tar.gz`
+archives in the server's prior directory. To recover the data, an operator creates
+a fresh server and **uploads** the chosen archive as a backup (the upload-backup
+flow, issue #281), then **restores** it — `restore_backup` republishes the `tar.gz`
+into the new server's `current/`. To reclaim the disk instead, delete the server
+directory tree.
+
 ---
 
 ## 3. The `Storage` Port contract
@@ -153,6 +183,7 @@ authoritative-side stream and the atomic-publish handshake.
 | `write_snapshot(handle, WriteStream)` | Stream the Worker's working set into staging | Writes only into staging, never `current/`. May be called incrementally. |
 | `commit_snapshot(handle)` | Atomically publish the staged snapshot as the new authoritative copy | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. |
 | `abort_snapshot(handle)` | Discard an incomplete/failed transfer | Deletes the staging area; `current/` is untouched. Also the cleanup path for crash recovery (Section 4.3). |
+| `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1, issue #777). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, `current`; leaves `backups/`. Fail-closed on a pack failure; no-op if nothing is published. |
 
 The hydrate/snapshot **wire transport** (how `ReadStream`/`WriteStream` bytes
 cross the API↔Worker boundary) is the data plane (epic #8). `Storage` only

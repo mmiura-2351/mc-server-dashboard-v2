@@ -464,6 +464,36 @@ async def test_delete_backup_is_idempotent(harness: StorageHarness) -> None:
     await harness.storage.delete_backup(community, server, key)  # no raise
 
 
+# --- prune to final snapshot (DeleteServer reclaim, issue #777) -------------
+
+
+async def test_prune_drops_working_set_but_keeps_backups(
+    harness: StorageHarness,
+) -> None:
+    # After the prune the working set is gone (hydrate / create now 404), but the
+    # existing backup archives are left untouched for the caller to prune.
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"w"})
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    await harness.storage.prune_to_final_snapshot(community, server)
+
+    with pytest.raises(NotFoundError):
+        await drain(harness.storage.open_hydrate_source(community, server))
+    with pytest.raises(NotFoundError):
+        await harness.storage.create_backup_from_current(community, server)
+    assert await harness.storage.list_backups(community, server) == [key]
+
+
+async def test_prune_without_published_snapshot_is_a_noop(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.storage.prune_to_final_snapshot(community, server)  # no raise
+    with pytest.raises(NotFoundError):
+        await drain(harness.storage.open_hydrate_source(community, server))
+
+
 # --- backup transfer: open / put / size (Section 3.3, issue #281) -----------
 
 
