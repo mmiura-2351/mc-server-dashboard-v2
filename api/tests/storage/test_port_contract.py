@@ -18,6 +18,7 @@ import pytest
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     IncompleteTransferError,
+    IntegrityCheckError,
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
@@ -30,10 +31,13 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
     bomb_targz,
+    corrupt_region_bytes,
     drain,
+    healthy_region_bytes,
     malicious_tar_with_escape,
     new_scope,
     read_tar,
+    region_targz,
     stream_of,
     tar_bytes,
     tar_stream,
@@ -148,6 +152,45 @@ async def test_write_snapshot_sandboxes_malicious_members(
 
     with pytest.raises(Exception):
         await harness.storage.write_snapshot(handle, _stream())
+
+
+# --- content-integrity gate on the authoritative-create paths (#703/#750) ---
+
+
+async def test_commit_refuses_corrupt_region_and_preserves_prior(
+    harness: StorageHarness,
+) -> None:
+    """A commit whose staged working set carries a structurally corrupt ``.mca``
+    is refused on BOTH backends (#750): the gate raises ``IntegrityCheckError`` and
+    the prior published snapshot is left untouched (last-known-good, #703)."""
+
+    community, server = new_scope()
+    prior = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, prior)
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(
+        handle, tar_stream({"world/region/r.0.0.mca": corrupt_region_bytes()})
+    )
+    with pytest.raises(IntegrityCheckError):
+        await harness.storage.commit_snapshot(handle)
+
+    # The corrupt transfer never published: the prior healthy region is still live.
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == prior
+
+
+async def test_commit_publishes_a_structurally_healthy_region(
+    harness: StorageHarness,
+) -> None:
+    """A structurally sound ``.mca`` passes the gate and publishes unchanged."""
+
+    community, server = new_scope()
+    files = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, files)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == files
 
 
 # --- JAR store / reuse (Section 3.2) ---------------------------------------
@@ -288,6 +331,72 @@ async def test_restore_rejects_decompression_bomb(backend: str, tmp_path: Path) 
     key = await harness.storage.put_backup(community, server, stream_of(bomb))
     with pytest.raises(ArchiveTooLargeError):
         await harness.storage.restore_backup(community, server, key)
+
+
+async def test_restore_corrupt_backup_without_force_is_refused(
+    harness: StorageHarness,
+) -> None:
+    """Restoring a backup carrying a corrupt ``.mca`` without ``force`` is refused on
+    BOTH backends (#750/#743): the gate raises ``IntegrityCheckError`` and the live
+    snapshot is left untouched, so a known-corrupt backup never re-poisons it."""
+
+    community, server = new_scope()
+    await harness.publish(
+        community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    corrupt = region_targz({"world/region/r.0.0.mca": corrupt_region_bytes()})
+    key = await harness.storage.put_backup(community, server, stream_of(corrupt))
+
+    with pytest.raises(IntegrityCheckError):
+        await harness.storage.restore_backup(community, server, key)
+
+    # The refused restore never published: the prior healthy region is still live.
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"world/region/r.0.0.mca": healthy_region_bytes()}
+
+
+async def test_restore_corrupt_backup_with_force_publishes_and_reports(
+    harness: StorageHarness,
+) -> None:
+    """``force=True`` is the operator override: a corrupt backup IS published and the
+    returned report flags the corruption so the caller can quarantine + audit it
+    (#703 — a deliberate corrupt restore beats no restore)."""
+
+    community, server = new_scope()
+    await harness.publish(
+        community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    corrupt_region = corrupt_region_bytes()
+    corrupt = region_targz({"world/region/r.0.0.mca": corrupt_region})
+    key = await harness.storage.put_backup(community, server, stream_of(corrupt))
+
+    report = await harness.storage.restore_backup(community, server, key, force=True)
+    assert not report.healthy
+    assert len(report.corrupt) == 1
+
+    # The forced restore published the (corrupt) backup over the live snapshot.
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"world/region/r.0.0.mca": corrupt_region}
+
+
+async def test_restore_healthy_backup_reports_healthy(
+    harness: StorageHarness,
+) -> None:
+    """A restore of a structurally sound backup reports healthy on both backends."""
+
+    community, server = new_scope()
+    original = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, original)
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    await harness.publish(
+        community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    report = await harness.storage.restore_backup(community, server, key)
+    assert report.healthy
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == original
 
 
 async def test_delete_backup_is_idempotent(harness: StorageHarness) -> None:

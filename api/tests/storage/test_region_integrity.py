@@ -16,6 +16,7 @@ import pytest
 
 from mc_server_dashboard_api.storage.integrity.region import (
     ReasonCode,
+    check_region_bytes,
     check_region_file,
     check_working_set,
 )
@@ -200,3 +201,28 @@ def test_walker_finds_mca_in_dimensions_subtree(tmp_path: Path) -> None:
     report = check_working_set(tmp_path)
     assert report.scanned == 1
     assert report.healthy is True
+
+
+# --- in-memory body check (the object-store gate's entry point, issue #750) --
+
+
+def test_check_region_bytes_healthy_returns_none() -> None:
+    assert check_region_bytes("r.0.0.mca", _build_region()) is None
+
+
+def test_check_region_bytes_corrupt_returns_finding_with_name() -> None:
+    image = _build_region()
+    finding = check_region_bytes("world/region/r.0.0.mca", image[:-10])
+    assert finding is not None
+    assert finding.reason is ReasonCode.NOT_4096_ALIGNED
+    assert finding.path == Path("world/region/r.0.0.mca")
+
+
+def test_check_region_bytes_matches_check_region_file(tmp_path: Path) -> None:
+    # The body check and the path check share one core: a region failing on disk
+    # fails identically in memory (the object/fs gate parity, #750).
+    image = _build_region(compression=99)  # an unknown compression scheme.
+    path = _write(tmp_path / "r.mca", image)
+    finding = check_region_bytes("r.mca", image)
+    assert finding is not None
+    assert finding.reason is check_region_file(path)
