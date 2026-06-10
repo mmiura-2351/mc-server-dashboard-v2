@@ -64,6 +64,7 @@ func wantCode(t *testing.T, code string) (success bool, errCode session.CommandE
 		"file_access_denied": session.CommandErrorFileAccessDenied,
 		"port_conflict":      session.CommandErrorPortConflict,
 		"image_missing":      session.CommandErrorImageMissing,
+		"busy":               session.CommandErrorBusy,
 	}
 	c, ok := codes[code]
 	if !ok {

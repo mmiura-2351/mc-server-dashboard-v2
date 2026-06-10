@@ -441,6 +441,14 @@ enum CommandErrorCode {
   // Minecraft/Java version. Sanitized from the container driver's create error;
   // the raw daemon text stays in Worker logs.
   COMMAND_ERROR_CODE_IMAGE_MISSING = 8;
+  // Another mutating lifecycle command is already in flight for this server, so
+  // the Worker refused this one without applying it (issue #824). Distinct from
+  // INVALID_STATE: the id is RESERVED (a re-issued duplicate after a stream
+  // reconnect, or a detached stop still confirming termination), not in a
+  // settled state like "already running". The outcome of the in-flight command
+  // is not yet known, so the API must NOT converge an observed state on it — it
+  // keeps the assignment/intent and retries on a later reconcile tick.
+  COMMAND_ERROR_CODE_BUSY = 9;
 }
 
 // ---------------------------------------------------------------------------

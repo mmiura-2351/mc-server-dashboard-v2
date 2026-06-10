@@ -179,6 +179,15 @@ class _CommandErrorCodeEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_Comm
     Minecraft/Java version. Sanitized from the container driver's create error;
     the raw daemon text stays in Worker logs.
     """
+    COMMAND_ERROR_CODE_BUSY: _CommandErrorCode.ValueType  # 9
+    """Another mutating lifecycle command is already in flight for this server, so
+    the Worker refused this one without applying it (issue #824). Distinct from
+    INVALID_STATE: the id is RESERVED (a re-issued duplicate after a stream
+    reconnect, or a detached stop still confirming termination), not in a
+    settled state like "already running". The outcome of the in-flight command
+    is not yet known, so the API must NOT converge an observed state on it — it
+    keeps the assignment/intent and retries on a later reconcile tick.
+    """
 
 class CommandErrorCode(_CommandErrorCode, metaclass=_CommandErrorCodeEnumTypeWrapper):
     """CommandErrorCode classifies a command failure."""
@@ -207,6 +216,15 @@ COMMAND_ERROR_CODE_IMAGE_MISSING: CommandErrorCode.ValueType  # 8
 """A StartServer could not find or pull the container image for the server's
 Minecraft/Java version. Sanitized from the container driver's create error;
 the raw daemon text stays in Worker logs.
+"""
+COMMAND_ERROR_CODE_BUSY: CommandErrorCode.ValueType  # 9
+"""Another mutating lifecycle command is already in flight for this server, so
+the Worker refused this one without applying it (issue #824). Distinct from
+INVALID_STATE: the id is RESERVED (a re-issued duplicate after a stream
+reconnect, or a detached stop still confirming termination), not in a
+settled state like "already running". The outcome of the in-flight command
+is not yet known, so the API must NOT converge an observed state on it — it
+keeps the assignment/intent and retries on a later reconcile tick.
 """
 Global___CommandErrorCode: _TypeAlias = CommandErrorCode  # noqa: Y015
 

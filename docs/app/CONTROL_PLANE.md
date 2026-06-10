@@ -329,7 +329,8 @@ classes a Worker can hit:
 | Code | When |
 |---|---|
 | `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, or a missing file target). |
-| `INVALID_STATE` | The command is invalid for the current state (e.g. start or hydrate a running server). |
+| `INVALID_STATE` | The command is invalid for the current settled state (e.g. start or hydrate a running server, or a server with a failed-stop orphan pending termination). |
+| `BUSY` | Another mutating lifecycle command is already in flight for the server, so this one was refused without being applied (the reservation race, issue #824). Distinct from `INVALID_STATE`: the in-flight command's outcome is not yet known, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. |
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
 | `FILE_ACCESS_DENIED` | A file path was rejected. A refining `file_access_reason` (Section 7.2) splits the distinct conditions so the API maps each to an honest HTTP reason instead of one blanket `invalid_path`. |
 | `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |

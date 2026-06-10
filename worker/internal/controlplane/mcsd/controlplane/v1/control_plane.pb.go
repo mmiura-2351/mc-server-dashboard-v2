@@ -241,6 +241,14 @@ const (
 	// Minecraft/Java version. Sanitized from the container driver's create error;
 	// the raw daemon text stays in Worker logs.
 	CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING CommandErrorCode = 8
+	// Another mutating lifecycle command is already in flight for this server, so
+	// the Worker refused this one without applying it (issue #824). Distinct from
+	// INVALID_STATE: the id is RESERVED (a re-issued duplicate after a stream
+	// reconnect, or a detached stop still confirming termination), not in a
+	// settled state like "already running". The outcome of the in-flight command
+	// is not yet known, so the API must NOT converge an observed state on it — it
+	// keeps the assignment/intent and retries on a later reconcile tick.
+	CommandErrorCode_COMMAND_ERROR_CODE_BUSY CommandErrorCode = 9
 )
 
 // Enum value maps for CommandErrorCode.
@@ -255,6 +263,7 @@ var (
 		6: "COMMAND_ERROR_CODE_INTERNAL",
 		7: "COMMAND_ERROR_CODE_PORT_CONFLICT",
 		8: "COMMAND_ERROR_CODE_IMAGE_MISSING",
+		9: "COMMAND_ERROR_CODE_BUSY",
 	}
 	CommandErrorCode_value = map[string]int32{
 		"COMMAND_ERROR_CODE_UNSPECIFIED":        0,
@@ -266,6 +275,7 @@ var (
 		"COMMAND_ERROR_CODE_INTERNAL":           6,
 		"COMMAND_ERROR_CODE_PORT_CONFLICT":      7,
 		"COMMAND_ERROR_CODE_IMAGE_MISSING":      8,
+		"COMMAND_ERROR_CODE_BUSY":               9,
 	}
 )
 
@@ -2523,7 +2533,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"!FILE_ACCESS_REASON_IS_A_DIRECTORY\x10\x01\x12&\n" +
 	"\"FILE_ACCESS_REASON_NOT_A_DIRECTORY\x10\x02\x12&\n" +
 	"\"FILE_ACCESS_REASON_SYMLINK_REFUSED\x10\x03\x12(\n" +
-	"$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\xf0\x02\n" +
+	"$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\x8d\x03\n" +
 	"\x10CommandErrorCode\x12\"\n" +
 	"\x1eCOMMAND_ERROR_CODE_UNSPECIFIED\x10\x00\x12'\n" +
 	"#COMMAND_ERROR_CODE_SERVER_NOT_FOUND\x10\x01\x12$\n" +
@@ -2533,7 +2543,8 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\"COMMAND_ERROR_CODE_TRANSFER_FAILED\x10\x05\x12\x1f\n" +
 	"\x1bCOMMAND_ERROR_CODE_INTERNAL\x10\x06\x12$\n" +
 	" COMMAND_ERROR_CODE_PORT_CONFLICT\x10\a\x12$\n" +
-	" COMMAND_ERROR_CODE_IMAGE_MISSING\x10\b*\xcc\x01\n" +
+	" COMMAND_ERROR_CODE_IMAGE_MISSING\x10\b\x12\x1b\n" +
+	"\x17COMMAND_ERROR_CODE_BUSY\x10\t*\xcc\x01\n" +
 	"\vServerState\x12\x1c\n" +
 	"\x18SERVER_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15SERVER_STATE_STARTING\x10\x01\x12\x18\n" +

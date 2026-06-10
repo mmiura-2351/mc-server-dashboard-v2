@@ -61,6 +61,11 @@ class CommandResultCode(enum.Enum):
     # Sanitized start-failure categories the Worker classifies (issue #225).
     PORT_CONFLICT = "port_conflict"
     IMAGE_MISSING = "image_missing"
+    # Another mutating lifecycle command is already in flight for the server, so
+    # the Worker refused this one without applying it (issue #824). Distinct from
+    # INVALID_STATE: the in-flight command's outcome is unknown, so the caller
+    # keeps its assignment/intent and retries rather than converging a state.
+    BUSY = "busy"
 
 
 class FileAccessReason(enum.Enum):

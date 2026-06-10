@@ -92,6 +92,7 @@ _STATUS_BY_CODE: dict[CommandResultCode, CommandStatus] = {
     CommandResultCode.INTERNAL: CommandStatus.INTERNAL,
     CommandResultCode.PORT_CONFLICT: CommandStatus.PORT_CONFLICT,
     CommandResultCode.IMAGE_MISSING: CommandStatus.IMAGE_MISSING,
+    CommandResultCode.BUSY: CommandStatus.BUSY,
 }
 
 # Map the fleet file-access reason to the servers outcome reason (issue #548;

@@ -59,6 +59,11 @@ API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     # start means the Worker already runs the server (its start guard rejected a
     # live instance), so both treat it as convergence rather than a failure.
     ("StartServer", CommandStatus.INVALID_STATE),
+    # lifecycle.py: redispatch_start AND __call__ (#824) -- BUSY on a start means
+    # another lifecycle command is in flight on the Worker (outcome unknown), so
+    # both keep the assignment/intent and raise for a retry WITHOUT converging
+    # observed=running (the distinct-from-INVALID_STATE branch).
+    ("StartServer", CommandStatus.BUSY),
     # lifecycle.py: stop convergence -- SERVER_NOT_FOUND means no live instance;
     # converge observed=stopped instead of failing. The graceful-stop path also
     # special-cases the same status ("not SERVER_NOT_FOUND" raises), and
@@ -109,17 +114,18 @@ def test_no_undeclared_match_sites() -> None:
         len(pattern.findall(path.read_text()))
         for path in (_LIFECYCLE, _FILES, _COMMAND_DISPATCH)
     )
-    # lifecycle.py has 6 CommandStatus.<NAME> references (redispatch_start and
-    # __call__ both read an INVALID_STATE start as already-running (#773/#774),
-    # stop convergence, graceful-stop "not SERVER_NOT_FOUND", redispatch_stop's
-    # snapshot-skip "not SERVER_NOT_FOUND" (#846), SendServerCommand); files.py has 2
+    # lifecycle.py has 8 CommandStatus.<NAME> references (redispatch_start and
+    # __call__ both read an INVALID_STATE start as already-running (#773/#774) and
+    # both special-case a BUSY start as retry-no-converge (#824), stop convergence,
+    # graceful-stop "not SERVER_NOT_FOUND", redispatch_stop's snapshot-skip
+    # "not SERVER_NOT_FOUND" (#846), SendServerCommand); files.py has 2
     # (_map_file_status); command_dispatch.py has 2 (the sanitized start-failure
     # reason map, issue #225). Bump this with intent when a genuinely new
     # convergence/special-case match is added -- and add it to API_MATCH_SITES so it
     # is checked against the contract table.
-    assert found == 10, (
+    assert found == 12, (
         f"found {found} CommandStatus references in lifecycle.py/files.py/"
-        "command_dispatch.py, expected 10. A convergence/special-case match was "
+        "command_dispatch.py, expected 12. A convergence/special-case match was "
         "added or removed: update API_MATCH_SITES (so it is checked against the "
         "contract table) and this count."
     )
