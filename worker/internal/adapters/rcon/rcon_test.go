@@ -98,6 +98,113 @@ func TestDialExecute(t *testing.T) {
 	}
 }
 
+// silentFakeServer accepts a connection and authenticates, but never replies to
+// an EXEC_COMMAND — modelling an MC server hung mid-tick that accepts the TCP
+// connect but goes silent. It blocks the read until the test ends.
+func newSilentFakeServer(t *testing.T, password string) *fakeServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	fs := &fakeServer{
+		ln:       ln,
+		password: password,
+		reply:    map[string]string{},
+		got:      make(chan string, 8),
+	}
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for {
+			id, typ, body, err := readPacket(conn)
+			if err != nil {
+				return
+			}
+			switch typ {
+			case typeAuth:
+				respID := id
+				if body != fs.password {
+					respID = -1
+				}
+				_ = writePacket(conn, id, typeResponseValue, "")
+				_ = writePacket(conn, respID, typeAuthResponse, "")
+			case typeExecCommand:
+				fs.got <- body
+				// Deliberately never reply.
+			}
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+	return fs
+}
+
+// With no deadline on ctx, Execute against a silent server must not block
+// forever: it falls back to the default per-call deadline and returns an error.
+func TestExecuteDefaultDeadlineUnblocksSilentServer(t *testing.T) {
+	prev := defaultExecuteTimeout
+	defaultExecuteTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { defaultExecuteTimeout = prev })
+
+	fs := newSilentFakeServer(t, "secret")
+	c, err := Dial(context.Background(), fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	done := make(chan error, 1)
+	go func() { _, err := c.Execute(context.Background(), "list"); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Execute returned nil against a silent server, want timeout error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute hung past the default deadline against a silent server")
+	}
+}
+
+// Cancelling ctx must unblock a read that is waiting on a silent server promptly,
+// well before the default deadline.
+func TestExecuteCtxCancellationUnblocksSilentServer(t *testing.T) {
+	prev := defaultExecuteTimeout
+	defaultExecuteTimeout = time.Hour // ensure it is cancellation, not the deadline, that unblocks
+	t.Cleanup(func() { defaultExecuteTimeout = prev })
+
+	fs := newSilentFakeServer(t, "secret")
+	c, err := Dial(context.Background(), fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := c.Execute(ctx, "list"); done <- err }()
+
+	// Wait until the server has received the command, so the client is blocked
+	// in read, then cancel.
+	select {
+	case <-fs.got:
+	case <-time.After(time.Second):
+		t.Fatal("server never received command")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Execute returned nil after ctx cancellation, want error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute did not unblock promptly after ctx cancellation")
+	}
+}
+
 func TestDialAuthFailure(t *testing.T) {
 	fs := newFakeServer(t, "secret")
 	_, err := Dial(context.Background(), fs.addr(), "wrong")
