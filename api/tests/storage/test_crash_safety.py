@@ -224,9 +224,13 @@ async def test_prune_fsyncs_final_before_unlinking_current(
     # ``current`` symlink is unlinked, or a power cut could commit the unlink/GC while
     # the tar's data blocks were never flushed, destroying the only re-packable source
     # and leaving a torn final. A torn-final power-loss is not reproducible in-process,
-    # so we instead assert the ordering: at least one ``os.fsync`` is issued before the
-    # ``current`` symlink is removed.
+    # so we instead assert the ordering: both the tmp-tar fsync and the server_root dir
+    # fsync are issued before the ``current`` symlink is removed. We classify each
+    # fsync by the fd's type (``stat.S_ISDIR`` over ``os.fstat``) so a reorder that
+    # moved the *directory* fsync after the unlink is caught — a bare "some fsync
+    # precedes the unlink" check would still pass on the tmp-tar fsync alone (#837).
     import os
+    import stat as stat_module
 
     import mc_server_dashboard_api.storage.adapters.fs as fs_module
 
@@ -243,7 +247,8 @@ async def test_prune_fsyncs_final_before_unlinking_current(
     real_rmtree = fs_module._rmtree
 
     def spy_fsync(fd: int) -> None:
-        events.append("fsync")
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
         real_fsync(fd)
 
     def spy_rmtree(path: Path) -> None:
@@ -256,12 +261,13 @@ async def test_prune_fsyncs_final_before_unlinking_current(
 
     await storage.prune_to_final_snapshot(community, server)
 
-    assert "fsync" in events
     assert "unlink-current" in events
-    # The (two) fsyncs — tmp tar file, then server_root dir — both precede the unlink.
-    assert events.index("unlink-current") > events.index("fsync")
-    assert events.count("fsync") >= 2
-    assert events[events.index("unlink-current") - 1] == "fsync"
+    unlink_at = events.index("unlink-current")
+    # The tmp-tar (file) fsync makes the archive's data blocks durable, and the
+    # server_root (dir) fsync makes the final rename durable — BOTH must precede the
+    # ``current`` unlink, or the unlink/GC could commit while either was unflushed.
+    assert "fsync-file" in events and events.index("fsync-file") < unlink_at
+    assert "fsync-dir" in events and events.index("fsync-dir") < unlink_at
 
 
 async def test_prune_drops_generation_marker(tmp_path: Path) -> None:
@@ -281,3 +287,56 @@ async def test_prune_drops_generation_marker(tmp_path: Path) -> None:
     assert not (server_root / "generation").exists()
     assert not (server_root / "snapshots").exists()
     assert not (server_root / "current").exists()
+
+
+async def test_create_backup_fsyncs_archive_before_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Single-file write discipline (#837): create_backup_from_current must pack into a
+    # temp sibling, fsync the tar's data blocks, THEN rename it into ``<key>.tar.gz``,
+    # then fsync the directory — so a power cut never leaves a torn archive listed as a
+    # normal backup. A torn-archive power-loss is not reproducible in-process, so we
+    # assert the ordering: the temp-file fsync precedes the rename onto the final
+    # ``.tar.gz`` path, and the directory fsync follows it. fds are classified by type
+    # (``stat.S_ISDIR``) so the dir fsync can't masquerade as the file fsync.
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(NEW))
+    await storage.commit_snapshot(handle)
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if str(dst).endswith(".tar.gz"):
+            events.append("rename-archive")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    key = await storage.create_backup_from_current(community, server)
+
+    server_root = _prune_server_root(tmp_path, community, server)
+    archive = server_root / "backups" / f"{key.value}.tar.gz"
+    assert archive.is_file()
+    assert read_tar(archive.read_bytes()) == NEW
+    assert not list((server_root / "backups").glob(".backup.*.tmp"))
+
+    assert "rename-archive" in events
+    rename_at = events.index("rename-archive")
+    # The tmp-tar (file) fsync makes the archive's data blocks durable BEFORE the
+    # rename publishes the listable name; the directory fsync makes that rename durable
+    # AFTER it.
+    assert "fsync-file" in events and events.index("fsync-file") < rename_at
+    assert events.index("fsync-dir") > rename_at
