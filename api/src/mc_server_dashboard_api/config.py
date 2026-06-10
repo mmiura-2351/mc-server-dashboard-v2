@@ -140,7 +140,8 @@ class StorageFsSettings(_Section):
     """Filesystem-backend settings (CONFIGURATION.md Section 5.2).
 
     ``root`` is the directory the ``fs`` adapter roots its tree at (STORAGE.md
-    Section 2). Only read when ``storage.backend = fs``.
+    Section 2). Read when ``storage.backend`` is ``fs`` or ``remote-fs``; for
+    ``remote-fs`` point it at the POSIX mount path (STORAGE.md Section 7.2).
     """
 
     root: str = "./data"

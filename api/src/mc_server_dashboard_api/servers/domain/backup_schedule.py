@@ -8,11 +8,10 @@ due-tracking map (the snapshot-cadence pattern).
 **Schedule format (M1).** A per-server *interval in hours* stored on the
 ``Server`` config blob (DATABASE.md Section 8 places the schedule in
 ``server.config``), absent meaning "no scheduled backups". This is chosen over a
-cron expression at M1 — DATABASE.md says "a simple interval or limited cron subset
-is acceptable" — because it needs no cron parser/dependency, validates exactly like
-the existing ``snapshot_interval_seconds`` override (FR-DATA-7), and an interval is
-the natural granularity for backup cadence. A cron subset (specific times of day)
-is a follow-up behind this same config key if ever required.
+cron expression at M1 because it needs no cron parser/dependency, validates
+exactly like the existing ``snapshot_interval_seconds`` override (FR-DATA-7), and
+an interval is the natural granularity for backup cadence. A cron-style schedule
+is a follow-on behind epic #649.
 
 Per-server jitter spreads the due instants so a fleet sharing one interval does
 not back up in lockstep; it is derived deterministically from the server id, so

@@ -206,7 +206,7 @@ running-server file access.
 
 | Command | Meaning | Result payload | Req. ref |
 |---|---|---|---|
-| `StartServer` | Launch the server (after a preceding hydrate). Carries the driver, JAR relpath, MC version (Worker picks the Java runtime), and launch mode (`jar` is the default JAR launch; `forge-argsfile` launches Forge via its generated args file, running a supervised installer first when the working set is uninstalled). | none | FR-SRV-2, FR-EXE-5, ARCHITECTURE.md Section 7.3 |
+| `StartServer` | Launch the server (after a preceding hydrate). Carries the driver, JAR relpath, MC version (Worker picks the Java runtime), launch mode (`jar` is the default JAR launch; `forge-argsfile` launches Forge via its generated args file, running a supervised installer first when the working set is uninstalled), optional `memory_limit_bytes` (per-server memory ceiling; 0/unset = driver default; #706), and optional `cpu_millis` (soft CPU allocation in millicores; 0/unset = driver default; #723). | none | FR-SRV-2, FR-EXE-5, ARCHITECTURE.md Section 7.3 |
 | `StopServer` | Stop the server; graceful stop triggers an event-driven snapshot. `force` skips graceful. | none | FR-SRV-2, FR-DATA-7 |
 | `RestartServer` | Stop then start in place. | none | FR-SRV-2 |
 | `ServerCommand` | Forward an RCON/console line. | `command_output` | FR-SRV-5 |

@@ -180,9 +180,8 @@ certificate against its `api.tls.ca_file`.
 |---|---|---|---|
 | `database.url` | *required* | secret | Connection string for the persistence adapter (may embed credentials). Model owned by DATABASE.md (#15). |
 | `storage.backend` | `fs` | | Selector for the `Storage` Port (Section 4): `fs` / `remote-fs` / `object`. |
-| `storage.fs.root` | `./data` | | Root directory when `storage.backend = fs`. |
+| `storage.fs.root` | `./data` | | Root directory for the `fs` and `remote-fs` backends. For `fs` this is a local path; for `remote-fs` point it at the POSIX mount path (the `fs` adapter is reused over the mount — STORAGE.md Section 7.2). |
 | `storage.version_retention` | `10` | | Maximum per-file prior versions retained for rollback; the oldest beyond this count are pruned (STORAGE.md Section 5). Must be non-negative; `0` retains no prior versions. |
-| `storage.fs.root` (remote-fs) | `./data` | | Root directory of the POSIX mount when `storage.backend = remote-fs`. Point this at the mount path; the `fs` adapter is reused over it (STORAGE.md Section 7.2). |
 | `storage.object.endpoint` | — | | Object-store endpoint when `storage.backend = object`. |
 | `storage.object.bucket` | — | | Object-store bucket/container. |
 | `storage.object.access_key` | — | secret | Object-store access key. |
@@ -201,6 +200,7 @@ publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md (#17).
 | `auth.token.access_ttl_seconds` | `900` | | Short-lived access-token lifetime. Must be positive and **strictly less than** `refresh_ttl_seconds` (an access token may not outlive the refresh token); a non-conforming pair fails fast at load. |
 | `auth.token.refresh_ttl_seconds` | `1209600` | | Long-lived refresh-token lifetime (14 days). Must be positive. Also the `Max-Age` of the refresh cookie below. |
 | `auth.token.refresh_reuse_grace_seconds` | `60` | | Grace window after a refresh token is rotated within which re-presenting the **predecessor** is treated as a legitimate concurrent refresh (two SPA tabs, or a retry of a refresh whose response was lost) rather than theft (issue #369): a fresh pair is issued and the token family is kept. Outside the window the reuse still revokes the whole family (DENIED audit event). Must be positive. Larger values tolerate more clock skew / slower retries at the cost of a longer replay window for a leaked predecessor secret. |
+| `auth.token.refresh_cookie_name` | `mcd_refresh` | | Name of the `HttpOnly` refresh-token cookie set by `/api/auth/refresh` and `/api/auth/logout` (AUTH_API.md Section 3). Must be non-empty. |
 | `auth.token.refresh_cookie_secure` | `true` | | Sets the `Secure` flag on the refresh cookie (HTTPS-only). Turn it **off** only for plain-HTTP localhost development so the browser will store the cookie. |
 | `auth.password.hash` | `argon2` | | `PasswordHasher` selector (Section 4): `argon2` / `bcrypt`. |
 

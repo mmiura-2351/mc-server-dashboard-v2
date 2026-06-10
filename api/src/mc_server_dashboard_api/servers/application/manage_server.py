@@ -174,8 +174,8 @@ class CreateServer:
     Create validates the requested ``(server_type, mc_version)`` against the global
     version catalog (cheap, no download — the JAR is fetched on first start, the
     ensure-on-start ruling). The check rejects an unsupported edition (the catalog
-    is Java-only at M1), an unsupported type (forge at M1), and an unoffered version
-    before the row is staged (FR-VER-1).
+    is Java-only at M1), an uncatalogued type (``spigot`` — REQUIREMENTS.md
+    FR-VER-1), and an unoffered version before the row is staged.
 
     Create assigns the server's **game port** (issue #243): the lowest free
     in-range port from ``port_range``, or an operator-supplied ``game_port``
