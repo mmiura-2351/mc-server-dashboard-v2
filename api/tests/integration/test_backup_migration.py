@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from tests.integration.migrate import (
     downgrade_base,
+    downgrade_to,
     upgrade_head,
     upgrade_to,
 )
@@ -178,6 +179,79 @@ async def test_source_check_admits_uploaded_after_upgrade() -> None:
                 )
             ).scalar_one()
             assert "uploaded" in clause
+    finally:
+        await engine.dispose()
+
+    await downgrade_base(_DB_URL)
+
+
+async def test_downgrade_remaps_uploaded_rows_before_narrowing_check() -> None:
+    """0013's downgrade must not reject ``uploaded`` rows valid at head (issue #758).
+
+    An ``uploaded`` backup is admissible at head; the downgrade re-narrows
+    ``ck_backup_source`` to the 0006 three-value set, so it must first remap such
+    rows to ``manual`` or the re-applied CHECK would fail mid-ALTER and poison the
+    batched integration teardown.
+    """
+
+    assert _DB_URL is not None
+    await downgrade_base(_DB_URL)
+    await upgrade_head(_DB_URL)
+
+    community_id = uuid.uuid4()
+    server_id = uuid.uuid4()
+    backup_id = uuid.uuid4()
+
+    engine = create_async_engine(_DB_URL)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO community (id, name, created_at, updated_at) "
+                    "VALUES (:id, :name, now(), now())"
+                ),
+                {"id": community_id, "name": "guild"},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO server (id, community_id, name, mc_edition, "
+                    "mc_version, server_type, execution_backend, config, "
+                    "desired_state, observed_state, created_at, updated_at) VALUES "
+                    "(:id, :community_id, :name, 'java', '1.21.1', 'vanilla', "
+                    "'container', '{}', 'stopped', 'unknown', now(), now())"
+                ),
+                {"id": server_id, "community_id": community_id, "name": "survival"},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO backup (id, server_id, storage_ref, source, "
+                    "health, created_at) VALUES (:id, :server_id, 'ref', "
+                    "'uploaded', 'unknown', now())"
+                ),
+                {"id": backup_id, "server_id": server_id},
+            )
+    finally:
+        await engine.dispose()
+
+    # Walk 0013's downgrade (target 0012, just past it). The re-narrowed CHECK
+    # would reject the ``uploaded`` row unless the downgrade remapped it first.
+    await downgrade_to("0012_player_groups", _DB_URL)
+
+    await upgrade_head(_DB_URL)
+
+    engine = create_async_engine(_DB_URL)
+    try:
+        async with engine.begin() as conn:
+            source = (
+                await conn.execute(
+                    text("SELECT source FROM backup WHERE id = :id"),
+                    {"id": backup_id},
+                )
+            ).scalar_one()
+            assert source == "manual"
+            await conn.execute(text("DELETE FROM backup"))
+            await conn.execute(text("DELETE FROM server"))
+            await conn.execute(text("DELETE FROM community"))
     finally:
         await engine.dispose()
 

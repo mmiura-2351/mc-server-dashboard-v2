@@ -14,8 +14,9 @@ rendering exactly (``IN`` list in model order, single-quoted values), mirroring
 the 0010 ``server_type`` widening.
 
 Downgrade restores the 0006 three-value CHECK. Any ``uploaded`` rows present at
-downgrade would violate it; there are none in the documented flow before this
-change shipped.
+downgrade would violate that narrower CHECK, so the downgrade first remaps them to
+``manual`` (the model default) -- a downgrade that rejected data valid at head
+would itself be a latent migration bug.
 
 Numbering note (issue #281): authored as ``0012`` off ``0011_user_active``. The
 concurrent groups PR (#279) merged first as ``0012_player_groups``, so this
@@ -49,5 +50,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Remap rows that only the widened CHECK admits before re-narrowing it, so the
+    # ALTER never rejects data that was valid at head.
+    op.execute("UPDATE backup SET source = 'manual' WHERE source = 'uploaded'")
     op.drop_constraint(_CONSTRAINT, "backup", type_="check")
     op.create_check_constraint(_CONSTRAINT, "backup", _OLD_CHECK)
