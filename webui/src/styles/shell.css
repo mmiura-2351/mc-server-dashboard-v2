@@ -488,6 +488,16 @@ body.col-resizing {
   color: var(--accent);
   border-color: rgba(77, 159, 255, 0.3);
 }
+/* Backup condition badges (#745). Quarantined is a warning (amber/red so it
+ * reads as at-risk); unknown stays muted, just slightly dimmer than the row. */
+.badge.health-quarantined {
+  color: var(--red);
+  border-color: rgba(242, 85, 85, 0.4);
+  background: rgba(242, 85, 85, 0.08);
+}
+.badge.health-unknown {
+  color: var(--text-faint);
+}
 
 /* Observed-state pills (color tokens from #399). */
 .pill {
@@ -677,6 +687,19 @@ body.col-resizing {
 .field .error {
   font-size: 12px;
   color: var(--red);
+}
+
+/* Force-restore confirmation dialog: the warning and ack row render inside a
+ * portaled Modal, out of reach of the page scopes that style `.field-error` /
+ * `.field-inline`, so they carry their own self-contained rules (#755). */
+.restore-damaged-warning {
+  font-size: 12px;
+  color: var(--red);
+}
+.restore-ack-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* ---------- Modal primitive ---------- */

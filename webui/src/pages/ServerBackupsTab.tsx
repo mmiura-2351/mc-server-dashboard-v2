@@ -301,6 +301,7 @@ export function ServerBackupsTab({
             <tr>
               <th>{t("backups.col.created")}</th>
               <th>{t("backups.col.source")}</th>
+              <th>{t("backups.col.condition")}</th>
               <th>{t("backups.col.size")}</th>
               <th>{t("backups.col.creator")}</th>
               <th />
@@ -309,7 +310,7 @@ export function ServerBackupsTab({
           <tbody>
             {backups.length === 0 ? (
               <tr>
-                <td colSpan={5} className="sub">
+                <td colSpan={6} className="sub">
                   {t("backups.empty")}
                 </td>
               </tr>
@@ -319,6 +320,9 @@ export function ServerBackupsTab({
                   <td>{formatDateTime(backup.created_at)}</td>
                   <td>
                     <span className="badge">{backup.source}</span>
+                  </td>
+                  <td>
+                    <HealthBadge health={backup.health} />
                   </td>
                   <td className="num">
                     {backup.size_bytes !== null
@@ -393,6 +397,29 @@ export function ServerBackupsTab({
         onClose={() => setDeleteTarget(null)}
       />
     </section>
+  );
+}
+
+// Condition badge driven by the API `health` field (#745). A healthy backup
+// renders nothing — only the at-risk states (quarantined / unknown, and any
+// future value) earn a badge, so a clean list stays quiet. Each badge carries a
+// plain-language hover title; no internal jargon leaks.
+function HealthBadge({ health }: { health: string }) {
+  if (health === "healthy") {
+    return null;
+  }
+  const quarantined = health === "quarantined";
+  return (
+    <span
+      className={`badge ${quarantined ? "health-quarantined" : "health-unknown"}`}
+      title={t(
+        quarantined
+          ? "backups.health.quarantinedTitle"
+          : "backups.health.unknownTitle",
+      )}
+    >
+      {t(quarantined ? "backups.health.quarantined" : "backups.health.unknown")}
+    </span>
   );
 }
 
@@ -502,6 +529,11 @@ function ScheduleField({
 // has settled (the honest two-step — no auto-chain). When stopped it is a
 // typed-confirm restore. A 409 server_not_stopped (state changed mid-flight) is
 // surfaced specifically.
+//
+// A quarantined backup (health === "quarantined") is known-damaged: the restore
+// is gated behind an extra explicit acknowledgement and sent with force=true,
+// the operator override the API requires for a corrupt backup (#745). A healthy
+// (or unknown) backup keeps the existing typed-confirm path with no force.
 function RestoreDialog({
   backup,
   server,
@@ -523,7 +555,9 @@ function RestoreDialog({
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
   const [typed, setTyped] = useState("");
+  const [acknowledged, setAcknowledged] = useState(false);
   const phrase = t("backups.restoreDialog.phrase");
+  const quarantined = backup.health === "quarantined";
 
   const invalidateServer = () => {
     queryClient.invalidateQueries({
@@ -532,17 +566,24 @@ function RestoreDialog({
     queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
   };
 
+  const restorePath = apiPath(
+    "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/restore",
+    {
+      community_id: communityId,
+      server_id: server.id,
+      backup_id: backup.id,
+    },
+  );
+
   const restore = useMutation({
     mutationFn: () =>
+      // force=true is the operator override the API requires to restore a
+      // known-corrupt backup (#745); a healthy backup restores without it. The
+      // query suffix keeps the schema-literal path type via the cast.
       api.post(
-        apiPath(
-          "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/restore",
-          {
-            community_id: communityId,
-            server_id: server.id,
-            backup_id: backup.id,
-          },
-        ),
+        quarantined
+          ? (`${restorePath}?force=true` as typeof restorePath)
+          : restorePath,
       ),
     onSuccess: () => {
       showToast(t("backups.restored"), "success");
@@ -596,10 +637,18 @@ function RestoreDialog({
             <button
               type="button"
               className="btn danger"
-              disabled={typed !== phrase || restore.isPending}
+              disabled={
+                typed !== phrase ||
+                (quarantined && !acknowledged) ||
+                restore.isPending
+              }
               onClick={() => restore.mutate()}
             >
-              {t("backups.restoreDialog.confirm")}
+              {t(
+                quarantined
+                  ? "backups.restoreDialog.damagedConfirm"
+                  : "backups.restoreDialog.confirm",
+              )}
             </button>
           ) : (
             canStop && (
@@ -618,6 +667,11 @@ function RestoreDialog({
     >
       {stopped ? (
         <>
+          {quarantined && (
+            <p className="restore-damaged-warning">
+              {t("backups.restoreDialog.damagedWarning")}
+            </p>
+          )}
           <p>{t("backups.restoreDialog.body")}</p>
           <label className="field">
             {t("backups.restoreDialog.prompt")}
@@ -628,6 +682,16 @@ function RestoreDialog({
               onChange={(e) => setTyped(e.target.value)}
             />
           </label>
+          {quarantined && (
+            <label className="restore-ack-row">
+              <input
+                type="checkbox"
+                checked={acknowledged}
+                onChange={(e) => setAcknowledged(e.target.checked)}
+              />
+              {t("backups.restoreDialog.damagedAck")}
+            </label>
+          )}
         </>
       ) : (
         <>

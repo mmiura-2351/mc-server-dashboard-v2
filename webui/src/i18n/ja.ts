@@ -365,10 +365,20 @@ export const ja: Record<TranslationKey, string> = {
   // Table.
   "backups.col.created": "作成日時",
   "backups.col.source": "ソース",
+  "backups.col.condition": "状態",
   "backups.col.size": "サイズ",
   "backups.col.creator": "実行者",
   "backups.unknownSize": "不明",
   "backups.unknownCreator": "—",
+  // Condition badge (API `health`: healthy / quarantined / unknown). Plain
+  // language — no internal jargon. A healthy backup shows nothing, keeping the
+  // row quiet; only the at-risk states are flagged.
+  "backups.health.quarantined": "破損",
+  "backups.health.quarantinedTitle":
+    "このバックアップのデータは破損していることが判明しています。復元するとワールドが壊れる可能性があります。",
+  "backups.health.unknown": "未検証",
+  "backups.health.unknownTitle":
+    "このバックアップは検査されていないため、状態は不明です。",
   // Actions.
   "backups.create": "+ バックアップを作成",
   "backups.upload": "アップロード",
@@ -395,6 +405,17 @@ export const ja: Record<TranslationKey, string> = {
   "backups.restoreDialog.prompt": "確認のため RESTORE と入力",
   "backups.restoreDialog.phrase": "RESTORE",
   "backups.restoreDialog.confirm": "バックアップを復元",
+  // Force-restore warning shown only when the chosen backup is quarantined
+  // (health === "quarantined"). It restores anyway with force=true, so the copy
+  // makes the deliberate, damaged-data nature explicit (#745).
+  "backups.restoreDialog.damagedWarning":
+    "このバックアップのデータは破損していることが判明しています。復元するとサーバーのワールドが壊れた状態になる可能性があり、その後修復する方法はありません。",
+  "backups.restoreDialog.damagedConfirm":
+    "破損したバックアップを承知のうえで復元",
+  // Acknowledgement checkbox label gating the force-restore — affirmation phrased
+  // (the user asserts they accept the risk), not a restatement of the warning.
+  "backups.restoreDialog.damagedAck":
+    "このバックアップが破損しており、修復できない壊れたワールドになる可能性があることを理解しました。",
   // Delete dialog (typed confirm).
   "backups.deleteDialog.title": "バックアップを削除",
   "backups.deleteDialog.body":
