@@ -105,6 +105,22 @@ type Manager struct {
 	// for a running server. The instance's status pump clears the record if the
 	// orphan finally exits on its own.
 	orphans map[string]execution.Instance
+	// reserved marks a server id as having a mutating lifecycle command in flight
+	// (StartServer / HydrateTrigger / SnapshotTrigger, plus a RestartServer's
+	// internal relaunch) so a duplicate re-issued after a stream reconnect cannot
+	// overlap the still-running original (issue #780). handleStart's check-then-act
+	// window — the instances-map check, then driver.Start, then registration — is
+	// not atomic on its own: a stale lane and the re-issued one could both pass the
+	// running check and launch two processes for one server, and a re-issued
+	// HydrateTrigger could race the old one writing the same working set. The
+	// reservation is taken before driver.Start / the transfer under mu, held across
+	// the long operation, and released on completion (success or failure); a
+	// duplicate arriving while reserved is rejected with INVALID_STATE — the same
+	// family as "already running". Stop / Restart already serialize through the
+	// instance latch (take evicts the tracked instance under mu, so a duplicate
+	// finds nothing); the file handlers act atomically on individual files; neither
+	// takes a reservation.
+	reserved map[string]bool
 
 	// events/logs/metrics are the merged streams the session forwards. Per-instance
 	// pumps fan their events into them (FR-MON-2, FR-MON-3).
@@ -143,6 +159,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		instances:       map[string]execution.Instance{},
 		startCmds:       map[string]session.Command{},
 		orphans:         map[string]execution.Instance{},
+		reserved:        map[string]bool{},
 		events:          make(chan session.StatusEvent, 32),
 		logs:            make(chan session.LogEvent, 256),
 		metrics:         make(chan session.MetricsEvent, 32),
@@ -223,20 +240,17 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			"instancemanager: no data-plane transfer client configured")
 	}
-	m.mu.Lock()
-	_, running := m.instances[cmd.ServerID]
-	_, orphaned := m.orphans[cmd.ServerID]
-	m.mu.Unlock()
-	if running {
+	// Reserve the id for the duration of the transfer so a re-issued HydrateTrigger
+	// (or a racing StartServer/SnapshotTrigger) cannot write the same working set
+	// concurrently with the original after a stream reconnect (issue #780). The
+	// reservation also subsumes the running / failed-stop-orphan preconditions —
+	// hydrating either would replace the working set out from under a live process
+	// (issue #251) — and is always released on return.
+	if ok, _ := m.reserve(cmd.ServerID); !ok {
 		return fail(cmd.CommandID, session.CommandErrorInvalidState,
-			"instancemanager: cannot hydrate a running server")
+			"instancemanager: cannot hydrate (server running, has a failed-stop orphan, or a lifecycle command is in flight)")
 	}
-	if orphaned {
-		// A failed-stop orphan may still be alive; hydrating would replace the
-		// working set out from under the lingering process (issue #251).
-		return fail(cmd.CommandID, session.CommandErrorInvalidState,
-			"instancemanager: cannot hydrate a server with a failed-stop orphan pending termination")
-	}
+	defer m.release(cmd.ServerID)
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	gen, err := m.transfer.Hydrate(ctx, cmd.TransferURL, cmd.TransferToken, workingDir)
@@ -407,24 +421,20 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 			fmt.Sprintf("instancemanager: unknown launch mode %q", cmd.LaunchMode))
 	}
 
-	m.mu.Lock()
-	if _, running := m.instances[cmd.ServerID]; running {
-		m.mu.Unlock()
-		return fail(cmd.CommandID, session.CommandErrorInvalidState,
-			"instancemanager: server already running")
+	// Reserve the id before driver.Start so a duplicate StartServer re-issued after
+	// a stream reconnect cannot pass the running check and launch a second instance
+	// while the original is still mid-driver.Start (issue #780). The reservation is
+	// released on every exit path below — including a failed start — so a retry can
+	// proceed. It is not released on success: the registered instance then holds the
+	// id (a duplicate sees the running instance), so releasing the reservation only
+	// after registration keeps the id continuously claimed across the handoff.
+	if ok, msg := m.reserve(cmd.ServerID); !ok {
+		return fail(cmd.CommandID, session.CommandErrorInvalidState, msg)
 	}
-	if _, orphaned := m.orphans[cmd.ServerID]; orphaned {
-		// A prior stop could not confirm termination: the process/container may
-		// still be lingering. Starting now would double-instance over it; the
-		// reconciler must retry the stop first (issue #251).
-		m.mu.Unlock()
-		return fail(cmd.CommandID, session.CommandErrorInvalidState,
-			"instancemanager: server has a failed-stop orphan pending termination")
-	}
-	m.mu.Unlock()
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
+		m.release(cmd.ServerID)
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: prepare working dir: %v", err))
 	}
@@ -444,13 +454,19 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 		CPUMillis: cmd.CPUMillis,
 	})
 	if err != nil {
+		m.release(cmd.ServerID)
 		return fail(cmd.CommandID, startErrorCode(err),
 			fmt.Sprintf("instancemanager: start: %v", err))
 	}
 
+	// Register the instance, then drop the reservation under the same mu: the
+	// tracked instance now holds the id, so there is no window where neither the
+	// reservation nor the instance claims it (a concurrent duplicate always sees
+	// one or the other, issue #780).
 	m.mu.Lock()
 	m.instances[cmd.ServerID] = inst
 	m.startCmds[cmd.ServerID] = cmd
+	delete(m.reserved, cmd.ServerID)
 	m.mu.Unlock()
 	m.startPumps(cmd.ServerID, inst)
 
@@ -963,6 +979,43 @@ func (m *Manager) driverFor(serverID string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.startCmds[serverID].Driver
+}
+
+// reserve claims serverID for an in-flight mutating lifecycle command (issue
+// #780). It atomically rejects — under the same mu held for the running/orphan
+// checks, so there is no check-then-act gap — when the id is already running, has
+// a failed-stop orphan pending, or already carries a reservation, and otherwise
+// marks it reserved. ok reports whether the claim was taken; on a rejection, msg
+// is the precondition message the caller fails with under INVALID_STATE (the same
+// family as "already running"). It must be paired with release on every exit
+// path.
+func (m *Manager) reserve(serverID string) (ok bool, msg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, running := m.instances[serverID]; running {
+		return false, "instancemanager: server already running"
+	}
+	if _, orphaned := m.orphans[serverID]; orphaned {
+		// A prior stop could not confirm termination: the process/container may
+		// still be lingering. Starting/hydrating now would double-instance over it;
+		// the reconciler must retry the stop first (issue #251).
+		return false, "instancemanager: server has a failed-stop orphan pending termination"
+	}
+	if m.reserved[serverID] {
+		// A re-issued duplicate arriving while the original is still in flight after
+		// a stream reconnect (issue #780): reject it rather than overlap the original.
+		return false, "instancemanager: a lifecycle command is already in flight for this server"
+	}
+	m.reserved[serverID] = true
+	return true, ""
+}
+
+// release drops serverID's in-flight reservation so a later command (a retry
+// after a failure, or the next lifecycle op) can claim it again (issue #780).
+func (m *Manager) release(serverID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.reserved, serverID)
 }
 
 // take removes and returns the instance and its StartServer command for
