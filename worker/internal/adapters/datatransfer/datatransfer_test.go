@@ -426,6 +426,45 @@ func TestSnapshotRemovesSpoolFile(t *testing.T) {
 	}
 }
 
+func TestSweepSnapshotSpoolsRemovesLeftoverSpools(t *testing.T) {
+	// A crash mid-snapshot leaks snapshot-*.tar in the scratch root; the startup
+	// sweep must reclaim them while leaving server working-set dirs and unrelated
+	// files untouched (issue #787).
+	scratch := t.TempDir()
+	leaked := []string{"snapshot-123.tar", "snapshot-abc.tar"}
+	for _, name := range leaked {
+		if err := os.WriteFile(filepath.Join(scratch, name), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A server working set (dir) and an unrelated file must survive.
+	if err := os.MkdirAll(filepath.Join(scratch, "s1"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "snapshot-notatar.txt"), []byte("y"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	SweepSnapshotSpools(scratch)
+
+	for _, name := range leaked {
+		if _, err := os.Stat(filepath.Join(scratch, name)); !os.IsNotExist(err) {
+			t.Fatalf("spool %q survived the sweep: stat err = %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(scratch, "s1")); err != nil {
+		t.Fatalf("server dir removed by sweep: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(scratch, "snapshot-notatar.txt")); err != nil {
+		t.Fatalf("non-.tar file removed by sweep: %v", err)
+	}
+}
+
+func TestSweepSnapshotSpoolsMissingRootIsNoOp(t *testing.T) {
+	// A worker with no scratch root yet must not panic or error (best-effort).
+	SweepSnapshotSpools(filepath.Join(t.TempDir(), "absent"))
+}
+
 func TestSnapshotEmptyDirUploadsEmptyTar(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
