@@ -34,7 +34,6 @@ the few interactions with them are annotated pragmatically.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import datetime as dt
 import hmac
 import logging
@@ -177,6 +176,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # Read inbound events/results in a background task while this generator
         # yields the Worker's outbound commands; both share the one stream.
         reader = asyncio.ensure_future(self._read_inbound(worker_id, request_iterator))
+        # Tracks the in-flight outbound.get() so the finally can cancel it even if
+        # this generator is cancelled mid-await (an abrupt gRPC RPC cancel): an
+        # uncancelled get() would await the orphaned queue forever, leaking a
+        # Task+Queue per disconnect (issue #788).
+        outbound_get: asyncio.Future[pb.ApiMessage] | None = None
         try:
             yield self._register_ack(correlation_id=correlation_id)
             while True:
@@ -191,11 +195,24 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     outbound_get.cancel()
                     break
         finally:
+            if outbound_get is not None:
+                outbound_get.cancel()
             reader.cancel()
             # Retrieve the reader's outcome so a transport error it raised is not
             # logged as an unretrieved task exception; a cancellation is expected.
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            # A genuine terminal error (e.g. a transport drop, or an unexpected
+            # error escaping the handler) is logged at warning with the worker id
+            # so the cause is not silently lost (issue #776).
+            try:
                 await reader
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                _LOG.warning(
+                    "worker session reader ended with an error",
+                    extra={"worker_id": worker_id.value},
+                    exc_info=True,
+                )
             # Fail this worker's in-flight commands immediately: its outbound
             # stream is gone, so they can never be answered. Awaiters get a typed
             # WorkerNotConnectedError now instead of riding the full timeout.
@@ -210,9 +227,14 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # Pass this Session's token so a delayed teardown only offlines the
             # Worker if it has not reconnected on a newer Session (Section 4.4).
             self._registry.mark_disconnected(worker_id, session)
-            await self._state_sink.mark_worker_servers_unknown(
-                worker_id=worker_id.value
-            )
+            # Guard the bulk observed=unknown write with this Session's token too:
+            # the write deliberately bypasses the per-server monotonic guard, so a
+            # stale teardown after a reconnect would otherwise clobber the NEW
+            # session's live server states (issue #775, CONTROL_PLANE.md 4.4).
+            if self._registry.is_current_session(worker_id, session):
+                await self._state_sink.mark_worker_servers_unknown(
+                    worker_id=worker_id.value
+                )
             _LOG.info("worker disconnected", extra={"worker_id": worker_id.value})
 
     async def _read_inbound(
@@ -221,7 +243,22 @@ class WorkerSessionServicer(WorkerServiceServicer):
         request_iterator: AsyncIterator[pb.WorkerMessage],
     ) -> None:
         async for message in request_iterator:
-            await self._handle(worker_id, message)
+            # Contain a per-message handler failure (e.g. a transient DB error
+            # while recording one StatusChange) so a single bad event is logged
+            # and skipped rather than tearing down the whole worker session
+            # (issue #776). Stream-level errors from iterating request_iterator
+            # are not caught here, so a real transport drop still ends the loop;
+            # CancelledError propagates so teardown is not swallowed.
+            try:
+                await self._handle(worker_id, message)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOG.warning(
+                    "dropping a worker message after a handler error",
+                    extra={"worker_id": worker_id.value},
+                    exc_info=True,
+                )
 
     async def _rebuild_assignments(self, worker_id: WorkerId) -> None:
         count = await self._state_sink.count_running_assignments(

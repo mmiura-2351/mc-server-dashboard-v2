@@ -109,6 +109,17 @@ class WorkerRegistry(abc.ABC):
         """
 
     @abc.abstractmethod
+    def is_current_session(self, worker_id: WorkerId, session: SessionToken) -> bool:
+        """Return whether ``session`` is still the current one for ``worker_id``.
+
+        Lets a stale Session's delayed teardown tell itself apart from the live
+        Session after a reconnect, so a teardown side effect that bypasses the
+        per-server monotonic guard (the bulk observed=unknown write, FR-WRK-4)
+        does not clobber the new Session's state (CONTROL_PLANE.md Section 4.4).
+        Returns ``False`` for an unknown Worker.
+        """
+
+    @abc.abstractmethod
     def set_draining(self, worker_id: WorkerId, draining: bool) -> bool:
         """Set or clear the Worker's drain flag (FR-WRK-5).
 

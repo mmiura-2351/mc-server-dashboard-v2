@@ -382,6 +382,125 @@ async def test_disconnect_marks_worker_servers_unknown(harness: _Harness) -> Non
     assert harness.state_sink.unknown_for == [_WORKER_ID]
 
 
+async def test_stale_session_teardown_does_not_mark_servers_unknown(
+    harness: _Harness,
+) -> None:
+    # Session A registers the worker; the worker reconnects on Session B (PR #84
+    # backoff) before A's teardown runs. A's delayed teardown must NOT stamp the
+    # live worker's servers observed=unknown, or it clobbers Session B's state
+    # (issue #775, CONTROL_PLANE.md Section 4.4).
+    stub = await harness.start()
+    call_a = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call_a.write(_register_message())
+    await call_a.read()  # ack
+
+    call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call_b.write(_register_message())
+    await call_b.read()  # ack
+
+    # Session A tears down after B is the current Session.
+    await call_a.done_writing()
+    while await call_a.read() is not aio.EOF:
+        pass
+
+    # The stale teardown must not have marked the live worker's servers unknown.
+    assert harness.state_sink.unknown_for == []
+    await call_b.done_writing()
+
+
+async def test_poison_status_change_does_not_end_session(harness: _Harness) -> None:
+    # A transient DB error while handling ONE StatusChange must not tear down the
+    # whole worker session; the bad event is logged-and-skipped and a later
+    # StatusChange is still reconciled (issue #776).
+    bad_server = "33333333-3333-3333-3333-333333333333"
+    good_server = "11111111-1111-1111-1111-111111111111"
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=FakeServerStateSink(fail_observed_for={bad_server}),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        # The first StatusChange raises inside the handler; the stream survives.
+        await call.write(_status_message(bad_server, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(good_server, pb.SERVER_STATE_RUNNING))
+        for _ in range(100):
+            if h.state_sink.observed:
+                break
+            await asyncio.sleep(0.01)
+
+        # The good event was reconciled, and the worker is still ONLINE: the
+        # poison event did not drop the stream.
+        assert h.state_sink.observed == [(good_server, _WORKER_ID, "running")]
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_cancelled_session_cancels_pending_outbound_get() -> None:
+    # When the Session generator is cancelled mid-await (an abrupt RPC cancel),
+    # the finally must cancel the pending outbound.get() task so it does not
+    # await an orphaned queue forever (issue #788). The generator is iterated by
+    # a background task so it reaches and parks on outbound.get(); cancelling
+    # that task drives the cancel into the await, and an empty waiter deque on
+    # the queue after teardown proves the pending get() was cancelled.
+    async def _requests() -> AsyncIterator[pb.WorkerMessage]:
+        yield _register_message()
+        # Keep the inbound stream open so the generator parks on outbound.get().
+        await asyncio.Event().wait()
+
+    class _Ctx:
+        def invocation_metadata(self) -> list[tuple[str, str]]:
+            return _auth(_CREDENTIAL)
+
+        async def abort(self, *_args: object) -> None:  # pragma: no cover
+            raise AssertionError("unexpected abort")
+
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    control_plane = ControlPlaneState()
+    servicer = WorkerSessionServicer(
+        registry=registry,
+        clock=FakeClock(_T0),
+        worker_credential=_CREDENTIAL,
+        heartbeat_timeout=_TIMEOUT,
+        control_plane=control_plane,
+        state_sink=FakeServerStateSink(),
+        real_time_events=RecordingRealTimeEvents(),
+    )
+
+    gen = servicer.Session(_requests(), _Ctx())
+
+    async def _drain() -> None:
+        async for _ in gen:
+            pass
+
+    driver = asyncio.ensure_future(_drain())
+    # Wait until the generator has opened its outbound queue and parked a getter
+    # on it (the body's outbound.get()).
+    queue: asyncio.Queue[pb.ApiMessage] | None = None
+    for _ in range(200):
+        queue = control_plane.outbound_for(WorkerId(_WORKER_ID))
+        if queue is not None and queue._getters:  # type: ignore[attr-defined]
+            break
+        await asyncio.sleep(0.01)
+    assert queue is not None and queue._getters, (  # type: ignore[attr-defined]
+        "outbound.get() should be parked on the queue"
+    )
+
+    # Abrupt RPC cancel: cancel the consumer driving the generator.
+    driver.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await driver
+
+    # The pending outbound.get() must have been cancelled, leaving no waiter.
+    assert not queue._getters  # type: ignore[attr-defined]
+
+
 async def test_reregister_rebuilds_assignment_count_from_tally() -> None:
     # The Worker is reported (via the authoritative tally) to be running 2 servers;
     # on (re)register the registry must rebuild its load to 2, not the reset 0.

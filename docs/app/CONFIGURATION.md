@@ -182,7 +182,7 @@ certificate against its `api.tls.ca_file`.
 | `storage.backend` | `fs` | | Selector for the `Storage` Port (Section 4): `fs` / `remote-fs` / `object`. |
 | `storage.fs.root` | `./data` | | Root directory when `storage.backend = fs`. |
 | `storage.version_retention` | `10` | | Maximum per-file prior versions retained for rollback; the oldest beyond this count are pruned (STORAGE.md Section 5). Must be non-negative; `0` retains no prior versions. |
-| `storage.remote_fs.*` | — | partly | Mount/endpoint settings when `storage.backend = remote-fs`; secret members masked. Detail in STORAGE.md (#17). |
+| `storage.fs.root` (remote-fs) | `./data` | | Root directory of the POSIX mount when `storage.backend = remote-fs`. Point this at the mount path; the `fs` adapter is reused over it (STORAGE.md Section 7.2). |
 | `storage.object.endpoint` | — | | Object-store endpoint when `storage.backend = object`. |
 | `storage.object.bucket` | — | | Object-store bucket/container. |
 | `storage.object.access_key` | — | secret | Object-store access key. |
