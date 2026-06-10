@@ -115,7 +115,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET | `…/{sid}/backups/statistics` | count / total bytes / newest / oldest. |
 | POST | `…/{sid}/backups/upload` | Upload an off-host backup archive. |
 | GET | `…/{sid}/backups/{bid}/download` | Download archive. |
-| POST | `…/{sid}/backups/{bid}/restore` | **Server must be stopped.** |
+| POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate (#703). |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |
 | GET | `…/{sid}/groups` | Groups attached to this server. |
 | GET / POST | `/communities/{cid}/groups` | Player groups (`kind`: `op` \| `whitelist`). |
@@ -315,10 +315,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.7 Server detail — Backups
 - Stats header (count, total size, newest/oldest).
-- Table: created_at, source (manual/scheduled/pre-restore…), size, creator;
+- Table: created_at, source (`manual` / `scheduled` / `event` / `uploaded`), size, health (`healthy` / `quarantined` / `unknown`), creator;
   actions: download, restore, delete.
 - Restore: blocked with explanation while running (offer "stop now then
-  restore" two-step); typed-confirm dialog.
+  restore" two-step); typed-confirm dialog. A `quarantined` backup requires a
+  second force-acknowledge confirmation before the `?force=true` restore is
+  issued.
 - Create backup button (works on running servers — save-all + snapshot path);
   upload backup (file picker).
 - Schedule: per-server interval via the `backup_interval_hours` key on the

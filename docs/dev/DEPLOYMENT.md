@@ -389,7 +389,7 @@ A whole server moves in and out as a single ZIP archive:
 | `name`        | the source server's name (informational; import uses the request name) |
 | `mc_edition`  | the Minecraft edition (`java`)                       |
 | `mc_version`  | the Minecraft version                                |
-| `server_type` | the server type (`vanilla` / `paper` / `fabric`)     |
+| `server_type` | the server type (`vanilla` / `paper` / `fabric` / `forge`) |
 | `exported_at` | the export timestamp (ISO 8601, UTC)                 |
 
 On import the `format` field must equal `1`, and `server_type` / `mc_version` are
