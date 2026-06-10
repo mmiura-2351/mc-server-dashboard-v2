@@ -220,6 +220,14 @@ type instance struct {
 	// a terminal state supervise reached during the post-kill wait window (#392).
 	exitObserved bool
 	closed       bool
+	// terminalLatched is set by emit the first time a terminal state is published.
+	// Once latched, emit drops any later non-terminal event: awaitReady's running
+	// and Stop's stopping can race past supervise's stopped|crashed, and a
+	// latest-wins consumer would otherwise transiently report a dead process as
+	// running/stopping. The latch is read and set under i.mu, which emit already
+	// holds, so the terminal emit and these post-terminal emits are serialized
+	// (issue #835).
+	terminalLatched bool
 
 	// cpu carries the previous CPU reading so Sample reports a rate (cpu_millis,
 	// thousandths of a core) over the interval between two samples.
@@ -721,13 +729,25 @@ func (i *instance) set(s execution.ServerState) {
 // emit publishes a status event without ever blocking supervision. When the
 // buffer is full it coalesces latest-state-wins: the oldest buffered event is
 // discarded to make room for this one, mirroring the manager's coalescing (issue
-// #96) so the terminal event — always the last emit — is never dropped (issue
-// #790). It returns silently once the stream is closed.
+// #96) so the terminal event is never dropped (issue #790). It returns silently
+// once the stream is closed.
+//
+// A terminal state latches: once one is emitted, any later non-terminal event is
+// dropped. awaitReady's running and Stop's stopping can be emitted after
+// supervise's stopped|crashed (the terminal emit is not guaranteed to be the last
+// call), and a latest-wins consumer would otherwise transiently report a dead
+// process as running/stopping (issue #835).
 func (i *instance) emit(state execution.ServerState, detail string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.closed {
 		return
+	}
+	if i.terminalLatched && !isTerminal(state) {
+		return
+	}
+	if isTerminal(state) {
+		i.terminalLatched = true
 	}
 	ev := execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail}
 	for {
