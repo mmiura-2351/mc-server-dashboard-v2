@@ -755,10 +755,24 @@ class FsStorage(Storage):
         tmp = Path(tmp_name)
         try:
             _write_tar_gz(current, tmp)
+            # Make final.tar.gz durable BEFORE the ``current`` unlink below destroys
+            # the only re-packable source: fsync the tar's data blocks (the tmp file)
+            # before the rename, then fsync server_root after it. Without this, a power
+            # cut could commit the unlink/GC (journaled metadata) while the tar's data
+            # blocks were never flushed — a retried prune would find the marker gone,
+            # take the GC-only branch, finish reclaiming the tree, and leave a
+            # torn/empty final with no source: latest state lost (#777 review). Mirrors
+            # put_backup's tmp fsync (fs.py:818) and commit_snapshot's dir fsync.
+            tmp_fd = os.open(tmp, os.O_RDONLY)
+            try:
+                os.fsync(tmp_fd)
+            finally:
+                os.close(tmp_fd)
             os.replace(tmp, final)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
+        _fsync_dir(server_root)
         # Unlink the ``current`` symlink FIRST, the instant final.tar.gz is durable:
         # it is the one marker that says the working set is still live and re-packable.
         # A crash after this point leaves no symlink, so a retried delete raises

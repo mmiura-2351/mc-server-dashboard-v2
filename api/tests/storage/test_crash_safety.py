@@ -217,6 +217,53 @@ async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
     assert not list(server_root.glob(".final.*.tmp"))
 
 
+async def test_prune_fsyncs_final_before_unlinking_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Durability ordering (#777 review): final.tar.gz must be made durable BEFORE the
+    # ``current`` symlink is unlinked, or a power cut could commit the unlink/GC while
+    # the tar's data blocks were never flushed, destroying the only re-packable source
+    # and leaving a torn final. A torn-final power-loss is not reproducible in-process,
+    # so we instead assert the ordering: at least one ``os.fsync`` is issued before the
+    # ``current`` symlink is removed.
+    import os
+
+    import mc_server_dashboard_api.storage.adapters.fs as fs_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(NEW))
+    await storage.commit_snapshot(handle)
+    server_root = _prune_server_root(tmp_path, community, server)
+    current_link = server_root / "current"
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_rmtree = fs_module._rmtree
+
+    def spy_fsync(fd: int) -> None:
+        events.append("fsync")
+        real_fsync(fd)
+
+    def spy_rmtree(path: Path) -> None:
+        if path == current_link:
+            events.append("unlink-current")
+        real_rmtree(path)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(fs_module, "_rmtree", spy_rmtree)
+
+    await storage.prune_to_final_snapshot(community, server)
+
+    assert "fsync" in events
+    assert "unlink-current" in events
+    # The (two) fsyncs — tmp tar file, then server_root dir — both precede the unlink.
+    assert events.index("unlink-current") > events.index("fsync")
+    assert events.count("fsync") >= 2
+    assert events[events.index("unlink-current") - 1] == "fsync"
+
+
 async def test_prune_drops_generation_marker(tmp_path: Path) -> None:
     # Parity with the object adapter (#777 review): the fs prune drops the generation
     # marker too, so the post-delete tree holds only backups/ + final.tar.gz.

@@ -631,6 +631,12 @@ class DeleteServer:
     server whose working set was already pruned. Closing it fully needs a per-server
     lifecycle lock that does not yet exist project-wide; this is the same residual
     window DeleteBackup carries.
+
+    The backups list is read in that SAME final transaction (not before the pack):
+    a backup created during the pack window would otherwise be neither the head nor
+    in the deletable tail and would survive as a third orphan archive. Reading it
+    fresh keeps the "latest existing at delete time" head and prunes every other
+    archive before the rows cascade.
     """
 
     uow: UnitOfWork
@@ -643,22 +649,12 @@ class DeleteServer:
                 raise ServerNotFoundError(str(server_id.value))
             if not server.is_at_rest():
                 raise ServerNotStoppedError(str(server_id.value))
-            # Backups are newest-first; the head is retained, the tail is deleted.
-            backups = await self.uow.backups.list_for_server(server_id)
         # Pack the working set into the retained final tar.gz first. This is
         # mandatory and fail-closed (#777): if it raises, the row is untouched and
         # the whole delete fails rather than dropping the latest state.
         await self.backup_store.prune_to_final_snapshot(
             community_id=community_id, server_id=server_id
         )
-        # Archive-first ordering: delete every archive except the newest before the
-        # rows cascade away, so no archive is left orphaned with a live row.
-        for backup in backups[1:]:
-            await self.backup_store.delete(
-                community_id=community_id,
-                server_id=server_id,
-                storage_ref=backup.storage_ref,
-            )
         async with self.uow:
             # Re-check at-rest in the final transaction: a start could have landed
             # in the (possibly minutes-long) pack window above. Re-checking bounds
@@ -670,6 +666,20 @@ class DeleteServer:
                 raise ServerNotFoundError(str(server_id.value))
             if not server.is_at_rest():
                 raise ServerNotStoppedError(str(server_id.value))
+            # Re-list backups HERE, not before the pack: a backup created during the
+            # (minutes-long) pack window would otherwise be neither the snapshotted
+            # head nor in the snapshotted tail, surviving as a third orphan archive
+            # (#777 review). The fresh list keeps the "latest existing at delete time"
+            # semantics — the head is the newest row at this point — and archive-first
+            # ordering holds because the tail is deleted before the row delete below
+            # cascades the rows away. Newest-first; head retained, tail deleted.
+            backups = await self.uow.backups.list_for_server(server_id)
+            for backup in backups[1:]:
+                await self.backup_store.delete(
+                    community_id=community_id,
+                    server_id=server_id,
+                    storage_ref=backup.storage_ref,
+                )
             await self.uow.servers.delete(server_id)
             # No FK on resource_grant.resource_id, so the server delete does not
             # cascade; sweep the grants in the same transaction (Section 10).

@@ -136,9 +136,11 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
 **neither of which has a DB row** (they are operator-level artifacts):
 
 1. **The latest backup archive, if one exists** — `backups/<newest-id>.tar.gz`. The
-   newest backup by `created_at` is kept; every older archive (and all retained
-   per-file `versions/`) is deleted, archive-first per the `delete_backup` ordering
-   convention (Section 3.3). Selection is the literal latest-by-`created_at`
+   newest backup by `created_at` is kept; every older archive is deleted,
+   archive-first per the `delete_backup` ordering convention (Section 3.3). (The
+   per-file `versions/` tree is not pruned here — it is removed by the working-set
+   prune in point 2, before any archive delete.) Selection is the literal
+   latest-by-`created_at`
    **regardless of `health`** (owner ruling on #777: "latest existing"): a
    QUARANTINED newest archive is still the one kept. The mandatory `final.tar.gz`
    below is the safety net — it is strictly newer and is the recommended recovery

@@ -1628,6 +1628,42 @@ async def test_delete_rechecks_at_rest_after_the_pack_window() -> None:
     assert uow.commits == 0
 
 
+async def test_delete_reconciles_a_backup_created_during_the_pack_window() -> None:
+    # Third-orphan fix (#777 review): a backup created during the (minutes-long) pack
+    # would, if the list were snapshotted before the pack, be neither the retained head
+    # nor in the deletable tail — its archive would survive as a third orphan. The list
+    # is re-read in the final transaction, so the mid-pack backup becomes the head
+    # ("latest existing at delete time") and the previously-newest archive is deleted.
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    store.archives.update({"old", "new", "midpack"})
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    base = dt.datetime(2026, 6, 10, tzinfo=dt.timezone.utc)
+    uow.backups.seed(_backup(server.id, ref="old", created_at=base))
+    uow.backups.seed(
+        _backup(server.id, ref="new", created_at=base + dt.timedelta(hours=1))
+    )
+
+    def _backup_created_during_pack() -> None:
+        uow.backups.seed(
+            _backup(server.id, ref="midpack", created_at=base + dt.timedelta(hours=2))
+        )
+
+    store.on_prune = _backup_created_during_pack
+
+    await DeleteServer(uow=uow, backup_store=store)(
+        community_id=community, server_id=server.id
+    )
+    # The mid-pack backup is the newest by created_at at delete time, so it is the
+    # retained head; "old" and "new" are both deleted — no third orphan survives.
+    assert {ref for _, ref in store.deleted} == {"old", "new"}
+    assert store.archives == {"midpack"}
+    assert store.pruned == [server.id]
+    assert server.id not in uow.servers.by_id
+
+
 async def test_delete_other_communitys_server_is_not_found() -> None:
     uow = FakeUnitOfWork()
     store = FakeBackupArchiveStore()
