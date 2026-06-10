@@ -42,13 +42,13 @@ class FakeServerStateSink(ServerStateSink):
     def __init__(
         self,
         *,
-        running_counts: dict[str, int] | None = None,
+        running_ids: dict[str, set[str]] | None = None,
         fail_observed_for: set[str] | None = None,
     ) -> None:
         self.observed: list[tuple[str, str, str]] = []
         self.unknown_for: list[str] = []
         self.counted_for: list[str] = []
-        self._running_counts = running_counts or {}
+        self._running_ids = running_ids or {}
         # Server ids whose next record_observed_state call raises, simulating a
         # transient DB error while handling one StatusChange; the id is dropped
         # after raising so a later report for the same server succeeds.
@@ -65,9 +65,9 @@ class FakeServerStateSink(ServerStateSink):
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
         self.unknown_for.append(worker_id)
 
-    async def count_running_assignments(self, *, worker_id: str) -> int:
+    async def running_assignment_ids(self, *, worker_id: str) -> set[str]:
         self.counted_for.append(worker_id)
-        return self._running_counts.get(worker_id, 0)
+        return set(self._running_ids.get(worker_id, set()))
 
 
 class RecordingRealTimeEvents(RealTimeEvents):

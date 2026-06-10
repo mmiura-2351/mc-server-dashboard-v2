@@ -131,6 +131,7 @@ class ControlPlane(abc.ABC):
     async def place(
         self,
         *,
+        server_id: ServerId,
         backend: ExecutionBackend,
         memory_limit_mb: int | None,
         committed_by_worker: dict[WorkerId, CommittedResources],
@@ -144,9 +145,17 @@ class ControlPlane(abc.ABC):
         this seam stays free of persistence). The adapter merges these with the
         registry's advertised capacity and feeds the pure ``place`` function.
 
+        On a successful choice the adapter RESERVES ``server_id`` on the chosen
+        Worker atomically (#778), in the same await-free section that read the
+        candidates' load, so a concurrent placement sees the slot taken and two
+        starts cannot both claim a Worker's last capacity slot. The caller MUST
+        later either confirm the reservation (:meth:`increment_assignment` after
+        the lifecycle commit) or release it (:meth:`release_reservation` if the
+        commit is lost).
+
         ``None`` is the typed no-eligible-worker outcome (FR-WRK-3); the use case
         maps it to a transport error rather than treating placement failure as
-        an exception.
+        an exception. No reservation is made when ``None`` is returned.
         """
 
     @abc.abstractmethod
@@ -178,8 +187,23 @@ class ControlPlane(abc.ABC):
         """
 
     @abc.abstractmethod
-    def increment_assignment(self, *, worker_id: WorkerId) -> None:
-        """Record one more server placed on ``worker_id`` (placement load++)."""
+    def increment_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
+        """Confirm ``server_id``'s reservation as a committed placement (#778).
+
+        Called after the lifecycle commit lands. Converts the reservation that
+        :meth:`place` made into a committed assignment; placement load is unchanged
+        (the reservation already counted it). A no-op if the reservation is gone
+        because a reconnect rebuild already counted the committed row.
+        """
+
+    @abc.abstractmethod
+    def release_reservation(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
+        """Release ``server_id``'s reservation when its commit is lost (#778).
+
+        Called when the placement fails BEFORE the lifecycle commit (a lost
+        compare-and-set), freeing the tentatively-held slot without it ever
+        counting as a committed assignment.
+        """
 
     @abc.abstractmethod
     def decrement_assignment(self, *, worker_id: WorkerId) -> None:

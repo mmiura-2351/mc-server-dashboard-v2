@@ -42,13 +42,22 @@ class _EmptyRegistry(WorkerRegistry):
     def set_draining(self, worker_id, draining):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    def increment_assignment(self, worker_id):  # type: ignore[no-untyped-def]
+    def reserve(self, worker_id, server_id, memory_mb):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    def reserved_memory_mb(self, worker_id):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    def release_reservation(self, worker_id, server_id):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    def increment_assignment(self, worker_id, server_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     def decrement_assignment(self, worker_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    def set_assignment(self, worker_id, count):  # type: ignore[no-untyped-def]
+    def set_assignment(self, worker_id, server_ids):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     def candidates_for_placement(self):  # type: ignore[no-untyped-def]

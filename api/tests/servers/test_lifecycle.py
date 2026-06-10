@@ -15,6 +15,20 @@ import uuid
 
 import pytest
 
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    Command as FleetCommand,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    CommandResult,
+    CommandResultCode,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    ControlPlane as FleetControlPlane,
+)
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
+from mc_server_dashboard_api.servers.adapters.control_plane import (
+    FleetControlPlaneAdapter,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     SendServerCommand,
@@ -60,6 +74,29 @@ from tests.servers.fakes import (
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+
+
+class _OkFleetControlPlane(FleetControlPlane):
+    """A fleet control plane that answers every dispatch OK (no Worker, no network).
+
+    Lets the #778 placement-race tests drive the real
+    :class:`FleetControlPlaneAdapter` (genuine reserve/confirm/release) while the
+    hydrate/start dispatches succeed without a live Worker.
+    """
+
+    async def dispatch(
+        self, *, worker_id: FleetWorkerId, server_id: str, command: FleetCommand
+    ) -> CommandResult:
+        return CommandResult(code=CommandResultCode.OK)
+
+
+def _registry_backed_control_plane(registry: object) -> FleetControlPlaneAdapter:
+    return FleetControlPlaneAdapter(
+        registry=registry,  # type: ignore[arg-type]
+        control_plane=_OkFleetControlPlane(),
+        data_plane_base_url="http://data-plane.test",
+        worker_credential="test-credential",
+    )
 
 
 class _RacingServerRepository(FakeServerRepository):
@@ -282,6 +319,98 @@ async def test_start_with_no_eligible_worker_is_typed_error() -> None:
     # Nothing was committed or dispatched.
     assert uow.servers.by_id[ServerId(server_id)].desired_state is DesiredState.STOPPED
     assert cp.dispatched == []
+
+
+async def test_two_concurrent_starts_only_one_takes_the_last_slot() -> None:
+    # The placement capacity race (#778): two starts of DIFFERENT servers run
+    # concurrently against a worker with a single capacity slot. The reservation
+    # taken at placement time means exactly one places and starts; the other sees no
+    # eligible worker — the worker's max_servers is never oversubscribed. (Backed by
+    # the real registry + control-plane adapter so the actual reservation runs.)
+    import asyncio
+
+    from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+    from tests.fleet.fakes import FakeClock as FleetFakeClock
+    from tests.fleet.fakes import make_worker
+
+    community = uuid.uuid4()
+    server_a, server_b = uuid.uuid4(), uuid.uuid4()
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
+    )
+    registry.register(make_worker(worker_id=str(worker_uuid), max_servers=1, at=_NOW))
+    cp = _registry_backed_control_plane(registry)
+
+    async def start(server_id: uuid.UUID) -> object:
+        uow = FakeUnitOfWork()
+        uow.servers.seed(_server(community_id=community, server_id=server_id))
+        use_case = StartServer(
+            uow=uow,
+            control_plane=cp,
+            clock=FakeClock(_NOW),
+            jar_provisioner=FakeJarProvisioner(),
+            store_generation=FakeStoreGenerationReader(),
+        )
+        try:
+            return await use_case(
+                community_id=CommunityId(community), server_id=ServerId(server_id)
+            )
+        except NoEligibleWorkerError as exc:
+            return exc
+
+    results = await asyncio.gather(start(server_a), start(server_b))
+
+    placed = [r for r in results if isinstance(r, Server)]
+    rejected = [r for r in results if isinstance(r, NoEligibleWorkerError)]
+    assert len(placed) == 1
+    assert len(rejected) == 1
+    # The committed load reflects exactly one placement: the worker is not
+    # oversubscribed past its single slot.
+    assert registry.list_workers()[0].assigned_count == 1
+
+
+async def test_reregister_between_commit_and_increment_does_not_double_count() -> None:
+    # The minor variant (#778): the worker re-registers (resetting its count) and is
+    # rebuilt from the authoritative tally — which already includes this server's
+    # just-committed row — in the window between the lifecycle commit and the
+    # increment. The deferred increment must then be a no-op, not a second count.
+    from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+    from tests.fleet.fakes import FakeClock as FleetFakeClock
+    from tests.fleet.fakes import make_worker
+
+    community, server_id, _ = _ids()
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
+    )
+    registry.register(make_worker(worker_id=str(worker_uuid), max_servers=4, at=_NOW))
+    cp = _registry_backed_control_plane(registry)
+
+    # A UnitOfWork whose commit simulates a Worker reconnect landing mid-commit: the
+    # registry resets the count and rebuilds from the tally, which already includes
+    # this committed server id.
+    class _ReregisteringUnitOfWork(FakeUnitOfWork):
+        async def commit(self) -> None:
+            await super().commit()
+            registry.register(make_worker(worker_id=str(worker_uuid), at=_NOW))
+            registry.set_assignment(FleetWorkerId(str(worker_uuid)), {str(server_id)})
+
+    uow = _ReregisteringUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    # The rebuild counted the row once; the post-commit increment is a no-op, so the
+    # load is exactly 1 (not 2).
+    assert registry.list_workers()[0].assigned_count == 1
 
 
 async def test_start_hydrate_failure_compensates_without_dispatching_start() -> None:
@@ -639,10 +768,13 @@ async def test_start_lost_race_is_conflict_without_dispatch_or_count() -> None:
             community_id=CommunityId(community), server_id=ServerId(server_id)
         )
 
-    # No dispatch, no commit, no count change: the winner's row is untouched.
+    # No dispatch, no commit, no committed count change: the winner's row is
+    # untouched. The placement reservation taken before the lost CAS is released so
+    # the tentatively-held slot is freed (#778).
     assert cp.dispatched == []
     assert cp.incremented == []
     assert cp.decremented == []
+    assert cp.released == [(WorkerId(placed_worker), ServerId(server_id))]
     assert uow.commits == 0
     survivor = uow.servers.by_id[ServerId(server_id)]
     assert survivor.assigned_worker_id == WorkerId(winner_worker)

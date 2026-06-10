@@ -45,10 +45,19 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # fresh tokens so a reconnect always supersedes the prior Session.
         self._sessions: dict[WorkerId, SessionToken] = {}
         self._next_session: SessionToken = 0
-        # Per-worker assigned-server count, the placement 'load' axis (FR-WRK-3).
-        # Reset on (re)registration: a fresh connection starts with no servers
-        # placed on it (epic #7 will re-place after hydrate).
+        # Per-worker COMMITTED assigned-server count, the placement 'load' axis
+        # (FR-WRK-3). Reset on (re)registration: a fresh connection starts with no
+        # servers placed on it (epic #7 will re-place after hydrate).
         self._assignments: dict[WorkerId, int] = {}
+        # Per-worker RESERVED-but-uncommitted placements: server id -> declared
+        # memory request in MiB (0 = unset / not memory-gated), the slot held
+        # atomically at placement decision time (#778). A concurrent placement sees
+        # each reservation counted toward load AND its memory folded into committed
+        # memory, so neither the count cap nor the memory gate can be oversubscribed
+        # by two starts racing for a Worker's last slot. The slot is confirmed (moved
+        # into _assignments) by increment_assignment after the lifecycle commit, or
+        # released by release_reservation if the placement loses its commit race.
+        self._reserved: dict[WorkerId, dict[str, int]] = {}
         # Worker ids an operator has drained. This outlives connections so the
         # drain intent survives the Go agent's automatic reconnect; only the
         # DELETE drain endpoint clears it (FR-WRK-5).
@@ -76,8 +85,13 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         self._held[worker.id] = dict(held_servers)
         # Assignment counts reset on (re)register; the server-lifecycle layer
         # (epic #7) MUST reconcile counts from worker status reports after
-        # reconnect — a reconnected worker may still be running servers.
+        # reconnect — a reconnected worker may still be running servers. Reserved
+        # placements are NOT reset: a placement reserved before the reconnect may
+        # still commit, and set_assignment (the rebuild) drops only those already
+        # reflected in the tally, leaving still-uncommitted ones pending so their
+        # later confirm counts (#778). Ensure the key exists for a brand-new worker.
         self._assignments[worker.id] = 0
+        self._reserved.setdefault(worker.id, {})
         session = self._next_session
         self._next_session += 1
         self._sessions[worker.id] = session
@@ -113,17 +127,41 @@ class InMemoryWorkerRegistry(WorkerRegistry):
             self._workers[worker_id] = worker.stop_draining()
         return True
 
-    def increment_assignment(self, worker_id: WorkerId) -> None:
+    def reserve(self, worker_id: WorkerId, server_id: str, memory_mb: int) -> None:
         if worker_id in self._assignments:
+            self._reserved[worker_id][server_id] = memory_mb
+
+    def reserved_memory_mb(self, worker_id: WorkerId) -> int:
+        return sum(self._reserved.get(worker_id, {}).values())
+
+    def release_reservation(self, worker_id: WorkerId, server_id: str) -> None:
+        if worker_id in self._reserved:
+            self._reserved[worker_id].pop(server_id, None)
+
+    def increment_assignment(self, worker_id: WorkerId, server_id: str) -> None:
+        if worker_id not in self._assignments:
+            return
+        # Confirm the reservation -> committed. If it is already gone, a rebuild
+        # (set_assignment) between the commit and this call counted it in the
+        # tally and dropped the reservation, so incrementing again would
+        # double-count: treat the missing reservation as already-counted (#778).
+        if self._reserved[worker_id].pop(server_id, None) is not None:
             self._assignments[worker_id] += 1
 
     def decrement_assignment(self, worker_id: WorkerId) -> None:
         if self._assignments.get(worker_id, 0) > 0:
             self._assignments[worker_id] -= 1
 
-    def set_assignment(self, worker_id: WorkerId, count: int) -> None:
-        if worker_id in self._assignments:
-            self._assignments[worker_id] = count
+    def set_assignment(self, worker_id: WorkerId, server_ids: set[str]) -> None:
+        if worker_id not in self._assignments:
+            return
+        self._assignments[worker_id] = len(server_ids)
+        # Drop reservations now reflected in the authoritative tally so their
+        # pending increment_assignment becomes a no-op (no double-count); keep
+        # reservations not yet in the tally (their commit is not yet visible) so
+        # their later confirm still counts (#778).
+        for committed_id in server_ids:
+            self._reserved[worker_id].pop(committed_id, None)
 
     def candidates_for_placement(self) -> list[PlacementCandidate]:
         now = self._clock.now()
@@ -132,7 +170,10 @@ class InMemoryWorkerRegistry(WorkerRegistry):
                 worker_id=worker.id,
                 drivers=worker.capabilities.drivers,
                 capacity=worker.capabilities.max_servers,
-                load=self._assignments[worker.id],
+                # Load counts committed assignments PLUS reservations still in
+                # flight, so a concurrent placement sees a tentatively-taken slot
+                # and cannot oversubscribe a Worker's last capacity slot (#778).
+                load=self._load(worker.id),
                 # Advertised host memory for resource-aware placement (#710),
                 # in MiB (the per-server limit's unit). 0 means the worker
                 # advertised none, so the placement filter falls back to
@@ -162,5 +203,12 @@ class InMemoryWorkerRegistry(WorkerRegistry):
             registered_at=worker.registered_at,
             last_heartbeat_at=worker.last_heartbeat_at,
             status=worker.status(now=now, timeout=self._timeout),
-            assigned_count=self._assignments[worker.id],
+            # The read view reflects the same load placement sees: committed
+            # assignments plus in-flight reservations (#778).
+            assigned_count=self._load(worker.id),
         )
+
+    def _load(self, worker_id: WorkerId) -> int:
+        """Placement load: committed assignments plus in-flight reservations (#778)."""
+
+        return self._assignments[worker_id] + len(self._reserved.get(worker_id, ()))

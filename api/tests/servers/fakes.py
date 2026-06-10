@@ -388,13 +388,13 @@ class FakeServerRepository(ServerRepository):
                 count += 1
         return count
 
-    async def count_running_for_worker(self, worker_id: WorkerId) -> int:
-        return sum(
-            1
+    async def running_assignment_ids_for_worker(self, worker_id: WorkerId) -> set[str]:
+        return {
+            str(server.id.value)
             for server in self.by_id.values()
             if server.assigned_worker_id == worker_id
             and server.desired_state is DesiredState.RUNNING
-        )
+        }
 
     async def list_running_assigned(self) -> list[Server]:
         return [
@@ -633,6 +633,10 @@ class FakeControlPlane(ControlPlane):
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
         self.incremented: list[WorkerId] = []
         self.decremented: list[WorkerId] = []
+        # The (worker, server) placements reserved by place() and the reservations
+        # released before commit, so a test can assert the #778 reservation lifecycle.
+        self.reserved: list[tuple[WorkerId, ServerId]] = []
+        self.released: list[tuple[WorkerId, ServerId]] = []
         # The ``force`` flag of the last stop dispatch, so a test can assert the
         # use case forwarded the caller's choice (issue #270).
         self.stop_force: bool | None = None
@@ -640,15 +644,19 @@ class FakeControlPlane(ControlPlane):
     async def place(
         self,
         *,
+        server_id: ServerId,
         backend: ExecutionBackend,
         memory_limit_mb: int | None = None,
         committed_by_worker: dict[WorkerId, CommittedResources] | None = None,
     ) -> WorkerId | None:
         # Record the resource-aware placement inputs (#710) so a test can assert
         # the use case summed the committed accounting and forwarded the request's
-        # memory; the placement decision itself stays the configured stub.
+        # memory; the placement decision itself stays the configured stub. Record
+        # the reservation (#778) so a test can assert the chosen worker was reserved.
         self.place_memory_limit_mb = memory_limit_mb
         self.place_committed_by_worker = committed_by_worker or {}
+        if self._place_to is not None:
+            self.reserved.append((self._place_to, server_id))
         return self._place_to
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
@@ -659,8 +667,11 @@ class FakeControlPlane(ControlPlane):
     ) -> int | None:
         return self._held.get((worker_id, server_id))
 
-    def increment_assignment(self, *, worker_id: WorkerId) -> None:
+    def increment_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
         self.incremented.append(worker_id)
+
+    def release_reservation(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
+        self.released.append((worker_id, server_id))
 
     def decrement_assignment(self, *, worker_id: WorkerId) -> None:
         self.decremented.append(worker_id)

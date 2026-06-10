@@ -181,12 +181,21 @@ class StartServer:
             )
             if not applied:
                 # A concurrent start won the compare-and-set: the row is already
-                # running/assigned. Abort before dispatch or any count change so
-                # the lost race causes no double placement (FR-SRV-2).
+                # running/assigned. Release the placement reservation (the slot
+                # _place tentatively took, #778) and abort before dispatch or any
+                # committed count change so the lost race causes no double placement
+                # (FR-SRV-2).
+                self.control_plane.release_reservation(
+                    worker_id=worker_id, server_id=server_id
+                )
                 raise LifecycleTransitionConflictError(str(server_id.value))
             await self.uow.commit()
 
-        self.control_plane.increment_assignment(worker_id=worker_id)
+        # Confirm the placement reservation as a committed assignment now the intent
+        # is durable (#778); a no-op if a reconnect rebuild already counted this row.
+        self.control_plane.increment_assignment(
+            worker_id=worker_id, server_id=server_id
+        )
         dispatch = _Dispatch()
         try:
             outcome = await self._launch(
@@ -298,12 +307,20 @@ class StartServer:
             )
             if not applied:
                 # A concurrent assignment (a real start or another reconcile tick)
-                # won the compare-and-set; abort before dispatch or any count
-                # change so the lost race causes no double placement.
+                # won the compare-and-set; release the placement reservation (#778)
+                # and abort before dispatch or any committed count change so the lost
+                # race causes no double placement.
+                self.control_plane.release_reservation(
+                    worker_id=worker_id, server_id=server_id
+                )
                 raise LifecycleTransitionConflictError(str(server_id.value))
             await self.uow.commit()
 
-        self.control_plane.increment_assignment(worker_id=worker_id)
+        # Confirm the placement reservation as a committed assignment now the intent
+        # is durable (#778); a no-op if a reconnect rebuild already counted this row.
+        self.control_plane.increment_assignment(
+            worker_id=worker_id, server_id=server_id
+        )
         dispatch = _Dispatch()
         try:
             outcome = await self._launch(
@@ -514,6 +531,7 @@ class StartServer:
             await self.uow.servers.list_running_assigned()
         )
         return await self.control_plane.place(
+            server_id=server.id,
             backend=server.execution_backend,
             memory_limit_mb=memory_limit_from_config(server.config),
             committed_by_worker=committed,
@@ -684,7 +702,7 @@ class StopServer:
         # Decrement the placement load symmetrically with StartServer's
         # increment, right after desired flips to stopped. This keeps the
         # in-memory count consistent with the authoritative running-server tally
-        # (count_running_for_worker, used to rebuild after a reconnect): both
+        # (running_assignment_ids_for_worker, used to rebuild after a reconnect): both
         # define load as "servers assigned with desired=running". Deferring the
         # decrement to the StatusChange(stopped) event was considered but would
         # leave the count disagreeing with the desired-state tally during the
