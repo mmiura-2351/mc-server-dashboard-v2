@@ -626,11 +626,13 @@ class DeleteServer:
     Two-transaction shape (the DeleteBackup pattern): the at-rest check and the
     destructive prune live in separate transactions with a potentially minutes-long
     pack between them. The final transaction re-checks ``is_at_rest()`` before the
-    row delete to bound the worst case, but a residual TOCTOU window remains — a
-    start that lands AFTER that re-check but before the commit yields a running
-    server whose working set was already pruned. Closing it fully needs a per-server
-    lifecycle lock that does not yet exist project-wide; this is the same residual
-    window DeleteBackup carries.
+    row delete to bound the worst case, but a residual TOCTOU window remains — any
+    concurrent Storage operation that lands AFTER that re-check but before the commit
+    races the prune: a start yields a running server whose working set was already
+    pruned, and a concurrent restore or CreateBackup writes into ``current`` while it
+    is being packed/torn down. Closing it fully needs a per-server lifecycle lock that
+    does not yet exist project-wide (#827); this is the same residual window
+    DeleteBackup carries.
 
     The backups list is read in that SAME final transaction (not before the pack):
     a backup created during the pack window would otherwise be neither the head nor

@@ -31,10 +31,15 @@ type fakeProcess struct {
 	// driving the re-attemptable-Stop path (issue #253).
 	killSurvive int
 	killCalls   int
-	startErr    error
-	startedAt   bool
-	stdout      io.Reader
-	stderr      io.Reader
+	// killErrs scripts per-call Kill errors (the last entry repeats once exhausted);
+	// a nil entry lets that Kill proceed normally. It models a Kill() that errors on
+	// the first attempt and succeeds on a retry, driving the kill-error
+	// re-attemptable-Stop path (issue #816).
+	killErrs  []error
+	startErr  error
+	startedAt bool
+	stdout    io.Reader
+	stderr    io.Reader
 }
 
 func newFakeProcess() *fakeProcess {
@@ -79,6 +84,16 @@ func (p *fakeProcess) Kill() error {
 	p.mu.Lock()
 	p.killed = true
 	p.killCalls++
+	if len(p.killErrs) > 0 {
+		err := p.killErrs[0]
+		if len(p.killErrs) > 1 {
+			p.killErrs = p.killErrs[1:]
+		}
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+	}
 	survive := p.killNoExit || p.killSurvive > 0
 	if p.killSurvive > 0 {
 		p.killSurvive--
@@ -590,6 +605,36 @@ func TestRetryStopStillSurvivingFailsAgain(t *testing.T) {
 	}
 }
 
+// When the Kill() call itself errors, Stop must fail without leaving the stopping
+// latch set: a retried Stop has to re-run the full kill sequence rather than
+// short-circuit on the entry guard and return a false nil success, which would let
+// the API remove the orphan and GC its scratch while the process may still be
+// alive (issue #816). Here the retry kill succeeds.
+func TestStopReattemptableAfterKillError(t *testing.T) {
+	proc := newFakeProcess()
+	// First Kill errors, the retry Kill proceeds normally and exits the process.
+	proc.killErrs = []error{errors.New("kill failed"), nil}
+	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected first Stop to fail when Kill errors")
+	}
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("retry Stop = %v, want success once the retry kill succeeds", err)
+	}
+	if proc.killCount() != 2 {
+		t.Fatalf("Kill called %d times, want 2 (initial errors + retry re-issues the kill)", proc.killCount())
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+}
+
 // Stopping a crashed instance is a prompt no-op success: the process is already
 // dead, so Stop must not signal it, must not spin waitExit's timeout, and must
 // not surface a Kill() error.
@@ -699,6 +744,53 @@ func TestStopDetachesEscalationFromContextCancellation(t *testing.T) {
 	}
 	if proc.killed {
 		t.Fatal("Stop escalated to SIGKILL despite the RCON stop succeeding within grace")
+	}
+}
+
+// A pathological RCON peer that drags the "stop" exchange must not consume the
+// whole escalation budget: tryRCONStop runs under its own phase deadline, so it
+// gives up promptly and the SIGTERM→SIGKILL waits keep their full stopTimeout
+// grace (issue #832). Here the peer hangs the "stop" until its phase ctx fires;
+// the process then exits on SIGTERM well inside the stop timeout, so Stop
+// completes via SIGTERM without ever escalating to SIGKILL.
+func TestStopRCONPhaseBudgetPreservesEscalationGrace(t *testing.T) {
+	prev := rconPhaseCap
+	rconPhaseCap = 20 * time.Millisecond
+	t.Cleanup(func() { rconPhaseCap = prev })
+
+	proc := newFakeProcess()
+	ctrl := &fakeControl{hangUntilCtxDone: true}
+	d := newTestDriver(t, proc, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// The process exits on SIGTERM after a short delay, well inside stopTimeout
+	// (50ms). Pre-fix, a hung RCON under the whole stopCtx left this SIGTERM wait
+	// near-zero grace; the phase budget restores it.
+	go func() {
+		for !proc.gotSignal(syscall.SIGTERM) {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(5 * time.Millisecond)
+		proc.exit(nil)
+	}()
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if !ctrl.stopCalled {
+		t.Fatal("expected RCON stop to be attempted")
+	}
+	if !proc.gotSignal(syscall.SIGTERM) {
+		t.Fatal("expected SIGTERM after the hung RCON phase gave up")
+	}
+	if proc.killed {
+		t.Fatal("Stop escalated to SIGKILL: the SIGTERM grace was collapsed by the hung RCON")
 	}
 }
 
@@ -868,13 +960,22 @@ func TestSampleErrorsForUnknownPid(t *testing.T) {
 type fakeControl struct {
 	stopCalled bool
 	onStop     func()
+	// hangUntilCtxDone models a pathological peer that drags the RCON "stop"
+	// exchange: Execute blocks until the call's ctx is cancelled (the stop-path
+	// phase deadline), then returns its error. tryRCONStop must give up at the
+	// phase budget rather than ride the whole escalation deadline (issue #832).
+	hangUntilCtxDone bool
 }
 
-func (c *fakeControl) Execute(_ context.Context, line string) (string, error) {
+func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) {
 	if line == "stop" {
 		c.stopCalled = true
 		if c.onStop != nil {
 			c.onStop()
+		}
+		if c.hangUntilCtxDone {
+			<-ctx.Done()
+			return "", ctx.Err()
 		}
 	}
 	return "", nil
