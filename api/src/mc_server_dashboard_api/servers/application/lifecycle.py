@@ -808,16 +808,39 @@ class StopServer:
             server.assigned_worker_id = None
         # Final snapshot AFTER the process has exited (the graceful stop above
         # only returns once the Worker reports the process gone), so the captured
-        # working set is quiescent (FR-DATA-4, FR-DATA-7). A snapshot failure is
-        # logged, not raised: the stop itself already succeeded and the server is
-        # down. But the failure is logged at ERROR, not warning (issue #841): this
-        # is the ONLY final-snapshot path for a graceful stop, and the server is now
-        # stopped+unassigned, so there is no periodic-snapshot or reconciler retry to
-        # recover it — a failure here means the world progressed since the last
-        # periodic snapshot is permanently lost. A silent warning is exactly what hid
-        # the #841 regression (a worker-side empty_snapshot 400 swallowed here), so it
-        # must be loud. (The Worker self-addresses no Storage; the API drives the
-        # snapshot because only it knows the (community, server) scope.)
+        # working set is quiescent (FR-DATA-4, FR-DATA-7).
+        await self._final_snapshot(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+        return server
+
+    async def _final_snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> None:
+        """Capture the quiescent working set after a confirmed graceful stop.
+
+        Shared by ``__call__`` and ``redispatch_stop`` (issue #846) so reconciler-
+        and drain-driven stops take the same final snapshot as a direct
+        ``server:stop`` — otherwise post-#845 the Worker retains the stop scratch
+        waiting on a snapshot that never comes, and progression since the last
+        periodic snapshot is lost (FR-DATA-7).
+
+        A snapshot failure is logged, not raised: the stop itself already succeeded
+        and the server is down. But the failure is logged at ERROR, not warning
+        (issue #841): this is the ONLY final-snapshot path for a graceful stop, and
+        the server is now stopped+unassigned, so there is no periodic-snapshot or
+        reconciler retry to recover it — a failure here means the world progressed
+        since the last periodic snapshot is permanently lost. A silent warning is
+        exactly what hid the #841 regression (a worker-side empty_snapshot 400
+        swallowed here), so it must be loud. (The Worker self-addresses no Storage;
+        the API drives the snapshot because only it knows the (community, server)
+        scope.)
+        """
+
         try:
             snapshot = await self.control_plane.snapshot(
                 worker_id=worker_id,
@@ -839,7 +862,6 @@ class StopServer:
                 "and progression since the last periodic snapshot is lost",
                 server_id.value,
             )
-        return server
 
     async def redispatch_stop(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -894,6 +916,15 @@ class StopServer:
             server.observed_state = ObservedState.STOPPED
             server.observed_at = observed_at
             server.assigned_worker_id = None
+        # Final snapshot, mirroring __call__ (issue #846): only on a confirmed live
+        # stop. SERVER_NOT_FOUND means no live instance remained on the Worker, so
+        # there is no working set to capture — skip it.
+        if outcome.status is not CommandStatus.SERVER_NOT_FOUND:
+            await self._final_snapshot(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
         return server
 
 

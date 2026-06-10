@@ -205,7 +205,9 @@ async def test_stopped_intent_observed_running_redispatches_stop() -> None:
     cp = FakeControlPlane()
     clock = FakeClock(_NOW)
     await _reconciler(uow, cp, clock).tick()
-    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+    # The confirmed stop takes the same post-stop final snapshot as a direct
+    # server:stop (issue #846, FR-DATA-7).
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
     assert cp.decremented == []  # the original stop owns the decrement
 
 
@@ -362,7 +364,8 @@ async def test_success_clears_backoff() -> None:
     clock = FakeClock(_NOW)
     reconciler = _reconciler(uow, cp, clock)
     await reconciler.tick()
-    assert len(cp.dispatched) == 1
+    # One redispatch_stop action: the stop plus its post-stop final snapshot (#846).
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
     assert server.id not in reconciler._attempts
 
 
