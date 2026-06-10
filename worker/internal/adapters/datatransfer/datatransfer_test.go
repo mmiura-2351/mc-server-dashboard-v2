@@ -63,6 +63,137 @@ func TestHydrateUnpacksWorkingSet(t *testing.T) {
 	}
 }
 
+func TestHydrateReplacesStaleWorkingSet(t *testing.T) {
+	// Hydrate must REPLACE the dest's contents, not merge: a file present in the
+	// stale working set but absent from the served tar must be gone afterwards
+	// (the A->B->A stale-generation case, issue #772). A merge would leave the
+	// stale file behind, producing an internally inconsistent mixed-generation
+	// world that region fsck cannot detect.
+	body := tarOf(map[string]string{
+		"server.properties": "new",
+		"world/level.dat":   "new-world",
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	// A pre-existing (stale) working set: a file the new tar does NOT carry, plus
+	// an old copy of one it does.
+	dest := filepath.Join(t.TempDir(), "server")
+	if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "stale-plugin.jar"), []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "world", "old-region.mca"), []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "server.properties"), []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	// The stale, upstream-deleted files must be gone.
+	if _, err := os.Stat(filepath.Join(dest, "stale-plugin.jar")); !os.IsNotExist(err) {
+		t.Fatal("stale-plugin.jar survived the hydrate (merge, not replace)")
+	}
+	if _, err := os.Stat(filepath.Join(dest, "world", "old-region.mca")); !os.IsNotExist(err) {
+		t.Fatal("world/old-region.mca survived the hydrate (merge, not replace)")
+	}
+	// The served working set must be present and current.
+	got, err := os.ReadFile(filepath.Join(dest, "server.properties"))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("server.properties = %q, %v (want %q)", got, err, "new")
+	}
+	got, err = os.ReadFile(filepath.Join(dest, "world", "level.dat"))
+	if err != nil || string(got) != "new-world" {
+		t.Fatalf("world/level.dat = %q, %v (want %q)", got, err, "new-world")
+	}
+}
+
+func TestHydrateDoesNotFollowPreexistingSymlink(t *testing.T) {
+	// A pre-existing symlink in the working set at a path a tar member also names
+	// must NOT be followed: hydrating into a brand-new tree means the planted link
+	// is never traversed, so the link's target is left untouched (issue #772).
+	body := tarOf(map[string]string{"server.properties": "from-tar"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	// The out-of-sandbox file a malicious symlink would target.
+	outside := filepath.Join(tmp, "outside-secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The working set carries a planted symlink at the path the tar will write.
+	dest := filepath.Join(tmp, "server")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dest, "server.properties")); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	// The symlink target outside the sandbox must be untouched.
+	got, err := os.ReadFile(outside)
+	if err != nil || string(got) != "secret" {
+		t.Fatalf("outside target = %q, %v (want %q, must not be written through)", got, err, "secret")
+	}
+	// The dest now holds the served file as a plain regular file.
+	info, err := os.Lstat(filepath.Join(dest, "server.properties"))
+	if err != nil {
+		t.Fatalf("Lstat server.properties: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("server.properties is still a symlink after hydrate")
+	}
+	got, err = os.ReadFile(filepath.Join(dest, "server.properties"))
+	if err != nil || string(got) != "from-tar" {
+		t.Fatalf("server.properties = %q, %v (want %q)", got, err, "from-tar")
+	}
+}
+
+func TestHydrateLeavesNoTempSiblingsInScratch(t *testing.T) {
+	// The temp/trash dirs the swap uses live in the scratch root next to dest; a
+	// successful hydrate must clean them all up so ScanHeldServers does not later
+	// see bogus held-server entries (issue #772, scratchscan.go interplay).
+	body := tarOf(map[string]string{"server.properties": "x"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "server" {
+			t.Fatalf("leftover entry in scratch root after hydrate: %q", e.Name())
+		}
+	}
+}
+
 func TestHydrateNoContentLeavesDestEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -295,6 +426,45 @@ func TestSnapshotRemovesSpoolFile(t *testing.T) {
 	}
 }
 
+func TestSweepSnapshotSpoolsRemovesLeftoverSpools(t *testing.T) {
+	// A crash mid-snapshot leaks snapshot-*.tar in the scratch root; the startup
+	// sweep must reclaim them while leaving server working-set dirs and unrelated
+	// files untouched (issue #787).
+	scratch := t.TempDir()
+	leaked := []string{"snapshot-123.tar", "snapshot-abc.tar"}
+	for _, name := range leaked {
+		if err := os.WriteFile(filepath.Join(scratch, name), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A server working set (dir) and an unrelated file must survive.
+	if err := os.MkdirAll(filepath.Join(scratch, "s1"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "snapshot-notatar.txt"), []byte("y"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	SweepSnapshotSpools(scratch)
+
+	for _, name := range leaked {
+		if _, err := os.Stat(filepath.Join(scratch, name)); !os.IsNotExist(err) {
+			t.Fatalf("spool %q survived the sweep: stat err = %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(scratch, "s1")); err != nil {
+		t.Fatalf("server dir removed by sweep: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(scratch, "snapshot-notatar.txt")); err != nil {
+		t.Fatalf("non-.tar file removed by sweep: %v", err)
+	}
+}
+
+func TestSweepSnapshotSpoolsMissingRootIsNoOp(t *testing.T) {
+	// A worker with no scratch root yet must not panic or error (best-effort).
+	SweepSnapshotSpools(filepath.Join(t.TempDir(), "absent"))
+}
+
 func TestSnapshotEmptyDirUploadsEmptyTar(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -316,5 +486,113 @@ func TestSnapshotPropagatesServerError(t *testing.T) {
 	c := New(srv.Client())
 	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", t.TempDir()); err == nil {
 		t.Fatal("expected an error for a 400 response")
+	}
+}
+
+// fakeInfo wraps a real os.FileInfo but overrides Size() so we can simulate a
+// file that grew or shrank between the ReadDir stat and the actual copy.
+type fakeInfo struct {
+	os.FileInfo
+	size int64
+}
+
+func (f fakeInfo) Size() int64 { return f.size }
+
+// TestWriteRegularGrowingFile verifies that a file that grows between the stat
+// and the copy does not cause ErrWriteTooLong: the tar entry must be exactly
+// the header-declared size and the archive must untar cleanly.
+func TestWriteRegularGrowingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "latest.log")
+	// Write 5 bytes to disk.
+	original := []byte("hello")
+	if err := os.WriteFile(path, original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Stat reports only 3 bytes (simulating the ReadDir-time snapshot before the
+	// file grew to 5 bytes).
+	realInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := fakeInfo{FileInfo: realInfo, size: 3}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := writeRegular(tw, "latest.log", path, info); err != nil {
+		t.Fatalf("writeRegular with grown file: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tw.Close with grown file: %v", err)
+	}
+
+	// The archive must untar cleanly and the entry must be exactly 3 bytes.
+	tr := tar.NewReader(&buf)
+	h, err := tr.Next()
+	if err != nil {
+		t.Fatalf("tar.Next: %v", err)
+	}
+	if h.Size != 3 {
+		t.Fatalf("header.Size = %d, want 3", h.Size)
+	}
+	content, err := io.ReadAll(tr)
+	if err != nil {
+		t.Fatalf("read entry: %v", err)
+	}
+	if int64(len(content)) != h.Size {
+		t.Fatalf("entry bytes = %d, want %d", len(content), h.Size)
+	}
+	// Content must be the first 3 bytes of the file (the file grew, we capped).
+	if string(content) != "hel" {
+		t.Fatalf("entry content = %q, want %q", string(content), "hel")
+	}
+}
+
+// TestWriteRegularShrinkingFile verifies that a file that shrinks between the
+// stat and the copy does not leave the tar in an inconsistent state: the entry
+// is zero-padded to the header-declared size and the archive untars cleanly.
+func TestWriteRegularShrinkingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "latest.log")
+	// Write 3 bytes to disk.
+	if err := os.WriteFile(path, []byte("hi!"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Stat reports 6 bytes (simulating the ReadDir-time snapshot before the
+	// file shrank from 6 bytes to 3 bytes).
+	realInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := fakeInfo{FileInfo: realInfo, size: 6}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := writeRegular(tw, "latest.log", path, info); err != nil {
+		t.Fatalf("writeRegular with shrunk file: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tw.Close with shrunk file: %v", err)
+	}
+
+	// The archive must untar cleanly and the entry must be exactly 6 bytes.
+	tr := tar.NewReader(&buf)
+	h, err := tr.Next()
+	if err != nil {
+		t.Fatalf("tar.Next: %v", err)
+	}
+	if h.Size != 6 {
+		t.Fatalf("header.Size = %d, want 6", h.Size)
+	}
+	content, err := io.ReadAll(tr)
+	if err != nil {
+		t.Fatalf("read entry: %v", err)
+	}
+	if int64(len(content)) != h.Size {
+		t.Fatalf("entry bytes = %d, want %d", len(content), h.Size)
+	}
+	// First 3 bytes are the file content; last 3 are zero-padding.
+	if string(content) != "hi!\x00\x00\x00" {
+		t.Fatalf("entry content = %q, want %q", content, "hi!\x00\x00\x00")
 	}
 }

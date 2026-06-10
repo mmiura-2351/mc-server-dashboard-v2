@@ -14,6 +14,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -28,6 +29,17 @@ import (
 // authMetadataKey is the metadata key carrying the Worker credential. The API's
 // control-plane server reads it to authenticate the stream.
 const authMetadataKey = "authorization"
+
+// registerAckTimeout bounds how long RecvRegisterAck waits for the API's opening
+// RegisterAck (CONTROL_PLANE.md Section 4.1). Without it, an API that accepts the
+// stream but never acks would wedge the run loop until process shutdown: the run
+// loop blocks in RecvRegisterAck before it ever reaches the serve/heartbeat loop,
+// so nothing else can notice the stall or tear the stream down (issue #786). The
+// value is generous against a slow-but-live API yet far below any operator's
+// patience for a stuck Worker. There is no transport-timeout config knob today
+// (config.go carries none), and inventing one for an internal failsafe is not
+// warranted; it is a package var rather than a const only so tests can lower it.
+var registerAckTimeout = 30 * time.Second
 
 // Dialer opens a fresh Session stream per Dial, implementing session.Dialer.
 type Dialer struct {
@@ -47,19 +59,28 @@ func NewDialer(conn grpc.ClientConnInterface, credential string, clock session.C
 // stream context.
 func (d *Dialer) Dial(ctx context.Context) (session.Transport, error) {
 	client := controlplanev1.NewWorkerServiceClient(d.conn)
-	authCtx := metadata.AppendToOutgoingContext(ctx, authMetadataKey, "Bearer "+d.credential)
+	// The stream rides a per-stream cancellable context, not the long-lived Run
+	// ctx directly, so Close can cancel it and unblock a Recv that is otherwise
+	// stranded — RecvCommand's stream.Recv ignores the ctx it is passed and waits
+	// only on this stream context (issue #786).
+	streamCtx, cancel := context.WithCancel(ctx)
+	authCtx := metadata.AppendToOutgoingContext(streamCtx, authMetadataKey, "Bearer "+d.credential)
 
 	stream, err := client.Session(authCtx)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("controlplane: open session: %w", classify(err))
 	}
-	return &transport{stream: stream, clock: d.clock}, nil
+	return &transport{stream: stream, clock: d.clock, cancel: cancel}, nil
 }
 
 // transport adapts one open Session stream to session.Transport.
 type transport struct {
 	stream controlplanev1.WorkerService_SessionClient
 	clock  session.Clock
+	// cancel tears down the per-stream context; Close calls it after CloseSend so
+	// an in-flight Recv returns instead of lingering (issue #786).
+	cancel context.CancelFunc
 }
 
 func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) error {
@@ -87,6 +108,21 @@ func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) e
 }
 
 func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, error) {
+	// Bound the wait: an API that opens the stream but never acks must not wedge
+	// the run loop forever (issue #786). The timer cancels the stream context,
+	// which unblocks the pending stream.Recv with a context error.
+	deadline := t.clock.NewTimer(registerAckTimeout)
+	defer deadline.Stop()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-deadline.C():
+			t.cancel()
+		case <-done:
+		}
+	}()
+
 	msg, err := t.recvClassified()
 	if err != nil {
 		return session.RegisterAck{}, fmt.Errorf("controlplane: recv register ack: %w", err)
@@ -237,8 +273,17 @@ func (t *transport) RecvCommand(_ context.Context) (session.Command, error) {
 	}
 }
 
+// Close releases the stream. It half-closes the send direction first (CloseSend)
+// to signal a graceful end, then cancels the per-stream context so any in-flight
+// Recv returns instead of lingering on a half-closed-but-not-torn-down stream
+// (issue #786). The run loop discards the transport and dials a fresh stream on
+// every reconnect, so there is no path that wants the stream to outlive Close;
+// the cancel is therefore unconditional and immediate rather than a separate
+// teardown method.
 func (t *transport) Close() error {
-	return t.stream.CloseSend()
+	err := t.stream.CloseSend()
+	t.cancel()
+	return err
 }
 
 // classify maps a gRPC stream error to the domain's terminal/transient

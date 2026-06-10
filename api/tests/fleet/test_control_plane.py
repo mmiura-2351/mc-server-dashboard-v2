@@ -581,3 +581,35 @@ async def test_current_session_teardown_fails_its_pending_fast() -> None:
     assert future.done()
     with pytest.raises(WorkerNotConnectedError):
         future.result()
+
+
+async def test_resolve_ignores_result_from_non_owning_worker() -> None:
+    # A command is dispatched to one worker, but a CommandResult arrives bearing
+    # its command_id from a DIFFERENT worker (a forged report). The future must
+    # NOT be resolved; the command stays in flight to time out normally
+    # (defense-in-depth, issue #789).
+    state = ControlPlaneState()
+    owner = WorkerId(_WORKER)
+    intruder = WorkerId("33333333-3333-3333-3333-333333333333")
+
+    future = state.register_pending("cmd-1", owner)
+    state.resolve("cmd-1", intruder, pb.CommandResult(success=True))
+
+    assert not future.done()
+
+
+async def test_resolve_accepts_result_from_owning_worker() -> None:
+    # The owning worker's result for its own command resolves the future, even
+    # after a forged result from another worker was dropped first (issue #789).
+    state = ControlPlaneState()
+    owner = WorkerId(_WORKER)
+    intruder = WorkerId("33333333-3333-3333-3333-333333333333")
+
+    future = state.register_pending("cmd-1", owner)
+    state.resolve("cmd-1", intruder, pb.CommandResult(success=False))
+    assert not future.done()
+
+    state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+
+    assert future.done()
+    assert future.result().success

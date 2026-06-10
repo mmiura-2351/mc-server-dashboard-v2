@@ -34,7 +34,6 @@ the few interactions with them are annotated pragmatically.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import datetime as dt
 import hmac
 import logging
@@ -91,6 +90,19 @@ _BEARER_PREFIX = "Bearer "
 # timeout so a Worker normally beats several times before the window lapses
 # (CONTROL_PLANE.md Section 4.3).
 _HEARTBEAT_INTERVAL_DIVISOR = 3
+
+# Cap on consecutive per-message handler failures before the session is treated
+# as terminal (issue #807). The per-message log-and-continue (issue #776)
+# contains a single bad event, but an unbounded skip keeps the session alive
+# against a permanently poisoned sink (e.g. the DB is down): every StatusChange
+# is discarded while the worker stays "online" and its servers are never marked
+# unknown, silently hiding the outage from the reconciler. After this many
+# consecutive failures, letting the next one propagate ends the session, which
+# marks the worker disconnected and surfaces the outage. The counter resets on
+# any successful handle, so transient blips never accumulate to the cap. The
+# value is small enough to fail fast yet absorbs a short burst of transient
+# errors without bouncing a healthy session.
+_MAX_CONSECUTIVE_HANDLER_FAILURES = 5
 
 _DRIVER_BY_KIND: dict[int, DriverKind] = {
     pb.EXECUTION_DRIVER_KIND_HOST_PROCESS: DriverKind.HOST_PROCESS,
@@ -177,6 +189,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # Read inbound events/results in a background task while this generator
         # yields the Worker's outbound commands; both share the one stream.
         reader = asyncio.ensure_future(self._read_inbound(worker_id, request_iterator))
+        # Tracks the in-flight outbound.get() so the finally can cancel it even if
+        # this generator is cancelled mid-await (an abrupt gRPC RPC cancel): an
+        # uncancelled get() would await the orphaned queue forever, leaking a
+        # Task+Queue per disconnect (issue #788).
+        outbound_get: asyncio.Future[pb.ApiMessage] | None = None
         try:
             yield self._register_ack(correlation_id=correlation_id)
             while True:
@@ -191,11 +208,24 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     outbound_get.cancel()
                     break
         finally:
+            if outbound_get is not None:
+                outbound_get.cancel()
             reader.cancel()
             # Retrieve the reader's outcome so a transport error it raised is not
             # logged as an unretrieved task exception; a cancellation is expected.
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            # A genuine terminal error (e.g. a transport drop, or an unexpected
+            # error escaping the handler) is logged at warning with the worker id
+            # so the cause is not silently lost (issue #776).
+            try:
                 await reader
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                _LOG.warning(
+                    "worker session reader ended with an error",
+                    extra={"worker_id": worker_id.value},
+                    exc_info=True,
+                )
             # Fail this worker's in-flight commands immediately: its outbound
             # stream is gone, so they can never be answered. Awaiters get a typed
             # WorkerNotConnectedError now instead of riding the full timeout.
@@ -210,9 +240,23 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # Pass this Session's token so a delayed teardown only offlines the
             # Worker if it has not reconnected on a newer Session (Section 4.4).
             self._registry.mark_disconnected(worker_id, session)
-            await self._state_sink.mark_worker_servers_unknown(
-                worker_id=worker_id.value
-            )
+            # Guard the bulk observed=unknown write with this Session's token too:
+            # the write deliberately bypasses the per-server monotonic guard, so a
+            # stale teardown after a reconnect would otherwise clobber the NEW
+            # session's live server states (issue #775, CONTROL_PLANE.md 4.4).
+            # There is an accepted one-roundtrip TOCTOU window here: a reconnect
+            # on a newer Session could win the is_current_session check between
+            # this read and the bulk unknown-write below, so the write could
+            # still clobber the NEW session's live states with unknown. The
+            # window is judged acceptable (PR #802 review): it is bounded to a
+            # single observation and the reconciler self-heals — the live worker
+            # re-reports its servers' states on its next StatusChange, restoring
+            # them. Closing it fully would need the write itself to be guarded by
+            # the session token atomically, which is not worth the complexity.
+            if self._registry.is_current_session(worker_id, session):
+                await self._state_sink.mark_worker_servers_unknown(
+                    worker_id=worker_id.value
+                )
             _LOG.info("worker disconnected", extra={"worker_id": worker_id.value})
 
     async def _read_inbound(
@@ -220,8 +264,44 @@ class WorkerSessionServicer(WorkerServiceServicer):
         worker_id: WorkerId,
         request_iterator: AsyncIterator[pb.WorkerMessage],
     ) -> None:
+        consecutive_failures = 0
         async for message in request_iterator:
-            await self._handle(worker_id, message)
+            # Contain a per-message handler failure (e.g. a transient DB error
+            # while recording one StatusChange) so a single bad event is logged
+            # and skipped rather than tearing down the whole worker session
+            # (issue #776). Stream-level errors from iterating request_iterator
+            # are not caught here, so a real transport drop still ends the loop;
+            # CancelledError propagates so teardown is not swallowed.
+            #
+            # The skip is bounded (issue #807): a permanently poisoned sink would
+            # otherwise keep discarding every event while the session stays alive
+            # and the worker's servers are never marked unknown. Once the failures
+            # have already reached the cap, the next failure is allowed to
+            # propagate, ending the session so teardown marks the worker
+            # disconnected and surfaces the outage to the reconciler. Any success
+            # resets the streak, so only a sustained outage trips the cap.
+            try:
+                await self._handle(worker_id, message)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                consecutive_failures += 1
+                if consecutive_failures > _MAX_CONSECUTIVE_HANDLER_FAILURES:
+                    _LOG.error(
+                        "ending worker session after %d consecutive handler "
+                        "failures; the state sink looks unavailable",
+                        consecutive_failures,
+                        extra={"worker_id": worker_id.value},
+                        exc_info=True,
+                    )
+                    raise
+                _LOG.warning(
+                    "dropping a worker message after a handler error",
+                    extra={"worker_id": worker_id.value},
+                    exc_info=True,
+                )
+            else:
+                consecutive_failures = 0
 
     async def _rebuild_assignments(self, worker_id: WorkerId) -> None:
         count = await self._state_sink.count_running_assignments(
@@ -307,7 +387,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
         if payload == "command_result":
             # Match the result to its in-flight command by command_id, carried as
             # the enclosing message's correlation_id (CONTROL_PLANE.md Section 3).
-            self._control_plane.resolve(message.correlation_id, message.command_result)
+            # The reporting worker is passed so a result forged for another
+            # worker's command is dropped, not applied (issue #789).
+            self._control_plane.resolve(
+                message.correlation_id, worker_id, message.command_result
+            )
             return
         if payload != "event":
             return

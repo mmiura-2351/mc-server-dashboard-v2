@@ -32,8 +32,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   orphan path has no assigned Worker, so it is unaffected by this skip.
 
 Grace window — a divergence is acted on only once it has persisted past
-``grace_seconds`` (measured from ``observed_at``, or ``updated_at`` when the server
-has never been reported). This gives the normal in-flight path time to converge
+``grace_seconds`` (measured from ``max(updated_at, observed_at or updated_at)`` —
+the later of the last intent commit and the last Worker report). This gives the
+normal in-flight path time to converge
 (a start that is mid-launch reports ``starting``, not a divergence) before the
 reconciler intervenes.
 
@@ -162,7 +163,11 @@ class RunReconcilerTick:
         await self._run(server, action, now)
 
     def _within_grace(self, server: Server, now: dt.datetime) -> bool:
-        since = server.observed_at or server.updated_at
+        # Measure from the most recent of observed_at (last Worker report) and
+        # updated_at (last intent commit). update_lifecycle refreshes updated_at
+        # but NOT observed_at, so a fresh start on a long-stale server would
+        # otherwise get zero grace and race the in-flight start (#774).
+        since = max(server.updated_at, server.observed_at or server.updated_at)
         return (now - since) < dt.timedelta(seconds=self.grace_seconds)
 
     def _action_for(self, server: Server) -> str | None:

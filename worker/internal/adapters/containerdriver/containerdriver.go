@@ -921,15 +921,29 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	i.mu.Unlock()
 	i.emit(execution.StateStopping, "")
 
-	if graceful && i.tryRCONStop(ctx) && i.waitExit(ctx, i.stopTimeout) {
+	// Once a stop has begun, detach the escalation from the caller's context. The
+	// graceful stop usually runs on a per-server lane whose ctx is the gRPC
+	// session stream's serveCtx; if the stream drops mid-stop, a cancelled ctx
+	// would fail the docker Stop/Kill HTTP calls and the waits immediately, so a
+	// still-healthy, still-stopping container gets recorded as a failed-stop
+	// orphan — spurious churn that blocks start/hydrate until a retried stop
+	// clears it (issue #770). Decouple instead: run the escalation against a
+	// detached context bound by stopDeadline so the container keeps its full
+	// grace period regardless of the caller, while the bound still caps a hung
+	// daemon call. The post-Kill confirm (waitExitDone) already ignores caller
+	// cancellation, so it stays as is.
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.stopDeadline())
+	defer cancel()
+
+	if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
 		return nil
 	}
 
-	if err := i.docker.Stop(ctx, id, i.stopTimeout); err == nil && i.waitExit(ctx, i.stopTimeout) {
+	if err := i.docker.Stop(stopCtx, id, i.stopTimeout); err == nil && i.waitExit(stopCtx, i.stopTimeout) {
 		return nil
 	}
 
-	if err := i.docker.Kill(ctx, id); err != nil {
+	if err := i.docker.Kill(stopCtx, id); err != nil {
 		return fmt.Errorf("containerdriver: kill: %w", err)
 	}
 	// Confirm the kill actually terminated the container. A container that survives
@@ -975,6 +989,21 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 		return fmt.Errorf("containerdriver: container survived docker kill after %s", i.stopTimeout)
 	}
 	return nil
+}
+
+// stopDeadlineGrace pads the detached stop-escalation deadline beyond the
+// stopTimeout-bounded steps, leaving headroom for the RCON open/"stop" and the
+// docker Kill call so a healthy stop never trips the bound; it only caps a hung
+// daemon call.
+const stopDeadlineGrace = 10 * time.Second
+
+// stopDeadline bounds the detached escalation context (issue #770). The
+// graceful path runs an RCON wait (stopTimeout), a docker Stop whose daemon-side
+// SIGTERM grace is itself stopTimeout, a post-Stop wait (stopTimeout), then a
+// docker Kill — so 3*stopTimeout plus a grace covers the whole sequence without
+// cutting an in-progress stop short, while still capping a hung daemon call.
+func (i *instance) stopDeadline() time.Duration {
+	return 3*i.stopTimeout + stopDeadlineGrace
 }
 
 // waitExitDone reports whether the container reached a terminal state within d,
@@ -1080,17 +1109,31 @@ func (i *instance) set(s execution.ServerState) {
 	i.mu.Unlock()
 }
 
-// emit publishes a status event, dropping it if the stream is closed or full so a
-// slow consumer never blocks supervision.
+// emit publishes a status event without ever blocking supervision. When the
+// buffer is full it coalesces latest-state-wins: the oldest buffered event is
+// discarded to make room for this one, mirroring the manager's coalescing (issue
+// #96) so the terminal event — always the last emit — is never dropped (issue
+// #790). It returns silently once the stream is closed.
 func (i *instance) emit(state execution.ServerState, detail string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.closed {
 		return
 	}
-	select {
-	case i.events <- execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail}:
-	default:
+	ev := execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail}
+	for {
+		select {
+		case i.events <- ev:
+			return
+		default:
+		}
+		// Buffer full: drop the oldest buffered event and retry so the latest
+		// state wins. The retry can race a concurrent reader that just freed a
+		// slot, in which case the drain misses and we loop back to the send.
+		select {
+		case <-i.events:
+		default:
+		}
 	}
 }
 

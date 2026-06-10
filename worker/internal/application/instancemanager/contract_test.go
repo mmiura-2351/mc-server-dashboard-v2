@@ -110,6 +110,18 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		}
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
+	case "command_in_flight":
+		// Hold a StartServer mid-driver.Start so the id is reserved but no instance is
+		// tracked yet — the same state a detached stop occupies between takeStoppableReserve's
+		// eviction and stop confirmation (issue #780). The row command then arrives while the
+		// reservation is held and must be rejected, not treated as SERVER_NOT_FOUND.
+		d := newGatedDriver()
+		m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
+		go func() { _ = m.Handle(ctx, startCmd()) }()
+		awaitEnter(t, d.entered)
+		defer close(d.release)
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
 	case "driver_unavailable":
 		m := newManager(t, &fakeDriver{}, nil)
 		cmd := contractCmd(t, row.Kind, serverID)
@@ -141,6 +153,13 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		cmd := contractCmd(t, row.Kind, serverID)
 		cmd.Path = "../escape"
 		return m.Handle(ctx, cmd)
+
+	case "unsafe_server_id":
+		// An empty server id collapses every scratch-path join onto the scratch
+		// ROOT; the intake guard must reject it before any handler runs (issue
+		// #782). Driven with the empty id since that is the most dangerous shape.
+		m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{})
+		return m.Handle(ctx, contractCmd(t, row.Kind, ""))
 
 	default:
 		t.Fatalf("contract table: unknown precondition %q", row.Precondition)

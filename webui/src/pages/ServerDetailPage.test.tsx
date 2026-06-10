@@ -712,6 +712,36 @@ describe("ServerDetailPage settings", () => {
     expect(typeof config.snapshot_interval_seconds).toBe("number");
   });
 
+  it("preserves the original value type when only a row's key is renamed (#791)", async () => {
+    // A string value that parses as a JSON literal ("12" → 12 via
+    // parseConfigValue) must stay a string if the user only renamed the key —
+    // the row must NOT be flagged as edited in that case.
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        config: { motd: "12" },
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    // Rename the key — the value "12" is untouched.
+    fireEvent.change(screen.getByDisplayValue("motd"), {
+      target: { value: "greeting" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
+    // "12" must stay a string — the key rename must not trigger re-parsing.
+    expect(config).toEqual({ greeting: "12" });
+    expect(typeof config.greeting).toBe("string");
+  });
+
   it("sends an edited integer config value as a number", async () => {
     mockApi.get.mockResolvedValue(
       server({

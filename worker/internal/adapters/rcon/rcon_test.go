@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,6 +20,13 @@ type fakeServer struct {
 	reply map[string]string
 	// authFails forces the auth handshake to reject (id=-1).
 	authFails bool
+	// silent makes the server authenticate but never reply to an EXEC_COMMAND,
+	// modelling an MC server hung mid-tick that accepts the TCP connect but goes
+	// silent. The client's read then blocks until the test ends.
+	silent bool
+	// silentAuth makes the server accept the TCP connect but never send an
+	// AUTH_RESPONSE, modelling a peer that wedges the dial+authenticate handshake.
+	silentAuth bool
 
 	got chan string
 }
@@ -56,6 +64,9 @@ func (fs *fakeServer) serve() {
 		}
 		switch typ {
 		case typeAuth:
+			if fs.silentAuth {
+				continue // Deliberately never send an AUTH_RESPONSE.
+			}
 			respID := id
 			if fs.authFails || body != fs.password {
 				respID = -1
@@ -65,6 +76,9 @@ func (fs *fakeServer) serve() {
 			_ = writePacket(conn, respID, typeAuthResponse, "")
 		case typeExecCommand:
 			fs.got <- body
+			if fs.silent {
+				continue // Deliberately never reply.
+			}
 			_ = writePacket(conn, id, typeResponseValue, fs.reply[body])
 		}
 	}
@@ -98,11 +112,179 @@ func TestDialExecute(t *testing.T) {
 	}
 }
 
+// newSilentFakeServer accepts and authenticates but never replies to an
+// EXEC_COMMAND. See fakeServer.silent.
+func newSilentFakeServer(t *testing.T, password string) *fakeServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	fs := &fakeServer{
+		ln:       ln,
+		password: password,
+		reply:    map[string]string{},
+		silent:   true,
+		got:      make(chan string, 8),
+	}
+	go fs.serve()
+	t.Cleanup(func() { _ = ln.Close() })
+	return fs
+}
+
+// With no deadline on ctx, Execute against a silent server must not block
+// forever: it falls back to the default per-call deadline and returns an error.
+func TestExecuteDefaultDeadlineUnblocksSilentServer(t *testing.T) {
+	prev := defaultExecuteTimeout
+	defaultExecuteTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { defaultExecuteTimeout = prev })
+
+	fs := newSilentFakeServer(t, "secret")
+	c, err := Dial(context.Background(), fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	var wg sync.WaitGroup
+	done := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := c.Execute(context.Background(), "list")
+		done <- err
+	}()
+	// Close the connection on cleanup so a hung Execute unblocks, then wait for
+	// the goroutine to finish: it can never be left running past the test (racing
+	// the t.Cleanup that restores defaultExecuteTimeout) even on the failure path.
+	t.Cleanup(func() {
+		_ = c.Close()
+		wg.Wait()
+	})
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Execute returned nil against a silent server, want timeout error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute hung past the default deadline against a silent server")
+	}
+}
+
+// Cancelling ctx must unblock a read that is waiting on a silent server promptly,
+// well before the default deadline.
+func TestExecuteCtxCancellationUnblocksSilentServer(t *testing.T) {
+	prev := defaultExecuteTimeout
+	defaultExecuteTimeout = time.Hour // ensure it is cancellation, not the deadline, that unblocks
+	t.Cleanup(func() { defaultExecuteTimeout = prev })
+
+	fs := newSilentFakeServer(t, "secret")
+	c, err := Dial(context.Background(), fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := c.Execute(ctx, "list"); done <- err }()
+
+	// Wait until the server has received the command, so the client is blocked
+	// in read, then cancel.
+	select {
+	case <-fs.got:
+	case <-time.After(time.Second):
+		t.Fatal("server never received command")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		// The failure was caused by ctx cancellation, so Execute must surface
+		// ctx.Err() rather than the opaque underlying i/o timeout.
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Execute error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute did not unblock promptly after ctx cancellation")
+	}
+}
+
 func TestDialAuthFailure(t *testing.T) {
 	fs := newFakeServer(t, "secret")
 	_, err := Dial(context.Background(), fs.addr(), "wrong")
 	if !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("Dial error = %v, want ErrAuthFailed", err)
+	}
+}
+
+// With no deadline on ctx, Dial against a peer that TCP-accepts but never sends
+// an AUTH_RESPONSE must not block forever: the handshake falls back to the
+// default per-call deadline and returns an error.
+func TestDialDefaultDeadlineUnblocksSilentAuthServer(t *testing.T) {
+	prev := defaultExecuteTimeout
+	defaultExecuteTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { defaultExecuteTimeout = prev })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	fs := &fakeServer{
+		ln:         ln,
+		password:   "secret",
+		reply:      map[string]string{},
+		silentAuth: true,
+		got:        make(chan string, 8),
+	}
+	go fs.serve()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	var wg sync.WaitGroup
+	done := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := Dial(context.Background(), fs.addr(), "secret")
+		done <- err
+	}()
+	t.Cleanup(func() { wg.Wait() })
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Dial returned nil against a silent-auth server, want timeout error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Dial hung past the default deadline against a silent-auth server")
+	}
+}
+
+// After a round trip fails mid-stream, the connection is poisoned: a subsequent
+// Execute on the same Client fails fast with ErrConnBroken instead of reading a
+// stale, mis-framed response. This forces the only reuser (instancemanager's
+// quiesce save-on, on the next snapshot) to redial rather than act on garbage.
+func TestExecutePoisonsConnAfterIOError(t *testing.T) {
+	prev := defaultExecuteTimeout
+	defaultExecuteTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { defaultExecuteTimeout = prev })
+
+	fs := newSilentFakeServer(t, "secret")
+	c, err := Dial(context.Background(), fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	if _, err := c.Execute(context.Background(), "save-off"); err == nil {
+		t.Fatal("first Execute returned nil against a silent server, want timeout error")
+	}
+
+	// The connection is now poisoned; the next Execute must fail fast without
+	// touching the wire.
+	_, err = c.Execute(context.Background(), "save-on")
+	if !errors.Is(err, ErrConnBroken) {
+		t.Fatalf("second Execute error = %v, want ErrConnBroken", err)
 	}
 }
 

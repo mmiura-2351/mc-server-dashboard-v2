@@ -25,7 +25,10 @@ import pytest
 from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
-from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServicer
+from mc_server_dashboard_api.fleet.adapters.grpc_server import (
+    _MAX_CONSECUTIVE_HANDLER_FAILURES,
+    WorkerSessionServicer,
+)
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
 from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
@@ -380,6 +383,236 @@ async def test_disconnect_marks_worker_servers_unknown(harness: _Harness) -> Non
         pass
 
     assert harness.state_sink.unknown_for == [_WORKER_ID]
+
+
+async def test_stale_session_teardown_does_not_mark_servers_unknown(
+    harness: _Harness,
+) -> None:
+    # Session A registers the worker; the worker reconnects on Session B (PR #84
+    # backoff) before A's teardown runs. A's delayed teardown must NOT stamp the
+    # live worker's servers observed=unknown, or it clobbers Session B's state
+    # (issue #775, CONTROL_PLANE.md Section 4.4).
+    stub = await harness.start()
+    call_a = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call_a.write(_register_message())
+    await call_a.read()  # ack
+
+    call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call_b.write(_register_message())
+    await call_b.read()  # ack
+
+    # Session A tears down after B is the current Session.
+    await call_a.done_writing()
+    while await call_a.read() is not aio.EOF:
+        pass
+
+    # The stale teardown must not have marked the live worker's servers unknown.
+    assert harness.state_sink.unknown_for == []
+    await call_b.done_writing()
+
+
+async def test_poison_status_change_does_not_end_session(harness: _Harness) -> None:
+    # A transient DB error while handling ONE StatusChange must not tear down the
+    # whole worker session; the bad event is logged-and-skipped and a later
+    # StatusChange is still reconciled (issue #776).
+    bad_server = "33333333-3333-3333-3333-333333333333"
+    good_server = "11111111-1111-1111-1111-111111111111"
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=FakeServerStateSink(fail_observed_for={bad_server}),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        # The first StatusChange raises inside the handler; the stream survives.
+        await call.write(_status_message(bad_server, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(good_server, pb.SERVER_STATE_RUNNING))
+        for _ in range(100):
+            if h.state_sink.observed:
+                break
+            await asyncio.sleep(0.01)
+
+        # The good event was reconciled, and the worker is still ONLINE: the
+        # poison event did not drop the stream.
+        assert h.state_sink.observed == [(good_server, _WORKER_ID, "running")]
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def _drain_to_eof(call: aio.StreamStreamCall) -> None:
+    """Drive the response stream to completion so the handler's finally runs."""
+
+    while await call.read() is not aio.EOF:
+        pass
+
+
+async def test_consecutive_handler_failures_end_session(harness: _Harness) -> None:
+    # A permanently poisoned sink (e.g. the DB is down) makes every StatusChange
+    # handler raise. The per-message log-and-continue (issue #776) is bounded
+    # (issue #807): after the cap of consecutive failures, the next failure ends
+    # the session, so teardown marks the worker disconnected and writes its
+    # servers unknown — surfacing the outage to the reconciler.
+    server = "11111111-1111-1111-1111-111111111111"
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=FakeServerStateSink(always_fail_observed=True),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        # Send one more than the cap: the first _MAX failures are skipped, the
+        # next one is terminal and ends the session.
+        for _ in range(_MAX_CONSECUTIVE_HANDLER_FAILURES + 1):
+            await call.write(_status_message(server, pb.SERVER_STATE_RUNNING))
+        await call.done_writing()
+        await _drain_to_eof(call)
+
+        snapshot = h.registry.list_workers()[0]
+        assert snapshot.status is WorkerStatus.OFFLINE
+        assert h.state_sink.unknown_for == [_WORKER_ID]
+    finally:
+        await h.stop()
+
+
+async def test_success_resets_consecutive_failure_counter(harness: _Harness) -> None:
+    # A success mid-streak resets the consecutive-failure counter, so transient
+    # blips never accumulate to the cap (issue #807). Drive the sink to the brink
+    # (cap-1 failures), let one succeed, then fail again: the session must stay
+    # alive because the streak was reset rather than continuing toward the cap.
+    good_server = "11111111-1111-1111-1111-111111111111"
+    bad_server = "33333333-3333-3333-3333-333333333333"
+
+    class _CountingSink(FakeServerStateSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def record_observed_state(
+            self, *, server_id: str, worker_id: str, state: str
+        ) -> None:
+            self.calls += 1
+            if server_id == bad_server:
+                raise RuntimeError("observed-state sink unavailable")
+            await super().record_observed_state(
+                server_id=server_id, worker_id=worker_id, state=state
+            )
+
+    sink = _CountingSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        # cap-1 failures (one short of terminal), one success (resets the
+        # counter), then cap-1 more failures. Without the reset this would total
+        # well past the cap and end the session.
+        for _ in range(_MAX_CONSECUTIVE_HANDLER_FAILURES - 1):
+            await call.write(_status_message(bad_server, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(good_server, pb.SERVER_STATE_RUNNING))
+        for _ in range(_MAX_CONSECUTIVE_HANDLER_FAILURES - 1):
+            await call.write(_status_message(bad_server, pb.SERVER_STATE_RUNNING))
+
+        # Wait until every sent message has been handled (the good one recorded,
+        # the bad ones raised) before asserting the session is still alive.
+        expected_calls = 2 * (_MAX_CONSECUTIVE_HANDLER_FAILURES - 1) + 1
+        for _ in range(200):
+            if sink.calls >= expected_calls:
+                break
+            await asyncio.sleep(0.01)
+
+        assert sink.observed == [(good_server, _WORKER_ID, "running")]
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+        assert h.state_sink.unknown_for == []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_cancelled_session_cancels_pending_outbound_get() -> None:
+    # When the Session generator is cancelled mid-await (an abrupt RPC cancel),
+    # the finally must cancel the pending outbound.get() task so it does not
+    # await an orphaned queue forever (issue #788). The generator is iterated by
+    # a background task so it reaches and parks on outbound.get(); cancelling
+    # that task drives the cancel into the await, and an empty waiter deque on
+    # the queue after teardown proves the pending get() was cancelled.
+    async def _requests() -> AsyncIterator[pb.WorkerMessage]:
+        yield _register_message()
+        # Keep the inbound stream open so the generator parks on outbound.get().
+        await asyncio.Event().wait()
+
+    class _Ctx:
+        def invocation_metadata(self) -> list[tuple[str, str]]:
+            return _auth(_CREDENTIAL)
+
+        async def abort(self, *_args: object) -> None:  # pragma: no cover
+            raise AssertionError("unexpected abort")
+
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    control_plane = ControlPlaneState()
+    servicer = WorkerSessionServicer(
+        registry=registry,
+        clock=FakeClock(_T0),
+        worker_credential=_CREDENTIAL,
+        heartbeat_timeout=_TIMEOUT,
+        control_plane=control_plane,
+        state_sink=FakeServerStateSink(),
+        real_time_events=RecordingRealTimeEvents(),
+    )
+
+    gen = servicer.Session(_requests(), _Ctx())
+
+    async def _drain() -> None:
+        async for _ in gen:
+            pass
+
+    tasks_before = asyncio.all_tasks()
+    driver = asyncio.ensure_future(_drain())
+    # Wait until the generator has opened its outbound queue and parked on the
+    # body's outbound.get(). The queue's presence in the control plane plus a
+    # settle sleep is enough to know the body has reached the await — we do not
+    # inspect CPython-private queue internals (issue #807).
+    for _ in range(200):
+        if control_plane.outbound_for(WorkerId(_WORKER_ID)) is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert control_plane.outbound_for(WorkerId(_WORKER_ID)) is not None, (
+        "the session should have opened its outbound queue"
+    )
+    await asyncio.sleep(0.05)  # let the body reach outbound.get()
+
+    # Abrupt RPC cancel: cancel the consumer driving the generator.
+    driver.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await driver
+
+    # The pending outbound.get() must have been cancelled by the generator's
+    # finally: an uncancelled get() would leak a Task awaiting the orphaned
+    # queue forever (issue #788). Observe that by the absence of leftover tasks
+    # rather than the queue's private waiter deque — settle the loop, then diff
+    # the task set; a leaked get() would still be pending here (issue #807).
+    await asyncio.sleep(0.05)
+    leaked = {
+        task
+        for task in asyncio.all_tasks() - tasks_before
+        if task is not asyncio.current_task() and not task.done()
+    }
+    assert not leaked, f"the session leaked pending tasks: {leaked}"
 
 
 async def test_reregister_rebuilds_assignment_count_from_tally() -> None:

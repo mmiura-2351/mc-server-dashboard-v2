@@ -158,10 +158,16 @@ export function applyAuditParams(
     params.set("actor", filters.actor.trim());
   }
   if (filters.since !== "") {
-    params.set("since", new Date(filters.since).toISOString());
+    const d = new Date(filters.since);
+    if (!Number.isNaN(d.getTime())) {
+      params.set("since", d.toISOString());
+    }
   }
   if (filters.until !== "") {
-    params.set("until", new Date(filters.until).toISOString());
+    const d = new Date(filters.until);
+    if (!Number.isNaN(d.getTime())) {
+      params.set("until", d.toISOString());
+    }
   }
 }
 

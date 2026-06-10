@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useParams } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
@@ -92,9 +92,34 @@ const CREATE_ERROR_KEY: Record<string, TranslationKey> = {
 };
 
 export function ServerCreatePage() {
-  const { communityId } = useActiveCommunity();
+  // Create in the community named by the URL `:cid` (#784), not the active one:
+  // the two can disagree on a stale bookmark or a community the user has left,
+  // and creating in the active community while the URL says another is wrong.
+  // The active-community list is the caller's membership; the URL cid must be in
+  // it. `useUrlCommunitySync` (AppShell) adopts an in-membership cid as the
+  // active community, so the `server:create` capability resolves for this cid.
+  const { cid } = useParams();
+  const { communities } = useActiveCommunity();
   const canCreate = useCanCode("server:create");
 
+  // Membership still loading: hold the chrome rather than flash a not-found.
+  if (communities === undefined) {
+    return (
+      <Chrome>
+        <p className="sub">{t("auth.loading")}</p>
+      </Chrome>
+    );
+  }
+  if (cid === undefined || !communities.some((c) => c.id === cid)) {
+    return (
+      <Chrome>
+        <div className="empty">
+          <div className="big">{t("community.notFound.title")}</div>
+          <p className="sub">{t("community.notFound.body")}</p>
+        </div>
+      </Chrome>
+    );
+  }
   if (!canCreate) {
     return (
       <Chrome>
@@ -102,14 +127,7 @@ export function ServerCreatePage() {
       </Chrome>
     );
   }
-  if (communityId === null) {
-    return (
-      <Chrome>
-        <p className="sub">{t("shell.noCommunities")}</p>
-      </Chrome>
-    );
-  }
-  return <Wizard communityId={communityId} />;
+  return <Wizard communityId={cid} />;
 }
 
 function Chrome({ children }: { children: React.ReactNode }) {
@@ -318,8 +336,16 @@ function NewServerWizard({ communityId }: { communityId: string }) {
                       setVersion("");
                     }}
                   >
-                    <div className="t-name">{t(TYPE_LABEL[typeOption])}</div>
-                    <div className="t-sub">{t(TYPE_SUB[typeOption])}</div>
+                    <div className="t-name">
+                      {TYPE_LABEL[typeOption] !== undefined
+                        ? t(TYPE_LABEL[typeOption])
+                        : typeOption}
+                    </div>
+                    <div className="t-sub">
+                      {TYPE_SUB[typeOption] !== undefined
+                        ? t(TYPE_SUB[typeOption])
+                        : ""}
+                    </div>
                   </button>
                 ))}
                 <button

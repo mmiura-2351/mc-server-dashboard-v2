@@ -488,15 +488,28 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	i.mu.Unlock()
 	i.emit(execution.StateStopping, "")
 
+	// Once a stop has begun, detach the escalation from the caller's context. A
+	// graceful stop usually runs on a per-server lane whose ctx is the gRPC
+	// session stream's serveCtx; if the stream drops mid-stop (RCON "stop" already
+	// accepted, the MC server saving), a cancelled ctx would make waitExit return
+	// false instantly — twice — and Stop would escalate straight to SIGTERM and a
+	// zero-grace SIGKILL, truncating .mca files mid-save (the #703 data-safety
+	// line). Decouple instead: run the escalation against a detached context bound
+	// by stopDeadline so the process keeps its full grace period regardless of the
+	// caller, while the bound still caps a hung RCON call. The post-Kill confirm
+	// (waitExitDone) already ignores caller cancellation, so it stays as is.
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.stopDeadline())
+	defer cancel()
+
 	// A graceful RCON stop only makes sense for a running server; during the
 	// install phase RCON is not listening, so it falls through to signalling the
 	// installer process directly.
-	if graceful && i.tryRCONStop(ctx) && i.waitExit(ctx, i.stopTimeout) {
+	if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
 		return nil
 	}
 
 	_ = proc.Signal(syscall.SIGTERM)
-	if i.waitExit(ctx, i.stopTimeout) {
+	if i.waitExit(stopCtx, i.stopTimeout) {
 		return nil
 	}
 
@@ -546,6 +559,19 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 		return fmt.Errorf("hostprocess: process survived SIGKILL after %s", i.stopTimeout)
 	}
 	return nil
+}
+
+// stopDeadlineGrace pads the detached stop-escalation deadline beyond the two
+// stopTimeout-bounded waits, leaving headroom for the RCON open/"stop" call so a
+// healthy stop never trips the bound; it only caps a hung RCON call.
+const stopDeadlineGrace = 10 * time.Second
+
+// stopDeadline bounds the detached escalation context (issue #770). The
+// graceful path runs at most two stopTimeout-bounded waits (RCON→SIGTERM,
+// SIGTERM→SIGKILL), so 2*stopTimeout plus a grace for the RCON call covers the
+// whole sequence without cutting an in-progress stop short.
+func (i *instance) stopDeadline() time.Duration {
+	return 2*i.stopTimeout + stopDeadlineGrace
 }
 
 // waitExitDone reports whether the process reached a terminal state within d,
@@ -647,17 +673,31 @@ func (i *instance) set(s execution.ServerState) {
 	i.mu.Unlock()
 }
 
-// emit publishes a status event, dropping it if the stream is closed or full so a
-// slow consumer never blocks supervision.
+// emit publishes a status event without ever blocking supervision. When the
+// buffer is full it coalesces latest-state-wins: the oldest buffered event is
+// discarded to make room for this one, mirroring the manager's coalescing (issue
+// #96) so the terminal event — always the last emit — is never dropped (issue
+// #790). It returns silently once the stream is closed.
 func (i *instance) emit(state execution.ServerState, detail string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.closed {
 		return
 	}
-	select {
-	case i.events <- execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail}:
-	default:
+	ev := execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail}
+	for {
+		select {
+		case i.events <- ev:
+			return
+		default:
+		}
+		// Buffer full: drop the oldest buffered event and retry so the latest
+		// state wins. The retry can race a concurrent reader that just freed a
+		// slot, in which case the drain misses and we loop back to the send.
+		select {
+		case <-i.events:
+		default:
+		}
 	}
 }
 

@@ -835,6 +835,45 @@ func TestStopWaitSatisfiedByCrash(t *testing.T) {
 	}
 }
 
+// Once a stop has begun, escalation is decoupled from the caller's context
+// (issue #770): a cancelled ctx — e.g. the gRPC session stream dropping mid-stop
+// — must NOT fail the docker calls/waits immediately and record a still-healthy,
+// still-stopping container as a failed-stop orphan. The RCON "stop" is accepted
+// and the container exits within its grace, so Stop completes cleanly without
+// docker stop/kill even though ctx was cancelled before Stop ran.
+func TestStopDetachesEscalationFromContextCancellation(t *testing.T) {
+	docker := newFakeDocker()
+	// RCON "stop" is accepted; the container exits shortly after, well inside the
+	// stop timeout. This models a graceful stop in flight.
+	ctrl := &fakeControl{onStop: func() {
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			docker.exit(0, nil)
+		}()
+	}}
+	d := newTestDriver(docker, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// ctx is already cancelled, modelling the dropped stream. Pre-fix the cancelled
+	// ctx made waitExit return false instantly and docker Stop/Kill fail, recording
+	// a failed-stop orphan; now the escalation runs on a detached context, so the
+	// container keeps its full grace and exits on its own.
+	if err := inst.Stop(ctx, true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if docker.stopWasCalled() || docker.killWasCalled() {
+		t.Fatal("Stop escalated to docker stop/kill despite the RCON stop succeeding within grace")
+	}
+}
+
 // When RCON is unavailable, a graceful stop falls back to docker stop.
 func TestGracefulStopFallsBackToDockerStop(t *testing.T) {
 	docker := newFakeDocker()
@@ -1556,5 +1595,36 @@ func TestStartConflictLoopDeadlineFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "remove boom") {
 		t.Fatalf("err = %v, want the last decline reason in the message", err)
+	}
+}
+
+// TestEmitCoalescesTerminalEventOnFullBuffer bursts more events than the 8-slot
+// buffer with no consumer, then drains. The latest-state-wins coalescing must
+// have kept the terminal event so it is never dropped (issue #790).
+func TestEmitCoalescesTerminalEventOnFullBuffer(t *testing.T) {
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "srv-790"},
+		events: make(chan execution.StatusEvent, 8),
+	}
+
+	// Burst well past the buffer capacity, ending on the terminal state.
+	for i := 0; i < 32; i++ {
+		inst.emit(execution.StateRunning, "")
+	}
+	inst.emit(execution.StateCrashed, "process exited unexpectedly")
+
+	// Drain the buffer; the last buffered event must be the terminal one.
+	var last execution.StatusEvent
+	for {
+		select {
+		case ev := <-inst.events:
+			last = ev
+			continue
+		default:
+		}
+		break
+	}
+	if last.State != execution.StateCrashed {
+		t.Fatalf("terminal event dropped: last buffered state = %v, want %v", last.State, execution.StateCrashed)
 	}
 }

@@ -208,4 +208,40 @@ describe("admin overview stats", () => {
       await screen.findByText(t("admin.overview.loadError")),
     ).toBeInTheDocument();
   });
+
+  it("re-fetches worker data after 12 s so heartbeat ages do not freeze (#791)", async () => {
+    // shouldAdvanceTime lets react-query timers fire while async utilities still
+    // resolve (mirrors the AdminWorkersPage timer pattern).
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    signedInAs(ADMIN);
+
+    renderApp({ path: "/admin" });
+
+    // Wait for the initial render to settle.
+    await screen.findByRole("heading", { name: t("admin.overview.fleet") });
+
+    const callsBefore = fetchMock.mock.calls.filter((c) => {
+      const url =
+        typeof c[0] === "string"
+          ? c[0]
+          : (c[0] as { toString(): string }).toString();
+      return url === "/api/workers";
+    }).length;
+
+    vi.advanceTimersByTime(12_000);
+
+    await screen.findByRole("heading", { name: t("admin.overview.fleet") });
+
+    const callsAfter = fetchMock.mock.calls.filter((c) => {
+      const url =
+        typeof c[0] === "string"
+          ? c[0]
+          : (c[0] as { toString(): string }).toString();
+      return url === "/api/workers";
+    }).length;
+
+    expect(callsAfter).toBeGreaterThan(callsBefore);
+
+    vi.useRealTimers();
+  });
 });

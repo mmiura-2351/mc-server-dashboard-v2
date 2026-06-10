@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { ToastProvider } from "../components/Toast.tsx";
@@ -66,6 +66,9 @@ function LocationProbe() {
   return null;
 }
 
+// The page creates in the community named by the URL `:cid` (#784), so mount it
+// under a matching route. Default to the member community; pass another cid to
+// exercise the not-found state for a community outside the caller's membership.
 function renderPage(path = `/communities/${CID}/servers/new`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -75,7 +78,12 @@ function renderPage(path = `/communities/${CID}/servers/new`) {
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
           <LocationProbe />
-          <ServerCreatePage />
+          <Routes>
+            <Route
+              path="/communities/:cid/servers/new"
+              element={<ServerCreatePage />}
+            />
+          </Routes>
         </ToastProvider>
       </QueryClientProvider>
     </MemoryRouter>,
@@ -132,6 +140,13 @@ describe("ServerCreatePage gating", () => {
     expect(screen.getByText(t("serverCreate.denied"))).toBeInTheDocument();
     expect(screen.queryByText(t("serverCreate.typeHeading"))).toBeNull();
   });
+
+  it("shows the not-found state for a URL cid outside the membership list (#784)", () => {
+    renderPage("/communities/other/servers/new");
+    expect(screen.getByText(t("community.notFound.title"))).toBeInTheDocument();
+    // It must not render the wizard for a community the caller is not in.
+    expect(screen.queryByText(t("serverCreate.typeHeading"))).toBeNull();
+  });
 });
 
 describe("Step 1 — type & version", () => {
@@ -165,6 +180,27 @@ describe("Step 1 — type & version", () => {
     await waitFor(() =>
       expect(screen.getByText(t("serverCreate.next"))).toBeEnabled(),
     );
+  });
+
+  it("falls back to the raw type string for a catalog type not in TYPE_LABEL (#791)", async () => {
+    // A future catalog type unknown to the hardcoded TYPE_LABEL map must not
+    // render a blank card — it must show the raw type string instead.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === "/api/versions") {
+        return Promise.resolve({
+          server_types: ["vanilla", "paper", "future_engine"],
+        });
+      }
+      return defaultGet(path);
+    });
+    renderPage();
+
+    // Known types still show their translated labels.
+    expect(
+      await screen.findByText(t("serverCreate.type.vanilla")),
+    ).toBeInTheDocument();
+    // The unmapped type falls back to its raw string — the card is not blank.
+    expect(screen.getByText("future_engine")).toBeInTheDocument();
   });
 });
 
