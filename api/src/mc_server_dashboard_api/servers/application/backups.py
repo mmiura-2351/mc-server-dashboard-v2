@@ -56,6 +56,7 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 )
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
+    BackupHealth,
     BackupId,
     BackupSource,
     BackupStatistics,
@@ -155,6 +156,10 @@ class CreateBackup:
             storage_ref=storage_ref,
             size_bytes=size_bytes,
             source=source,
+            # Healthy by construction: ``create_from_current`` runs through the
+            # integrity gate (#749), which refuses to archive a corrupt working
+            # set — so reaching here means the archived contents were sound (#742).
+            health=BackupHealth.HEALTHY,
             created_by=created_by,
             created_at=self.clock.now(),
         )
@@ -371,6 +376,9 @@ class UploadBackup:
             storage_ref=storage_ref,
             size_bytes=len(content),
             source=BackupSource.UPLOADED,
+            # An off-host archive bypasses the create-direction integrity gate, so
+            # its structural health is unknown until the sweep (#744) checks it (#742).
+            health=BackupHealth.UNKNOWN,
             created_by=created_by,
             created_at=self.clock.now(),
         )

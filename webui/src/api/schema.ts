@@ -1648,6 +1648,8 @@ export interface components {
             created_at: string;
             /** Created By */
             created_by: string | null;
+            /** Health */
+            health: string;
             /**
              * Id
              * Format: uuid

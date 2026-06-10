@@ -52,6 +52,25 @@ class BackupSource(enum.Enum):
     UPLOADED = "uploaded"
 
 
+class BackupHealth(enum.Enum):
+    """Structural health of a backup's archived contents (issue #742, #703).
+
+    ``HEALTHY`` means the working set was structurally sound when the archive was
+    written. A backup created through the normal create path is healthy *by
+    construction*: the create-direction integrity gate (issue #749) refuses to
+    archive a corrupt working set, so this records that fact rather than
+    re-validating. ``QUARANTINED`` marks a backup whose contents a later check
+    found structurally corrupt (set by the future sweep, #744). ``UNKNOWN`` is
+    the honest default for rows that predate any check — legacy backups and
+    uploaded archives (which bypass the create gate) — until the sweep
+    classifies them.
+    """
+
+    HEALTHY = "healthy"
+    QUARANTINED = "quarantined"
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class Backup:
     """Row of the ``backup`` table (DATABASE.md Section 8).
@@ -73,6 +92,7 @@ class Backup:
     storage_ref: str
     size_bytes: int | None
     source: BackupSource
+    health: BackupHealth
     created_by: uuid.UUID | None
     created_at: dt.datetime
 

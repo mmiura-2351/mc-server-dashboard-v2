@@ -40,6 +40,10 @@ class BackupModel(Base):
             "source IN ('manual', 'scheduled', 'event', 'uploaded')",
             name="ck_backup_source",
         ),
+        CheckConstraint(
+            "health IN ('healthy', 'quarantined', 'unknown')",
+            name="ck_backup_health",
+        ),
         # List a server's backups newest-first (DATABASE.md Section 8).
         Index("ix_backup_server_id_created_at", "server_id", "created_at"),
     )
@@ -53,6 +57,13 @@ class BackupModel(Base):
     storage_ref: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     source: Mapped[str] = mapped_column(String, nullable=False)
+    # Structural health of the archived contents (issue #742): 'healthy' when
+    # written through the integrity-gated create path, 'unknown' for legacy and
+    # uploaded rows until the sweep (#744) classifies them, 'quarantined' if found
+    # corrupt. Defaulted at the column so an INSERT that omits it lands 'unknown'.
+    health: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="unknown"
+    )
     # No FK: a soft reference so the row survives the actor's deletion (Section 9).
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True

@@ -98,6 +98,9 @@ class BackupResponse(BaseModel):
     id: uuid.UUID
     server_id: uuid.UUID
     source: str
+    # Structural health of the archived contents (issue #742): ``healthy`` (gated
+    # create path), ``unknown`` (legacy/uploaded, not yet checked), ``quarantined``.
+    health: str
     size_bytes: int | None
     created_by: uuid.UUID | None
     created_at: UtcDatetime
@@ -108,6 +111,7 @@ class BackupResponse(BaseModel):
             id=backup.id.value,
             server_id=backup.server_id.value,
             source=backup.source.value,
+            health=backup.health.value,
             size_bytes=backup.size_bytes,
             created_by=backup.created_by,
             created_at=backup.created_at,

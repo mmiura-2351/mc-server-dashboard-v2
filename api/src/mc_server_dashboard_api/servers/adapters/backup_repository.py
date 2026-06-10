@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mc_server_dashboard_api.servers.adapters.backup_models import BackupModel
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
+    BackupHealth,
     BackupId,
     BackupSource,
     BackupStatistics,
@@ -31,6 +32,7 @@ def _to_backup(row: BackupModel) -> Backup:
         storage_ref=row.storage_ref,
         size_bytes=row.size_bytes,
         source=BackupSource(row.source),
+        health=BackupHealth(row.health),
         created_by=row.created_by,
         created_at=row.created_at,
     )
@@ -50,6 +52,7 @@ class SqlAlchemyBackupRepository(BackupRepository):
                 storage_ref=backup.storage_ref,
                 size_bytes=backup.size_bytes,
                 source=backup.source.value,
+                health=backup.health.value,
                 created_by=backup.created_by,
                 created_at=backup.created_at,
             )

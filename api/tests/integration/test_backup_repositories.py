@@ -34,6 +34,7 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
+    BackupHealth,
     BackupId,
     BackupSource,
 )
@@ -97,7 +98,13 @@ async def _seed_server(engine: AsyncEngine) -> uuid.UUID:
     return server.id.value
 
 
-def _backup(server_id: uuid.UUID, *, ref: str, created_at: dt.datetime) -> Backup:
+def _backup(
+    server_id: uuid.UUID,
+    *,
+    ref: str,
+    created_at: dt.datetime,
+    health: BackupHealth = BackupHealth.HEALTHY,
+) -> Backup:
     from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
     return Backup(
@@ -106,6 +113,7 @@ def _backup(server_id: uuid.UUID, *, ref: str, created_at: dt.datetime) -> Backu
         storage_ref=ref,
         size_bytes=123,
         source=BackupSource.MANUAL,
+        health=health,
         created_by=None,
         created_at=created_at,
     )
@@ -135,6 +143,37 @@ async def test_add_list_newest_first_and_delete(engine: AsyncEngine) -> None:
     async with ServersUnitOfWork(factory) as uow:
         remaining = await uow.backups.list_for_server(ServerId(server_id))
     assert [b.id for b in remaining] == [older.id]
+
+
+async def test_health_round_trips(engine: AsyncEngine) -> None:
+    """The ``health`` field persists and reads back unchanged (issue #742)."""
+
+    from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    healthy = _backup(server_id, ref="h", created_at=_NOW, health=BackupHealth.HEALTHY)
+    unknown = _backup(
+        server_id,
+        ref="u",
+        created_at=_NOW + dt.timedelta(hours=1),
+        health=BackupHealth.UNKNOWN,
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.add(healthy)
+        await uow.backups.add(unknown)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        listed = await uow.backups.list_for_server(ServerId(server_id))
+        fetched = await uow.backups.get_by_id(healthy.id)
+    assert {b.id: b.health for b in listed} == {
+        unknown.id: BackupHealth.UNKNOWN,
+        healthy.id: BackupHealth.HEALTHY,
+    }
+    assert fetched is not None
+    assert fetched.health is BackupHealth.HEALTHY
 
 
 async def test_deleting_server_cascades_to_backups(engine: AsyncEngine) -> None:

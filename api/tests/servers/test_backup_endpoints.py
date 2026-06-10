@@ -46,6 +46,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
+    BackupHealth,
     BackupId,
     BackupSource,
     BackupStatistics,
@@ -106,6 +107,7 @@ def _backup(server_id: ServerId) -> Backup:
         storage_ref="ref",
         size_bytes=None,
         source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
         created_by=uuid.uuid4(),
         created_at=_NOW,
     )
@@ -213,6 +215,8 @@ def test_create_returns_201_and_passes_actor() -> None:
     assert resp.status_code == 201
     body = resp.json()
     assert body["source"] == "manual"
+    # The backup's health is surfaced in the create response (issue #742).
+    assert body["health"] == "healthy"
     # The authorized actor is forwarded as created_by, and source is MANUAL.
     assert use_case.calls[0]["source"] is BackupSource.MANUAL
     assert isinstance(use_case.calls[0]["created_by"], uuid.UUID)
@@ -264,7 +268,10 @@ def test_list_returns_backups() -> None:
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), server.value))
     assert resp.status_code == 200
-    assert len(resp.json()["backups"]) == 1
+    backups = resp.json()["backups"]
+    assert len(backups) == 1
+    # The list response carries each backup's health (issue #742).
+    assert backups[0]["health"] == "healthy"
 
 
 def test_list_unknown_server_is_404() -> None:
@@ -374,6 +381,7 @@ def test_upload_returns_201_and_passes_actor() -> None:
             storage_ref="ref",
             size_bytes=9,
             source=BackupSource.UPLOADED,
+            health=BackupHealth.UNKNOWN,
             created_by=uuid.uuid4(),
             created_at=_NOW,
         )
@@ -383,6 +391,7 @@ def test_upload_returns_201_and_passes_actor() -> None:
     resp = client.post(_url(uuid.uuid4(), server.value, "/upload"), files=_multipart())
     assert resp.status_code == 201
     assert resp.json()["source"] == "uploaded"
+    assert resp.json()["health"] == "unknown"
     assert isinstance(use_case.calls[0]["created_by"], uuid.UUID)
     assert use_case.calls[0]["content"] == b"\x1f\x8bcontent"
 
