@@ -162,7 +162,11 @@ class RunReconcilerTick:
         await self._run(server, action, now)
 
     def _within_grace(self, server: Server, now: dt.datetime) -> bool:
-        since = server.observed_at or server.updated_at
+        # Measure from the most recent of observed_at (last Worker report) and
+        # updated_at (last intent commit). update_lifecycle refreshes updated_at
+        # but NOT observed_at, so a fresh start on a long-stale server would
+        # otherwise get zero grace and race the in-flight start (#774).
+        since = max(server.updated_at, server.observed_at or server.updated_at)
         return (now - since) < dt.timedelta(seconds=self.grace_seconds)
 
     def _action_for(self, server: Server) -> str | None:
