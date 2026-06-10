@@ -76,6 +76,7 @@ function backup(overrides: Record<string, unknown> = {}) {
     id: BID,
     server_id: SID,
     source: "manual",
+    health: "healthy",
     size_bytes: 1610612736,
     created_by: "miura",
     created_at: "2026-06-06T04:00:00Z",
@@ -240,6 +241,39 @@ describe("ServerBackupsTab stats + table", () => {
   });
 });
 
+describe("ServerBackupsTab condition badge (#745)", () => {
+  it("badges a quarantined backup with a warning condition", async () => {
+    routeGet({ backups: [backup({ health: "quarantined" })] });
+    await openBackups();
+
+    expect(
+      await screen.findByText(t("backups.health.quarantined")),
+    ).toBeInTheDocument();
+  });
+
+  it("badges an unknown-health backup as unverified", async () => {
+    routeGet({ backups: [backup({ health: "unknown" })] });
+    await openBackups();
+
+    expect(
+      await screen.findByText(t("backups.health.unknown")),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no condition badge for a healthy backup", async () => {
+    routeGet({ backups: [backup({ health: "healthy" })] });
+    await openBackups();
+
+    await screen.findByText("manual");
+    expect(
+      screen.queryByText(t("backups.health.quarantined")),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(t("backups.health.unknown")),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("ServerBackupsTab create / upload / download / delete", () => {
   it("creates a backup with a POST to the backups collection", async () => {
     routeGet();
@@ -361,6 +395,75 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
       { target: { value: "RESTORE" } },
     );
     fireEvent.click(confirm);
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/backups/${BID}/restore`,
+      ),
+    );
+  });
+
+  it("gates a quarantined restore behind acknowledgement and sends force=true (#745)", async () => {
+    routeGet({
+      srv: { observed_state: "stopped", desired_state: "stopped" },
+      backups: [backup({ health: "quarantined" })],
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    await openBackups();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.restore") }),
+    );
+    // The damaged-data warning is shown and the confirm uses the force label.
+    expect(
+      screen.getByText(t("backups.restoreDialog.damagedWarning")),
+    ).toBeInTheDocument();
+    const confirm = screen.getByRole("button", {
+      name: t("backups.restoreDialog.damagedConfirm"),
+    });
+
+    // Typing the phrase alone is not enough — the extra acknowledgement gates it.
+    fireEvent.change(
+      screen.getByPlaceholderText(t("backups.restoreDialog.phrase")),
+      { target: { value: "RESTORE" } },
+    );
+    expect(confirm).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(confirm).not.toBeDisabled();
+    fireEvent.click(confirm);
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/backups/${BID}/restore?force=true`,
+      ),
+    );
+  });
+
+  it("restores a healthy backup without force and with no extra acknowledgement", async () => {
+    routeGet({
+      srv: { observed_state: "stopped", desired_state: "stopped" },
+      backups: [backup({ health: "healthy" })],
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    await openBackups();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.restore") }),
+    );
+    // No damaged warning, no acknowledgement checkbox on a healthy backup.
+    expect(
+      screen.queryByText(t("backups.restoreDialog.damagedWarning")),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+
+    fireEvent.change(
+      screen.getByPlaceholderText(t("backups.restoreDialog.phrase")),
+      { target: { value: "RESTORE" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("backups.restoreDialog.confirm") }),
+    );
 
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
