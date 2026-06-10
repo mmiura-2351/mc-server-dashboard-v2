@@ -62,13 +62,16 @@ type Client struct {
 }
 
 // Dial opens an RCON connection to addr and authenticates with password. It
-// returns ErrAuthFailed on a rejected password. The handshake honours ctx's
-// deadline and falls back to defaultExecuteTimeout when ctx carries none, so a
-// peer that accepts the TCP connect but never sends an AUTH_RESPONSE cannot
-// wedge the call forever. It returns ctx.Err() when ctx cancellation caused the
-// failure.
+// returns ErrAuthFailed on a rejected password. Both the TCP connect and the
+// handshake honour ctx's deadline and fall back to defaultExecuteTimeout when
+// ctx carries none: a peer that never completes the SYN handshake (firewalled or
+// gone) cannot ride the OS's ~2-minute SYN timeout, and one that accepts the
+// connect but never sends an AUTH_RESPONSE cannot wedge the read forever. It
+// returns ctx.Err() when ctx cancellation caused the failure.
 func Dial(ctx context.Context, addr, password string) (*Client, error) {
-	var d net.Dialer
+	// DialContext honours ctx's deadline; set Timeout as the fallback bound for a
+	// deadline-less ctx so the connect cannot hang on the OS SYN timeout.
+	d := net.Dialer{Timeout: defaultExecuteTimeout}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("rcon: dial %s: %w", addr, err)

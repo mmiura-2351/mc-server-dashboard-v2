@@ -125,10 +125,10 @@ class ServersServerStateSink(ServerStateSink):
             await repo.mark_worker_servers_unknown(WorkerId(parsed), self._clock.now())
             await session.commit()
 
-    async def running_assignment_ids(self, *, worker_id: str) -> set[str]:
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
         parsed = _parse_id(worker_id, kind="worker_id")
         if parsed is None:
-            return set()
+            return {}
         async with self._session_factory() as session:
             repo = SqlAlchemyServerRepository(session)
             return await repo.running_assignment_ids_for_worker(WorkerId(parsed))

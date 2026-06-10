@@ -637,7 +637,9 @@ class StartServer:
             )
             raise compensation_error from original
         if reverted:
-            self.control_plane.decrement_assignment(worker_id=worker_id)
+            self.control_plane.decrement_assignment(
+                worker_id=worker_id, server_id=server_id
+            )
 
     async def _unassign(
         self,
@@ -693,7 +695,9 @@ class StartServer:
             )
             raise compensation_error from original
         if reverted:
-            self.control_plane.decrement_assignment(worker_id=worker_id)
+            self.control_plane.decrement_assignment(
+                worker_id=worker_id, server_id=server_id
+            )
 
 
 @dataclass(frozen=True)
@@ -741,7 +745,9 @@ class StopServer:
         # decrement to the StatusChange(stopped) event was considered but would
         # leave the count disagreeing with the desired-state tally during the
         # graceful-stop window and on a missed event.
-        self.control_plane.decrement_assignment(worker_id=worker_id)
+        self.control_plane.decrement_assignment(
+            worker_id=worker_id, server_id=server_id
+        )
         outcome = await self.control_plane.stop(
             worker_id=worker_id, server_id=server_id, force=force
         )

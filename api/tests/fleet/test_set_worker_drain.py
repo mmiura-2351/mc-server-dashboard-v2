@@ -232,7 +232,9 @@ async def test_drain_decrements_placement_load_per_stopped_server() -> None:
     worker_id = WorkerId(str(_WORKER_UUID))
     # Seed the worker's committed load to 1 (one assigned, desired-running server),
     # the truth the drain is about to flip.
-    registry.set_assignment(worker_id, {str(s.id.value)})
+    registry.set_assignment(
+        worker_id, {str(s.id.value): 0}, registry.assignment_epoch(worker_id)
+    )
     assert _assigned_count(registry, worker_id) == 1
 
     count = await _use_case(registry, uow)(worker_id=worker_id, draining=True)
@@ -256,7 +258,9 @@ async def test_drain_does_not_decrement_when_commit_fails() -> None:
     uow.servers.seed(s)
     registry = _registry()
     worker_id = WorkerId(str(_WORKER_UUID))
-    registry.set_assignment(worker_id, {str(s.id.value)})
+    registry.set_assignment(
+        worker_id, {str(s.id.value): 0}, registry.assignment_epoch(worker_id)
+    )
     assert _assigned_count(registry, worker_id) == 1
 
     with pytest.raises(RuntimeError, match="forced commit failure"):

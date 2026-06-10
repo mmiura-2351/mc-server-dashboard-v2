@@ -220,6 +220,14 @@ type instance struct {
 	// a terminal state supervise reached during the post-kill wait window (#392).
 	exitObserved bool
 	closed       bool
+	// terminalLatched is set by emit the first time a terminal state is published.
+	// Once latched, emit drops any later non-terminal event: awaitReady's running
+	// and Stop's stopping can race past supervise's stopped|crashed, and a
+	// latest-wins consumer would otherwise transiently report a dead process as
+	// running/stopping. The latch is read and set under i.mu, which emit already
+	// holds, so the terminal emit and these post-terminal emits are serialized
+	// (issue #835).
+	terminalLatched bool
 
 	// cpu carries the previous CPU reading so Sample reports a rate (cpu_millis,
 	// thousandths of a core) over the interval between two samples.
@@ -611,10 +619,37 @@ func isTerminal(s execution.ServerState) bool {
 	return s == execution.StateStopped || s == execution.StateCrashed
 }
 
+// rconPhaseCap bounds the RCON open+"stop" exchange to its own slice of the stop
+// budget. It mirrors rcon's defaultExecuteTimeout: a healthy exchange is
+// sub-second, so this ceiling never trips a real stop; it only caps a hung peer.
+// A var (not a const) so tests can shrink it.
+var rconPhaseCap = 30 * time.Second
+
+// rconStopDeadline gives the RCON phase its own sub-budget within the detached
+// stopCtx. stopCtx carries the whole escalation deadline, so rcon's own 30s
+// fallback never fires there; a pathological peer could otherwise drag the
+// exchange to just under the full budget and leave the SIGTERM→SIGKILL waits
+// near-zero grace (the #703-adjacent shape, issue #832). Cap the phase at
+// min(rconPhaseCap, remaining/3): the /3 reserves the bulk of the remaining
+// budget for the two escalation waits that follow, and the cap keeps the phase
+// short on a large budget.
+func rconStopDeadline(ctx context.Context) time.Time {
+	phase := rconPhaseCap
+	if deadline, ok := ctx.Deadline(); ok {
+		if third := time.Until(deadline) / 3; third < phase {
+			phase = third
+		}
+	}
+	return time.Now().Add(phase)
+}
+
 // tryRCONStop opens RCON and sends "stop", reporting whether the in-band stop was
 // issued successfully. A failure (no RCON, send error) returns false so Stop
-// falls back to signals.
+// falls back to signals. The exchange runs under a phase deadline so a hung peer
+// cannot consume the whole stop budget (issue #832).
 func (i *instance) tryRCONStop(ctx context.Context) bool {
+	ctx, cancel := context.WithDeadline(ctx, rconStopDeadline(ctx))
+	defer cancel()
 	ctrl, err := i.openControl(ctx, i.spec)
 	if err != nil {
 		return false
@@ -694,13 +729,25 @@ func (i *instance) set(s execution.ServerState) {
 // emit publishes a status event without ever blocking supervision. When the
 // buffer is full it coalesces latest-state-wins: the oldest buffered event is
 // discarded to make room for this one, mirroring the manager's coalescing (issue
-// #96) so the terminal event — always the last emit — is never dropped (issue
-// #790). It returns silently once the stream is closed.
+// #96) so the terminal event is never dropped (issue #790). It returns silently
+// once the stream is closed.
+//
+// A terminal state latches: once one is emitted, any later non-terminal event is
+// dropped. awaitReady's running and Stop's stopping can be emitted after
+// supervise's stopped|crashed (the terminal emit is not guaranteed to be the last
+// call), and a latest-wins consumer would otherwise transiently report a dead
+// process as running/stopping (issue #835).
 func (i *instance) emit(state execution.ServerState, detail string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.closed {
 		return
+	}
+	if i.terminalLatched && !isTerminal(state) {
+		return
+	}
+	if isTerminal(state) {
+		i.terminalLatched = true
 	}
 	ev := execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail}
 	for {

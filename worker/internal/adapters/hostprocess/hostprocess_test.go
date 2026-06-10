@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -747,6 +748,53 @@ func TestStopDetachesEscalationFromContextCancellation(t *testing.T) {
 	}
 }
 
+// A pathological RCON peer that drags the "stop" exchange must not consume the
+// whole escalation budget: tryRCONStop runs under its own phase deadline, so it
+// gives up promptly and the SIGTERM→SIGKILL waits keep their full stopTimeout
+// grace (issue #832). Here the peer hangs the "stop" until its phase ctx fires;
+// the process then exits on SIGTERM well inside the stop timeout, so Stop
+// completes via SIGTERM without ever escalating to SIGKILL.
+func TestStopRCONPhaseBudgetPreservesEscalationGrace(t *testing.T) {
+	prev := rconPhaseCap
+	rconPhaseCap = 20 * time.Millisecond
+	t.Cleanup(func() { rconPhaseCap = prev })
+
+	proc := newFakeProcess()
+	ctrl := &fakeControl{hangUntilCtxDone: true}
+	d := newTestDriver(t, proc, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// The process exits on SIGTERM after a short delay, well inside stopTimeout
+	// (50ms). Pre-fix, a hung RCON under the whole stopCtx left this SIGTERM wait
+	// near-zero grace; the phase budget restores it.
+	go func() {
+		for !proc.gotSignal(syscall.SIGTERM) {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(5 * time.Millisecond)
+		proc.exit(nil)
+	}()
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if !ctrl.stopCalled {
+		t.Fatal("expected RCON stop to be attempted")
+	}
+	if !proc.gotSignal(syscall.SIGTERM) {
+		t.Fatal("expected SIGTERM after the hung RCON phase gave up")
+	}
+	if proc.killed {
+		t.Fatal("Stop escalated to SIGKILL: the SIGTERM grace was collapsed by the hung RCON")
+	}
+}
+
 func TestStartSpawnFailure(t *testing.T) {
 	proc := newFakeProcess()
 	proc.startErr = errors.New("exec: java not found")
@@ -913,13 +961,22 @@ func TestSampleErrorsForUnknownPid(t *testing.T) {
 type fakeControl struct {
 	stopCalled bool
 	onStop     func()
+	// hangUntilCtxDone models a pathological peer that drags the RCON "stop"
+	// exchange: Execute blocks until the call's ctx is cancelled (the stop-path
+	// phase deadline), then returns its error. tryRCONStop must give up at the
+	// phase budget rather than ride the whole escalation deadline (issue #832).
+	hangUntilCtxDone bool
 }
 
-func (c *fakeControl) Execute(_ context.Context, line string) (string, error) {
+func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) {
 	if line == "stop" {
 		c.stopCalled = true
 		if c.onStop != nil {
 			c.onStop()
+		}
+		if c.hangUntilCtxDone {
+			<-ctx.Done()
+			return "", ctx.Err()
 		}
 	}
 	return "", nil
@@ -955,5 +1012,93 @@ func TestEmitCoalescesTerminalEventOnFullBuffer(t *testing.T) {
 	}
 	if last.State != execution.StateStopped {
 		t.Fatalf("terminal event dropped: last buffered state = %v, want %v", last.State, execution.StateStopped)
+	}
+}
+
+// TestEmitDropsNonTerminalAfterTerminal asserts the terminal latch: once a
+// terminal state is emitted, a later non-terminal event (awaitReady's running or
+// Stop's stopping racing past supervise's stopped|crashed) is dropped so a
+// latest-wins consumer never sees a dead process flip back to running/stopping
+// (issue #835).
+func TestEmitDropsNonTerminalAfterTerminal(t *testing.T) {
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "srv-835"},
+		events: make(chan execution.StatusEvent, 8),
+	}
+
+	inst.emit(execution.StateStopped, "")
+	inst.emit(execution.StateRunning, "")  // awaitReady racing past the exit
+	inst.emit(execution.StateStopping, "") // Stop racing past the exit
+
+	got := drainStates(inst.events)
+	want := []execution.ServerState{execution.StateStopped}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("post-terminal non-terminal emit not dropped: got %v, want %v", got, want)
+	}
+}
+
+// TestEmitTerminalLatchUnderConcurrentBurst future-proofs the mu-serialized emit
+// assumption: many goroutines burst non-terminal events while one emits the
+// terminal state. The latch is read and set under i.mu, so regardless of
+// scheduling the last buffered event is the terminal one and no non-terminal
+// event is buffered after it (issue #835).
+func TestEmitTerminalLatchUnderConcurrentBurst(t *testing.T) {
+	for trial := 0; trial < 50; trial++ {
+		inst := &instance{
+			spec:   execution.InstanceSpec{ServerID: "srv-835-burst"},
+			events: make(chan execution.StatusEvent, 64),
+		}
+
+		var wg sync.WaitGroup
+		// One goroutine emits the terminal state amid the burst; the rest hammer
+		// non-terminal states before and after it.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inst.emit(execution.StateStopped, "")
+		}()
+		for g := 0; g < 8; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for n := 0; n < 16; n++ {
+					inst.emit(execution.StateRunning, "")
+					inst.emit(execution.StateStopping, "")
+				}
+			}()
+		}
+		wg.Wait()
+
+		got := drainStates(inst.events)
+		if len(got) == 0 {
+			t.Fatalf("trial %d: no events buffered", trial)
+		}
+		// The terminal event must appear, and nothing may follow it.
+		var seenTerminal bool
+		for idx, st := range got {
+			if isTerminal(st) {
+				seenTerminal = true
+				if idx != len(got)-1 {
+					t.Fatalf("trial %d: non-terminal event buffered after terminal: %v", trial, got)
+				}
+			}
+		}
+		if !seenTerminal {
+			t.Fatalf("trial %d: terminal event never buffered: %v", trial, got)
+		}
+	}
+}
+
+// drainStates non-blockingly drains the event channel and returns the buffered
+// states in order.
+func drainStates(ch <-chan execution.StatusEvent) []execution.ServerState {
+	var states []execution.ServerState
+	for {
+		select {
+		case ev := <-ch:
+			states = append(states, ev.State)
+		default:
+			return states
+		}
 	}
 }

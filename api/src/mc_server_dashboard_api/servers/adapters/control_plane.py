@@ -186,13 +186,15 @@ class FleetControlPlaneAdapter(ControlPlane):
         }
         # Read candidates, decide, and reserve in ONE await-free section (#778): the
         # registry load each candidate carries already includes outstanding
-        # reservations (count) and their declared memory (folded below), so a
-        # concurrent placement on this single event loop sees the slot taken the
+        # reservations (count) and the candidate's committed_memory_mb already sums
+        # committed + reserved declared memory registry-side (#843), so a concurrent
+        # placement on this single event loop sees the slot AND its memory taken the
         # instant we reserve it and cannot oversubscribe a Worker's last capacity or
-        # memory slot. The reservation is later confirmed by increment_assignment
+        # memory slot. Only the soft CPU tie-break is still folded from the DB
+        # snapshot below. The reservation is later confirmed by increment_assignment
         # (commit landed) or freed by release_reservation.
         candidates = [
-            self._with_committed(candidate, committed_by_fleet_id)
+            self._with_committed_cpu(candidate, committed_by_fleet_id)
             for candidate in self._registry.candidates_for_placement()
         ]
         chosen = place(
@@ -205,28 +207,20 @@ class FleetControlPlaneAdapter(ControlPlane):
             return _servers_worker(chosen)
         return None
 
-    def _with_committed(
+    def _with_committed_cpu(
         self,
         candidate: PlacementCandidate,
         committed_by_fleet_id: dict[FleetWorkerId, CommittedResources],
     ) -> PlacementCandidate:
-        # Fold in-flight reservations' declared memory on top of the DB-committed
-        # memory (#778): reserved placements are NOT yet committed rows, so their
-        # memory is absent from committed_by_worker and must be added so the memory
-        # gate accounts for a concurrent placement's last-slot claim.
-        reserved_memory_mb = self._registry.reserved_memory_mb(candidate.worker_id)
+        # Committed memory now arrives on the candidate from the registry (committed +
+        # reserved, read synchronously, #843), so we only fold the soft CPU tie-break
+        # from the DB snapshot here. CPU oversubscribes fine (it never excludes a
+        # candidate), so its DB-snapshot staleness cannot cause oversubscription —
+        # only a momentarily suboptimal tie-break among the memory-eligible hosts.
         committed = committed_by_fleet_id.get(candidate.worker_id)
-        if committed is None and reserved_memory_mb == 0:
+        if committed is None:
             return candidate
-        committed_memory_mb = (
-            committed.memory_mb if committed else 0
-        ) + reserved_memory_mb
-        committed_cpu_millis = committed.cpu_millis if committed else 0
-        return replace(
-            candidate,
-            committed_memory_mb=committed_memory_mb,
-            committed_cpu_millis=committed_cpu_millis,
-        )
+        return replace(candidate, committed_cpu_millis=committed.cpu_millis)
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
         # The registry resolves liveness at read time from the heartbeat clock;
@@ -259,8 +253,10 @@ class FleetControlPlaneAdapter(ControlPlane):
             _fleet_worker(worker_id), str(server_id.value)
         )
 
-    def decrement_assignment(self, *, worker_id: WorkerId) -> None:
-        self._registry.decrement_assignment(_fleet_worker(worker_id))
+    def decrement_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
+        self._registry.decrement_assignment(
+            _fleet_worker(worker_id), str(server_id.value)
+        )
 
     async def start(
         self,

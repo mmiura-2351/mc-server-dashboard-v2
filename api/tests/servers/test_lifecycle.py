@@ -407,7 +407,10 @@ async def test_reregister_between_commit_and_increment_does_not_double_count() -
         async def commit(self) -> None:
             await super().commit()
             registry.register(make_worker(worker_id=str(worker_uuid), at=_NOW))
-            registry.set_assignment(FleetWorkerId(str(worker_uuid)), {str(server_id)})
+            epoch = registry.assignment_epoch(FleetWorkerId(str(worker_uuid)))
+            registry.set_assignment(
+                FleetWorkerId(str(worker_uuid)), {str(server_id): 0}, epoch
+            )
 
     uow = _ReregisteringUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
@@ -922,8 +925,10 @@ async def test_start_confirms_reservation_when_cancelled_after_commit() -> None:
     assert registry.reserved_memory_mb(FleetWorkerId(str(worker_uuid))) == 0
     # An authoritative rebuild that omits this server (it has since stopped) drops the
     # count to 0 — proving the entry was a committed assignment, not a stuck
-    # reservation that set_assignment can never clear.
-    registry.set_assignment(FleetWorkerId(str(worker_uuid)), set())
+    # reservation that set_assignment can never clear. The snapshot epoch is read here
+    # (after the confirm), so the confirm is not preserved and the empty tally wins.
+    epoch = registry.assignment_epoch(FleetWorkerId(str(worker_uuid)))
+    registry.set_assignment(FleetWorkerId(str(worker_uuid)), {}, epoch)
     assert registry.list_workers()[0].assigned_count == 0
 
 
