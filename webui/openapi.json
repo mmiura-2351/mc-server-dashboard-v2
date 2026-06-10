@@ -365,6 +365,10 @@
             ],
             "title": "Created By"
           },
+          "health": {
+            "title": "Health",
+            "type": "string"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -395,6 +399,7 @@
           "id",
           "server_id",
           "source",
+          "health",
           "size_bytes",
           "created_by",
           "created_at"

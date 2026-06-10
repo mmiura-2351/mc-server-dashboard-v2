@@ -511,6 +511,7 @@ this row only points at them.
 | `storage_ref` | text | locator of the archive in `Storage` (opaque to the DB) |
 | `size_bytes` | bigint nullable | recorded archive size; set at create/upload (issue #281). Legacy rows predating this stay NULL and are reported as "unknown" in statistics — an honest gap, not a wrong total |
 | `source` | text | `manual` / `scheduled` / `event` / `uploaded` (CHECK enum). `uploaded` is an off-host archive brought in via the upload endpoint (issue #281; migration 0013 widened the CHECK) |
+| `health` | text | `healthy` / `quarantined` / `unknown` (CHECK enum, issue #742; migration 0015). Structural health of the archived contents. A backup created through the integrity-gated create path (#749) is `healthy` by construction; legacy rows and `uploaded` archives (which bypass that gate) are `unknown` until the one-shot sweep (#744) classifies them; a row a check found corrupt is `quarantined`. NOT NULL, defaults `unknown` |
 | `created_by` | uuid nullable | the user who triggered the backup; **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
 | `created_at` | timestamptz | |
 

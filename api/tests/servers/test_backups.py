@@ -41,6 +41,7 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 )
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
+    BackupHealth,
     BackupId,
     BackupSource,
 )
@@ -157,11 +158,15 @@ async def test_create_at_rest_archives_without_save_all_or_snapshot() -> None:
     )
 
     assert backup.source is BackupSource.MANUAL
+    # Healthy by construction: the gated create path archived a sound working set.
+    assert backup.health is BackupHealth.HEALTHY
     assert archive.created == [server.id]
     # No RCON save-all and no snapshot trigger on the at-rest path.
     assert [kind for kind, *_ in control_plane.dispatched] == []
-    # The metadata row was persisted.
-    assert await uow.backups.get_by_id(backup.id) is not None
+    # The metadata row was persisted with its health recorded.
+    persisted = await uow.backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.health is BackupHealth.HEALTHY
 
 
 async def test_create_running_save_all_then_snapshot_then_archive() -> None:
@@ -302,6 +307,7 @@ async def test_list_is_community_scoped_and_newest_first() -> None:
         storage_ref="a",
         size_bytes=None,
         source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
         created_by=None,
         created_at=_NOW,
     )
@@ -311,6 +317,7 @@ async def test_list_is_community_scoped_and_newest_first() -> None:
         storage_ref="b",
         size_bytes=None,
         source=BackupSource.SCHEDULED,
+        health=BackupHealth.HEALTHY,
         created_by=None,
         created_at=_NOW + dt.timedelta(hours=1),
     )
@@ -338,6 +345,7 @@ async def test_restore_requires_stopped_server() -> None:
         storage_ref="ref",
         size_bytes=None,
         source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
         created_by=None,
         created_at=_NOW,
     )
@@ -364,6 +372,7 @@ async def test_restore_at_rest_republishes_known_ref() -> None:
         storage_ref="ref",
         size_bytes=None,
         source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
         created_by=None,
         created_at=_NOW,
     )
@@ -402,6 +411,7 @@ async def test_restore_backup_of_other_server_is_not_found() -> None:
         storage_ref="ref",
         size_bytes=None,
         source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
         created_by=None,
         created_at=_NOW,
     )
@@ -424,6 +434,7 @@ async def test_delete_removes_archive_before_metadata_row() -> None:
         storage_ref="ref",
         size_bytes=None,
         source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
         created_by=None,
         created_at=_NOW,
     )
@@ -496,6 +507,7 @@ def _seed_backup(
         storage_ref=storage_ref,
         size_bytes=size_bytes,
         source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
         created_by=None,
         created_at=created_at,
     )
@@ -566,6 +578,8 @@ async def test_upload_validates_stores_and_records_uploaded_row() -> None:
     )
 
     assert backup.source is BackupSource.UPLOADED
+    # An uploaded archive bypasses the create gate, so its health is unknown.
+    assert backup.health is BackupHealth.UNKNOWN
     assert backup.created_by == actor
     assert backup.size_bytes == len(content)
     assert archive.stored == [server.id]
