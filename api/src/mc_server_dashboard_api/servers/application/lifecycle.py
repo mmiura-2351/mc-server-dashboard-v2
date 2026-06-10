@@ -196,17 +196,24 @@ class StartServer:
                     # change so the lost race causes no double placement (FR-SRV-2).
                     raise LifecycleTransitionConflictError(str(server_id.value))
                 await self.uow.commit()
+                # Confirm the placement reservation as a committed assignment now the
+                # intent is durable (#778); a no-op if a reconnect rebuild already
+                # counted this row. Confirm HERE — inside the transaction, immediately
+                # after the commit returns and with no await in between (a sync
+                # registry call) — not after the ``async with`` block: the UoW
+                # ``__aexit__`` awaits rollback()/close(), suspension points outside
+                # this try/except where a client-disconnect CancelledError (or a
+                # post-commit teardown error) would leave the committed reservation
+                # neither confirmed nor released, leaking it permanently (#840).
+                self.control_plane.increment_assignment(
+                    worker_id=worker_id, server_id=server_id
+                )
             except (Exception, asyncio.CancelledError):
                 self.control_plane.release_reservation(
                     worker_id=worker_id, server_id=server_id
                 )
                 raise
 
-        # Confirm the placement reservation as a committed assignment now the intent
-        # is durable (#778); a no-op if a reconnect rebuild already counted this row.
-        self.control_plane.increment_assignment(
-            worker_id=worker_id, server_id=server_id
-        )
         dispatch = _Dispatch()
         try:
             outcome = await self._launch(
@@ -330,17 +337,24 @@ class StartServer:
                     # count change so the lost race causes no double placement.
                     raise LifecycleTransitionConflictError(str(server_id.value))
                 await self.uow.commit()
+                # Confirm the placement reservation as a committed assignment now the
+                # intent is durable (#778); a no-op if a reconnect rebuild already
+                # counted this row. Confirm HERE — inside the transaction, immediately
+                # after the commit returns and with no await in between (a sync
+                # registry call) — not after the ``async with`` block: the UoW
+                # ``__aexit__`` awaits rollback()/close(), suspension points outside
+                # this try/except where a client-disconnect CancelledError (or a
+                # post-commit teardown error) would leave the committed reservation
+                # neither confirmed nor released, leaking it permanently (#840).
+                self.control_plane.increment_assignment(
+                    worker_id=worker_id, server_id=server_id
+                )
             except (Exception, asyncio.CancelledError):
                 self.control_plane.release_reservation(
                     worker_id=worker_id, server_id=server_id
                 )
                 raise
 
-        # Confirm the placement reservation as a committed assignment now the intent
-        # is durable (#778); a no-op if a reconnect rebuild already counted this row.
-        self.control_plane.increment_assignment(
-            worker_id=worker_id, server_id=server_id
-        )
         dispatch = _Dispatch()
         try:
             outcome = await self._launch(

@@ -9,6 +9,7 @@ running), and the placement-load increment/decrement bookkeeping.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import uuid
@@ -838,8 +839,6 @@ async def test_start_release_reservation_when_cancelled() -> None:
     # The request task is cancelled at the commit await (a client disconnect cancels
     # the HTTP task). CancelledError is a BaseException, not Exception, so the leak
     # fix must catch it explicitly to release the reservation before re-raising (#778).
-    import asyncio
-
     from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
     from tests.fleet.fakes import FakeClock as FleetFakeClock
     from tests.fleet.fakes import make_worker
@@ -872,6 +871,59 @@ async def test_start_release_reservation_when_cancelled() -> None:
         )
 
     # The reservation was released despite the cancellation: capacity is not shrunk.
+    assert registry.list_workers()[0].assigned_count == 0
+
+
+async def test_start_confirms_reservation_when_cancelled_after_commit() -> None:
+    # The commit lands, then the request task is cancelled at the UoW ``__aexit__``
+    # await (its rollback()/close() are real suspension points outside the
+    # CAS+commit try/except). The confirm now runs INSIDE the transaction, right
+    # after the commit returns, so the reservation is already promoted to a
+    # committed assignment before the cancellation unwinds: the count stays truthful
+    # (1) and is not leaked as a pending reservation that no rebuild would reclaim
+    # (#840). It must NOT be released either — the committed row is real.
+    from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+    from tests.fleet.fakes import FakeClock as FleetFakeClock
+    from tests.fleet.fakes import make_worker
+
+    community, server_id, _ = _ids()
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
+    )
+    registry.register(make_worker(worker_id=str(worker_uuid), max_servers=1, at=_NOW))
+    cp = _registry_backed_control_plane(registry)
+
+    class _CancelOnExitUnitOfWork(FakeUnitOfWork):
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            # Cancellation delivered at the teardown await, after a successful commit.
+            raise asyncio.CancelledError()
+
+    uow = _CancelOnExitUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # Confirmed, not leaked: the reservation was promoted to a committed assignment
+    # (count == 1), and the reservation bucket is empty so no later set_assignment
+    # rebuild would have to reclaim a stale pending entry.
+    assert uow.commits == 1
+    assert registry.list_workers()[0].assigned_count == 1
+    assert registry.reserved_memory_mb(FleetWorkerId(str(worker_uuid))) == 0
+    # An authoritative rebuild that omits this server (it has since stopped) drops the
+    # count to 0 — proving the entry was a committed assignment, not a stuck
+    # reservation that set_assignment can never clear.
+    registry.set_assignment(FleetWorkerId(str(worker_uuid)), set())
     assert registry.list_workers()[0].assigned_count == 0
 
 
