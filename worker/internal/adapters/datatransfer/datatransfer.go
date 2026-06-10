@@ -100,6 +100,14 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint6
 	case http.StatusNoContent:
 		// No published working set yet; nothing to unpack. The store generation is
 		// 0 (the API serves no generation header on a 204), so the Worker records 0.
+		//
+		// IMPLICIT CALLER DEPENDENCY: this returns WITHOUT touching destDir, so a
+		// retained stale destDir from a prior placement is left in place (not
+		// replaced). That is safe only because the caller never reaches a 204 with a
+		// stale destDir to displace: store generation 0 + a held working set means the
+		// API gates this off with skip_hydrate (lifecycle.py), so a 204 here only ever
+		// hydrates onto an empty/absent destDir. Leaving the retained destDir is
+		// intentional — do not add a blind destDir wipe here.
 		return parseGeneration(resp.Header), nil
 	case http.StatusOK:
 	default:
@@ -205,8 +213,10 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) (uint6
 // scratch root). ScanHeldServers (scratchscan.go) reports every scratch subdir as
 // a held server, but the API only consults that list for ids it assigned, so a
 // crash-leftover .hydrate-* sibling is never matched; a stale one is also reclaimed
-// by the next hydrate's leftover sweep below and by the authoritative-stop scratch
-// GC (issue #766, os.RemoveAll over the whole scratch subtree on stop).
+// by the next hydrate's leftover sweep below (if the id is re-placed here) and by
+// the post-final-snapshot scratch GC, which sweeps this id's .hydrate-<id>-* siblings
+// alongside removing scratchDir/<id> once the stopped-id final snapshot publishes
+// (issue #766/#841/#842, instancemanager.removeScratch).
 //
 // Crash safety: the temp tree is built fully before any rename. The swap then does
 // (1) rename destDir -> trash, (2) rename temp -> destDir, (3) remove trash. A
@@ -256,7 +266,7 @@ func unpackAndSwap(r io.Reader, destDir string) error {
 	} else {
 		swapped = true
 	}
-	if err := os.Rename(tmpDir, destDir); err != nil {
+	if err := swapRename(tmpDir, destDir); err != nil {
 		if swapped {
 			// Restore the old working set so the failure does not lose both copies.
 			_ = os.Rename(trashDir, destDir)
@@ -274,6 +284,12 @@ func unpackAndSwap(r io.Reader, destDir string) error {
 	}
 	return nil
 }
+
+// swapRename is the final temp->destDir swap rename, indirected through a package
+// var so a test can force it to fail and exercise the trash-restore path (the swap
+// renames within one parent dir are symmetric, so there is no static-perms way to
+// fail only this one). Production always uses os.Rename.
+var swapRename = os.Rename
 
 // fsyncTree fsyncs every directory in the tree rooted at dir (post-order, so a
 // child dir is durable before its parent's entry for it). File contents are already

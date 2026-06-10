@@ -171,6 +171,7 @@ class FleetControlPlaneAdapter(ControlPlane):
     async def place(
         self,
         *,
+        server_id: ServerId,
         backend: ExecutionBackend,
         memory_limit_mb: int | None,
         committed_by_worker: dict[WorkerId, CommittedResources],
@@ -183,6 +184,13 @@ class FleetControlPlaneAdapter(ControlPlane):
             _fleet_worker(worker_id): committed
             for worker_id, committed in committed_by_worker.items()
         }
+        # Read candidates, decide, and reserve in ONE await-free section (#778): the
+        # registry load each candidate carries already includes outstanding
+        # reservations (count) and their declared memory (folded below), so a
+        # concurrent placement on this single event loop sees the slot taken the
+        # instant we reserve it and cannot oversubscribe a Worker's last capacity or
+        # memory slot. The reservation is later confirmed by increment_assignment
+        # (commit landed) or freed by release_reservation.
         candidates = [
             self._with_committed(candidate, committed_by_fleet_id)
             for candidate in self._registry.candidates_for_placement()
@@ -193,21 +201,31 @@ class FleetControlPlaneAdapter(ControlPlane):
             needed_memory_mb=memory_limit_mb,
         )
         if isinstance(chosen, FleetWorkerId):
+            self._registry.reserve(chosen, str(server_id.value), memory_limit_mb or 0)
             return _servers_worker(chosen)
         return None
 
-    @staticmethod
     def _with_committed(
+        self,
         candidate: PlacementCandidate,
         committed_by_fleet_id: dict[FleetWorkerId, CommittedResources],
     ) -> PlacementCandidate:
+        # Fold in-flight reservations' declared memory on top of the DB-committed
+        # memory (#778): reserved placements are NOT yet committed rows, so their
+        # memory is absent from committed_by_worker and must be added so the memory
+        # gate accounts for a concurrent placement's last-slot claim.
+        reserved_memory_mb = self._registry.reserved_memory_mb(candidate.worker_id)
         committed = committed_by_fleet_id.get(candidate.worker_id)
-        if committed is None:
+        if committed is None and reserved_memory_mb == 0:
             return candidate
+        committed_memory_mb = (
+            committed.memory_mb if committed else 0
+        ) + reserved_memory_mb
+        committed_cpu_millis = committed.cpu_millis if committed else 0
         return replace(
             candidate,
-            committed_memory_mb=committed.memory_mb,
-            committed_cpu_millis=committed.cpu_millis,
+            committed_memory_mb=committed_memory_mb,
+            committed_cpu_millis=committed_cpu_millis,
         )
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
@@ -231,8 +249,15 @@ class FleetControlPlaneAdapter(ControlPlane):
             _fleet_worker(worker_id), str(server_id.value)
         )
 
-    def increment_assignment(self, *, worker_id: WorkerId) -> None:
-        self._registry.increment_assignment(_fleet_worker(worker_id))
+    def increment_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
+        self._registry.increment_assignment(
+            _fleet_worker(worker_id), str(server_id.value)
+        )
+
+    def release_reservation(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
+        self._registry.release_reservation(
+            _fleet_worker(worker_id), str(server_id.value)
+        )
 
     def decrement_assignment(self, *, worker_id: WorkerId) -> None:
         self._registry.decrement_assignment(_fleet_worker(worker_id))

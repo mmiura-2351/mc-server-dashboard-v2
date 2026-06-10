@@ -376,12 +376,27 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: snapshot: %v", err))
 	}
-	// Record the NEW generation the publish produced (issue #763): the scratch we
-	// just pushed is the source of this store generation, so its local generation
-	// advances to match. This keeps a same-Worker restart's held generation equal to
-	// the store generation (the API then skips the destructive hydrate). Best-effort
-	// (logged, not failed) — see recordGeneration.
-	m.recordGeneration(workingDir, cmd.ServerID, gen)
+	if running {
+		// Record the NEW generation the publish produced (issue #763): the scratch we
+		// just pushed is the source of this store generation, so its local generation
+		// advances to match. This keeps a same-Worker restart's held generation equal to
+		// the store generation (the API then skips the destructive hydrate). Best-effort
+		// (logged, not failed) — see recordGeneration.
+		m.recordGeneration(workingDir, cmd.ServerID, gen)
+	} else {
+		// Stopped-id snapshot succeeded: this is the post-stop FINAL snapshot (or a
+		// snapshot of an at-rest set). The working set is now captured authoritatively
+		// and the API has typically already unassigned this Worker, so the local scratch
+		// is redundant — GC it now to reclaim disk and shrink the stale-leftover surface
+		// (#762's anti-accumulation goal, relocated here from the stop path so the final
+		// snapshot can no longer pack an empty dir, issue #841). The GC is deferred to
+		// AFTER a successful publish: a failed snapshot returned above with the scratch
+		// intact, so nothing is lost. The reservation taken in the stopped branch is
+		// still held (released by the deferred release on return), so no racing hydrate
+		// or start can recreate the dir between the publish and this removal. Recording
+		// the new generation would be pointless work on a dir we are about to delete.
+		m.removeScratch(cmd.ServerID)
+	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
@@ -551,32 +566,67 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: stop: %v", err))
 	}
-	// A confirmed StopServer is an AUTHORITATIVE stop: every API path that sends a
-	// bare StopServer to the Worker (StopServer, redispatch_stop) clears the
-	// server's assignment on the confirmed stop, so the Worker no longer owns this
-	// working set. GC the local scratch dir to reclaim disk and shrink the
-	// stale-leftover surface the #698 hydrate-skip reasons about (issue #762). This
-	// is distinct from a TRANSIENT restart, which arrives as RestartServer
-	// (handleRestart, internal stop+start) and a same-Worker redispatch_start, which
-	// arrives as HydrateTrigger+StartServer — neither sends a bare StopServer, so
-	// both correctly RETAIN the scratch and #698 hydrate-skip keeps working.
-	//
-	// GC runs only on a CONFIRMED stop (attemptStop returned nil): a failed-stop
-	// orphan may still be alive and writing the working set (issue #251), so the
-	// failure path above leaves the scratch in place.
-	m.removeScratch(cmd.ServerID)
+	// Do NOT GC the scratch here, even though a confirmed StopServer is an
+	// AUTHORITATIVE stop (issue #841). The API sends the FINAL snapshot for this id
+	// only AFTER this stop's CommandResult (StopServer.__call__, lifecycle.py,
+	// FR-DATA-7): a stop-time GC would leave that SnapshotTrigger to pack an empty
+	// dir, silently losing the world progressed since the last periodic snapshot.
+	// The #762 reclamation moves to AFTER the post-stop final snapshot publishes
+	// (handleSnapshot's stopped-id branch) — see removeScratch.
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// removeScratch deletes the server's local working-set scratch dir. It is
-// best-effort: a removal failure is logged, never surfaced — the authoritative
-// stop already succeeded, and leftover scratch is a hygiene problem, not a
-// stop failure. A missing dir is a no-op (os.RemoveAll returns nil).
+// removeScratch deletes the server's local working-set scratch dir, plus any
+// .hydrate-<id>-* temp/trash siblings a crash mid-hydrate left behind for this
+// id (datatransfer.unpackAndSwap, issue #772, swept via sweepHydrateLeftovers).
+// It is best-effort: a removal failure is logged, never surfaced — the working
+// set has already been captured (the snapshot that triggers it succeeded), and
+// leftover scratch is a hygiene problem, not a failure. A missing dir is a no-op
+// (os.RemoveAll returns nil).
+//
+// Reclamation contract (issue #841, preserving #762's anti-accumulation goal):
+//   - GC runs ONLY after a successful STOPPED-id SnapshotTrigger — the post-stop
+//     final snapshot (or a snapshot of an at-rest set). At that point the working
+//     set is captured authoritatively and the API has typically unassigned this
+//     Worker, so the local copy is redundant and safe to reclaim. The scratch dir
+//     and this id's hydrate leftovers (#842) are reclaimed together at that moment.
+//   - It does NOT run on the stop itself (the final snapshot has not happened yet),
+//     on a FAILED snapshot (nothing was captured — losing it would be the #841 bug),
+//     or on a RUNNING-id snapshot (the live server still owns its working set).
+//   - If the final snapshot NEVER arrives (API crash between stop and snapshot, or
+//     the Worker/stream dropping before it lands), the scratch persists. It is then
+//     reclaimed by the next authoritative event for that id: a later start hydrates
+//     a fresh working set over it, or — on a same-Worker restart — ScanHeldServers
+//     reports it as held and the API's generation-gated hydrate (#763/#767) either
+//     reuses it (still current) or re-hydrates (stale). This bounds accumulation to
+//     at most one at-rest working set per stopped server, never an unbounded leak.
 func (m *Manager) removeScratch(serverID string) {
 	dir := filepath.Join(m.scratchDir, serverID)
 	if err := os.RemoveAll(dir); err != nil {
-		m.logger.Warn("failed to remove scratch dir on authoritative stop",
+		m.logger.Warn("failed to remove scratch dir after final snapshot",
 			"server_id", serverID, "dir", dir, "error", err)
+	}
+	m.sweepHydrateLeftovers(serverID)
+}
+
+// sweepHydrateLeftovers removes the .hydrate-<id>-* temp/trash siblings a crashed
+// hydrate for serverID left in the scratch root. The next start's leftover sweep
+// (datatransfer.sweepHydrateLeftovers) clears them too, but only if the server is
+// re-placed onto this Worker; a deleted/re-placed-elsewhere id would otherwise leak
+// the world-sized orphan permanently. The prefix matches datatransfer.hydrateTmpPrefix
+// exactly (".hydrate-<id>-"), so only this id's leftovers are touched — not another
+// server's dir or a similarly named one. Best-effort: a removal failure is ignored
+// (a leftover is wasted disk, never a correctness problem).
+func (m *Manager) sweepHydrateLeftovers(serverID string) {
+	entries, err := os.ReadDir(m.scratchDir)
+	if err != nil {
+		return
+	}
+	prefix := ".hydrate-" + serverID + "-"
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			_ = os.RemoveAll(filepath.Join(m.scratchDir, e.Name()))
+		}
 	}
 }
 
