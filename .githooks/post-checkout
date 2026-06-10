@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 #
-# post-checkout: warn loudly when the PRIMARY checkout is moved off `main`.
+# post-checkout: auto-restore the PRIMARY checkout to `main` when it leaves it.
 #
 # The primary checkout (repo root, NOT a worktree under .claude/worktrees/) is
 # the live-deployment build source: `docker compose` builds it from compose.yaml
 # + .env at the repo root, so a stray checkout silently changes what the next
 # rebuild deploys (docs/dev/CONTRIBUTING.md Section 3). Agent sessions have moved
-# it off main repeatedly despite prompts (#432), so this is the structural,
-# developer-time signal.
+# it off main repeatedly (#809), so the hook now auto-restores instead of just
+# warning.
 #
-# post-checkout cannot block, and a checkout can be intentional, so this does NOT
-# auto-restore -- the warning is the guard. It stays silent for worktree
-# checkouts, branch creation in worktrees, and file (path) checkouts, so it does
-# not get in the way of normal agent work.
+# Override: set MCSD_ALLOW_PRIMARY_BRANCH=1 to suppress auto-restore and allow
+# an intentional off-main checkout of the primary checkout (e.g. a human
+# inspecting a branch directly). The hook will still print a loud notice.
+#
+# Dirty-tree guard: if the working tree has uncommitted changes at the time of
+# the stray checkout, auto-restore is refused (it would discard those changes).
+# Fix: stash or commit, then manually run `git checkout main`.
+#
+# Detached HEAD: treated the same as a named branch -- auto-restored to main,
+# or refused when dirty.
+#
+# In-operation guard: git rebase, bisect, cherry-pick, and merge all invoke
+# post-checkout internally. Auto-restoring during these operations would corrupt
+# them. The hook exits silently when any of their marker files/dirs are present.
 #
 # Args (git post-checkout): $1 prev HEAD, $2 new HEAD, $3 flag (1 = branch
 # checkout, 0 = file checkout).
@@ -25,6 +35,8 @@ toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
 # Worktrees live under .claude/worktrees/; their checkouts are expected to leave
 # main and must stay silent. Only the primary checkout is the deploy source.
+# Note: this exemption is path-convention-based, not structural — it matches
+# repos whose toplevel happens to contain /.claude/worktrees/ in their path.
 case "$toplevel" in
 	*/.claude/worktrees/*) exit 0 ;;
 esac
@@ -32,25 +44,71 @@ esac
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")"
 [ "$branch" = "main" ] && exit 0
 
-# Loud, unmissable warning (red if stderr is a terminal).
+# In-operation guard: skip auto-restore when git is mid-rebase, mid-bisect,
+# mid-cherry-pick, or mid-merge. These operations invoke post-checkout internally;
+# restoring to main would corrupt the in-progress operation.
+gitdir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+if [ -d "$gitdir/rebase-merge" ] || [ -d "$gitdir/rebase-apply" ] \
+   || [ -f "$gitdir/BISECT_LOG" ] || [ -f "$gitdir/CHERRY_PICK_HEAD" ] \
+   || [ -f "$gitdir/MERGE_HEAD" ]; then
+	exit 0
+fi
+
+# Colour helpers (only when stderr is a terminal).
 if [ -t 2 ]; then
 	red=$'\033[1;31m'
+	yellow=$'\033[1;33m'
 	reset=$'\033[0m'
 else
 	red=""
+	yellow=""
 	reset=""
 fi
 
 ref="${branch:-detached HEAD ($(git rev-parse --short HEAD 2>/dev/null || echo unknown))}"
+
+# Allow intentional override: MCSD_ALLOW_PRIMARY_BRANCH=1 skips auto-restore.
+if [ "${MCSD_ALLOW_PRIMARY_BRANCH:-0}" = "1" ]; then
+	{
+		echo
+		echo "${yellow}################################################################${reset}"
+		echo "${yellow}#  NOTICE: PRIMARY checkout is off 'main' (override active).${reset}"
+		echo "${yellow}#    -> ${ref}${reset}"
+		echo "${yellow}#  MCSD_ALLOW_PRIMARY_BRANCH=1 -- auto-restore suppressed.${reset}"
+		echo "${yellow}#  Restore manually when done: git checkout main${reset}"
+		echo "${yellow}################################################################${reset}"
+		echo
+	} >&2
+	exit 0
+fi
+
+# Dirty-tree guard: auto-restore would discard uncommitted work -- refuse instead.
+if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+	{
+		echo
+		echo "${red}################################################################${reset}"
+		echo "${red}#  ERROR: PRIMARY checkout left 'main' AND has uncommitted work.${reset}"
+		echo "${red}#    -> ${ref}${reset}"
+		echo "${red}#  Auto-restore aborted to protect your changes.${reset}"
+		echo "${red}#  Stash or commit first, then run: git checkout main${reset}"
+		echo "${red}################################################################${reset}"
+		echo
+	} >&2
+	exit 1
+fi
+
+# Auto-restore: switch the primary checkout back to main.
 {
 	echo
 	echo "${red}################################################################${reset}"
-	echo "${red}#  WARNING: the PRIMARY checkout is no longer on 'main'.${reset}"
-	echo "${red}#  It is the live-deployment build source (docker compose${reset}"
-	echo "${red}#  builds the repo root); the next rebuild will deploy:${reset}"
-	echo "${red}#    -> ${ref}${reset}"
-	echo "${red}#  Restore it before any rebuild/redeploy:${reset}"
-	echo "${red}#    git checkout main${reset}"
+	echo "${red}#  AUTO-RESTORE: PRIMARY checkout left 'main'.${reset}"
+	echo "${red}#    was: ${ref}${reset}"
+	echo "${red}#  The primary checkout is the live-deploy build source.${reset}"
+	echo "${red}#  Switching back to main automatically.${reset}"
+	echo "${red}#  To allow an off-main checkout, set MCSD_ALLOW_PRIMARY_BRANCH=1${reset}"
 	echo "${red}################################################################${reset}"
 	echo
 } >&2
+
+# Unset the hook path so the recursive checkout does not re-enter this hook.
+git -c core.hooksPath="" checkout main
