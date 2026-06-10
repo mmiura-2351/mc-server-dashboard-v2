@@ -20,6 +20,8 @@ from collections.abc import Iterator
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -32,6 +34,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_create_backup,
     get_current_user,
     get_delete_backup,
@@ -65,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -131,6 +135,7 @@ def _app(
     upload: _FakeUseCase | None = None,
     statistics: _FakeUseCase | None = None,
     global_statistics: _FakeUseCase | None = None,
+    recorder: RecordingAuditRecorder | None = None,
     is_admin: bool = False,
 ) -> object:
     app = create_app()
@@ -159,6 +164,8 @@ def _app(
         app.dependency_overrides[get_global_backup_statistics] = lambda: (
             global_statistics
         )
+    if recorder is not None:
+        app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return app
 
 
@@ -210,7 +217,8 @@ def test_member_without_permission_gets_403_on_delete() -> None:
 def test_create_returns_201_and_passes_actor() -> None:
     server = ServerId(uuid.uuid4())
     use_case = _FakeUseCase(result=_backup(server))
-    app = _app(member=True, allow=True, create=use_case)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), server.value))
     assert resp.status_code == 201
@@ -221,14 +229,24 @@ def test_create_returns_201_and_passes_actor() -> None:
     # The authorized actor is forwarded as created_by, and source is MANUAL.
     assert use_case.calls[0]["source"] is BackupSource.MANUAL
     assert isinstance(use_case.calls[0]["created_by"], uuid.UUID)
+    # A successful create records a backup:create SUCCESS against the new backup.
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 
 def test_create_unsettled_is_409() -> None:
     use_case = _FakeUseCase(error=BackupUnsettledError("x"))
-    app = _app(member=True, allow=True, create=use_case)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 409
+    # A create refused because the server is unsettled records backup:create
+    # DENIED against the server (no backup id yet).
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
+    assert recorder.events[0].outcome is Outcome.DENIED
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
 
 
 def test_create_nothing_to_archive_is_404() -> None:
@@ -252,11 +270,17 @@ def test_create_corrupt_working_set_is_500_with_reason() -> None:
     # set: a server-side data fault, surfaced as a 500 with a machine-readable
     # reason, not a 4xx client error.
     use_case = _FakeUseCase(error=BackupCorruptError("x", corrupt_count=3))
-    app = _app(member=True, allow=True, create=use_case)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 500
     assert resp.json()["reason"] == "working_set_corrupt"
+    # The refused-by-gate create records backup:create ERROR; with no backup id
+    # yet it targets the server.
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
 
 
 # --- list ------------------------------------------------------------------
@@ -288,10 +312,16 @@ def test_list_unknown_server_is_404() -> None:
 
 def test_restore_running_is_409() -> None:
     use_case = _FakeUseCase(error=ServerNotStoppedError("x"))
-    app = _app(member=True, allow=True, restore=use_case)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 409
+    # A restore refused because the server is running records backup:restore
+    # DENIED against the backup.
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.DENIED
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 
 def test_restore_unknown_backup_is_404() -> None:
@@ -304,12 +334,17 @@ def test_restore_unknown_backup_is_404() -> None:
 
 def test_restore_at_rest_is_204() -> None:
     use_case = _FakeUseCase(result=RestoreResult(forced_corrupt=False, corrupt_count=0))
-    app = _app(member=True, allow=True, restore=use_case)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 204
     # force defaults to False when the query param is absent.
     assert use_case.calls[0]["force"] is False
+    # A clean restore records backup:restore SUCCESS against the backup.
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 
 def test_restore_corrupt_without_force_is_500_with_reason() -> None:
@@ -317,16 +352,22 @@ def test_restore_corrupt_without_force_is_500_with_reason() -> None:
     # data fault surfaced as a 500 with a machine-readable reason, matching the
     # create-direction gate (#749).
     use_case = _FakeUseCase(error=BackupCorruptError("x", corrupt_count=3))
-    app = _app(member=True, allow=True, restore=use_case)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 500
     assert resp.json()["reason"] == "working_set_corrupt"
+    # The gate-refused restore records backup:restore ERROR against the backup.
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 
 def test_restore_with_force_query_param_passes_force_true() -> None:
     use_case = _FakeUseCase(result=RestoreResult(forced_corrupt=True, corrupt_count=2))
-    app = _app(member=True, allow=True, restore=use_case)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
     client = next(_client(app))
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore?force=true")
@@ -334,6 +375,11 @@ def test_restore_with_force_query_param_passes_force_true() -> None:
     # A forced corrupt restore still publishes -> 204; force was forwarded.
     assert resp.status_code == 204
     assert use_case.calls[0]["force"] is True
+    # The deliberate corrupt restore records the distinct backup:force_restore
+    # SUCCESS (issue #743), not a routine backup:restore.
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 
 # --- delete ----------------------------------------------------------------
@@ -341,10 +387,15 @@ def test_restore_with_force_query_param_passes_force_true() -> None:
 
 def test_delete_is_204() -> None:
     use_case = _FakeUseCase()
-    app = _app(member=True, allow=True, delete=use_case)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, delete=use_case, recorder=recorder)
     client = next(_client(app))
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 204
+    # A successful delete records backup:delete SUCCESS against the backup.
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_DELETE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 
 def test_delete_unknown_backup_is_404() -> None:
