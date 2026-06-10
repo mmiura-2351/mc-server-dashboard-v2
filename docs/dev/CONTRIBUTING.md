@@ -49,11 +49,19 @@ make hooks-install
 This points `core.hooksPath` at the checked-in `.githooks/`. The **pre-commit**
 hook formats and lints the modules with staged changes; the **pre-push** hook
 runs the full `make check` (lint + typecheck + test for both ecosystems). The
-**post-checkout** hook warns loudly when the *primary* checkout (the repo root,
-not a worktree under `.claude/worktrees/`) is left off `main` — it is the deploy
-build source (Section 3), so the warning catches a stray checkout before the next
-rebuild ships the wrong ref. It does not auto-restore and stays silent in
-worktrees; restore the primary checkout with `git checkout main`.
+**post-checkout** hook auto-restores the *primary* checkout (the repo root, not
+a worktree under `.claude/worktrees/`) to `main` whenever it is left off it —
+it is the deploy build source (Section 3), so a stray `git checkout`, `git
+switch`, or `gh pr checkout` is immediately undone. The hook stays silent in
+worktrees. Edge cases:
+
+- **Dirty working tree** — if the primary checkout has uncommitted changes when
+  the stray checkout occurs, auto-restore is refused to protect those changes; a
+  loud error is printed instead. Stash or commit, then restore manually with
+  `git checkout main`.
+- **Intentional override** — set `MCSD_ALLOW_PRIMARY_BRANCH=1` in the
+  environment to suppress auto-restore for a single checkout (e.g. to inspect a
+  branch directly). A notice is still printed; restore manually when done.
 
 - Don't bypass failing pre-commit / pre-push hooks; fix the cause. If a hook
   fails, the commit did not happen — make a **new** commit rather than

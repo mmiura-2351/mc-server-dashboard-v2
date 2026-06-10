@@ -15,7 +15,7 @@
 	webui-lint webui-format webui-test webui-build webui-e2e \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
-	bootstrap hooks-install hooks-check
+	bootstrap hooks-install hooks-check hooks-test
 
 # golangci-lint is not part of the Go distribution; it is installed into a
 # module-local, gitignored ./.bin (see worker/README.md).
@@ -48,7 +48,7 @@ lint: api-lint worker-lint webui-lint proto-lint
 
 format: api-format worker-format webui-format
 
-test: api-test worker-test worker-e2e-compile webui-test
+test: api-test worker-test worker-e2e-compile webui-test hooks-test
 
 # docs/ convention gate (docs/README.md Conventions): relative links resolve,
 # no section-mark glyph, no 'v1' versioning term. Pure stdlib python3, no deps.
@@ -221,6 +221,11 @@ hooks-check:
 		echo "  Restore them with: make hooks-install"; \
 		echo "============================================================"; \
 	fi
+
+# Unit-test the checked-in git hooks. Pure bash + a temp git repo; no external
+# test runner required. Included in `make test`.
+hooks-test:
+	bash .githooks/test-post-checkout.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.
