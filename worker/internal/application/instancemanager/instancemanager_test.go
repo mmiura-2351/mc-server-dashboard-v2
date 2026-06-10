@@ -77,15 +77,30 @@ func (i *fakeInstance) wasStopped() (stopped, graceful bool) {
 	return i.stopped, i.graceful
 }
 
-// fakeControl is an in-memory ServerControl for ServerCommand forwarding.
+// fakeControl is an in-memory ServerControl for ServerCommand forwarding. When
+// seq is set, every executed line is also appended to it so a test can assert the
+// RCON ordering against another recorder (the snapshot save-off / save-on bracket,
+// #694). failOnCancelled makes Execute return the context error when ctx is
+// already cancelled, so a test can prove the deferred save-on ran on a live,
+// detached context rather than the request's dead one.
 type fakeControl struct {
-	reply string
-	err   error
-	lines []string
+	reply           string
+	err             error
+	lines           []string
+	seq             *[]string
+	failOnCancelled bool
 }
 
-func (c *fakeControl) Execute(_ context.Context, line string) (string, error) {
+func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) {
+	if c.failOnCancelled {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
 	c.lines = append(c.lines, line)
+	if c.seq != nil {
+		*c.seq = append(*c.seq, line)
+	}
 	return c.reply, c.err
 }
 

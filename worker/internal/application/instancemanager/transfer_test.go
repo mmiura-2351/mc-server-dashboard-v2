@@ -10,12 +10,19 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// fakeTransfer records hydrate/snapshot calls and returns a canned error.
+// fakeTransfer records hydrate/snapshot calls and returns a canned error. When
+// seq is set, Snapshot appends a "transfer" marker to it so a test can assert the
+// copy is ordered between the RCON save-off / save-on bracket (#694).
 type fakeTransfer struct {
 	mu        sync.Mutex
 	hydrated  []string // workingDir args
 	snapshots []string
 	err       error
+	seq       *[]string
+	// cancelDuringSnapshot, when set, is invoked at the start of Snapshot to model
+	// the request context being cancelled mid-transfer; Snapshot then returns
+	// context.Canceled. It proves the deferred save-on still runs (#694).
+	cancelDuringSnapshot context.CancelFunc
 }
 
 func (f *fakeTransfer) Hydrate(_ context.Context, _, _, workingDir string) error {
@@ -29,7 +36,37 @@ func (f *fakeTransfer) Snapshot(_ context.Context, _, _, workingDir string) erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshots = append(f.snapshots, workingDir)
+	if f.seq != nil {
+		*f.seq = append(*f.seq, "transfer")
+	}
+	if f.cancelDuringSnapshot != nil {
+		f.cancelDuringSnapshot()
+		return context.Canceled
+	}
 	return f.err
+}
+
+// equalLines reports whether two RCON-line slices are element-wise equal.
+func equalLines(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// containsLine reports whether line appears in lines.
+func containsLine(lines []string, line string) bool {
+	for _, l := range lines {
+		if l == line {
+			return true
+		}
+	}
+	return false
 }
 
 func hydrateCmd() session.Command {
@@ -118,10 +155,12 @@ func TestSnapshotTriggerTransferFailureIsCoded(t *testing.T) {
 	}
 }
 
-// A running-server snapshot issues a plain "save-all" over RCON — never the
-// blocking "save-all flush", whose synchronous main-thread flush can trip the
-// server watchdog and crash the server (#693).
-func TestSnapshotTriggerRunningServerIssuesSaveAllNotFlush(t *testing.T) {
+// A running-server snapshot brackets the working-dir copy with save-off →
+// save-all → save-on (#694): save-off disables auto-save so a region file cannot
+// be captured torn mid-copy, save-all (never the blocking "save-all flush", whose
+// synchronous main-thread flush can trip the server watchdog, #693) refreshes the
+// on-disk copy, and save-on re-enables auto-save afterwards.
+func TestSnapshotTriggerRunningServerBracketsCopyWithSaveOffOn(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
@@ -132,14 +171,90 @@ func TestSnapshotTriggerRunningServerIssuesSaveAllNotFlush(t *testing.T) {
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("SnapshotTrigger result = %+v, want success", res)
 	}
-	if len(ctrl.lines) != 1 || ctrl.lines[0] != "save-all" {
-		t.Fatalf("rcon lines = %v, want [\"save-all\"]", ctrl.lines)
+	want := []string{"save-off", "save-all", "save-on"}
+	if !equalLines(ctrl.lines, want) {
+		t.Fatalf("rcon lines = %v, want %v", ctrl.lines, want)
 	}
 }
 
-// The pre-snapshot save-all is best-effort: an RCON failure is logged, not
-// propagated, and the snapshot still succeeds (FR-DATA-5).
-func TestSnapshotTriggerRunningServerSaveAllFailureIsNonFatal(t *testing.T) {
+// save-off must precede the transfer (the world is quiesced before the copy
+// starts) and save-on must follow it (auto-save is only re-enabled after the copy
+// completes) — otherwise the bracket would not actually protect the copy window.
+func TestSnapshotTriggerRunningServerSaveOffBracketsTheTransfer(t *testing.T) {
+	var seq []string
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	tr := &fakeTransfer{seq: &seq}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("SnapshotTrigger result = %+v, want success", res)
+	}
+	want := []string{"save-off", "save-all", "transfer", "save-on"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v", seq, want)
+	}
+}
+
+// save-on MUST still run when the transfer itself fails: the deferred restore
+// re-enables auto-save before the failed result is returned, so a transfer error
+// never leaves the server with auto-save disabled (#694).
+func TestSnapshotTriggerRunningServerSaveOnRunsOnTransferError(t *testing.T) {
+	var seq []string
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	tr := &fakeTransfer{seq: &seq, err: errors.New("boom")}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger = %+v, want transfer-failed", res)
+	}
+	want := []string{"save-off", "save-all", "transfer", "save-on"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (save-on must run after a failed transfer)", seq, want)
+	}
+}
+
+// save-on MUST still run when the request context is already cancelled: the
+// deferred restore runs on a context detached from the request's, so a
+// cancelled/timed-out snapshot still re-enables auto-save rather than leaving the
+// server unable to persist (#694).
+func TestSnapshotTriggerRunningServerSaveOnRunsWhenContextCancelled(t *testing.T) {
+	// failOnCancelled makes the RCON Execute fail on a dead context, so save-on can
+	// only succeed if the restore runs on a live, detached context.
+	ctrl := &fakeControl{reply: "ok", failOnCancelled: true}
+	m := newManager(t, &fakeDriver{}, ctrl)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// The transfer cancels the request context mid-copy (a cancelled/timed-out
+	// snapshot), after save-off has already disabled auto-save.
+	m.WithTransfer(&fakeTransfer{cancelDuringSnapshot: cancel})
+
+	res := m.Handle(ctx, snapshotCmd())
+	if res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want failure under cancelled context", res)
+	}
+	// save-on ran (it would have errored on the cancelled request context, so its
+	// presence proves the restore used a live, detached context).
+	if !containsLine(ctrl.lines, "save-on") {
+		t.Fatalf("rcon lines = %v, want a save-on (restore must run on a detached context)", ctrl.lines)
+	}
+}
+
+// The save-off toggle is best-effort: when it fails the snapshot proceeds without
+// the bracket (the consistency benefit is forfeited for this run) and no save-on
+// is issued — auto-save was never disabled, so re-enabling it would be wrong
+// (#694). The snapshot still succeeds (FR-DATA-5).
+func TestSnapshotTriggerRunningServerSaveOffFailureIsNonFatalAndSkipsSaveOn(t *testing.T) {
 	ctrl := &fakeControl{err: errors.New("rcon: read length: EOF")}
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
@@ -149,9 +264,12 @@ func TestSnapshotTriggerRunningServerSaveAllFailureIsNonFatal(t *testing.T) {
 	}
 	res := m.Handle(context.Background(), snapshotCmd())
 	if !res.Success {
-		t.Fatalf("SnapshotTrigger result = %+v, want success despite save-all failure", res)
+		t.Fatalf("SnapshotTrigger result = %+v, want success despite save-off failure", res)
 	}
 	if len(tr.snapshots) != 1 {
-		t.Fatalf("snapshots = %v, want one despite save-all failure", tr.snapshots)
+		t.Fatalf("snapshots = %v, want one despite save-off failure", tr.snapshots)
+	}
+	if containsLine(ctrl.lines, "save-on") {
+		t.Fatalf("rcon lines = %v, want no save-on when save-off never succeeded", ctrl.lines)
 	}
 }
