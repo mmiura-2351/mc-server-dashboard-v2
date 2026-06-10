@@ -56,6 +56,9 @@ class _Registry(WorkerRegistry):
     def mark_disconnected(self, worker_id, session):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
+    def is_current_session(self, worker_id, session):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
     def set_draining(self, worker_id, draining):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 

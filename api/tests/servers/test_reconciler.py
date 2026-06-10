@@ -57,6 +57,7 @@ def _server(
     observed: ObservedState,
     worker: WorkerId | None,
     observed_at: dt.datetime | None = _PAST_GRACE,
+    updated_at: dt.datetime = _PAST_GRACE,
 ) -> Server:
     return Server(
         id=ServerId.new(),
@@ -72,7 +73,7 @@ def _server(
         observed_at=observed_at,
         assigned_worker_id=worker,
         created_at=_PAST_GRACE,
-        updated_at=_PAST_GRACE,
+        updated_at=updated_at,
     )
 
 
@@ -249,6 +250,27 @@ async def test_divergence_within_grace_is_skipped() -> None:
         observed=ObservedState.CRASHED,
         worker=_WORKER,
         observed_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+
+
+async def test_fresh_intent_on_stale_observed_is_within_grace() -> None:
+    # A fresh start commits desired=running + updated_at=now on a server last
+    # observed stopped long ago (observed_at past grace). update_lifecycle
+    # refreshes updated_at but NOT observed_at, so grace measured from
+    # observed_at alone would give zero grace and re-dispatch start concurrently
+    # with the in-flight HTTP start. Grace is measured from updated_at too (#774).
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=_PAST_GRACE,
+        updated_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
     )
     uow.servers.seed(server)
     cp = FakeControlPlane()

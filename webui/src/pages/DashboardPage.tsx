@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
-import { Link } from "react-router";
+import { Link, useParams } from "react-router";
 import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -58,18 +58,34 @@ function useViewMode(): [ViewMode, (mode: ViewMode) => void] {
 }
 
 export function DashboardPage() {
-  const { communityId } = useActiveCommunity();
+  // The community to list is the URL `:cid` (#784) — not the active community,
+  // which can disagree with the URL on a stale bookmark or a community the user
+  // has left. The active-community list (the caller's membership) is only used
+  // to confirm the URL cid is one the caller belongs to.
+  const { cid } = useParams();
+  const { communities } = useActiveCommunity();
 
-  // The shell only routes here under an active community, but guard anyway: with
-  // no community there is nothing to list.
-  if (communityId === null) {
+  // Membership still loading: hold the chrome rather than flash a not-found.
+  if (communities === undefined) {
     return (
       <DashboardChrome>
-        <p className="sub">{t("shell.noCommunities")}</p>
+        <p className="sub">{t("dashboard.loading")}</p>
       </DashboardChrome>
     );
   }
-  return <Loaded communityId={communityId} />;
+  // The URL names a community the caller is not a member of (or no cid at all):
+  // show a clear not-found state instead of silently listing another community.
+  if (cid === undefined || !communities.some((c) => c.id === cid)) {
+    return (
+      <DashboardChrome>
+        <div className="empty">
+          <div className="big">{t("community.notFound.title")}</div>
+          <p className="sub">{t("community.notFound.body")}</p>
+        </div>
+      </DashboardChrome>
+    );
+  }
+  return <Loaded communityId={cid} />;
 }
 
 function DashboardChrome({
