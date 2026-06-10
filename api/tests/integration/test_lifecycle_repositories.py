@@ -641,7 +641,7 @@ async def test_sink_marks_worker_servers_unknown(engine: AsyncEngine) -> None:
     assert loaded.assigned_worker_id == WorkerId(worker)
 
 
-async def test_sink_counts_running_assignments(engine: AsyncEngine) -> None:
+async def test_sink_returns_running_assignment_ids(engine: AsyncEngine) -> None:
     community_id = await _seed_community(engine)
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
@@ -663,11 +663,13 @@ async def test_sink_counts_running_assignments(engine: AsyncEngine) -> None:
         await uow.commit()
 
     sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
-    count = await sink.count_running_assignments(worker_id=str(worker))
-    assert count == 1
+    ids = await sink.running_assignment_ids(worker_id=str(worker))
+    assert ids == {str(running.value)}
 
 
-async def test_repository_count_running_for_worker(engine: AsyncEngine) -> None:
+async def test_repository_running_assignment_ids_for_worker(
+    engine: AsyncEngine,
+) -> None:
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     server_id = await _create_server(engine, community_id, "survival")
@@ -684,8 +686,13 @@ async def test_repository_count_running_for_worker(engine: AsyncEngine) -> None:
 
     async with factory() as session:
         repo = SqlAlchemyServerRepository(session)
-        assert await repo.count_running_for_worker(WorkerId(worker)) == 1
-        assert await repo.count_running_for_worker(WorkerId(uuid.uuid4())) == 0
+        assert await repo.running_assignment_ids_for_worker(WorkerId(worker)) == {
+            str(server_id.value)
+        }
+        assert (
+            await repo.running_assignment_ids_for_worker(WorkerId(uuid.uuid4()))
+            == set()
+        )
 
 
 async def test_repository_list_running_assigned(engine: AsyncEngine) -> None:

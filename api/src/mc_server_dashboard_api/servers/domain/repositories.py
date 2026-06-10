@@ -166,11 +166,13 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def count_running_for_worker(self, worker_id: WorkerId) -> int:
-        """Count servers assigned to ``worker_id`` with desired=running.
+    async def running_assignment_ids_for_worker(self, worker_id: WorkerId) -> set[str]:
+        """Return the ids of servers assigned to ``worker_id`` with desired=running.
 
-        The placement-load tally used to rebuild a reconnected Worker's
-        assignment count (epic #7 reconciliation obligation).
+        The placement-load tally used to rebuild a reconnected Worker's assignment
+        count (epic #7 reconciliation obligation). Returns ids (not just a count) so
+        the registry can reconcile the rebuild against reserved-but-uncommitted
+        placements (#778); the count is ``len`` of this set.
         """
 
     @abc.abstractmethod

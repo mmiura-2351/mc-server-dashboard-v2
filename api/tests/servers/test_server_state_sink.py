@@ -52,10 +52,10 @@ async def test_mark_worker_servers_unknown_logs_on_non_uuid_worker_id(
     assert any(record.levelno == logging.ERROR for record in caplog.records)
 
 
-async def test_count_running_assignments_logs_on_non_uuid_worker_id(
+async def test_running_assignment_ids_logs_on_non_uuid_worker_id(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.ERROR):
-        count = await _sink().count_running_assignments(worker_id="worker-1")
-    assert count == 0
+        ids = await _sink().running_assignment_ids(worker_id="worker-1")
+    assert ids == set()
     assert any(record.levelno == logging.ERROR for record in caplog.records)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, and_, delete, func, or_, select, update
+from sqlalchemy import CursorResult, and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
@@ -257,12 +257,13 @@ class SqlAlchemyServerRepository(ServerRepository):
         result = await self._session.execute(stmt)
         return cast("CursorResult[Any]", result).rowcount
 
-    async def count_running_for_worker(self, worker_id: WorkerId) -> int:
-        stmt = select(func.count()).where(
+    async def running_assignment_ids_for_worker(self, worker_id: WorkerId) -> set[str]:
+        stmt = select(ServerModel.id).where(
             ServerModel.assigned_worker_id == worker_id.value,
             ServerModel.desired_state == DesiredState.RUNNING.value,
         )
-        return int((await self._session.execute(stmt)).scalar_one())
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {str(row) for row in rows}
 
     async def list_running_assigned(self) -> list[Server]:
         stmt = select(ServerModel).where(

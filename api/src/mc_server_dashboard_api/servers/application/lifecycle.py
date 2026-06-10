@@ -63,6 +63,7 @@ instance (issue #773/#774).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -174,19 +175,45 @@ class StartServer:
             server.assigned_worker_id = worker_id
             server.config = {**server.config, JAR_KEY_CONFIG_FIELD: jar_key}
             server.updated_at = self.clock.now()
-            applied = await self.uow.servers.update_lifecycle(
-                server,
-                expected_from=DesiredState.STOPPED,
-                require_unassigned=True,
-            )
-            if not applied:
-                # A concurrent start won the compare-and-set: the row is already
-                # running/assigned. Abort before dispatch or any count change so
-                # the lost race causes no double placement (FR-SRV-2).
-                raise LifecycleTransitionConflictError(str(server_id.value))
-            await self.uow.commit()
+            # Any failure across the CAS+commit window — a raising update_lifecycle or
+            # commit, the lost-race abort, or this request task being cancelled at an
+            # await (a client disconnect cancels the HTTP task) — must release the
+            # placement reservation (the slot _place tentatively took, #778), or it
+            # leaks permanently: a never-committed server id never appears in the
+            # authoritative tally, so no reconnect rebuild ever reclaims it. Releasing
+            # on an ambiguous commit failure is safe: if the commit actually landed,
+            # the committed count undercounts by one until the reconnect rebuild,
+            # exactly the recovery _compensate's docstring already relies on.
+            try:
+                applied = await self.uow.servers.update_lifecycle(
+                    server,
+                    expected_from=DesiredState.STOPPED,
+                    require_unassigned=True,
+                )
+                if not applied:
+                    # A concurrent start won the compare-and-set: the row is already
+                    # running/assigned. Abort before dispatch or any committed count
+                    # change so the lost race causes no double placement (FR-SRV-2).
+                    raise LifecycleTransitionConflictError(str(server_id.value))
+                await self.uow.commit()
+                # Confirm the placement reservation as a committed assignment now the
+                # intent is durable (#778); a no-op if a reconnect rebuild already
+                # counted this row. Confirm HERE — inside the transaction, immediately
+                # after the commit returns and with no await in between (a sync
+                # registry call) — not after the ``async with`` block: the UoW
+                # ``__aexit__`` awaits rollback()/close(), suspension points outside
+                # this try/except where a client-disconnect CancelledError (or a
+                # post-commit teardown error) would leave the committed reservation
+                # neither confirmed nor released, leaking it permanently (#840).
+                self.control_plane.increment_assignment(
+                    worker_id=worker_id, server_id=server_id
+                )
+            except (Exception, asyncio.CancelledError):
+                self.control_plane.release_reservation(
+                    worker_id=worker_id, server_id=server_id
+                )
+                raise
 
-        self.control_plane.increment_assignment(worker_id=worker_id)
         dispatch = _Dispatch()
         try:
             outcome = await self._launch(
@@ -291,19 +318,43 @@ class StartServer:
             server.assigned_worker_id = worker_id
             server.config = {**server.config, JAR_KEY_CONFIG_FIELD: jar_key}
             server.updated_at = self.clock.now()
-            applied = await self.uow.servers.update_lifecycle(
-                server,
-                expected_from=DesiredState.RUNNING,
-                require_unassigned=True,
-            )
-            if not applied:
-                # A concurrent assignment (a real start or another reconcile tick)
-                # won the compare-and-set; abort before dispatch or any count
-                # change so the lost race causes no double placement.
-                raise LifecycleTransitionConflictError(str(server_id.value))
-            await self.uow.commit()
+            # Release the placement reservation on any failure across the CAS+commit
+            # window — a raising update_lifecycle or commit, the lost-race abort, or a
+            # task cancellation at an await — so the tentatively-taken slot (#778) does
+            # not leak permanently (a never-committed server id never enters the
+            # authoritative tally, so no reconnect rebuild reclaims it). Releasing on
+            # an ambiguous commit failure is safe: a landed commit undercounts by one
+            # until the reconnect rebuild, the recovery this path already relies on.
+            try:
+                applied = await self.uow.servers.update_lifecycle(
+                    server,
+                    expected_from=DesiredState.RUNNING,
+                    require_unassigned=True,
+                )
+                if not applied:
+                    # A concurrent assignment (a real start or another reconcile tick)
+                    # won the compare-and-set; abort before dispatch or any committed
+                    # count change so the lost race causes no double placement.
+                    raise LifecycleTransitionConflictError(str(server_id.value))
+                await self.uow.commit()
+                # Confirm the placement reservation as a committed assignment now the
+                # intent is durable (#778); a no-op if a reconnect rebuild already
+                # counted this row. Confirm HERE — inside the transaction, immediately
+                # after the commit returns and with no await in between (a sync
+                # registry call) — not after the ``async with`` block: the UoW
+                # ``__aexit__`` awaits rollback()/close(), suspension points outside
+                # this try/except where a client-disconnect CancelledError (or a
+                # post-commit teardown error) would leave the committed reservation
+                # neither confirmed nor released, leaking it permanently (#840).
+                self.control_plane.increment_assignment(
+                    worker_id=worker_id, server_id=server_id
+                )
+            except (Exception, asyncio.CancelledError):
+                self.control_plane.release_reservation(
+                    worker_id=worker_id, server_id=server_id
+                )
+                raise
 
-        self.control_plane.increment_assignment(worker_id=worker_id)
         dispatch = _Dispatch()
         try:
             outcome = await self._launch(
@@ -514,6 +565,7 @@ class StartServer:
             await self.uow.servers.list_running_assigned()
         )
         return await self.control_plane.place(
+            server_id=server.id,
             backend=server.execution_backend,
             memory_limit_mb=memory_limit_from_config(server.config),
             committed_by_worker=committed,
@@ -684,7 +736,7 @@ class StopServer:
         # Decrement the placement load symmetrically with StartServer's
         # increment, right after desired flips to stopped. This keeps the
         # in-memory count consistent with the authoritative running-server tally
-        # (count_running_for_worker, used to rebuild after a reconnect): both
+        # (running_assignment_ids_for_worker, used to rebuild after a reconnect): both
         # define load as "servers assigned with desired=running". Deferring the
         # decrement to the StatusChange(stopped) event was considered but would
         # leave the count disagreeing with the desired-state tally during the

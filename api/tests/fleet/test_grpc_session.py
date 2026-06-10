@@ -618,7 +618,14 @@ async def test_cancelled_session_cancels_pending_outbound_get() -> None:
 async def test_reregister_rebuilds_assignment_count_from_tally() -> None:
     # The Worker is reported (via the authoritative tally) to be running 2 servers;
     # on (re)register the registry must rebuild its load to 2, not the reset 0.
-    sink = FakeServerStateSink(running_counts={_WORKER_ID: 2})
+    sink = FakeServerStateSink(
+        running_ids={
+            _WORKER_ID: {
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            }
+        }
+    )
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
         FakeClock(_T0),

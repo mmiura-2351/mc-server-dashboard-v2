@@ -304,10 +304,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 consecutive_failures = 0
 
     async def _rebuild_assignments(self, worker_id: WorkerId) -> None:
-        count = await self._state_sink.count_running_assignments(
+        server_ids = await self._state_sink.running_assignment_ids(
             worker_id=worker_id.value
         )
-        self._registry.set_assignment(worker_id, count)
+        self._registry.set_assignment(worker_id, server_ids)
 
     async def _authenticate(
         self,
