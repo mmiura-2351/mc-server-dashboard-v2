@@ -774,6 +774,19 @@
         "title": "DirListingResponse",
         "type": "object"
       },
+      "DrainResponse": {
+        "properties": {
+          "servers_stopped": {
+            "title": "Servers Stopped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "servers_stopped"
+        ],
+        "title": "DrainResponse",
+        "type": "object"
+      },
       "EffectivePermissionsResponse": {
         "description": "The caller's community-wide codes and per-resource grants (issue #354).",
         "properties": {
@@ -6801,7 +6814,14 @@
           }
         ],
         "responses": {
-          "204": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrainResponse"
+                }
+              }
+            },
             "description": "Successful Response"
           },
           "422": {

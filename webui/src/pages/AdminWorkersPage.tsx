@@ -10,8 +10,9 @@ import { t } from "../i18n/index.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 
 // Platform admin Workers page (WEBUI_SPEC.md 6.12): the full fleet table with a
-// per-worker drain/undrain toggle. Drain is `PUT /workers/{id}/drain` and
-// undrain is `DELETE /workers/{id}/drain` (both 204, the worker:manage axis).
+// per-worker drain/undrain toggle. Drain is `PUT /workers/{id}/drain` (200 with
+// a `DrainResponse` body) and undrain is `DELETE /workers/{id}/drain` (204, the
+// worker:manage axis).
 // The status pill and heartbeat-age helpers are shared with the Overview page
 // rather than duplicated (#477).
 

@@ -6,7 +6,26 @@ since the fleet is cross-community infrastructure, not community-scoped:
 - ``GET /workers`` lists the registered Workers with their advertised
   capabilities, current liveness, and load (FR-WRK-2).
 - ``PUT``/``DELETE /workers/{worker_id}/drain`` set or clear a Worker's drain
-  flag (FR-WRK-5, worker:manage); a draining Worker is excluded from placement.
+  flag (FR-WRK-5, worker:manage); a draining Worker is excluded from placement
+  AND its assigned servers are marked ``desired=stopped``. The reconciler then
+  drives the graceful stop, which since #849 also takes the final snapshot (the
+  stop scratch is held for it since #845). Clearing the flag only re-enables
+  placement; it does not restart the servers drain stopped.
+
+  Convergence is ASYNCHRONOUS: ``PUT`` returns immediately with the count it
+  *marked*, not stopped. The stops (and snapshots) happen only after the
+  reconciler's grace window (120s default) plus a tick, and only while the Worker
+  stays connected — an operator MUST keep the Worker up until the stops converge,
+  since shutting the host down first defers every stop and snapshot until
+  reconnect (which never happens in a decommission). Confirm convergence PER
+  SERVER — each drain-marked server reaching ``observed=stopped`` and unassigned
+  — NOT by assigned load: drain decrements the placement load synchronously, so
+  ``GET /workers`` assigned load drops to 0 before any stop runs.
+
+  Clearing the drain flag before convergence opens a transient oversubscription
+  window: the load was freed at drain time, so the re-enabled Worker can take new
+  placements while its drained instances are still stopping. Wait for convergence
+  before un-draining.
 """
 
 from __future__ import annotations
@@ -61,6 +80,16 @@ class WorkersResponse(BaseModel):
     workers: list[WorkerResponse]
 
 
+class DrainResponse(BaseModel):
+    # The number of assigned servers this drain call MARKED desired=stopped — an
+    # async intent count, not the number already stopped. The reconciler then
+    # drives the graceful stop + final snapshot while the Worker stays connected
+    # (FR-WRK-5); confirm convergence per server (each reaching observed=stopped
+    # and unassigned), NOT by assigned load — drain decrements the load
+    # synchronously, so it drops to 0 before any stop runs.
+    servers_stopped: int
+
+
 def _to_response(snapshot: WorkerSnapshot) -> WorkerResponse:
     caps = snapshot.capabilities
     return WorkerResponse(
@@ -88,17 +117,15 @@ async def list_workers(
     return WorkersResponse(workers=[_to_response(w) for w in use_case()])
 
 
-@router.put(
-    "/workers/{worker_id}/drain",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
+@router.put("/workers/{worker_id}/drain")
 async def set_worker_drain(
     worker_id: str,
     use_case: Annotated[SetWorkerDrain, Depends(get_set_worker_drain)],
     user: Annotated[User, Depends(require_platform_admin)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
-) -> None:
-    if not use_case(worker_id=WorkerId(worker_id), draining=True):
+) -> DrainResponse:
+    servers_stopped = await use_case(worker_id=WorkerId(worker_id), draining=True)
+    if servers_stopped is None:
         raise problem(status.HTTP_404_NOT_FOUND, "not_found")
     # Worker ids are not UUIDs; the worker is named by the operation code, not a
     # UUID target_id (DATABASE.md Section 9 target_id is a UUID soft reference).
@@ -110,6 +137,7 @@ async def set_worker_drain(
             target_type=ops.TARGET_WORKER,
         )
     )
+    return DrainResponse(servers_stopped=servers_stopped)
 
 
 @router.delete(
@@ -122,7 +150,7 @@ async def clear_worker_drain(
     user: Annotated[User, Depends(require_platform_admin)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
-    if not use_case(worker_id=WorkerId(worker_id), draining=False):
+    if await use_case(worker_id=WorkerId(worker_id), draining=False) is None:
         raise problem(status.HTTP_404_NOT_FOUND, "not_found")
     await recorder.record(
         AuditEvent(

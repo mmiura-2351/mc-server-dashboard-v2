@@ -91,7 +91,11 @@ def test_set_drain_marks_worker_draining_in_listing() -> None:
     app, _ = _app(platform_admin=True)
     client = next(_client(app))
 
-    assert client.put("/api/workers/worker-1/drain").status_code == 204
+    resp = client.put("/api/workers/worker-1/drain")
+    assert resp.status_code == 200
+    # No UUID-format worker / no assigned servers in this in-memory fixture, so the
+    # count is zero; the response shape (servers_stopped) is what this asserts.
+    assert resp.json() == {"servers_stopped": 0}
 
     worker = client.get("/api/workers").json()["workers"][0]
     assert worker["status"] == "draining"
