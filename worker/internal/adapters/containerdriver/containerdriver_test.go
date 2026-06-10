@@ -57,7 +57,12 @@ type fakeDocker struct {
 	// container that lingers through the first kill(s) and dies on a later retry,
 	// driving the re-attemptable-Stop path (issue #253).
 	killSurvive int
-	removed     []string
+	// killErrs scripts per-call Kill errors (the last entry repeats once exhausted);
+	// a nil entry lets that Kill proceed normally. It models a docker kill call that
+	// errors (hung/erroring daemon) on the first attempt and succeeds on a retry,
+	// driving the kill-error re-attemptable-Stop path (issue #816).
+	killErrs []error
+	removed  []string
 
 	listResult []Container
 	listErr    error
@@ -164,6 +169,16 @@ func (f *fakeDocker) Kill(_ context.Context, _ string) error {
 	f.mu.Lock()
 	f.killCalled = true
 	f.killCalls++
+	if len(f.killErrs) > 0 {
+		err := f.killErrs[0]
+		if len(f.killErrs) > 1 {
+			f.killErrs = f.killErrs[1:]
+		}
+		if err != nil {
+			f.mu.Unlock()
+			return err
+		}
+	}
 	survive := f.killNoExit || f.killSurvive > 0
 	if f.killSurvive > 0 {
 		f.killSurvive--
@@ -304,13 +319,22 @@ func TestContainerSample(t *testing.T) {
 type fakeControl struct {
 	stopCalled bool
 	onStop     func()
+	// hangUntilCtxDone models a pathological peer that drags the RCON "stop"
+	// exchange: Execute blocks until the call's ctx is cancelled (the stop-path
+	// phase deadline), then returns its error. tryRCONStop must give up at the
+	// phase budget rather than ride the whole escalation deadline (issue #832).
+	hangUntilCtxDone bool
 }
 
-func (c *fakeControl) Execute(_ context.Context, line string) (string, error) {
+func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) {
 	if line == "stop" {
 		c.stopCalled = true
 		if c.onStop != nil {
 			c.onStop()
+		}
+		if c.hangUntilCtxDone {
+			<-ctx.Done()
+			return "", ctx.Err()
 		}
 	}
 	return "", nil
@@ -897,6 +921,42 @@ func TestGracefulStopFallsBackToDockerStop(t *testing.T) {
 	}
 }
 
+// A pathological RCON peer that drags the "stop" exchange must not consume the
+// whole escalation budget: tryRCONStop runs under its own phase deadline, so it
+// gives up promptly and the docker stop/kill steps keep their full grace (issue
+// #832). Here the peer hangs the "stop" until its phase ctx fires; the docker
+// stop then exits the container, so Stop completes without escalating to docker
+// kill.
+func TestStopRCONPhaseBudgetPreservesEscalationGrace(t *testing.T) {
+	prev := rconPhaseCap
+	rconPhaseCap = 20 * time.Millisecond
+	t.Cleanup(func() { rconPhaseCap = prev })
+
+	docker := newFakeDocker()
+	ctrl := &fakeControl{hangUntilCtxDone: true}
+	d := newTestDriver(docker, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if !ctrl.stopCalled {
+		t.Fatal("expected RCON stop to be attempted")
+	}
+	if !docker.stopWasCalled() {
+		t.Fatal("expected docker stop after the hung RCON phase gave up")
+	}
+	if docker.killWasCalled() {
+		t.Fatal("Stop escalated to docker kill: the stop grace was collapsed by the hung RCON")
+	}
+}
+
 // When the container ignores docker stop past the timeout, the driver escalates
 // to docker kill.
 func TestGracefulStopEscalatesToKill(t *testing.T) {
@@ -1113,6 +1173,38 @@ func TestRetryStopStillSurvivingFailsAgain(t *testing.T) {
 	if docker.killCount() != 2 {
 		t.Fatalf("docker kill called %d times, want 2 (the retry must re-issue the kill, not short-circuit)", docker.killCount())
 	}
+}
+
+// When the docker kill call itself errors (hung/erroring daemon), Stop must fail
+// without leaving the stopping latch set: a retried Stop has to re-run the full
+// kill sequence rather than short-circuit on the entry guard and return a false
+// nil success, which would let the API remove the orphan and GC its scratch while
+// the container may still be alive (issue #816). Here the retry kill succeeds.
+func TestStopReattemptableAfterKillError(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
+	// docker stop never exits the container, so each Stop falls through to docker
+	// kill; the first kill errors and the retry kill exits the container.
+	docker.stopNoExit = true
+	docker.killErrs = []error{errors.New("daemon hung"), nil}
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("expected first Stop to fail when docker kill errors")
+	}
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("retry Stop = %v, want success once the retry kill succeeds", err)
+	}
+	if docker.killCount() != 2 {
+		t.Fatalf("docker kill called %d times, want 2 (initial errors + retry re-issues the kill)", docker.killCount())
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
 }
 
 // A forced stop skips RCON and goes straight to docker stop.

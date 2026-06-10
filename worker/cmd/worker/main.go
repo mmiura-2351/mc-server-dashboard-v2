@@ -95,7 +95,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	manager.WithTransfer(datatransfer.New(transferClient))
+	manager.WithTransfer(datatransfer.New(transferClient).WithLogger(logger))
 	runner := session.NewRunner(dialer, caps, sysClock, logger, session.WithCommandHandler(manager))
 
 	// Cancel the run context on SIGINT/SIGTERM for a clean stream shutdown.
