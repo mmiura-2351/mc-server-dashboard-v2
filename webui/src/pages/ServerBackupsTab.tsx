@@ -689,7 +689,7 @@ function RestoreDialog({
                 checked={acknowledged}
                 onChange={(e) => setAcknowledged(e.target.checked)}
               />
-              {t("backups.health.quarantinedTitle")}
+              {t("backups.restoreDialog.damagedAck")}
             </label>
           )}
         </>
