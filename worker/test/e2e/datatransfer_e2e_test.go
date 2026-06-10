@@ -74,14 +74,14 @@ func TestSnapshotThenHydrateRoundTrip(t *testing.T) {
 
 	// Act 1: snapshot (pack + upload + publish). A clean publish is 204.
 	snapshotURL := scopeURL(base, community, server, "snapshot")
-	if err := client.Snapshot(ctx, snapshotURL, credential, src); err != nil {
+	if _, err := client.Snapshot(ctx, snapshotURL, credential, src); err != nil {
 		t.Fatalf("Snapshot against real API: %v", err)
 	}
 
 	// Act 2: hydrate the just-published set back into a fresh dir.
 	dest := t.TempDir()
 	hydrateURL := scopeURL(base, community, server, "working-set")
-	if err := client.Hydrate(ctx, hydrateURL, credential, dest); err != nil {
+	if _, err := client.Hydrate(ctx, hydrateURL, credential, dest); err != nil {
 		t.Fatalf("Hydrate against real API: %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestHydrateRejectsWrongCredential(t *testing.T) {
 	defer cancel()
 
 	hydrateURL := scopeURL(base, community, server, "working-set")
-	err := client.Hydrate(ctx, hydrateURL, "wrong-credential", t.TempDir())
+	_, err := client.Hydrate(ctx, hydrateURL, "wrong-credential", t.TempDir())
 	if err == nil {
 		t.Fatal("expected an error hydrating with a wrong credential (401)")
 	}

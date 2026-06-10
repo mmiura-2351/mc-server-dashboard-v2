@@ -83,8 +83,11 @@ class WorkerRegistry(abc.ABC):
         (an unknown Worker, or one that re-registered without that id because its
         scratch was wiped or GC'd) — the lifecycle layer then hydrates rather than
         booting a server on an empty/absent working set. A held generation of 0
-        means "held but at an unknown generation"; the lifecycle layer treats it as
-        older than any published store generation and hydrates.
+        means "held, but at generation 0" (an unknown / never-recorded generation):
+        the lifecycle layer hydrates whenever the store generation is greater (the
+        held set is stale), and skips only when the store generation is also 0 — a
+        never-snapshotted server, where ``0 >= 0`` keeps the Worker's existing
+        working set rather than hydrating an empty published set over it.
         """
 
     @abc.abstractmethod

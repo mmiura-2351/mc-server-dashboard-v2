@@ -56,6 +56,9 @@ from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
 )
+from mc_server_dashboard_api.servers.domain.store_generation import (
+    StoreGenerationReader,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -95,6 +98,37 @@ class FakeJarProvisioner(JarProvisioner):
         if self._fail:
             raise JarProvisioningError("forced provisioning failure")
         return self._key
+
+
+class FakeStoreGenerationReader(StoreGenerationReader):
+    """Authoritative store-generation seam double for the skip-hydrate decision.
+
+    By default it mirrors the server row's ``store_generation`` (the normal case,
+    DB mirror == Storage), reading it from the shared fake repo so the existing
+    seeded-generation tests drive it unchanged. Pass ``generation`` to pin a fixed
+    value that DIVERGES from the row — e.g. Storage ahead of a lagging DB mirror
+    (issue #763) — so a test can prove the reconciler compares against Storage, not
+    the DB column.
+    """
+
+    def __init__(
+        self,
+        servers: "FakeServerRepository | None" = None,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        self._servers = servers
+        self._generation = generation
+
+    async def current_generation(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        if self._generation is not None:
+            return self._generation
+        if self._servers is None:
+            return 0
+        server = self._servers.by_id.get(server_id)
+        return server.store_generation if server is not None else 0
 
 
 class FakeVersionValidator(VersionValidator):

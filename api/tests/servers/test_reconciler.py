@@ -41,6 +41,7 @@ from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
     FakeJarProvisioner,
+    FakeStoreGenerationReader,
     FakeUnitOfWork,
 )
 
@@ -87,6 +88,7 @@ def _reconciler(
             control_plane=cp,
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
+            store_generation=FakeStoreGenerationReader(uow.servers),
         ),
         stop_server=StopServer(uow=uow, control_plane=cp, clock=clock),
         control_plane=cp,

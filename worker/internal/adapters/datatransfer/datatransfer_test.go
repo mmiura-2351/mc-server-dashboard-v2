@@ -175,6 +175,63 @@ func TestSnapshotPacksAndUploadsWithContentLength(t *testing.T) {
 	}
 }
 
+func TestSnapshotExcludesGenerationMarker(t *testing.T) {
+	// The Worker-private generation marker at the scratch root must NOT be packed
+	// into the snapshot (issue #763): it is Worker-private state that would
+	// otherwise land in the authoritative stored working set and be re-hydrated to
+	// other Workers / the live Minecraft dir. A same-named file deeper in the tree
+	// is part of the legitimate world and must still be packed.
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, generationMarkerFile), []byte("7"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "server.properties"), []byte("p"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// A file with the marker's name but inside a sub-tree is NOT the marker.
+	nested := filepath.Join(srcDir, "world")
+	if err := os.MkdirAll(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, generationMarkerFile), []byte("nested"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(srv.Client())
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	names := map[string]bool{}
+	tr := tar.NewReader(bytes.NewReader(received))
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names[h.Name] = true
+	}
+	if names[generationMarkerFile] {
+		t.Fatalf("snapshot tar must not contain the root generation marker %q", generationMarkerFile)
+	}
+	if !names["server.properties"] {
+		t.Fatal("snapshot tar must contain server.properties")
+	}
+	if !names["world/"+generationMarkerFile] {
+		t.Fatalf("snapshot tar must contain the nested %q (not the root marker)", generationMarkerFile)
+	}
+}
+
 func TestSnapshotStreamsLargeWorkingSetWithMatchingContentLength(t *testing.T) {
 	// A multi-chunk working set must upload with a Content-Length that matches the
 	// streamed byte count without the client buffering the whole tar in RAM. The

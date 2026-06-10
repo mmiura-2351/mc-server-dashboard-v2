@@ -92,6 +92,9 @@ from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
 from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_loop
+from mc_server_dashboard_api.servers.adapters.store_generation import (
+    StorageGenerationReader,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
@@ -494,6 +497,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             pool=StorageJarPool(jars=storage),
                         )
                     ),
+                    store_generation=StorageGenerationReader(storage=storage),
                 ),
                 stop_server=StopServer(
                     uow=ServersUnitOfWork(create_session_factory(engine)),

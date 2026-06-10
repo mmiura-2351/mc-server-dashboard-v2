@@ -83,6 +83,9 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisione
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     memory_limit_from_config,
 )
+from mc_server_dashboard_api.servers.domain.store_generation import (
+    StoreGenerationReader,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
@@ -138,6 +141,7 @@ class StartServer:
     control_plane: ControlPlane
     clock: Clock
     jar_provisioner: JarProvisioner
+    store_generation: StoreGenerationReader
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -327,11 +331,23 @@ class StartServer:
         # Worker too old to report) OR holds a STALE generation (presence at an older
         # generation, e.g. an A->B->A leftover scratch B has since advanced past) —
         # never silently boot an empty/absent/stale working set.
+        #
+        # The threshold is Storage's authoritative current_generation, NOT the
+        # server.store_generation DB mirror. The snapshot endpoint publishes (Storage
+        # advances) and only then mirrors the new generation onto the DB row in a
+        # SEPARATE transaction; if that mirror write ever fails after a durable
+        # publish, the DB would lag Storage, and a Worker holding the prior generation
+        # would then satisfy held >= db_generation and WRONGLY skip a hydrate it needs
+        # — a #696-class world rollback. Reading Storage directly closes that lag
+        # window: the generation advances atomically with the working set it names.
         held_generation = self.control_plane.held_generation(
             worker_id=worker_id, server_id=server_id
         )
+        store_generation = await self.store_generation.current_generation(
+            community_id=community_id, server_id=server_id
+        )
         skip_hydrate = (
-            held_generation is not None and held_generation >= server.store_generation
+            held_generation is not None and held_generation >= store_generation
         )
         outcome = await self._launch(
             server, community_id, server_id, worker_id, skip_hydrate=skip_hydrate

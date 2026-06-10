@@ -34,6 +34,15 @@ import (
 	"strings"
 )
 
+// generationMarkerFile is the Worker-private marker the instance manager writes
+// at the scratch root to record its local working-set generation (issue #763).
+// It is excluded from a snapshot pack so this Worker-private state never lands in
+// the authoritative stored working set (and is never re-hydrated to another
+// Worker or the live Minecraft dir); Hydrate re-writes it fresh from the response
+// header after unpack, so excluding it on pack is purely corrective. Kept as a
+// local constant to avoid the adapter depending on the instancemanager package.
+const generationMarkerFile = ".mcsd_generation"
+
 // generationHeader is the response header the API data plane stamps on a hydrate
 // (the store generation served) and a snapshot (the new store generation
 // published) so the Worker can record the generation of its local working set
@@ -238,7 +247,8 @@ func safeJoin(root, name string) (string, error) {
 }
 
 // packTar writes a tar of srcDir's contents (entries relative to srcDir) into w,
-// in a deterministic (lexicographic) order. Nothing is excluded at M1.
+// in a deterministic (lexicographic) order. The Worker-private generation marker
+// at the scratch root is excluded (issue #763); nothing else is.
 func packTar(srcDir string, w io.Writer) error {
 	root, err := filepath.Abs(srcDir)
 	if err != nil {
@@ -273,6 +283,13 @@ func walkInto(tw *tar.Writer, root, dir string) error {
 	}
 	// os.ReadDir already returns entries sorted by name.
 	for _, entry := range entries {
+		// Exclude the Worker-private generation marker at the scratch root so it
+		// never lands in the authoritative stored working set (issue #763). It only
+		// ever lives at the root, so the dir == root guard keeps a same-named file in
+		// a sub-tree (which would be part of the legitimate world) untouched.
+		if dir == root && entry.Name() == generationMarkerFile {
+			continue
+		}
 		full := filepath.Join(dir, entry.Name())
 		rel, err := filepath.Rel(root, full)
 		if err != nil {
