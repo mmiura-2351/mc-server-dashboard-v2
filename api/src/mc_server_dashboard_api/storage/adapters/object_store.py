@@ -478,6 +478,17 @@ class ObjectStorage(Storage):
         self._release_staging(incoming)
         h.consumed = True
 
+    async def check_current_health(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> WorkingSetReport:
+        # The one-shot sweep's snapshot fsck (issue #744) is fs-only: it walks a
+        # local working-set directory (issue #738), which the object backend does
+        # not materialize. Like the create/restore gates (#749/#743), the object
+        # adapter is ungated (#750), so a healthy report is returned to satisfy the
+        # Port. ``del`` the scope to mark it intentionally unused.
+        del community_id, server_id
+        return WorkingSetReport()
+
     async def _publish(
         self,
         client: S3Client,
@@ -678,6 +689,21 @@ class ObjectStorage(Storage):
                     await asyncio.to_thread(spool.unlink, missing_ok=True)
         finally:
             self._release_staging(incoming)
+        return WorkingSetReport()
+
+    async def check_backup_health(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> WorkingSetReport:
+        # The one-shot sweep's per-backup fsck (issue #744) extracts a local working
+        # set and walks it (issue #738), which the object backend does not stage —
+        # like the restore gate (#743), it is fs-only and the object adapter is
+        # ungated (#750). The object's existence is still confirmed (so an unknown
+        # key is a NotFoundError, matching the fs adapter) before the healthy report
+        # is returned to satisfy the Port.
+        backup_key = self._backup_key(community_id, server_id, key)
+        async with self._client_factory() as client:
+            if await client.head_object(backup_key) is None:
+                raise NotFoundError(f"backup not found: {key.value}")
         return WorkingSetReport()
 
     async def delete_backup(

@@ -747,6 +747,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # reports corruption. ``corrupt_count`` is the count carried on the error.
         self.corrupt_refs: set[str] = set()
         self.corrupt_count = 1
+        # The sweep (#744) snapshot fsck: corrupt-region count of each server's
+        # published ``current``; a server absent here has no published snapshot, so
+        # ``check_current_health`` returns None (nothing to fsck).
+        self.current_corrupt: dict[ServerId, int] = {}
         self.deleted: list[tuple[ServerId, str]] = []
         self.stored: list[ServerId] = []
         self._counter = 0
@@ -778,6 +782,18 @@ class FakeBackupArchiveStore(BackupArchiveStore):
             raise BackupCorruptError(storage_ref, corrupt_count=self.corrupt_count)
         self.restored.append((server_id, storage_ref))
         return self.corrupt_count if storage_ref in self.corrupt_refs else 0
+
+    async def check_backup_health(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        if storage_ref not in self.archives:
+            raise BackupNotFoundError(storage_ref)
+        return self.corrupt_count if storage_ref in self.corrupt_refs else 0
+
+    async def check_current_health(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> int | None:
+        return self.current_corrupt.get(server_id)
 
     async def delete(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str

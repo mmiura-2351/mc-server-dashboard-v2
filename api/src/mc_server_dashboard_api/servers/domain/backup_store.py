@@ -64,6 +64,32 @@ class BackupArchiveStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def check_backup_health(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        """Extract an archive and structurally fsck it (the sweep probe, issue #744).
+
+        Read-only: extracts the archive into throwaway staging, walks it for corrupt
+        ``.mca`` region files (issue #738), and discards the staging — ``current`` is
+        never touched. Returns the corrupt region-file count (``0`` when healthy) so
+        the sweep persists ``HEALTHY`` / ``QUARANTINED`` on the backup row. Raises
+        :class:`BackupNotFoundError` for an unknown ref.
+        """
+
+    @abc.abstractmethod
+    async def check_current_health(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> int | None:
+        """Structurally fsck the on-disk authoritative snapshot (the sweep, issue #744).
+
+        Read-only: walks ``current/`` for corrupt ``.mca`` region files (issue #738)
+        in place — a published snapshot is immutable/quiesced, so no staging is
+        needed and ``current`` is never mutated. Returns the corrupt region-file
+        count (``0`` when healthy), or ``None`` when no snapshot has been published
+        (nothing to fsck) so the sweep skips the server's snapshot without erroring.
+        """
+
+    @abc.abstractmethod
     async def delete(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> None:

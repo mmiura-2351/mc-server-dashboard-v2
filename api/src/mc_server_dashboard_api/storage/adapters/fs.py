@@ -611,6 +611,48 @@ class FsStorage(Storage):
         finally:
             self._release_staging(staging)
 
+    async def check_backup_health(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> WorkingSetReport:
+        # One-shot fsck of an existing backup (issue #744). Extract the archive into
+        # a throwaway staging under the decompressed-byte cap (the restore path's
+        # extractor), walk it for structurally corrupt ``.mca`` files (#738), then
+        # remove the staging. Read-only: it never publishes and never touches
+        # ``current`` — only the WorkingSetReport is returned, so the caller persists
+        # the verdict (HEALTHY/QUARANTINED) in the DB. Re-running yields the same
+        # report (no on-disk state drifts).
+        archive = self._backup_path(community_id, server_id, key)
+        if not await asyncio.to_thread(archive.is_file):
+            raise NotFoundError(f"backup not found: {key.value}")
+        staging = (
+            self._server_root(community_id, server_id)
+            / "incoming"
+            / f"fsck-{key.value}-{uuid.uuid4().hex}"
+        )
+        await asyncio.to_thread(staging.mkdir, parents=True, exist_ok=False)
+        # The staging dir lives under incoming/ exactly like a restore, so pin it
+        # with the same active-staging lease for the life of the fsck — otherwise a
+        # concurrent orphan-staging sweep would _rmtree it mid-extract (issue #183).
+        self._register_staging(staging)
+        try:
+            await asyncio.to_thread(
+                _extract_tar_gz_into, archive, staging, self._max_restore_bytes
+            )
+            return await asyncio.to_thread(check_working_set, staging)
+        finally:
+            await asyncio.to_thread(_rmtree, staging)
+            self._release_staging(staging)
+
+    async def check_current_health(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> WorkingSetReport:
+        # One-shot fsck of the on-disk authoritative snapshot (issue #744). A
+        # published snapshot is immutable/quiesced, so scanning ``current/`` in place
+        # is safe and needs no staging. Read-only: it never mutates ``current``.
+        # Raises NotFoundError if nothing is published.
+        current = await asyncio.to_thread(self._current_dir, community_id, server_id)
+        return await asyncio.to_thread(check_working_set, current)
+
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> None:

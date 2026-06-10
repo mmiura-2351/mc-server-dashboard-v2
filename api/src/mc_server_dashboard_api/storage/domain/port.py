@@ -147,6 +147,19 @@ class WorkingSetStore(abc.ABC):
         Section 4.3).
         """
 
+    @abc.abstractmethod
+    async def check_current_health(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> WorkingSetReport:
+        """Structurally fsck the on-disk authoritative snapshot (issue #744).
+
+        The one-shot sweep's per-snapshot probe: walk ``current/`` for corrupt
+        ``.mca`` region files (issue #738). A published snapshot is immutable and
+        quiesced, so the scan is safe in place and needs no staging. Read-only — it
+        never mutates ``current``. Raises :class:`~.errors.NotFoundError` if no
+        snapshot has been published.
+        """
+
 
 class JarStore(abc.ABC):
     """Port slice: content-addressed JAR store/reuse (STORAGE.md Section 3.2)."""
@@ -241,6 +254,20 @@ class BackupStore(abc.ABC):
         corrupt one) so the caller can quarantine + audit. The application enforces
         the stop precondition; Storage enforces atomicity and stays DB-free. Raises
         :class:`~.errors.NotFoundError` for an unknown key.
+        """
+
+    @abc.abstractmethod
+    async def check_backup_health(
+        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+    ) -> WorkingSetReport:
+        """Extract a backup archive and structurally fsck it (issue #744).
+
+        The one-shot sweep's per-backup probe: extract the archive into throwaway
+        staging under the decompressed-byte cap (the restore extractor), walk it for
+        corrupt ``.mca`` region files (issue #738), then discard the staging.
+        Read-only — it never publishes and never touches ``current`` — so the caller
+        persists the verdict (HEALTHY/QUARANTINED) in the DB. Re-running yields the
+        same report. Raises :class:`~.errors.NotFoundError` for an unknown key.
         """
 
     @abc.abstractmethod
