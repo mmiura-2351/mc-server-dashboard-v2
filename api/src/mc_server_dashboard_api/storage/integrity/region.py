@@ -28,8 +28,10 @@ are reserved for real I/O errors (``OSError``) raised while reading.
 from __future__ import annotations
 
 import enum
+import io
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 # Region layout constants.
 _SECTOR = 4096
@@ -80,14 +82,15 @@ class WorkingSetReport:
         return not self.corrupt
 
 
-def check_region_file(path: Path) -> ReasonCode | None:
-    """Structurally validate one ``.mca`` region file.
+def _check_region(size: int, fh: BinaryIO) -> ReasonCode | None:
+    """Structurally validate one region container given its byte ``size`` and a
+    seekable binary reader ``fh`` positioned at its start.
 
-    Returns ``None`` if the file is structurally sound, or the first
-    :class:`ReasonCode` that fails. Raises ``OSError`` only on a real I/O error.
-    Reads at most the 8 KiB header plus a 5-byte prefix per present chunk.
+    The shared core behind :func:`check_region_file` (a local path) and
+    :func:`check_region_bytes` (an in-memory body). Returns ``None`` if sound or
+    the first :class:`ReasonCode` that fails; reads at most the 8 KiB header plus a
+    5-byte prefix per present chunk, so it never loads the region payload.
     """
-    size = path.stat().st_size
     # A valid region carries both header tables (location + timestamp), so the
     # smallest sound file is two sectors. A non-zero size below that — or any
     # size that is not a 4096 multiple — is a torn save.
@@ -96,46 +99,74 @@ def check_region_file(path: Path) -> ReasonCode | None:
 
     total_sectors = size // _SECTOR
 
-    with path.open("rb") as fh:
-        location_table = fh.read(_LOCATION_TABLE_SIZE)
-        for index in range(_ENTRY_COUNT):
-            entry = location_table[index * 4 : index * 4 + 4]
-            offset = int.from_bytes(entry[0:3], "big")
-            sector_count = entry[3]
-            if offset == 0 and sector_count == 0:
-                continue  # absent chunk.
+    location_table = fh.read(_LOCATION_TABLE_SIZE)
+    for index in range(_ENTRY_COUNT):
+        entry = location_table[index * 4 : index * 4 + 4]
+        offset = int.from_bytes(entry[0:3], "big")
+        sector_count = entry[3]
+        if offset == 0 and sector_count == 0:
+            continue  # absent chunk.
 
-            # Sector bounds: a present chunk must sit past both header tables and
-            # stay wholly within the file.
-            if offset < _HEADER_SECTORS or sector_count == 0:
-                return ReasonCode.SECTOR_OUT_OF_BOUNDS
-            if offset + sector_count > total_sectors:
-                return ReasonCode.SECTOR_OUT_OF_BOUNDS
+        # Sector bounds: a present chunk must sit past both header tables and
+        # stay wholly within the file.
+        if offset < _HEADER_SECTORS or sector_count == 0:
+            return ReasonCode.SECTOR_OUT_OF_BOUNDS
+        if offset + sector_count > total_sectors:
+            return ReasonCode.SECTOR_OUT_OF_BOUNDS
 
-            fh.seek(offset * _SECTOR)
-            prefix = fh.read(_CHUNK_PREFIX)
-            if len(prefix) < _CHUNK_PREFIX:
-                return ReasonCode.TRUNCATED_CHUNK
-            length = int.from_bytes(prefix[0:4], "big")
-            compression = prefix[4]
+        fh.seek(offset * _SECTOR)
+        prefix = fh.read(_CHUNK_PREFIX)
+        if len(prefix) < _CHUNK_PREFIX:
+            return ReasonCode.TRUNCATED_CHUNK
+        length = int.from_bytes(prefix[0:4], "big")
+        compression = prefix[4]
 
-            if compression & _EXTERNAL_FLAG:
-                scheme = compression & ~_EXTERNAL_FLAG
-            else:
-                scheme = compression
-            if scheme not in _COMPRESSION_SCHEMES:
-                return ReasonCode.BAD_COMPRESSION
+        if compression & _EXTERNAL_FLAG:
+            scheme = compression & ~_EXTERNAL_FLAG
+        else:
+            scheme = compression
+        if scheme not in _COMPRESSION_SCHEMES:
+            return ReasonCode.BAD_COMPRESSION
 
-            # The length prefix counts the compression byte plus the compressed
-            # stream. It must be positive and fit within the declared sectors
-            # (the 4-byte length itself is not counted by the length field).
-            if length < 1:
-                return ReasonCode.TRUNCATED_CHUNK
-            available = sector_count * _SECTOR - 4
-            if length > available:
-                return ReasonCode.TRUNCATED_CHUNK
+        # The length prefix counts the compression byte plus the compressed
+        # stream. It must be positive and fit within the declared sectors
+        # (the 4-byte length itself is not counted by the length field).
+        if length < 1:
+            return ReasonCode.TRUNCATED_CHUNK
+        available = sector_count * _SECTOR - 4
+        if length > available:
+            return ReasonCode.TRUNCATED_CHUNK
 
     return None
+
+
+def check_region_file(path: Path) -> ReasonCode | None:
+    """Structurally validate one ``.mca`` region file.
+
+    Returns ``None`` if the file is structurally sound, or the first
+    :class:`ReasonCode` that fails. Raises ``OSError`` only on a real I/O error.
+    Reads at most the 8 KiB header plus a 5-byte prefix per present chunk.
+    """
+    size = path.stat().st_size
+    with path.open("rb") as fh:
+        return _check_region(size, fh)
+
+
+def check_region_bytes(name: str, data: bytes) -> RegionFinding | None:
+    """Structurally validate one ``.mca`` region held in memory (issue #750).
+
+    The object-store adapter has no local working-set tree to walk: its region
+    files arrive as object bodies. This runs the same structural check over a
+    region's bytes (seeking within an in-memory buffer, never loading the payload
+    beyond the header + per-chunk prefix the check reads) so the object backend can
+    apply the same fail-closed gate the fs adapter applies via
+    :func:`check_working_set`. Returns a :class:`RegionFinding` carrying ``name``
+    when corrupt, or ``None`` when sound.
+    """
+    reason = _check_region(len(data), io.BytesIO(data))
+    if reason is None:
+        return None
+    return RegionFinding(path=Path(name), reason=reason)
 
 
 def check_working_set(root: Path) -> WorkingSetReport:

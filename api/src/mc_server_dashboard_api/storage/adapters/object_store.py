@@ -67,6 +67,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     IncompleteTransferError,
+    IntegrityCheckError,
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
@@ -88,7 +89,11 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     SnapshotId,
     VersionId,
 )
-from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
+from mc_server_dashboard_api.storage.integrity.region import (
+    RegionFinding,
+    WorkingSetReport,
+    check_region_bytes,
+)
 
 # Egress chunk size for hydrate / JAR streaming (one tar member-chunk at a time).
 _CHUNK = 1024 * 1024
@@ -464,6 +469,19 @@ class ObjectStorage(Storage):
                 # integrity check is part of the data-plane contract (epic #8); this
                 # is the gate that will host it.
                 raise IncompleteTransferError("no staged objects to publish")
+            # Content-integrity gate (issue #750): walk the staged ``.mca`` region
+            # bodies for structural corruption BEFORE the pointer flip, mirroring the
+            # fs adapter's create gate (#749). On corruption, clean the staging prefix
+            # (mirroring abort) and raise; the pointer is never flipped, so the prior
+            # snapshot is retained (last-known-good, #703). The object backend has no
+            # local working-set tree, so each region is checked from its object body
+            # one at a time (bounded per-member, like the backup builder).
+            report = await self._check_staged_regions(client, incoming, staged)
+            if not report.healthy:
+                await _delete_prefix(client, incoming)
+                self._release_staging(incoming)
+                h.consumed = True
+                raise IntegrityCheckError(report)
             await self._publish(client, h.community_id, h.server_id, incoming, staged)
         # Publish reclaimed the staging prefix; release its active-staging lease so
         # a later sweep is not blocked by a now-dead handle (issue #160).
@@ -483,11 +501,38 @@ class ObjectStorage(Storage):
     ) -> WorkingSetReport:
         # The one-shot sweep's snapshot fsck (issue #744) is fs-only: it walks a
         # local working-set directory (issue #738), which the object backend does
-        # not materialize. Like the create/restore gates (#749/#743), the object
-        # adapter is ungated (#750), so a healthy report is returned to satisfy the
-        # Port. ``del`` the scope to mark it intentionally unused.
+        # not materialize. The authoritative-create/restore gates ARE wired on this
+        # adapter (#750), but the read-only sweep fsck stays fs-only for now, so a
+        # healthy report is returned to satisfy the Port. ``del`` the scope to mark
+        # it intentionally unused.
         del community_id, server_id
         return WorkingSetReport()
+
+    async def _check_staged_regions(
+        self, client: S3Client, staged_prefix: str, staged: list[S3Object]
+    ) -> WorkingSetReport:
+        """Structurally fsck the staged ``.mca`` region objects (issue #750).
+
+        The object backend has no local working-set tree for
+        :func:`check_working_set` to walk, so each ``.mca`` object is fetched and
+        checked from its body one at a time — bounded per-member, the same memory
+        posture as the backup builder, never the whole working set at once. Returns
+        a :class:`WorkingSetReport` whose ``corrupt`` list names the staged member
+        of each structurally torn region (paths relative to ``staged_prefix``).
+        """
+
+        scanned = 0
+        corrupt: list[RegionFinding] = []
+        for obj in staged:
+            name = obj.key[len(staged_prefix) :]
+            if not name.endswith(".mca"):
+                continue
+            scanned += 1
+            data = await _read_all(client, obj.key)
+            finding = check_region_bytes(name, data)
+            if finding is not None:
+                corrupt.append(finding)
+        return WorkingSetReport(scanned=scanned, corrupt=corrupt)
 
     async def _publish(
         self,
@@ -610,6 +655,14 @@ class ObjectStorage(Storage):
             objs = sorted(
                 await client.list_objects(snapshot_prefix), key=lambda o: o.key
             )
+            # Content-integrity gate (issue #750): never archive a known-corrupt
+            # world, mirroring the fs adapter (#739). Walk the live snapshot's
+            # ``.mca`` region bodies BEFORE writing the archive; any corrupt region
+            # refuses the backup and no ``.tar.gz`` object is uploaded (fail-closed,
+            # #703).
+            report = await self._check_staged_regions(client, snapshot_prefix, objs)
+            if not report.healthy:
+                raise IntegrityCheckError(report)
             # Build the self-contained tar.gz to local scratch (gzip streams, so the
             # bodies are not all held at once), then upload it as one object.
             fd, spool_name = await asyncio.to_thread(
@@ -647,12 +700,6 @@ class ObjectStorage(Storage):
         *,
         force: bool = False,
     ) -> WorkingSetReport:
-        # The restore-direction integrity gate (issue #743) is fs-only: it walks a
-        # local working-set directory (issue #738), which the object backend does
-        # not stage — it streams members straight to object storage. Like the
-        # create-direction gate (#749), the object adapter is ungated, so ``force``
-        # is a no-op here and a healthy report is returned to satisfy the Port.
-        del force
         backup_key = self._backup_key(community_id, server_id, key)
         transfer_id = f"restore-{key.value}-{uuid.uuid4().hex}"
         incoming = self._incoming_prefix(community_id, server_id, transfer_id)
@@ -679,9 +726,23 @@ class ObjectStorage(Storage):
                             budget.count(_archive_member_parts(spool, name, "r:gz")),
                         )
                     staged = await client.list_objects(incoming)
+                    # Restore-direction integrity gate (issue #750), mirroring the fs
+                    # adapter (#743): walk the staged ``.mca`` region bodies for
+                    # structural corruption BEFORE publishing into the live snapshot.
+                    # By default (``force=False``) a corrupt restore is refused — the
+                    # staging is cleaned (the except below) and IntegrityCheckError is
+                    # raised, so the prior snapshot is left untouched (last-known-good,
+                    # #703). With ``force=True`` the operator override publishes anyway
+                    # (better a deliberate corrupt restore than no restore, #703). The
+                    # report is returned either way so the use case can quarantine +
+                    # audit a forced corrupt restore.
+                    report = await self._check_staged_regions(client, incoming, staged)
+                    if not report.healthy and not force:
+                        raise IntegrityCheckError(report)
                     await self._publish(
                         client, community_id, server_id, incoming, staged
                     )
+                    return report
                 except BaseException:
                     await _delete_prefix(client, incoming)
                     raise
@@ -689,17 +750,17 @@ class ObjectStorage(Storage):
                     await asyncio.to_thread(spool.unlink, missing_ok=True)
         finally:
             self._release_staging(incoming)
-        return WorkingSetReport()
 
     async def check_backup_health(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> WorkingSetReport:
         # The one-shot sweep's per-backup fsck (issue #744) extracts a local working
         # set and walks it (issue #738), which the object backend does not stage —
-        # like the restore gate (#743), it is fs-only and the object adapter is
-        # ungated (#750). The object's existence is still confirmed (so an unknown
-        # key is a NotFoundError, matching the fs adapter) before the healthy report
-        # is returned to satisfy the Port.
+        # so this read-only sweep fsck stays fs-only for now even though the
+        # authoritative-create/restore gates ARE wired on this adapter (#750). The
+        # object's existence is still confirmed (so an unknown key is a
+        # NotFoundError, matching the fs adapter) before the healthy report is
+        # returned to satisfy the Port.
         backup_key = self._backup_key(community_id, server_id, key)
         async with self._client_factory() as client:
             if await client.head_object(backup_key) is None:

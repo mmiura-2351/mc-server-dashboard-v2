@@ -24,6 +24,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     ObjectStorage,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    IntegrityCheckError,
     NotFoundError,
     PathTraversalError,
 )
@@ -33,7 +34,14 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
 )
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
-from tests.storage.helpers import drain, new_scope, read_tar, stream_of, tar_stream
+from tests.storage.helpers import (
+    corrupt_region_bytes,
+    drain,
+    new_scope,
+    read_tar,
+    stream_of,
+    tar_stream,
+)
 
 
 def _store_and_storage() -> tuple[FakeS3Store, ObjectStorage]:
@@ -402,3 +410,27 @@ async def test_subkey_traversal_is_confined_to_server_prefix() -> None:
     await _publish(storage, community, server, {"f": b"x"})
     with pytest.raises(PathTraversalError):
         RelPath("../escape")
+
+
+async def test_create_backup_refuses_corrupt_live_snapshot() -> None:
+    """The backup-create gate (#750) refuses a known-corrupt live snapshot and
+    writes no archive object.
+
+    The corrupt-create path is not reachable through the Port (the commit gate
+    rejects publishing a corrupt working set), so the corruption is planted by
+    PUTting a corrupt ``.mca`` directly under the live snapshot prefix — the object
+    analogue of writing into the fs adapter's ``current/`` (#739 backend tests).
+    """
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"world/region/r.0.0.mca": b"\0" * 8192})
+    pointer_key = _server_prefix(community, server) + _POINTER
+    snap_prefix = json.loads(store.objects[pointer_key])["snapshot"]
+    store.objects[snap_prefix + "world/region/r.0.0.mca"] = corrupt_region_bytes()
+
+    backups_prefix = _server_prefix(community, server) + "backups/"
+    with pytest.raises(IntegrityCheckError):
+        await storage.create_backup_from_current(community, server)
+    # Fail-closed: no ``.tar.gz`` backup object was uploaded.
+    assert not any(k.startswith(backups_prefix) for k in store.objects)
