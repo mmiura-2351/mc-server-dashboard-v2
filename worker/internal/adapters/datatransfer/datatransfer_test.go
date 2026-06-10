@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -520,7 +521,7 @@ func TestWriteRegularGrowingFile(t *testing.T) {
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := writeRegular(tw, "latest.log", path, info); err != nil {
+	if err := writeRegular(tw, "latest.log", path, info, slog.Default()); err != nil {
 		t.Fatalf("writeRegular with grown file: %v", err)
 	}
 	if err := tw.Close(); err != nil {
@@ -569,7 +570,7 @@ func TestWriteRegularShrinkingFile(t *testing.T) {
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := writeRegular(tw, "latest.log", path, info); err != nil {
+	if err := writeRegular(tw, "latest.log", path, info, slog.Default()); err != nil {
 		t.Fatalf("writeRegular with shrunk file: %v", err)
 	}
 	if err := tw.Close(); err != nil {
@@ -628,6 +629,243 @@ func TestSweepHydrateLeftovers(t *testing.T) {
 	}
 	if _, err := os.Stat(other); err != nil {
 		t.Fatalf("another server's leftover wrongly removed: %v", err)
+	}
+}
+
+// capturingHandler is a slog.Handler that records log records so tests can
+// assert that expected log lines were emitted.
+type capturingHandler struct {
+	records []slog.Record
+}
+
+func (h *capturingHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *capturingHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(_ string) slog.Handler      { return h }
+
+// hasMessage reports whether any captured record has the given message.
+func (h *capturingHandler) hasMessage(msg string) bool {
+	for _, r := range h.records {
+		if r.Message == msg {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWriteRegularVanishedFileIsSkipped verifies that a file deleted between
+// the walk and os.Open (ENOENT) is silently skipped and does not fail the
+// snapshot (issue #820). The tar must contain the other files but not the
+// vanished one.
+func TestWriteRegularVanishedFileIsSkipped(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "kept.txt"), []byte("keep"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	vanished := filepath.Join(srcDir, "vanished.log")
+	if err := os.WriteFile(vanished, []byte("log"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stat the vanished file to get its info (simulates the ReadDir-time snapshot).
+	info, err := os.Stat(vanished)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Delete the file before writeRegular opens it.
+	if err := os.Remove(vanished); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &capturingHandler{}
+	log := slog.New(h)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := writeRegular(tw, "vanished.log", vanished, info, log); err != nil {
+		t.Fatalf("writeRegular must skip a vanished file, got error: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tw.Close: %v", err)
+	}
+
+	// The tar must be empty (no entry for the vanished file).
+	tr := tar.NewReader(&buf)
+	if _, err := tr.Next(); err != io.EOF {
+		t.Fatalf("expected empty tar, got entry or error: %v", err)
+	}
+
+	// A log line must have been emitted.
+	const wantMsg = "snapshot: file vanished between walk and open; skipping"
+	if !h.hasMessage(wantMsg) {
+		t.Fatalf("expected log message %q, captured records: %v", wantMsg, h.records)
+	}
+}
+
+// TestWriteRegularVanishedFileOtherErrorFails verifies that non-ENOENT open
+// errors (e.g. permission denied) still fail the snapshot (issue #820).
+func TestWriteRegularVanishedFileOtherErrorFails(t *testing.T) {
+	srcDir := t.TempDir()
+	target := filepath.Join(srcDir, "noperm.txt")
+	if err := os.WriteFile(target, []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	err = writeRegular(tw, "noperm.txt", target, info, slog.Default())
+	if err == nil {
+		// Root can open mode-000 files; skip on root.
+		if os.Getuid() == 0 {
+			t.Skip("running as root: permission check skipped")
+		}
+		t.Fatal("expected an error for a permission-denied open, got nil")
+	}
+}
+
+// TestWriteRegularGrowingFileLogsCapLine verifies that a log line is emitted
+// when a grown file is capped at its header-declared size (issue #820).
+func TestWriteRegularGrowingFileLogsCapLine(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "latest.log")
+	// Write 5 bytes to disk.
+	if err := os.WriteFile(p, []byte("hello"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	realInfo, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Stat reports 3 bytes (file "grew" from 3 to 5 after the walk).
+	info := fakeInfo{FileInfo: realInfo, size: 3}
+
+	h := &capturingHandler{}
+	log := slog.New(h)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := writeRegular(tw, "latest.log", p, info, log); err != nil {
+		t.Fatalf("writeRegular: %v", err)
+	}
+	_ = tw.Close()
+
+	const wantMsg = "snapshot: file grew between walk and copy; capped"
+	if !h.hasMessage(wantMsg) {
+		t.Fatalf("expected log message %q, captured records: %v", wantMsg, h.records)
+	}
+}
+
+// TestWriteRegularShrinkingFileLogsPadLine verifies that a log line is emitted
+// when a shrunken file is zero-padded to its header-declared size (issue #820).
+func TestWriteRegularShrinkingFileLogsPadLine(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "latest.log")
+	// Write 3 bytes to disk.
+	if err := os.WriteFile(p, []byte("hi!"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	realInfo, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Stat reports 6 bytes (file "shrank" from 6 to 3 after the walk).
+	info := fakeInfo{FileInfo: realInfo, size: 6}
+
+	h := &capturingHandler{}
+	log := slog.New(h)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := writeRegular(tw, "latest.log", p, info, log); err != nil {
+		t.Fatalf("writeRegular: %v", err)
+	}
+	_ = tw.Close()
+
+	const wantMsg = "snapshot: file shrank between walk and copy; zero-padded"
+	if !h.hasMessage(wantMsg) {
+		t.Fatalf("expected log message %q, captured records: %v", wantMsg, h.records)
+	}
+}
+
+// TestSnapshotSkipsVanishedFilesAndSucceeds verifies that a snapshot of a
+// directory where a file disappears between the walk and the open succeeds
+// (issue #820). The vanished file must be absent from the uploaded tar, and the
+// remaining files must be present.
+func TestSnapshotSkipsVanishedFilesAndSucceeds(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "kept.txt"), []byte("keep"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a custom Client that uses an openFile hook so we can delete the file
+	// just before it is opened, simulating log rotation.
+	//
+	// Since openFile is not injectable, we instead write the file, stat it, then
+	// delete it before the Snapshot call, and rely on os.ReadDir seeing the entry
+	// (via a separate file that we delete after ReadDir but before Open).
+	//
+	// The simplest approach: write the file, take note of its path, then in the
+	// HTTP server delete it (the Snapshot call happens synchronously and the walk
+	// happens inside Snapshot). Instead, we simulate via walkInto's indirect path:
+	// we inject openFile via a package-level var (see packOpenFile below).
+
+	// Override openFile so the vanished.log entry is seen by ReadDir (we create
+	// it before Snapshot) but deleted before Open.
+	vanished := filepath.Join(srcDir, "vanished.log")
+	if err := os.WriteFile(vanished, []byte("log line\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	// Swap the openFile hook so vanished.log gets ENOENT.
+	orig := openFile
+	openFile = func(name string) (*os.File, error) {
+		if filepath.Base(name) == "vanished.log" {
+			return nil, os.ErrNotExist
+		}
+		return os.Open(name)
+	}
+	defer func() { openFile = orig }()
+
+	h := &capturingHandler{}
+	c := New(srv.Client()).WithLogger(slog.New(h))
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// The tar must contain kept.txt but not vanished.log.
+	names := map[string]bool{}
+	tr := tar.NewReader(bytes.NewReader(received))
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar.Next: %v", err)
+		}
+		names[hdr.Name] = true
+	}
+	if !names["kept.txt"] {
+		t.Fatal("kept.txt must be in the snapshot tar")
+	}
+	if names["vanished.log"] {
+		t.Fatal("vanished.log must not be in the snapshot tar (it was deleted)")
+	}
+
+	const wantMsg = "snapshot: file vanished between walk and open; skipping"
+	if !h.hasMessage(wantMsg) {
+		t.Fatalf("expected log message %q, captured records: %v", wantMsg, h.records)
 	}
 }
 
