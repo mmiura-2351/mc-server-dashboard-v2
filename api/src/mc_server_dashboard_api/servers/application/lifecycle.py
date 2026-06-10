@@ -317,15 +317,21 @@ class StartServer:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             worker_id = server.assigned_worker_id
 
-        # Presence-gated skip-hydrate (issue #696): a same-worker restart must NOT
-        # hydrate-clobber a live, newer working set. When the assigned Worker still
-        # reports holding this server's working set (its persistent scratch is at
-        # least as fresh as the last snapshot, since snapshots are pushed FROM it),
-        # skip the destructive hydrate and start on the existing scratch. When it
-        # does NOT report it (a fresh/wiped scratch, or a Worker too old to report),
-        # hydrate as before — never silently boot an empty/absent working set.
-        skip_hydrate = self.control_plane.holds_working_set(
+        # Generation-gated skip-hydrate (issue #763, generalizing #698): a
+        # same-worker restart must NOT hydrate-clobber a live, newer working set, but
+        # MUST hydrate a stale one. Compare the generation the assigned Worker reports
+        # holding against the authoritative store generation: skip the destructive
+        # hydrate only when the Worker holds a generation at least as fresh as the
+        # store (its scratch is at least as new as the last snapshot). Hydrate when
+        # the Worker reports NOTHING held (None — a fresh/wiped/GC'd scratch, or a
+        # Worker too old to report) OR holds a STALE generation (presence at an older
+        # generation, e.g. an A->B->A leftover scratch B has since advanced past) —
+        # never silently boot an empty/absent/stale working set.
+        held_generation = self.control_plane.held_generation(
             worker_id=worker_id, server_id=server_id
+        )
+        skip_hydrate = (
+            held_generation is not None and held_generation >= server.store_generation
         )
         outcome = await self._launch(
             server, community_id, server_id, worker_id, skip_hydrate=skip_hydrate

@@ -16,6 +16,7 @@ import datetime as dt
 import uuid
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -105,4 +106,11 @@ class ServerModel(Base):
     )
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
+    )
+    # The authoritative working-set generation (issue #763): bumped by Storage on
+    # each commit_snapshot and persisted here by the snapshot data plane. NOT NULL
+    # with a server-side default of 0 so every pre-existing row backfills to 0 (no
+    # snapshot accounted for yet), matching the Worker's "nothing held" default.
+    store_generation: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
     )

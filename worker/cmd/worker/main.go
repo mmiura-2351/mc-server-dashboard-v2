@@ -69,17 +69,18 @@ func run(ctx context.Context) error {
 
 	sysClock := clock.System{}
 	dialer := controlplane.NewDialer(conn, cfg.API.Credential, sysClock)
-	// Advertise the working sets already on the persistent scratch so the API
-	// skips the destructive hydrate on a same-worker restart (issue #696): a
-	// hydrate would unpack the last authoritative snapshot over the live, newer
-	// working set and roll the world back.
-	heldServerIDs := instancemanager.ScanHeldServerIDs(cfg.Worker.ScratchDir)
+	// Advertise the working sets already on the persistent scratch, each tagged
+	// with its generation, so the API skips the destructive hydrate on a same-worker
+	// restart only when the held generation is fresh enough (issue #763): a hydrate
+	// would unpack the last authoritative snapshot over the live, newer working set
+	// and roll the world back, while a stale held set must still hydrate.
+	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir)
 	caps := session.Capabilities{
 		WorkerID:      cfg.Worker.ID,
 		WorkerVersion: version,
 		Drivers:       cfg.Worker.Drivers,
 		MaxServers:    cfg.Worker.MaxServers,
-		HeldServerIDs: heldServerIDs,
+		HeldServers:   heldServers,
 	}
 	manager, err := buildInstanceManager(ctx, cfg, logger)
 	if err != nil {

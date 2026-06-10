@@ -90,6 +90,7 @@ def _server(
     observed: ObservedState = ObservedState.STOPPED,
     worker_id: uuid.UUID | None = None,
     config: dict[str, object] | None = None,
+    store_generation: int = 0,
 ) -> Server:
     return Server(
         id=ServerId(server_id),
@@ -106,6 +107,7 @@ def _server(
         assigned_worker_id=None if worker_id is None else WorkerId(worker_id),
         created_at=_NOW,
         updated_at=_NOW,
+        store_generation=store_generation,
     )
 
 
@@ -1281,7 +1283,7 @@ async def test_place_and_start_always_hydrates_even_if_worker_holds_working_set(
     )
     cp = FakeControlPlane(
         place_to=WorkerId(worker),
-        held={(WorkerId(worker), ServerId(server_id)): True},
+        held={(WorkerId(worker), ServerId(server_id)): 5},
     )
     await _start_server(uow, cp).place_and_start(
         community_id=CommunityId(community), server_id=ServerId(server_id)
@@ -1410,11 +1412,11 @@ async def test_redispatch_start_replays_launch_without_increment() -> None:
     assert result.observed_state is ObservedState.CRASHED
 
 
-async def test_redispatch_start_skips_hydrate_when_worker_holds_working_set() -> None:
-    # Presence-gated skip-hydrate (issue #696): a same-worker restart whose assigned
-    # Worker reports it still holds the live working set must NOT hydrate — the
-    # hydrate would clobber the newer scratch with the last snapshot and roll the
-    # world back. Start is still dispatched.
+async def test_redispatch_start_skips_hydrate_when_held_generation_is_fresh() -> None:
+    # Generation-gated skip-hydrate (issue #763): a same-worker restart whose
+    # assigned Worker reports holding a generation AT LEAST the store generation must
+    # NOT hydrate — the hydrate would clobber the newer scratch with the last
+    # snapshot and roll the world back. Start is still dispatched.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -1424,10 +1426,12 @@ async def test_redispatch_start_skips_hydrate_when_worker_holds_working_set() ->
             desired=DesiredState.RUNNING,
             observed=ObservedState.STOPPED,
             worker_id=worker,
+            store_generation=5,
         )
     )
+    # Worker holds generation 5, equal to the store generation -> skip hydrate.
     cp = FakeControlPlane(
-        held={(WorkerId(worker), ServerId(server_id)): True},
+        held={(WorkerId(worker), ServerId(server_id)): 5},
     )
     await _start_server(uow, cp).redispatch_start(
         community_id=CommunityId(community), server_id=ServerId(server_id)
@@ -1436,12 +1440,10 @@ async def test_redispatch_start_skips_hydrate_when_worker_holds_working_set() ->
     assert [k for k, _, _ in cp.dispatched] == ["start"]
 
 
-async def test_redispatch_start_hydrates_when_worker_does_not_hold_working_set() -> (
-    None
-):
-    # The assigned Worker does NOT report holding the working set (a fresh/wiped
-    # scratch, or a Worker too old to report): hydrate then start, so a same-worker
-    # restart never silently boots an empty/absent working set (issue #696).
+async def test_redispatch_start_hydrates_when_held_generation_is_stale() -> None:
+    # Presence at a STALE generation must hydrate (issue #763): an A->B->A leftover
+    # scratch is present but older than the store generation B advanced past, so the
+    # reconciler hydrates rather than starting on the stale working set.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -1451,9 +1453,38 @@ async def test_redispatch_start_hydrates_when_worker_does_not_hold_working_set()
             desired=DesiredState.RUNNING,
             observed=ObservedState.STOPPED,
             worker_id=worker,
+            store_generation=8,
         )
     )
-    # No `held` entry -> holds_working_set is False -> hydrate.
+    # Worker holds generation 3, older than the store generation 8 -> hydrate.
+    cp = FakeControlPlane(
+        held={(WorkerId(worker), ServerId(server_id)): 3},
+    )
+    await _start_server(uow, cp).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
+async def test_redispatch_start_hydrates_when_worker_does_not_hold_working_set() -> (
+    None
+):
+    # The assigned Worker does NOT report holding the working set (a fresh/wiped/GC'd
+    # scratch, or a Worker too old to report): hydrate then start, so a same-worker
+    # restart never silently boots an empty/absent working set (issue #763).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+            store_generation=2,
+        )
+    )
+    # No `held` entry -> held_generation is None -> hydrate.
     cp = FakeControlPlane()
     await _start_server(uow, cp).redispatch_start(
         community_id=CommunityId(community), server_id=ServerId(server_id)

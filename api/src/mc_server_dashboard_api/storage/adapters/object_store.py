@@ -109,6 +109,9 @@ _DEFAULT_VERSION_RETENTION = 10
 _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 # The single pointer object naming the live snapshot prefix (Section 4.2).
 _POINTER = "current.json"
+# The single counter object holding the working-set generation (issue #763): the
+# value ``commit_snapshot`` bumps and the hydrate data plane stamps onto a transfer.
+_GENERATION = "generation"
 
 
 @dataclass(frozen=True)
@@ -298,6 +301,32 @@ class ObjectStorage(Storage):
         value: str = json.loads(raw)["snapshot"]
         return value
 
+    async def _read_generation(self, client: S3Client, server_prefix: str) -> int:
+        """Return the working-set generation marker, or 0 when absent/unreadable."""
+
+        key = server_prefix + _GENERATION
+        if await client.head_object(key) is None:
+            return 0
+        try:
+            return int(await _read_all(client, key))
+        except ValueError:
+            return 0
+
+    async def _bump_generation(self, client: S3Client, server_prefix: str) -> int:
+        """Bump and persist the working-set generation, returning the new value.
+
+        A read-modify-write of the single counter object (issue #763). Snapshots for
+        one server are serialized by the scheduler (one in-flight transfer), so the
+        marker is not contended, mirroring the single-pointer flip just above which
+        is likewise not CAS-protected.
+        """
+
+        new_generation = await self._read_generation(client, server_prefix) + 1
+        await client.put_object(
+            server_prefix + _GENERATION, str(new_generation).encode()
+        )
+        return new_generation
+
     async def _live_snapshot_prefix(
         self, client: S3Client, community_id: CommunityId, server_id: ServerId
     ) -> str:
@@ -456,7 +485,7 @@ class ObjectStorage(Storage):
             finally:
                 await asyncio.to_thread(spool.unlink, missing_ok=True)
 
-    async def commit_snapshot(self, handle: SnapshotHandle) -> None:
+    async def commit_snapshot(self, handle: SnapshotHandle) -> int:
         h = _as_object_handle(handle)
         if h.consumed:
             raise SnapshotHandleError("snapshot handle already committed or aborted")
@@ -483,10 +512,17 @@ class ObjectStorage(Storage):
                 h.consumed = True
                 raise IntegrityCheckError(report)
             await self._publish(client, h.community_id, h.server_id, incoming, staged)
+            # Bump the working-set generation now that the pointer references the new
+            # snapshot (issue #763). Only a snapshot publish bumps it (not a restore
+            # or authoritative file edit, which target a stopped server whose Worker
+            # holds no scratch, so the reconciler hydrates regardless).
+            server_prefix = self._server_prefix(h.community_id, h.server_id)
+            generation = await self._bump_generation(client, server_prefix)
         # Publish reclaimed the staging prefix; release its active-staging lease so
         # a later sweep is not blocked by a now-dead handle (issue #160).
         self._release_staging(incoming)
         h.consumed = True
+        return generation
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
         h = _as_object_handle(handle)
@@ -495,6 +531,15 @@ class ObjectStorage(Storage):
             await _delete_prefix(client, incoming)
         self._release_staging(incoming)
         h.consumed = True
+
+    async def current_generation(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        # Read the counter ``commit_snapshot`` bumps (issue #763). No marker (never
+        # published) -> generation 0.
+        server_prefix = self._server_prefix(community_id, server_id)
+        async with self._client_factory() as client:
+            return await self._read_generation(client, server_prefix)
 
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId

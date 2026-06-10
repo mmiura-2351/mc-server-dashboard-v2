@@ -5,16 +5,19 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// TestScanHeldServerIDsReportsNonEmptyDirs verifies the registration scan reports
-// ids for non-empty scratch subdirectories and SKIPS empty or absent ones (issue
-// #696): an empty scratch dir holds no working set, so reporting it would let the
-// API skip the hydrate and boot a fresh/empty world.
-func TestScanHeldServerIDsReportsNonEmptyDirs(t *testing.T) {
+// TestScanHeldServersReportsNonEmptyDirsWithGeneration verifies the registration
+// scan reports non-empty scratch subdirectories with the generation recorded in
+// their marker file and SKIPS empty/absent ones and dirs holding only the marker
+// (issue #763): an empty scratch holds no working set, so reporting it would let
+// the API skip the hydrate and boot a fresh/empty world.
+func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	scratch := t.TempDir()
 
-	// A non-empty server dir (holds a live working set) -> reported.
+	// A non-empty server dir with a generation marker -> reported with that gen.
 	held := filepath.Join(scratch, "held-server")
 	if err := os.MkdirAll(held, 0o750); err != nil {
 		t.Fatal(err)
@@ -22,11 +25,13 @@ func TestScanHeldServerIDsReportsNonEmptyDirs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(held, "level.dat"), []byte("x"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	if err := writeGeneration(held, 7); err != nil {
+		t.Fatal(err)
+	}
 
-	// A second non-empty server dir whose content is itself a subdirectory ->
-	// still reported (non-empty = at least one entry).
-	heldNested := filepath.Join(scratch, "held-nested")
-	if err := os.MkdirAll(filepath.Join(heldNested, "world"), 0o750); err != nil {
+	// A non-empty server dir WITHOUT a marker (predates #763) -> reported at gen 0.
+	heldNoMarker := filepath.Join(scratch, "held-nomarker")
+	if err := os.MkdirAll(filepath.Join(heldNoMarker, "world"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,14 +40,26 @@ func TestScanHeldServerIDsReportsNonEmptyDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A server dir holding ONLY the generation marker -> skipped (no working set).
+	markerOnly := filepath.Join(scratch, "marker-only")
+	if err := os.MkdirAll(markerOnly, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(markerOnly, 3); err != nil {
+		t.Fatal(err)
+	}
+
 	// A stray regular file at the scratch root (e.g. a snapshot spool) -> skipped.
 	if err := os.WriteFile(filepath.Join(scratch, "snapshot-1.tar"), []byte("x"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServerIDs(scratch)
-	sort.Strings(got)
-	want := []string{"held-nested", "held-server"}
+	got := ScanHeldServers(scratch)
+	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
+	want := []session.HeldServer{
+		{ServerID: "held-nomarker", Generation: 0},
+		{ServerID: "held-server", Generation: 7},
+	}
 	if len(got) != len(want) {
 		t.Fatalf("held = %v, want %v", got, want)
 	}
@@ -53,10 +70,10 @@ func TestScanHeldServerIDsReportsNonEmptyDirs(t *testing.T) {
 	}
 }
 
-// TestScanHeldServerIDsMissingScratchRoot verifies an absent scratch root yields
-// an empty list (a fresh Worker holds nothing), not a panic or error.
-func TestScanHeldServerIDsMissingScratchRoot(t *testing.T) {
-	got := ScanHeldServerIDs(filepath.Join(t.TempDir(), "does-not-exist"))
+// TestScanHeldServersMissingScratchRoot verifies an absent scratch root yields an
+// empty list (a fresh Worker holds nothing), not a panic or error.
+func TestScanHeldServersMissingScratchRoot(t *testing.T) {
+	got := ScanHeldServers(filepath.Join(t.TempDir(), "does-not-exist"))
 	if len(got) != 0 {
 		t.Fatalf("held = %v, want empty", got)
 	}

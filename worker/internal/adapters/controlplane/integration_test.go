@@ -52,10 +52,10 @@ type fakeServer struct {
 	heartbeatEvery time.Duration
 	dropAfterFirst bool
 
-	mu            sync.Mutex
-	registers     int
-	heartbeats    int
-	heldServerIDs []string
+	mu          sync.Mutex
+	registers   int
+	heartbeats  int
+	heldServers []*controlplanev1.HeldServer
 }
 
 func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) error {
@@ -74,7 +74,7 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 	}
 	s.mu.Lock()
 	s.registers++
-	s.heldServerIDs = first.GetRegister().GetHeldServerIds()
+	s.heldServers = first.GetRegister().GetHeldServers()
 	s.mu.Unlock()
 
 	if err := stream.Send(acceptAck(s.heartbeatEvery)); err != nil {
@@ -124,10 +124,10 @@ func (s *fakeServer) heartbeatCount() int {
 	return s.heartbeats
 }
 
-func (s *fakeServer) reportedHeldServerIDs() []string {
+func (s *fakeServer) reportedHeldServers() []*controlplanev1.HeldServer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.heldServerIDs
+	return s.heldServers
 }
 
 func acceptAck(every time.Duration) *controlplanev1.ApiMessage {
@@ -213,10 +213,11 @@ func TestHappyPathRegisterAndHeartbeat(t *testing.T) {
 	<-done
 }
 
-// TestRegisterAdvertisesHeldServerIDs proves the adapter maps the domain
-// Capabilities.HeldServerIDs onto the wire Register.held_server_ids (issue #696),
-// so the API can skip the destructive hydrate on a same-worker restart.
-func TestRegisterAdvertisesHeldServerIDs(t *testing.T) {
+// TestRegisterAdvertisesHeldServers proves the adapter maps the domain
+// Capabilities.HeldServers (id + generation) onto the wire Register.held_servers
+// (issue #763), so the API can skip the destructive hydrate on a same-worker
+// restart only when the held generation is fresh enough.
+func TestRegisterAdvertisesHeldServers(t *testing.T) {
 	srv := &fakeServer{
 		wantCredential: "the-secret",
 		heartbeatEvery: 20 * time.Millisecond,
@@ -224,7 +225,10 @@ func TestRegisterAdvertisesHeldServerIDs(t *testing.T) {
 	conn := startServer(t, srv)
 
 	caps := testCaps()
-	caps.HeldServerIDs = []string{"server-a", "server-b"}
+	caps.HeldServers = []session.HeldServer{
+		{ServerID: "server-a", Generation: 5},
+		{ServerID: "server-b", Generation: 0},
+	}
 	dialer := controlplane.NewDialer(conn, "the-secret", realClock{})
 	runner := session.NewRunner(dialer, caps, realClock{}, testLogger())
 
@@ -234,17 +238,18 @@ func TestRegisterAdvertisesHeldServerIDs(t *testing.T) {
 	go func() { _ = runner.Run(ctx); close(done) }()
 
 	waitFor(t, func() bool { return srv.registerCount() == 1 })
-	got := srv.reportedHeldServerIDs()
+	got := srv.reportedHeldServers()
 	cancel()
 	<-done
 
-	want := []string{"server-a", "server-b"}
+	want := map[string]uint64{"server-a": 5, "server-b": 0}
 	if len(got) != len(want) {
-		t.Fatalf("held_server_ids = %v, want %v", got, want)
+		t.Fatalf("held_servers = %v, want %v", got, want)
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("held_server_ids = %v, want %v", got, want)
+	for _, h := range got {
+		gen, ok := want[h.GetServerId()]
+		if !ok || gen != h.GetGeneration() {
+			t.Fatalf("held_servers = %v, want %v", got, want)
 		}
 	}
 }

@@ -380,7 +380,7 @@ class Register(_message.Message):
     WORKER_ID_FIELD_NUMBER: _builtins.int
     WORKER_VERSION_FIELD_NUMBER: _builtins.int
     CAPABILITIES_FIELD_NUMBER: _builtins.int
-    HELD_SERVER_IDS_FIELD_NUMBER: _builtins.int
+    HELD_SERVERS_FIELD_NUMBER: _builtins.int
     worker_id: _builtins.str
     """worker_id is the stable identifier the Worker registers under
     (CONFIGURATION.md Section 6.1 worker.id).
@@ -394,16 +394,24 @@ class Register(_message.Message):
         """
 
     @_builtins.property
-    def held_server_ids(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
-        """held_server_ids advertises the server ids whose working set the Worker
-        already holds in its persistent local scratch at registration: the immediate
-        subdirectories of the scratch root named for a server that are NON-EMPTY
-        (issue #696). The API uses this to skip the destructive hydrate on a
-        same-worker restart — hydrating would unpack the last authoritative snapshot
-        over the Worker's LIVE, newer working set and roll the world back. The field
-        is additive: an older Worker leaves it empty, and the API then hydrates as
-        before (the historical behaviour), so no same-worker restart silently boots a
-        fresh/empty world.
+    def held_servers(self) -> _containers.RepeatedCompositeFieldContainer[Global___HeldServer]:
+        """held_servers advertises the working sets the Worker already holds in its
+        persistent local scratch at registration, each tagged with the GENERATION the
+        local working set is at (issue #763). The API uses this to skip the
+        destructive hydrate on a same-worker restart — hydrating would unpack the last
+        authoritative snapshot over the Worker's LIVE, newer working set and roll the
+        world back — but ONLY when the held generation is fresh enough: the reconciler
+        hydrates whenever the held generation is older than the authoritative store
+        generation (presence at a stale generation, e.g. an A->B->A leftover scratch,
+        is NOT fresh enough). This generalizes the presence-only skip of issue #696,
+        which was correct only because the one A->B->A path always re-placed through a
+        hydrate; carrying the generation keeps it correct under any future flow.
+
+        This REPLACES the prior `repeated string held_server_ids` (issue #696): a wire
+        break, justified because api/ and worker/ ship together (CONTRIBUTING.md) and a
+        clean replacement is simpler than a parallel field. An older Worker that does
+        not set held_servers reports holding nothing, so the API hydrates as before —
+        never silently booting a fresh/empty world.
         """
 
     def __init__(
@@ -412,15 +420,49 @@ class Register(_message.Message):
         worker_id: _builtins.str = ...,
         worker_version: _builtins.str = ...,
         capabilities: Global___WorkerCapabilities | None = ...,
-        held_server_ids: _abc.Iterable[_builtins.str] | None = ...,
+        held_servers: _abc.Iterable[Global___HeldServer] | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["capabilities", b"capabilities"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["capabilities", b"capabilities", "held_server_ids", b"held_server_ids", "worker_id", b"worker_id", "worker_version", b"worker_version"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["capabilities", b"capabilities", "held_servers", b"held_servers", "worker_id", b"worker_id", "worker_version", b"worker_version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___Register: _TypeAlias = Register  # noqa: Y015
+
+@_typing.final
+class HeldServer(_message.Message):
+    """HeldServer is one working set the Worker holds in local scratch, with the
+    generation it is at (issue #763). The generation is the authoritative store
+    generation the working set was last hydrated from or last snapshotted to: it is
+    stamped by the API data plane on each transfer and persisted by the Worker
+    alongside the scratch, so a same-worker restart re-reports it and a scratch GC
+    (issue #762) drops it. generation 0 means "held but at an unknown generation"
+    (e.g. a scratch that predates this field): the API treats 0 as older than any
+    published store generation and hydrates.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SERVER_ID_FIELD_NUMBER: _builtins.int
+    GENERATION_FIELD_NUMBER: _builtins.int
+    server_id: _builtins.str
+    """server_id is the API's identifier for the held server."""
+    generation: _builtins.int
+    """generation is the working-set generation in the Worker's scratch."""
+    def __init__(
+        self,
+        *,
+        server_id: _builtins.str = ...,
+        generation: _builtins.int = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["generation", b"generation", "server_id", b"server_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___HeldServer: _TypeAlias = HeldServer  # noqa: Y015
 
 @_typing.final
 class WorkerCapabilities(_message.Message):

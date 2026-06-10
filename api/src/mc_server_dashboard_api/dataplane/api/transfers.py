@@ -34,14 +34,24 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import StreamingResponse
 
 from mc_server_dashboard_api.dependencies import (
     ResolvedJarLookup,
+    StoreGenerationRecorder,
     get_resolved_jar_lookup,
     get_settings,
     get_storage,
+    get_store_generation_recorder,
 )
 from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.storage.domain.errors import (
@@ -61,6 +71,12 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 # (servers/application/lifecycle.py ``_DEFAULT_JAR_RELPATH``).
 _JAR_RELPATH = "server.jar"
 _TAR_BLOCK = 512
+
+# The response header carrying the authoritative working-set generation on both
+# data-plane transfers (issue #763): the generation served on a hydrate, and the
+# new generation published on a snapshot. The Worker records it as the generation
+# its local scratch is at. Mirrors the constant the Worker reads (datatransfer.go).
+_GENERATION_HEADER = "X-Working-Set-Generation"
 
 router = APIRouter(prefix="/data-plane")
 
@@ -137,6 +153,13 @@ async def hydrate_working_set(
     scope = (CommunityId(community_id), ServerId(server_id))
     jar_member = await _jar_member(storage, resolved_jar, community_id, server_id)
 
+    # Stamp the authoritative working-set generation the hydrate serves (issue #763)
+    # so the Worker records the generation its scratch is now at. 0 when no snapshot
+    # has been published (the Worker then treats the set as older than any store
+    # generation and re-hydrates later), matching the Worker's "nothing held"
+    # default. The header rides every response, including the 204 (no working set).
+    headers = {_GENERATION_HEADER: str(await storage.current_generation(*scope))}
+
     stream = storage.open_hydrate_source(*scope)
     # The hydrate stream resolves + leases the snapshot on its FIRST iteration,
     # so a NotFoundError (no published snapshot) only surfaces once we pull a
@@ -151,16 +174,23 @@ async def hydrate_working_set(
                 _empty(),
                 status_code=status.HTTP_204_NO_CONTENT,
                 media_type="application/x-tar",
+                headers=headers,
             )
         # No published working set, but a JAR is resolved: send a tar with only the
         # JAR member so the Worker can still launch.
         return StreamingResponse(
-            _single_member_tar(jar_member), media_type="application/x-tar"
+            _single_member_tar(jar_member),
+            media_type="application/x-tar",
+            headers=headers,
         )
     if jar_member is None:
-        return StreamingResponse(primed, media_type="application/x-tar")
+        return StreamingResponse(
+            primed, media_type="application/x-tar", headers=headers
+        )
     return StreamingResponse(
-        _with_jar_member(primed, jar_member), media_type="application/x-tar"
+        _with_jar_member(primed, jar_member),
+        media_type="application/x-tar",
+        headers=headers,
     )
 
 
@@ -197,7 +227,11 @@ async def publish_snapshot(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     request: Request,
+    response: Response,
     storage: Annotated[Storage, Depends(get_storage)],
+    record_generation: Annotated[
+        StoreGenerationRecorder, Depends(get_store_generation_recorder)
+    ],
     content_length: Annotated[int | None, Header()] = None,
 ) -> None:
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
@@ -231,7 +265,13 @@ async def publish_snapshot(
             # prior snapshot intact.
             await storage.abort_snapshot(handle)
             raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch")
-        await storage.commit_snapshot(handle)
+        generation = await storage.commit_snapshot(handle)
+        # Persist the new authoritative generation onto the server row and stamp it
+        # on the response (issue #763): the reconciler reads the column to decide a
+        # same-worker restart's hydrate, and the Worker records the header as the
+        # generation its scratch is now at (the source of this published snapshot).
+        await record_generation(community_id, server_id, generation)
+        response.headers[_GENERATION_HEADER] = str(generation)
     except HTTPException:
         raise
     except _CapExceeded:

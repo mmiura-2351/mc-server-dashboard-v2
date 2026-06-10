@@ -20,6 +20,8 @@ under cooperative asyncio scheduling.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Mapping
+from types import MappingProxyType
 
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.entities import Worker, WorkerStatus
@@ -51,15 +53,16 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # drain intent survives the Go agent's automatic reconnect; only the
         # DELETE drain endpoint clears it (FR-WRK-5).
         self._drained: set[WorkerId] = set()
-        # The server ids each connected Worker reported it already holds in its
-        # persistent scratch at its current registration (issue #696). Replaced on
-        # every (re)register, so it tracks only the live session's reality; the
-        # lifecycle layer reads it via holds_working_set to skip the destructive
-        # hydrate on a same-worker restart.
-        self._held: dict[WorkerId, frozenset[str]] = {}
+        # The working sets each connected Worker reported it already holds in its
+        # persistent scratch at its current registration, mapped to the GENERATION
+        # each is at (issue #763). Replaced on every (re)register, so it tracks only
+        # the live session's reality; the lifecycle layer reads it via
+        # held_generation to skip the destructive hydrate on a same-worker restart
+        # only when the held generation is fresh enough.
+        self._held: dict[WorkerId, dict[str, int]] = {}
 
     def register(
-        self, worker: Worker, held_server_ids: frozenset[str] = frozenset()
+        self, worker: Worker, held_servers: Mapping[str, int] = MappingProxyType({})
     ) -> SessionToken:
         # Re-apply any standing drain intent: a re-registering worker that was
         # drained must come back DRAINING, not silently ONLINE.
@@ -67,10 +70,10 @@ class InMemoryWorkerRegistry(WorkerRegistry):
             worker = worker.start_draining()
         self._workers[worker.id] = worker
         # Replace the held-working-set inventory with what THIS registration
-        # reported (issue #696): a reconnect whose scratch was wiped reports fewer
-        # ids, so a stale "held" claim never survives a re-register and the
+        # reported (issue #763): a reconnect whose scratch was wiped/GC'd reports
+        # fewer ids, so a stale "held" claim never survives a re-register and the
         # lifecycle layer hydrates rather than booting an empty working set.
-        self._held[worker.id] = held_server_ids
+        self._held[worker.id] = dict(held_servers)
         # Assignment counts reset on (re)register; the server-lifecycle layer
         # (epic #7) MUST reconcile counts from worker status reports after
         # reconnect — a reconnected worker may still be running servers.
@@ -80,8 +83,8 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         self._sessions[worker.id] = session
         return session
 
-    def holds_working_set(self, worker_id: WorkerId, server_id: str) -> bool:
-        return server_id in self._held.get(worker_id, frozenset())
+    def held_generation(self, worker_id: WorkerId, server_id: str) -> int | None:
+        return self._held.get(worker_id, {}).get(server_id)
 
     def record_heartbeat(self, worker_id: WorkerId, at: dt.datetime) -> None:
         worker = self._workers.get(worker_id)

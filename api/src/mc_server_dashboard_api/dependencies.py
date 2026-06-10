@@ -433,6 +433,40 @@ def get_resolved_jar_lookup(request: Request) -> ResolvedJarLookup:
     return _lookup
 
 
+StoreGenerationRecorder = Callable[[uuid.UUID, uuid.UUID, int], Awaitable[None]]
+
+
+def get_store_generation_recorder(request: Request) -> StoreGenerationRecorder:
+    """Provide a recorder that persists a server's working-set generation (#763).
+
+    The snapshot data-plane endpoint calls it after a successful ``commit_snapshot``
+    to write the new authoritative generation onto the server row, so the reconciler
+    can compare it against what a Worker reports holding. Monotonic and scoped to the
+    ``(community_id, server_id)`` pair; an unknown / cross-community server is a
+    no-op (the row is gone or not ours, nothing to record).
+    """
+
+    from mc_server_dashboard_api.servers.domain.value_objects import (
+        ServerId as ServersServerId,
+    )
+
+    session_factory = create_session_factory(get_engine(request))
+
+    async def _record(
+        community_id: uuid.UUID, server_id: uuid.UUID, generation: int
+    ) -> None:
+        async with ServersUnitOfWork(session_factory) as uow:
+            server = await uow.servers.get_by_id(ServersServerId(server_id))
+            if server is None or server.community_id.value != community_id:
+                return
+            await uow.servers.set_store_generation(
+                ServersServerId(server_id), generation
+            )
+            await uow.commit()
+
+    return _record
+
+
 def get_worker_registry(request: Request) -> WorkerRegistry:
     """Return the process-wide WorkerRegistry stored on application state.
 

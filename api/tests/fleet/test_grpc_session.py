@@ -50,7 +50,8 @@ _WORKER_ID = "22222222-2222-2222-2222-222222222222"
 
 
 def _register_message(
-    worker_id: str = _WORKER_ID, held_server_ids: list[str] | None = None
+    worker_id: str = _WORKER_ID,
+    held_servers: dict[str, int] | None = None,
 ) -> pb.WorkerMessage:
     caps = pb.WorkerCapabilities(
         drivers=[pb.EXECUTION_DRIVER_KIND_HOST_PROCESS],
@@ -63,7 +64,10 @@ def _register_message(
             worker_id=worker_id,
             worker_version="1.0.0",
             capabilities=caps,
-            held_server_ids=held_server_ids or [],
+            held_servers=[
+                pb.HeldServer(server_id=sid, generation=gen)
+                for sid, gen in (held_servers or {}).items()
+            ],
         ),
     )
 
@@ -223,20 +227,20 @@ async def test_register_returns_ack(harness: _Harness) -> None:
     await call.done_writing()
 
 
-async def test_register_records_held_server_ids(harness: _Harness) -> None:
+async def test_register_records_held_servers(harness: _Harness) -> None:
     # The register intake records the working sets the Worker reports it already
-    # holds (issue #696) so the lifecycle layer can skip the destructive hydrate on
-    # a same-worker restart.
+    # holds, with the generation each is at (issue #763), so the lifecycle layer can
+    # skip the destructive hydrate on a same-worker restart only when fresh enough.
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))
-    await call.write(_register_message(held_server_ids=["server-a", "server-b"]))
+    await call.write(_register_message(held_servers={"server-a": 5, "server-b": 0}))
 
     await call.read()
 
     worker = WorkerId(_WORKER_ID)
-    assert harness.registry.holds_working_set(worker, "server-a") is True
-    assert harness.registry.holds_working_set(worker, "server-b") is True
-    assert harness.registry.holds_working_set(worker, "server-c") is False
+    assert harness.registry.held_generation(worker, "server-a") == 5
+    assert harness.registry.held_generation(worker, "server-b") == 0
+    assert harness.registry.held_generation(worker, "server-c") is None
     await call.done_writing()
 
 

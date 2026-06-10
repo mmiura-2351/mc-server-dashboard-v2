@@ -140,13 +140,17 @@ backward-compatible change under the module's `FILE` breaking rule.
 `Register` MUST be the first message on a fresh stream. It advertises the
 Worker's id, version, and `WorkerCapabilities` (available drivers, capacity
 hint, host resources) — the input to the API's greedy placement
-(FR-WRK-1, FR-WRK-3). It also carries `held_server_ids`: the server ids whose
-working set the Worker already holds in its persistent local scratch (the
-non-empty per-server scratch dirs found at startup). The API records this so it
-can skip the destructive hydrate on a same-worker restart — hydrating there
-would unpack the last authoritative snapshot over the Worker's live, newer
-working set and roll the world back (issue #696, see Section 5). The field is
-additive: an older Worker leaves it empty and the API hydrates as before. The
+(FR-WRK-1, FR-WRK-3). It also carries `held_servers`: each server whose working
+set the Worker already holds in its persistent local scratch (the non-empty
+per-server scratch dirs found at startup), tagged with the **generation** that
+set is at — the authoritative store generation it was last hydrated from or
+snapshotted to, persisted in the scratch. The API records this so it can skip the
+destructive hydrate on a same-worker restart **only when the held generation is
+fresh enough** — hydrating a live, newer set would unpack the last authoritative
+snapshot over it and roll the world back, while a *stale* held set (e.g. an
+A→B→A leftover scratch B has advanced past) must still hydrate (issue #763,
+generalizing #696, see Section 5). A Worker that reports nothing held, or an
+older Worker that does not set the field, hydrates as before. The
 API answers `RegisterAck`: `accepted` plus the `heartbeat_interval` it expects;
 on refusal, `accepted=false` with a `rejection_reason` and the API closes the
 stream.
@@ -266,19 +270,24 @@ trigger result before the transfer completed would silently break both flows —
 the API would proceed against an unhydrated or unpublished working set with no
 error.
 
-The API hydrates **only on placement onto a Worker that does not already hold the
-working set**, not on every start (issue #696). A same-worker restart (the
-reconciler's same-worker re-dispatch, where the assigned Worker is unchanged)
-starts on the Worker's **existing** working set: its persistent scratch is the
-live, newer copy (snapshots are pushed *from* it), so a hydrate there would
-clobber it with the last snapshot and roll the world back. The API skips the
-hydrate when, and only when, the assigned Worker reported that server in its
-`Register.held_server_ids` (Section 4.1) — gated on live presence so a
-fresh/wiped scratch (or a Worker too old to report) still hydrates rather than
-booting an empty world. A fresh placement always hydrates: a first launch or a
-relocation onto a different Worker must pull the authoritative working set (a
-server that moved A→B→A returns via fresh placement, where A's leftover scratch
-is stale because B advanced and snapshotted it).
+The API hydrates **only when the Worker does not already hold a fresh-enough
+working set**, not on every start (issue #763, generalizing #696). A same-worker
+restart (the reconciler's same-worker re-dispatch, where the assigned Worker is
+unchanged) starts on the Worker's **existing** working set when it is current: the
+persistent scratch is the live, newer copy (snapshots are pushed *from* it), so a
+hydrate there would clobber it with the last snapshot and roll the world back. The
+API skips the hydrate when, and only when, the assigned Worker reported that
+server in its `Register.held_servers` (Section 4.1) at a **generation at least the
+authoritative store generation** — so a fresh/wiped/GC'd scratch (reported as not
+held, or a Worker too old to report) AND a *stale* held set (a generation older
+than the store) both still hydrate, rather than booting an empty world or starting
+on stale leftover scratch. The store generation is a per-server counter the
+authoritative Storage bumps on each `commit_snapshot` and stamps onto each hydrate
+/ snapshot transfer, so the Worker's reported generation and the store's share one
+number space. A fresh placement always hydrates: a first launch or a relocation
+onto a different Worker must pull the authoritative working set (a server that
+moved A→B→A returns via fresh placement, where A's leftover scratch is stale
+because B advanced and snapshotted it).
 
 ---
 

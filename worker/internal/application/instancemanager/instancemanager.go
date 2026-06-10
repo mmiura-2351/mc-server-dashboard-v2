@@ -46,10 +46,14 @@ type controlFunc func(ctx context.Context, serverID, driver string) (execution.S
 // control-plane stream (CONTROL_PLANE.md Section 5).
 type Transfer interface {
 	// Hydrate downloads the working set from url into workingDir (an empty/204
-	// response leaves it empty).
-	Hydrate(ctx context.Context, url, token, workingDir string) error
-	// Snapshot packs workingDir and uploads it to url.
-	Snapshot(ctx context.Context, url, token, workingDir string) error
+	// response leaves it empty). It returns the authoritative store GENERATION the
+	// API served (the value of its response header, issue #763); 0 when the header
+	// is absent (a server with no published snapshot, or an older API).
+	Hydrate(ctx context.Context, url, token, workingDir string) (uint64, error)
+	// Snapshot packs workingDir and uploads it to url. It returns the NEW
+	// authoritative store generation the publish produced (the value of the API's
+	// response header, issue #763); 0 when the header is absent (an older API).
+	Snapshot(ctx context.Context, url, token, workingDir string) (uint64, error)
 }
 
 // systemClock is the default wall-clock used for the metrics ticker when
@@ -235,11 +239,28 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	}
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
-	if err := m.transfer.Hydrate(ctx, cmd.TransferURL, cmd.TransferToken, workingDir); err != nil {
+	gen, err := m.transfer.Hydrate(ctx, cmd.TransferURL, cmd.TransferToken, workingDir)
+	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: hydrate: %v", err))
 	}
+	// Record the generation the working set is now at (issue #763): the API served
+	// the authoritative store at this generation, so the local scratch matches it.
+	// A 0 (no published snapshot, or an older API) is recorded as-is — the API then
+	// treats this set as older than any published store generation and re-hydrates,
+	// the safe direction. The marker write is best-effort: a failure only costs an
+	// extra hydrate next start, never correctness, so it is logged not propagated.
+	m.recordGeneration(workingDir, cmd.ServerID, gen)
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// recordGeneration writes the working-set generation marker, logging (not failing)
+// on error: a missing/stale marker only costs an extra hydrate, never correctness.
+func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) {
+	if err := writeGeneration(workingDir, gen); err != nil {
+		m.logger.Warn("could not record working-set generation",
+			"server_id", serverID, "generation", gen, "error", err)
+	}
 }
 
 // restoreSaveTimeout bounds the re-enable-auto-save RCON call on the snapshot
@@ -308,10 +329,17 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 				len(report.Corrupt), report.Scanned, filepath.Base(first.Path), first.Reason))
 	}
 
-	if err := m.transfer.Snapshot(ctx, cmd.TransferURL, cmd.TransferToken, workingDir); err != nil {
+	gen, err := m.transfer.Snapshot(ctx, cmd.TransferURL, cmd.TransferToken, workingDir)
+	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: snapshot: %v", err))
 	}
+	// Record the NEW generation the publish produced (issue #763): the scratch we
+	// just pushed is the source of this store generation, so its local generation
+	// advances to match. This keeps a same-Worker restart's held generation equal to
+	// the store generation (the API then skips the destructive hydrate). Best-effort
+	// (logged, not failed) — see recordGeneration.
+	m.recordGeneration(workingDir, cmd.ServerID, gen)
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 

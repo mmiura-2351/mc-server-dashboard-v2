@@ -347,7 +347,7 @@ class FsStorage(Storage):
         finally:
             await asyncio.to_thread(spool.unlink, missing_ok=True)
 
-    async def commit_snapshot(self, handle: SnapshotHandle) -> None:
+    async def commit_snapshot(self, handle: SnapshotHandle) -> int:
         fs_handle = _as_fs_handle(handle)
         if fs_handle.consumed:
             raise SnapshotHandleError("snapshot handle already committed or aborted")
@@ -377,13 +377,34 @@ class FsStorage(Storage):
             self._release_staging(staging)
             fs_handle.consumed = True
             raise IntegrityCheckError(report)
-        await asyncio.to_thread(
-            self._publish, fs_handle.community_id, fs_handle.server_id, staging
+        generation = await asyncio.to_thread(
+            self._publish_and_bump,
+            fs_handle.community_id,
+            fs_handle.server_id,
+            staging,
         )
         # Publish moved the staging dir into snapshots/; release its active-staging
         # lease so a later sweep is not blocked by a now-dead handle (issue #183).
         self._release_staging(staging)
         fs_handle.consumed = True
+        return generation
+
+    def _publish_and_bump(
+        self, community_id: CommunityId, server_id: ServerId, staging: Path
+    ) -> int:
+        """Publish the snapshot, then bump and return the generation (issue #763).
+
+        The generation advances ONLY on a snapshot publish (the worker pushed a new
+        working set), not on a restore or an authoritative file edit (those go to a
+        stopped server whose worker holds no scratch, so the reconciler hydrates
+        regardless). It is bumped after ``current`` points at the new snapshot, so
+        the persisted generation never claims a set newer than ``current`` resolves
+        to.
+        """
+
+        server_root = self._server_root(community_id, server_id)
+        self._publish(community_id, server_id, staging)
+        return self._bump_generation(server_root)
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
         fs_handle = _as_fs_handle(handle)
@@ -442,6 +463,37 @@ class FsStorage(Storage):
             # reader releases (Section 4.2 reader safety).
             if not self._is_leased(old_snapshot):
                 _rmtree(old_snapshot)
+
+    def _generation_path(self, server_root: Path) -> Path:
+        return server_root / "generation"
+
+    def _read_generation(self, server_root: Path) -> int:
+        try:
+            return int(self._generation_path(server_root).read_text())
+        except (FileNotFoundError, ValueError):
+            # No counter yet (never published) or an unreadable one: generation 0,
+            # matching the Worker's "nothing held" default so the reconciler's
+            # worker-gen < store-gen comparison treats both consistently.
+            return 0
+
+    def _bump_generation(self, server_root: Path) -> int:
+        new_generation = self._read_generation(server_root) + 1
+        path = self._generation_path(server_root)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(server_root), prefix=".generation.", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w") as out:
+                out.write(str(new_generation))
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp, path)
+            _fsync_dir(server_root)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return new_generation
 
     # --- JAR store / reuse (Section 3.2) -----------------------------------
 
@@ -642,6 +694,14 @@ class FsStorage(Storage):
         finally:
             await asyncio.to_thread(_rmtree, staging)
             self._release_staging(staging)
+
+    async def current_generation(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        # Read the counter ``commit_snapshot`` bumps (issue #763). A server with no
+        # published snapshot has no counter file -> generation 0.
+        server_root = self._server_root(community_id, server_id)
+        return await asyncio.to_thread(self._read_generation, server_root)
 
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId

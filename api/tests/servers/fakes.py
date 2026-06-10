@@ -341,6 +341,13 @@ class FakeServerRepository(ServerRepository):
             server.assigned_worker_id = None
         return True
 
+    async def set_store_generation(self, server_id: ServerId, generation: int) -> None:
+        # Mirror the real adapter's monotonic guard (issue #763): only advance the
+        # generation, never lower it; an absent row is a no-op.
+        server = self.by_id.get(server_id)
+        if server is not None and server.store_generation < generation:
+            server.store_generation = generation
+
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:
@@ -590,7 +597,7 @@ class FakeControlPlane(ControlPlane):
         raise_unavailable: bool = False,
         unavailable_kinds: set[str] | None = None,
         connected: dict[WorkerId, bool] | None = None,
-        held: dict[tuple[WorkerId, ServerId], bool] | None = None,
+        held: dict[tuple[WorkerId, ServerId], int] | None = None,
     ) -> None:
         self._place_to = place_to
         self._outcome = outcome or CommandOutcome(status=CommandStatus.OK)
@@ -605,8 +612,8 @@ class FakeControlPlane(ControlPlane):
         # Worker-connectivity map for the scheduler's skip-disconnected path; a
         # worker absent here is treated as connected.
         self._connected = connected or {}
-        # Held-working-set presence map for the skip-hydrate decision (issue #696);
-        # a (worker, server) pair absent here is treated as NOT held, so the default
+        # Held-working-set generation map for the skip-hydrate decision (issue #763);
+        # a (worker, server) pair absent here returns None (NOT held), so the default
         # is to hydrate.
         self._held = held or {}
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
@@ -633,8 +640,10 @@ class FakeControlPlane(ControlPlane):
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
         return self._connected.get(worker_id, True)
 
-    def holds_working_set(self, *, worker_id: WorkerId, server_id: ServerId) -> bool:
-        return self._held.get((worker_id, server_id), False)
+    def held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId
+    ) -> int | None:
+        return self._held.get((worker_id, server_id))
 
     def increment_assignment(self, *, worker_id: WorkerId) -> None:
         self.incremented.append(worker_id)

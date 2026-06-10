@@ -72,6 +72,61 @@ async def test_second_publish_supersedes(harness: StorageHarness) -> None:
     assert read_tar(blob) == {"f": b"v2"}
 
 
+async def test_commit_bumps_generation_and_round_trips(
+    harness: StorageHarness,
+) -> None:
+    # Each commit_snapshot bumps the per-server working-set generation, returns the
+    # new value, and current_generation reads it back (issue #763). A never-published
+    # server is generation 0, matching the Worker's "nothing held" default.
+    community, server = new_scope()
+    assert await harness.storage.current_generation(community, server) == 0
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"v1"}))
+    first = await harness.storage.commit_snapshot(handle)
+    assert first == 1
+    assert await harness.storage.current_generation(community, server) == 1
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"v2"}))
+    second = await harness.storage.commit_snapshot(handle)
+    assert second == 2
+    assert await harness.storage.current_generation(community, server) == 2
+
+
+async def test_generation_is_per_server(harness: StorageHarness) -> None:
+    # The generation counter is scoped per server, not global (issue #763).
+    community, server_a = new_scope()
+    _, server_b = new_scope()
+
+    handle = await harness.storage.begin_snapshot(community, server_a)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"a"}))
+    assert await harness.storage.commit_snapshot(handle) == 1
+
+    handle = await harness.storage.begin_snapshot(community, server_b)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"b"}))
+    assert await harness.storage.commit_snapshot(handle) == 1
+    assert await harness.storage.current_generation(community, server_a) == 1
+
+
+async def test_refused_commit_does_not_bump_generation(
+    harness: StorageHarness,
+) -> None:
+    # An integrity-refused publish does NOT bump the generation (issue #763): the
+    # generation tracks only successfully published working sets.
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"good"})
+    assert await harness.storage.current_generation(community, server) == 1
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(
+        handle, tar_stream({"r.mca": corrupt_region_bytes()})
+    )
+    with pytest.raises(IntegrityCheckError):
+        await harness.storage.commit_snapshot(handle)
+    assert await harness.storage.current_generation(community, server) == 1
+
+
 async def test_hydrate_streams_incrementally_not_buffered(
     harness: StorageHarness,
 ) -> None:

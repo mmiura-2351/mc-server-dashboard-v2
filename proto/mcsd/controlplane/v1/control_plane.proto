@@ -87,16 +87,39 @@ message Register {
   // placement filters on (FR-WRK-3).
   WorkerCapabilities capabilities = 3;
 
-  // held_server_ids advertises the server ids whose working set the Worker
-  // already holds in its persistent local scratch at registration: the immediate
-  // subdirectories of the scratch root named for a server that are NON-EMPTY
-  // (issue #696). The API uses this to skip the destructive hydrate on a
-  // same-worker restart — hydrating would unpack the last authoritative snapshot
-  // over the Worker's LIVE, newer working set and roll the world back. The field
-  // is additive: an older Worker leaves it empty, and the API then hydrates as
-  // before (the historical behaviour), so no same-worker restart silently boots a
-  // fresh/empty world.
-  repeated string held_server_ids = 4;
+  // held_servers advertises the working sets the Worker already holds in its
+  // persistent local scratch at registration, each tagged with the GENERATION the
+  // local working set is at (issue #763). The API uses this to skip the
+  // destructive hydrate on a same-worker restart — hydrating would unpack the last
+  // authoritative snapshot over the Worker's LIVE, newer working set and roll the
+  // world back — but ONLY when the held generation is fresh enough: the reconciler
+  // hydrates whenever the held generation is older than the authoritative store
+  // generation (presence at a stale generation, e.g. an A->B->A leftover scratch,
+  // is NOT fresh enough). This generalizes the presence-only skip of issue #696,
+  // which was correct only because the one A->B->A path always re-placed through a
+  // hydrate; carrying the generation keeps it correct under any future flow.
+  //
+  // This REPLACES the prior `repeated string held_server_ids` (issue #696): a wire
+  // break, justified because api/ and worker/ ship together (CONTRIBUTING.md) and a
+  // clean replacement is simpler than a parallel field. An older Worker that does
+  // not set held_servers reports holding nothing, so the API hydrates as before —
+  // never silently booting a fresh/empty world.
+  repeated HeldServer held_servers = 4;
+}
+
+// HeldServer is one working set the Worker holds in local scratch, with the
+// generation it is at (issue #763). The generation is the authoritative store
+// generation the working set was last hydrated from or last snapshotted to: it is
+// stamped by the API data plane on each transfer and persisted by the Worker
+// alongside the scratch, so a same-worker restart re-reports it and a scratch GC
+// (issue #762) drops it. generation 0 means "held but at an unknown generation"
+// (e.g. a scratch that predates this field): the API treats 0 as older than any
+// published store generation and hydrates.
+message HeldServer {
+  // server_id is the API's identifier for the held server.
+  string server_id = 1;
+  // generation is the working-set generation in the Worker's scratch.
+  uint64 generation = 2;
 }
 
 // WorkerCapabilities is what a Worker advertises at registration (FR-WRK-1).

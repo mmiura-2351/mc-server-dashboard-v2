@@ -22,6 +22,7 @@ from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.dependencies import (
     get_resolved_jar_lookup,
     get_storage,
+    get_store_generation_recorder,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -60,7 +61,7 @@ def _read_tar(blob: bytes) -> dict[str, bytes]:
 
 def _setup(
     tmp_path: Path, *, resolved_jar: str | None = None
-) -> tuple[TestClient, FsStorage]:
+) -> tuple[TestClient, FsStorage, list[tuple[uuid.UUID, uuid.UUID, int]]]:
     storage = FsStorage(tmp_path)
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: storage
@@ -69,8 +70,17 @@ def _setup(
         return resolved_jar
 
     app.dependency_overrides[get_resolved_jar_lookup] = lambda: _lookup
+
+    # Capture the generation the snapshot endpoint records (issue #763) without a DB
+    # (the endpoint otherwise persists to the server row via a real UoW).
+    recorded: list[tuple[uuid.UUID, uuid.UUID, int]] = []
+
+    async def _record(c: uuid.UUID, s: uuid.UUID, generation: int) -> None:
+        recorded.append((c, s, generation))
+
+    app.dependency_overrides[get_store_generation_recorder] = lambda: _record
     client = TestClient(app)
-    return client, storage
+    return client, storage, recorded
 
 
 def _auth() -> dict[str, str]:
@@ -98,7 +108,7 @@ async def _publish(
 
 
 def test_hydrate_rejects_missing_credential(tmp_path: Path) -> None:
-    client, _ = _setup(tmp_path)
+    client, _, _ = _setup(tmp_path)
     community, server = _scope()
     with client:
         resp = client.get(_url(community, server, "working-set"))
@@ -106,7 +116,7 @@ def test_hydrate_rejects_missing_credential(tmp_path: Path) -> None:
 
 
 def test_hydrate_rejects_wrong_credential(tmp_path: Path) -> None:
-    client, _ = _setup(tmp_path)
+    client, _, _ = _setup(tmp_path)
     community, server = _scope()
     with client:
         resp = client.get(
@@ -117,7 +127,7 @@ def test_hydrate_rejects_wrong_credential(tmp_path: Path) -> None:
 
 
 def test_snapshot_rejects_missing_credential(tmp_path: Path) -> None:
-    client, _ = _setup(tmp_path)
+    client, _, _ = _setup(tmp_path)
     community, server = _scope()
     with client:
         resp = client.post(_url(community, server, "snapshot"), content=b"x")
@@ -127,7 +137,7 @@ def test_snapshot_rejects_missing_credential(tmp_path: Path) -> None:
 def test_hydrate_round_trips_the_published_working_set(tmp_path: Path) -> None:
     import asyncio
 
-    client, storage = _setup(tmp_path)
+    client, storage, _ = _setup(tmp_path)
     community, server = _scope()
     files = {"server.properties": b"motd=hi", "world/level.dat": b"\x00\x01"}
     asyncio.run(_publish(storage, community, server, files))
@@ -138,7 +148,7 @@ def test_hydrate_round_trips_the_published_working_set(tmp_path: Path) -> None:
 
 
 def test_hydrate_unpublished_server_is_204(tmp_path: Path) -> None:
-    client, _ = _setup(tmp_path)
+    client, _, _ = _setup(tmp_path)
     community, server = _scope()
     with client:
         resp = client.get(_url(community, server, "working-set"), headers=_auth())
@@ -159,7 +169,7 @@ def test_hydrate_injects_resolved_jar_into_working_set(tmp_path: Path) -> None:
     jar_bytes = b"PK\x03\x04 resolved server jar"
     sha256 = asyncio.run(_store_jar(FsStorage(tmp_path), jar_bytes))
 
-    client, storage = _setup(tmp_path, resolved_jar=sha256)
+    client, storage, _ = _setup(tmp_path, resolved_jar=sha256)
     community, server = _scope()
     files = {"server.properties": b"motd=hi", "world/level.dat": b"\x00\x01"}
     asyncio.run(_publish(storage, community, server, files))
@@ -177,7 +187,7 @@ def test_hydrate_with_jar_but_no_snapshot_sends_jar_only_tar(tmp_path: Path) -> 
     jar_bytes = b"PK\x03\x04 jar only"
     sha256 = asyncio.run(_store_jar(FsStorage(tmp_path), jar_bytes))
 
-    client, _ = _setup(tmp_path, resolved_jar=sha256)
+    client, _, _ = _setup(tmp_path, resolved_jar=sha256)
     community, server = _scope()
     with client:
         resp = client.get(_url(community, server, "working-set"), headers=_auth())
@@ -193,7 +203,7 @@ def test_hydrate_resolved_jar_absent_from_pool_sends_working_set_alone(
     # A recorded key whose JAR is not actually in the pool: the endpoint falls back
     # to sending the working set alone (the prior posture), not an error.
     missing = "0" * 64
-    client, storage = _setup(tmp_path, resolved_jar=missing)
+    client, storage, _ = _setup(tmp_path, resolved_jar=missing)
     community, server = _scope()
     files = {"server.properties": b"motd=hi"}
     asyncio.run(_publish(storage, community, server, files))
@@ -206,7 +216,7 @@ def test_hydrate_resolved_jar_absent_from_pool_sends_working_set_alone(
 def test_snapshot_publishes_atomically(tmp_path: Path) -> None:
     import asyncio
 
-    client, storage = _setup(tmp_path)
+    client, storage, _ = _setup(tmp_path)
     community, server = _scope()
     body = _tar_bytes({"world/level.dat": b"new-world"})
     with client:
@@ -233,7 +243,7 @@ def test_snapshot_publishes_atomically(tmp_path: Path) -> None:
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
     import asyncio
 
-    client, storage = _setup(tmp_path)
+    client, storage, _ = _setup(tmp_path)
     community, server = _scope()
     asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
 
@@ -269,7 +279,7 @@ def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
 def test_snapshot_under_declared_length_aborts_mid_stream(tmp_path: Path) -> None:
     import asyncio
 
-    client, storage = _setup(tmp_path)
+    client, storage, _ = _setup(tmp_path)
     community, server = _scope()
     asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
 
@@ -312,7 +322,7 @@ def test_snapshot_over_cap_body_aborts_mid_stream(
     # snapshot.
     monkeypatch.setattr(transfers, "_MAX_SNAPSHOT_BYTES", 8)
 
-    client, storage = _setup(tmp_path)
+    client, storage, _ = _setup(tmp_path)
     community, server = _scope()
     asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
 
@@ -344,7 +354,7 @@ def test_snapshot_over_cap_body_aborts_mid_stream(
 def test_snapshot_empty_upload_is_rejected_and_not_published(tmp_path: Path) -> None:
     import asyncio
 
-    client, storage = _setup(tmp_path)
+    client, storage, _ = _setup(tmp_path)
     community, server = _scope()
     asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
 
@@ -380,7 +390,7 @@ def test_snapshot_corrupt_region_is_refused_with_machine_readable_reason(
 ) -> None:
     import asyncio
 
-    client, storage = _setup(tmp_path)
+    client, storage, _ = _setup(tmp_path)
     community, server = _scope()
     asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
 
@@ -414,7 +424,7 @@ def test_snapshot_corrupt_region_is_refused_with_machine_readable_reason(
 
 
 def test_snapshot_requires_content_length(tmp_path: Path) -> None:
-    client, _ = _setup(tmp_path)
+    client, _, _ = _setup(tmp_path)
     community, server = _scope()
 
     # A chunked (no Content-Length) upload is refused by the proven-complete gate.
