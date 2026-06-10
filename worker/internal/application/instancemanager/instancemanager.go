@@ -27,6 +27,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -263,6 +264,13 @@ const restoreSaveTimeout = 30 * time.Second
 // transfer error, or a cancelled/timed-out request context — via a deferred
 // restore that runs on a detached context, so the server is never left with
 // auto-save disabled (which would risk data loss on a later crash).
+//
+// Once the working set is quiesced (bracketed above for a running server, at rest
+// for a stopped one), a structural region fsck runs before the transfer (#741):
+// on detected corruption the snapshot is refused with a coded error — failing fast
+// at the source instead of after a full tar+upload the API gate would reject — and
+// the deferred restore still re-enables auto-save. A fsck I/O error is best-effort
+// (logged, the transfer proceeds) so it cannot wedge the snapshot.
 func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) session.CommandResult {
 	if m.transfer == nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -280,6 +288,26 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	}
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
+
+	// Pre-pack structural region fsck (#741): fail fast at the source if the
+	// working set is already corrupt (e.g. a region torn by a crash-during-save,
+	// #703), so we refuse the snapshot here — clear signal, no wasted tar+upload —
+	// rather than after a full transfer the API gate (#749) would reject anyway.
+	// The set is quiesced at this point: a running server is bracketed by save-off
+	// above (#694), and a stopped one is not being written. The check itself is
+	// fail-closed on detected corruption but best-effort on a fsck I/O error — an
+	// error reading the set must not wedge the snapshot, so it is logged and the
+	// transfer proceeds (the API gate remains the correctness guarantee).
+	if report, err := regionfsck.CheckWorkingSet(workingDir); err != nil {
+		m.logger.Warn("snapshot pre-pack region fsck failed; proceeding without it",
+			"server_id", cmd.ServerID, "error", err)
+	} else if !report.Healthy() {
+		first := report.Corrupt[0]
+		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+			fmt.Sprintf("instancemanager: snapshot refused: %d/%d region files corrupt (e.g. %s: %s)",
+				len(report.Corrupt), report.Scanned, filepath.Base(first.Path), first.Reason))
+	}
+
 	if err := m.transfer.Snapshot(ctx, cmd.TransferURL, cmd.TransferToken, workingDir); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: snapshot: %v", err))
