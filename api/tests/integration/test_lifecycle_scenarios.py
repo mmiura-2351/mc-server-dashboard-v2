@@ -79,6 +79,7 @@ from tests.servers.fakes import (
     FakeControlPlane,
     FakeFileStore,
     FakeJarProvisioner,
+    FakeStoreGenerationReader,
     FakeVersionValidator,
 )
 from tests.storage.helpers import drain, read_tar
@@ -165,6 +166,7 @@ def _start_server_use_case(
         control_plane=control_plane,
         clock=clock,
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
 

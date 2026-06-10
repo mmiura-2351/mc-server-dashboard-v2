@@ -30,8 +30,35 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
+
+// generationMarkerFile is the Worker-private marker the instance manager writes
+// at the scratch root to record its local working-set generation (issue #763).
+// It is excluded from a snapshot pack so this Worker-private state never lands in
+// the authoritative stored working set (and is never re-hydrated to another
+// Worker or the live Minecraft dir); Hydrate re-writes it fresh from the response
+// header after unpack, so excluding it on pack is purely corrective. Kept as a
+// local constant to avoid the adapter depending on the instancemanager package.
+const generationMarkerFile = ".mcsd_generation"
+
+// generationHeader is the response header the API data plane stamps on a hydrate
+// (the store generation served) and a snapshot (the new store generation
+// published) so the Worker can record the generation of its local working set
+// (issue #763). An absent or unparseable header is read as generation 0.
+const generationHeader = "X-Working-Set-Generation"
+
+// parseGeneration reads the store generation from a response header, returning 0
+// when it is absent or unparseable (the safe direction: the API treats 0 as older
+// than any published store generation and re-hydrates).
+func parseGeneration(h http.Header) uint64 {
+	gen, err := strconv.ParseUint(h.Get(generationHeader), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return gen
+}
 
 // Client moves working sets over the API HTTP data plane. It is safe for
 // concurrent use (it holds only an *http.Client).
@@ -49,35 +76,38 @@ func New(httpClient *http.Client) *Client {
 // contents. A 204 response means "no published working set"; destDir is left
 // empty and Hydrate returns nil (the Worker launches against an empty dir). Any
 // archive member that would escape destDir is rejected and aborts the transfer.
-func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) error {
+func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return fmt.Errorf("datatransfer: build hydrate request: %w", err)
+		return 0, fmt.Errorf("datatransfer: build hydrate request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("datatransfer: hydrate request: %w", err)
+		return 0, fmt.Errorf("datatransfer: hydrate request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusNoContent:
-		// No published working set yet; nothing to unpack.
-		return nil
+		// No published working set yet; nothing to unpack. The store generation is
+		// 0 (the API serves no generation header on a 204), so the Worker records 0.
+		return parseGeneration(resp.Header), nil
 	case http.StatusOK:
 	default:
-		return fmt.Errorf("datatransfer: hydrate: unexpected status %s", resp.Status)
+		return 0, fmt.Errorf("datatransfer: hydrate: unexpected status %s", resp.Status)
 	}
 
 	if err := os.MkdirAll(destDir, 0o750); err != nil {
-		return fmt.Errorf("datatransfer: prepare working dir: %w", err)
+		return 0, fmt.Errorf("datatransfer: prepare working dir: %w", err)
 	}
 	if err := unpackTar(resp.Body, destDir); err != nil {
-		return fmt.Errorf("datatransfer: unpack: %w", err)
+		return 0, fmt.Errorf("datatransfer: unpack: %w", err)
 	}
-	return nil
+	// The store generation the API served, recorded by the caller alongside the
+	// freshly unpacked working set (issue #763).
+	return parseGeneration(resp.Header), nil
 }
 
 // Snapshot packs srcDir into a tar and uploads it to url. The tar is spooled to a
@@ -87,10 +117,10 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) error 
 // for the Content-Length the API's proven-complete gate matches, streamed as the
 // request body, and removed on every path (delta/streamed snapshot is deferred,
 // FR-DATA-5).
-func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) error {
+func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) (uint64, error) {
 	spool, err := os.CreateTemp(filepath.Dir(srcDir), "snapshot-*.tar")
 	if err != nil {
-		return fmt.Errorf("datatransfer: create snapshot spool: %w", err)
+		return 0, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
 	}
 	defer func() {
 		_ = spool.Close()
@@ -98,19 +128,19 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) error 
 	}()
 
 	if err := packTar(srcDir, spool); err != nil {
-		return fmt.Errorf("datatransfer: pack: %w", err)
+		return 0, fmt.Errorf("datatransfer: pack: %w", err)
 	}
 	size, err := spool.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return fmt.Errorf("datatransfer: size snapshot spool: %w", err)
+		return 0, fmt.Errorf("datatransfer: size snapshot spool: %w", err)
 	}
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("datatransfer: rewind snapshot spool: %w", err)
+		return 0, fmt.Errorf("datatransfer: rewind snapshot spool: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, spool)
 	if err != nil {
-		return fmt.Errorf("datatransfer: build snapshot request: %w", err)
+		return 0, fmt.Errorf("datatransfer: build snapshot request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/x-tar")
@@ -119,14 +149,16 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) error 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("datatransfer: snapshot request: %w", err)
+		return 0, fmt.Errorf("datatransfer: snapshot request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("datatransfer: snapshot: unexpected status %s", resp.Status)
+		return 0, fmt.Errorf("datatransfer: snapshot: unexpected status %s", resp.Status)
 	}
-	return nil
+	// The new store generation the publish produced, recorded by the caller as the
+	// generation its scratch is now at (issue #763).
+	return parseGeneration(resp.Header), nil
 }
 
 // unpackTar extracts a tar stream into destDir, rejecting any member whose
@@ -215,7 +247,8 @@ func safeJoin(root, name string) (string, error) {
 }
 
 // packTar writes a tar of srcDir's contents (entries relative to srcDir) into w,
-// in a deterministic (lexicographic) order. Nothing is excluded at M1.
+// in a deterministic (lexicographic) order. The Worker-private generation marker
+// at the scratch root is excluded (issue #763); nothing else is.
 func packTar(srcDir string, w io.Writer) error {
 	root, err := filepath.Abs(srcDir)
 	if err != nil {
@@ -250,6 +283,13 @@ func walkInto(tw *tar.Writer, root, dir string) error {
 	}
 	// os.ReadDir already returns entries sorted by name.
 	for _, entry := range entries {
+		// Exclude the Worker-private generation marker at the scratch root so it
+		// never lands in the authoritative stored working set (issue #763). It only
+		// ever lives at the root, so the dir == root guard keeps a same-named file in
+		// a sub-tree (which would be part of the legitimate world) untouched.
+		if dir == root && entry.Name() == generationMarkerFile {
+			continue
+		}
 		full := filepath.Join(dir, entry.Name())
 		rel, err := filepath.Rel(root, full)
 		if err != nil {

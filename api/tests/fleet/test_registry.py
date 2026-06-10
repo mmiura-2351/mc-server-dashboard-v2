@@ -310,44 +310,42 @@ def test_candidates_exclude_offline_worker() -> None:
     assert registry.candidates_for_placement() == []
 
 
-def test_holds_working_set_reflects_reported_ids() -> None:
-    # The registry records the held-working-set ids a Worker reports on Register
-    # (issue #696) and answers presence per server id.
+def test_held_generation_reflects_reported_servers() -> None:
+    # The registry records the held working sets a Worker reports on Register with
+    # the generation each is at (issue #763) and answers the generation per id.
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(
-        make_worker(at=_T0), held_server_ids=frozenset({"server-a", "server-b"})
-    )
+    registry.register(make_worker(at=_T0), held_servers={"server-a": 5, "server-b": 0})
 
-    assert registry.holds_working_set(WorkerId("worker-1"), "server-a") is True
-    assert registry.holds_working_set(WorkerId("worker-1"), "server-b") is True
-    assert registry.holds_working_set(WorkerId("worker-1"), "server-c") is False
+    assert registry.held_generation(WorkerId("worker-1"), "server-a") == 5
+    assert registry.held_generation(WorkerId("worker-1"), "server-b") == 0
+    assert registry.held_generation(WorkerId("worker-1"), "server-c") is None
 
 
-def test_holds_working_set_false_for_unknown_worker() -> None:
+def test_held_generation_none_for_unknown_worker() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
 
-    assert registry.holds_working_set(WorkerId("ghost"), "server-a") is False
+    assert registry.held_generation(WorkerId("ghost"), "server-a") is None
 
 
 def test_register_replaces_held_working_set() -> None:
-    # A re-registration REPLACES the held set (the control plane keeps no
-    # cross-stream session state): a reconnect whose scratch was wiped reports
-    # fewer ids, so a stale "held" claim never survives (issue #696).
+    # A re-registration REPLACES the held map (the control plane keeps no
+    # cross-stream session state): a reconnect whose scratch was wiped/GC'd reports
+    # fewer ids, so a stale "held" claim never survives (issue #763).
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0), held_server_ids=frozenset({"server-a"}))
-    registry.register(make_worker(at=_T0), held_server_ids=frozenset())
+    registry.register(make_worker(at=_T0), held_servers={"server-a": 5})
+    registry.register(make_worker(at=_T0), held_servers={})
 
-    assert registry.holds_working_set(WorkerId("worker-1"), "server-a") is False
+    assert registry.held_generation(WorkerId("worker-1"), "server-a") is None
 
 
-def test_register_without_held_ids_holds_nothing() -> None:
+def test_register_without_held_servers_holds_nothing() -> None:
     # The default (an older Worker that does not report) holds nothing, so the
-    # lifecycle layer hydrates as before (issue #696).
+    # lifecycle layer hydrates as before (issue #763).
     clock = FakeClock(_T0)
     registry = _registry(clock)
     registry.register(make_worker(at=_T0))
 
-    assert registry.holds_working_set(WorkerId("worker-1"), "server-a") is False
+    assert registry.held_generation(WorkerId("worker-1"), "server-a") is None

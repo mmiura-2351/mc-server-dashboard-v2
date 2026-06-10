@@ -83,6 +83,9 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisione
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     memory_limit_from_config,
 )
+from mc_server_dashboard_api.servers.domain.store_generation import (
+    StoreGenerationReader,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
@@ -138,6 +141,7 @@ class StartServer:
     control_plane: ControlPlane
     clock: Clock
     jar_provisioner: JarProvisioner
+    store_generation: StoreGenerationReader
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -317,15 +321,30 @@ class StartServer:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             worker_id = server.assigned_worker_id
 
-        # Presence-gated skip-hydrate (issue #696): a same-worker restart must NOT
-        # hydrate-clobber a live, newer working set. When the assigned Worker still
-        # reports holding this server's working set (its persistent scratch is at
-        # least as fresh as the last snapshot, since snapshots are pushed FROM it),
-        # skip the destructive hydrate and start on the existing scratch. When it
-        # does NOT report it (a fresh/wiped scratch, or a Worker too old to report),
-        # hydrate as before — never silently boot an empty/absent working set.
-        skip_hydrate = self.control_plane.holds_working_set(
+        # Generation-gated skip-hydrate (issue #763, generalizing #698): a
+        # same-worker restart must NOT hydrate-clobber a live, newer working set, but
+        # MUST hydrate a stale one. Compare the generation the assigned Worker reports
+        # holding against the authoritative store generation: skip the destructive
+        # hydrate only when the Worker holds a generation at least as fresh as the
+        # store (its scratch is at least as new as the last snapshot). Hydrate when
+        # the Worker reports NOTHING held (None — a fresh/wiped/GC'd scratch, or a
+        # Worker too old to report) OR holds a STALE generation (presence at an older
+        # generation, e.g. an A->B->A leftover scratch B has since advanced past) —
+        # never silently boot an empty/absent/stale working set.
+        #
+        # The threshold is Storage's authoritative current_generation, read straight
+        # from Storage (the single source of truth). The generation advances
+        # atomically with the working set it names, so there is no lag window in which
+        # a Worker holding the prior generation could satisfy held >= store and
+        # WRONGLY skip a hydrate it needs — a #696-class world rollback.
+        held_generation = self.control_plane.held_generation(
             worker_id=worker_id, server_id=server_id
+        )
+        store_generation = await self.store_generation.current_generation(
+            community_id=community_id, server_id=server_id
+        )
+        skip_hydrate = (
+            held_generation is not None and held_generation >= store_generation
         )
         outcome = await self._launch(
             server, community_id, server_id, worker_id, skip_hydrate=skip_hydrate

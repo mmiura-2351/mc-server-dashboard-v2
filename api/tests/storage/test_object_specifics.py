@@ -20,6 +20,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     PublishPhase,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import (
+    _GENERATION,
     _POINTER,
     ObjectStorage,
 )
@@ -173,17 +174,19 @@ async def test_sweep_reclaims_orphan_prefixes_idempotently(
 
     recovered = ObjectStorage(fake_s3_factory(store))
     pointer_key = _server_prefix(community, server) + _POINTER
+    generation_key = _server_prefix(community, server) + _GENERATION
     live_prefix = json.loads(store.objects[pointer_key])["snapshot"]
 
     await recovered.sweep()
 
-    # No object survives outside the live snapshot prefix + the pointer itself
-    # (incoming/ staging and any superseded snapshot prefix are GC'd).
+    # No object survives outside the live snapshot prefix + the pointer + the
+    # generation marker (issue #763); incoming/ staging and any superseded snapshot
+    # prefix are GC'd, but the server-prefix markers are kept.
     server_objs = [
         k for k in store.objects if k.startswith(_server_prefix(community, server))
     ]
     for key in server_objs:
-        assert key == pointer_key or key.startswith(live_prefix), key
+        assert key in (pointer_key, generation_key) or key.startswith(live_prefix), key
     assert not any(
         k.startswith(_server_prefix(community, server) + "incoming/")
         for k in store.objects

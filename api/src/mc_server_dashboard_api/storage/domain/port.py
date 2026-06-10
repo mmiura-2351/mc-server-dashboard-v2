@@ -127,8 +127,8 @@ class WorkingSetStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def commit_snapshot(self, handle: SnapshotHandle) -> None:
-        """Atomically publish the staged snapshot as the new authoritative copy.
+    async def commit_snapshot(self, handle: SnapshotHandle) -> int:
+        """Atomically publish the staged snapshot, returning the new generation.
 
         Atomic publish (STORAGE.md Section 4): move staging into a fresh
         ``snapshots/<id>/``, flip the ``current`` symlink atomically, fsync the
@@ -136,6 +136,16 @@ class WorkingSetStore(abc.ABC):
         reflects the complete transfer or the prior copy — never a partial. Refuses
         an un-signalled-complete transfer with
         :class:`~.errors.IncompleteTransferError`.
+
+        Bumps and returns the per-server working-set GENERATION (issue #763): a
+        monotonically increasing counter the adapter persists alongside the server's
+        snapshots, incremented on each successful publish. The caller records it as
+        the authoritative store generation (a DB column) and hands it to the Worker
+        over the data plane, so the reconciler can hydrate only when a Worker holds a
+        STALE generation (presence at a fresh-enough generation, generalizing the
+        presence-only skip of issue #698). The bump is part of the publish, so the
+        persisted generation and ``current/`` never disagree. Refused publishes
+        (integrity gate, incomplete transfer) do NOT bump.
         """
 
     @abc.abstractmethod
@@ -145,6 +155,20 @@ class WorkingSetStore(abc.ABC):
         ``current/`` is untouched. Idempotent: a second abort, or an abort of an
         already-swept handle, is a no-op (the crash-recovery cleanup path,
         Section 4.3).
+        """
+
+    @abc.abstractmethod
+    async def current_generation(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        """Return the current authoritative working-set generation (issue #763).
+
+        The counter :meth:`commit_snapshot` bumps, read back so the hydrate data
+        plane can stamp the generation it serves onto the transfer. A server with no
+        published snapshot (never committed) is generation 0, the same value the
+        Worker records for an empty/never-hydrated working set, so the reconciler's
+        ``worker-gen < store-gen`` comparison treats "nothing published" and "nothing
+        held" consistently.
         """
 
     @abc.abstractmethod

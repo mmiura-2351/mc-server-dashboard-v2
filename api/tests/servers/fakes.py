@@ -56,6 +56,9 @@ from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
 )
+from mc_server_dashboard_api.servers.domain.store_generation import (
+    StoreGenerationReader,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -95,6 +98,24 @@ class FakeJarProvisioner(JarProvisioner):
         if self._fail:
             raise JarProvisioningError("forced provisioning failure")
         return self._key
+
+
+class FakeStoreGenerationReader(StoreGenerationReader):
+    """Authoritative store-generation seam double for the skip-hydrate decision.
+
+    Returns a fixed generation for every server (default 0, the "no snapshot
+    published" case). Pass ``generation`` to pin a non-zero authoritative store
+    generation (issue #763) so a test can drive the reconciler's
+    ``held >= store`` comparison.
+    """
+
+    def __init__(self, *, generation: int = 0) -> None:
+        self._generation = generation
+
+    async def current_generation(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        return self._generation
 
 
 class FakeVersionValidator(VersionValidator):
@@ -590,7 +611,7 @@ class FakeControlPlane(ControlPlane):
         raise_unavailable: bool = False,
         unavailable_kinds: set[str] | None = None,
         connected: dict[WorkerId, bool] | None = None,
-        held: dict[tuple[WorkerId, ServerId], bool] | None = None,
+        held: dict[tuple[WorkerId, ServerId], int] | None = None,
     ) -> None:
         self._place_to = place_to
         self._outcome = outcome or CommandOutcome(status=CommandStatus.OK)
@@ -605,8 +626,8 @@ class FakeControlPlane(ControlPlane):
         # Worker-connectivity map for the scheduler's skip-disconnected path; a
         # worker absent here is treated as connected.
         self._connected = connected or {}
-        # Held-working-set presence map for the skip-hydrate decision (issue #696);
-        # a (worker, server) pair absent here is treated as NOT held, so the default
+        # Held-working-set generation map for the skip-hydrate decision (issue #763);
+        # a (worker, server) pair absent here returns None (NOT held), so the default
         # is to hydrate.
         self._held = held or {}
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
@@ -633,8 +654,10 @@ class FakeControlPlane(ControlPlane):
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
         return self._connected.get(worker_id, True)
 
-    def holds_working_set(self, *, worker_id: WorkerId, server_id: ServerId) -> bool:
-        return self._held.get((worker_id, server_id), False)
+    def held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId
+    ) -> int | None:
+        return self._held.get((worker_id, server_id))
 
     def increment_assignment(self, *, worker_id: WorkerId) -> None:
         self.incremented.append(worker_id)

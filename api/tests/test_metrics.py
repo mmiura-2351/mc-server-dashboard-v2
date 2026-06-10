@@ -24,10 +24,10 @@ from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry, Worker
 class _EmptyRegistry(WorkerRegistry):
     """A registry stand-in that reports no workers (only list_workers is used)."""
 
-    def register(self, worker, held_server_ids=frozenset()):  # type: ignore[no-untyped-def]
+    def register(self, worker, held_servers=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    def holds_working_set(self, worker_id, server_id):  # type: ignore[no-untyped-def]
+    def held_generation(self, worker_id, server_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     def record_heartbeat(self, worker_id, at):  # type: ignore[no-untyped-def]

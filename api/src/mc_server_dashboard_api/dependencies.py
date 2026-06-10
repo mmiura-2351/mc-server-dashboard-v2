@@ -191,6 +191,9 @@ from mc_server_dashboard_api.servers.adapters.file_store import (
 from mc_server_dashboard_api.servers.adapters.jar_provisioner import (
     CatalogJarProvisioner,
 )
+from mc_server_dashboard_api.servers.adapters.store_generation import (
+    StorageGenerationReader,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
@@ -1398,6 +1401,7 @@ def get_start_server(
         control_plane=control_plane,
         clock=ServersSystemClock(),
         jar_provisioner=CatalogJarProvisioner(ensure_jar=ensure_jar),
+        store_generation=StorageGenerationReader(storage=get_storage(request)),
     )
 
 

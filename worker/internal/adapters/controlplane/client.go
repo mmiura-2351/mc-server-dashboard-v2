@@ -69,9 +69,10 @@ func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) e
 			Register: &controlplanev1.Register{
 				WorkerId:      caps.WorkerID,
 				WorkerVersion: caps.WorkerVersion,
-				// held_server_ids advertises the working sets this Worker already holds
-				// so the API skips a destructive hydrate on a same-worker restart (#696).
-				HeldServerIds: caps.HeldServerIDs,
+				// held_servers advertises the working sets this Worker already holds,
+				// each with its generation, so the API skips a destructive hydrate on a
+				// same-worker restart only when the held generation is fresh (#763).
+				HeldServers: mapHeldServers(caps.HeldServers),
 				Capabilities: &controlplanev1.WorkerCapabilities{
 					Drivers:    mapDrivers(caps.Drivers),
 					MaxServers: caps.MaxServers,
@@ -279,6 +280,19 @@ func mapDrivers(names []string) []controlplanev1.ExecutionDriverKind {
 		default:
 			out = append(out, controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_UNSPECIFIED)
 		}
+	}
+	return out
+}
+
+// mapHeldServers translates the held working sets to the wire HeldServer messages
+// the API reads on Register (issue #763).
+func mapHeldServers(held []session.HeldServer) []*controlplanev1.HeldServer {
+	out := make([]*controlplanev1.HeldServer, 0, len(held))
+	for _, h := range held {
+		out = append(out, &controlplanev1.HeldServer{
+			ServerId:   h.ServerID,
+			Generation: h.Generation,
+		})
 	}
 	return out
 }

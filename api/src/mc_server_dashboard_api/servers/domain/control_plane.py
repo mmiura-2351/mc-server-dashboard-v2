@@ -159,17 +159,22 @@ class ControlPlane(abc.ABC):
         """
 
     @abc.abstractmethod
-    def holds_working_set(self, *, worker_id: WorkerId, server_id: ServerId) -> bool:
-        """Return whether ``worker_id`` reported holding ``server_id``'s working set.
+    def held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId
+    ) -> int | None:
+        """Return the generation ``worker_id`` reported holding for ``server_id``.
 
         Answers from the held-working-set inventory the Worker advertised on its
-        current registration (issue #696). The lifecycle layer consults it on a
-        same-worker restart (``redispatch_start``): when the assigned Worker still
-        holds the live working set, the destructive hydrate is skipped (it would
-        clobber the newer scratch with the last authoritative snapshot). False for
-        a disconnected/unknown Worker, and false once the Worker re-registers
-        without that id (e.g. its scratch was wiped) — so the start hydrates rather
-        than booting an empty/absent working set.
+        current registration (issue #763). The lifecycle layer consults it on a
+        same-worker restart (``redispatch_start``): it skips the destructive hydrate
+        only when the held generation is at least the authoritative store generation
+        (the Worker's scratch is at least as fresh as the store, so hydrating would
+        clobber the newer scratch with the last snapshot). ``None`` for a
+        disconnected/unknown Worker, and ``None`` once the Worker re-registers
+        without that id (e.g. its scratch was wiped or GC'd) — so the start hydrates
+        rather than booting an empty/absent working set. A held generation older than
+        the store generation likewise hydrates (presence at a stale generation, e.g.
+        an A->B->A leftover scratch).
         """
 
     @abc.abstractmethod

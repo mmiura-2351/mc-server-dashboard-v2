@@ -221,11 +221,13 @@ class FleetControlPlaneAdapter(ControlPlane):
             WorkerStatus.DRAINING,
         )
 
-    def holds_working_set(self, *, worker_id: WorkerId, server_id: ServerId) -> bool:
+    def held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId
+    ) -> int | None:
         # Read the held-working-set inventory the Worker advertised on Register
-        # (issue #696). The registry keys it by the fleet worker-id string and the
+        # (issue #763). The registry keys it by the fleet worker-id string and the
         # server-id string (the wire spelling); the seam bridges both.
-        return self._registry.holds_working_set(
+        return self._registry.held_generation(
             _fleet_worker(worker_id), str(server_id.value)
         )
 

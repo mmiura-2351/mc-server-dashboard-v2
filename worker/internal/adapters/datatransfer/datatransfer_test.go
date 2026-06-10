@@ -38,14 +38,19 @@ func TestHydrateUnpacksWorkingSet(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
 			t.Errorf("auth header = %q, want Bearer tok", got)
 		}
+		w.Header().Set("X-Working-Set-Generation", "42")
 		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
 
 	dest := t.TempDir()
 	c := New(srv.Client())
-	if err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	gen, err := c.Hydrate(context.Background(), srv.URL, "tok", dest)
+	if err != nil {
 		t.Fatalf("Hydrate: %v", err)
+	}
+	if gen != 42 {
+		t.Fatalf("generation = %d, want 42", gen)
 	}
 
 	got, err := os.ReadFile(filepath.Join(dest, "server.properties"))
@@ -66,7 +71,7 @@ func TestHydrateNoContentLeavesDestEmpty(t *testing.T) {
 
 	dest := t.TempDir()
 	c := New(srv.Client())
-	if err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 	entries, _ := os.ReadDir(dest)
@@ -86,7 +91,7 @@ func TestHydrateRejectsPathEscape(t *testing.T) {
 	parent := t.TempDir()
 	dest := filepath.Join(parent, "working")
 	c := New(srv.Client())
-	if err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err == nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err == nil {
 		t.Fatal("expected an error for the path-escape member")
 	}
 	if _, err := os.Stat(filepath.Join(parent, "escape.txt")); !os.IsNotExist(err) {
@@ -109,7 +114,7 @@ func TestHydrateRejectsSymlinkMember(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if err := c.Hydrate(context.Background(), srv.URL, "tok", t.TempDir()); err == nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", t.TempDir()); err == nil {
 		t.Fatal("expected an error for the symlink member")
 	}
 }
@@ -131,13 +136,18 @@ func TestSnapshotPacksAndUploadsWithContentLength(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotLen = r.ContentLength
 		received, _ = io.ReadAll(r.Body)
+		w.Header().Set("X-Working-Set-Generation", "9")
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
+	gen, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir)
+	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
+	}
+	if gen != 9 {
+		t.Fatalf("generation = %d, want 9", gen)
 	}
 
 	if gotLen <= 0 || gotLen != int64(len(received)) {
@@ -165,6 +175,63 @@ func TestSnapshotPacksAndUploadsWithContentLength(t *testing.T) {
 	}
 }
 
+func TestSnapshotExcludesGenerationMarker(t *testing.T) {
+	// The Worker-private generation marker at the scratch root must NOT be packed
+	// into the snapshot (issue #763): it is Worker-private state that would
+	// otherwise land in the authoritative stored working set and be re-hydrated to
+	// other Workers / the live Minecraft dir. A same-named file deeper in the tree
+	// is part of the legitimate world and must still be packed.
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, generationMarkerFile), []byte("7"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "server.properties"), []byte("p"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// A file with the marker's name but inside a sub-tree is NOT the marker.
+	nested := filepath.Join(srcDir, "world")
+	if err := os.MkdirAll(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, generationMarkerFile), []byte("nested"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(srv.Client())
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	names := map[string]bool{}
+	tr := tar.NewReader(bytes.NewReader(received))
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names[h.Name] = true
+	}
+	if names[generationMarkerFile] {
+		t.Fatalf("snapshot tar must not contain the root generation marker %q", generationMarkerFile)
+	}
+	if !names["server.properties"] {
+		t.Fatal("snapshot tar must contain server.properties")
+	}
+	if !names["world/"+generationMarkerFile] {
+		t.Fatalf("snapshot tar must contain the nested %q (not the root marker)", generationMarkerFile)
+	}
+}
+
 func TestSnapshotStreamsLargeWorkingSetWithMatchingContentLength(t *testing.T) {
 	// A multi-chunk working set must upload with a Content-Length that matches the
 	// streamed byte count without the client buffering the whole tar in RAM. The
@@ -188,7 +255,7 @@ func TestSnapshotStreamsLargeWorkingSetWithMatchingContentLength(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	if gotLen <= fileSize {
@@ -214,7 +281,7 @@ func TestSnapshotRemovesSpoolFile(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	entries, err := os.ReadDir(filepath.Dir(srcDir))
@@ -235,7 +302,7 @@ func TestSnapshotEmptyDirUploadsEmptyTar(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if err := c.Snapshot(context.Background(), srv.URL, "tok", filepath.Join(t.TempDir(), "absent")); err != nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", filepath.Join(t.TempDir(), "absent")); err != nil {
 		t.Fatalf("Snapshot of absent dir: %v", err)
 	}
 }
@@ -247,7 +314,7 @@ func TestSnapshotPropagatesServerError(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if err := c.Snapshot(context.Background(), srv.URL, "tok", t.TempDir()); err == nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", t.TempDir()); err == nil {
 		t.Fatal("expected an error for a 400 response")
 	}
 }

@@ -19,20 +19,23 @@ type fakeTransfer struct {
 	snapshots []string
 	err       error
 	seq       *[]string
+	// gen is the store generation Hydrate/Snapshot report (issue #763); 0 by
+	// default. The manager records it in the working set's generation marker.
+	gen uint64
 	// cancelDuringSnapshot, when set, is invoked at the start of Snapshot to model
 	// the request context being cancelled mid-transfer; Snapshot then returns
 	// context.Canceled. It proves the deferred save-on still runs (#694).
 	cancelDuringSnapshot context.CancelFunc
 }
 
-func (f *fakeTransfer) Hydrate(_ context.Context, _, _, workingDir string) error {
+func (f *fakeTransfer) Hydrate(_ context.Context, _, _, workingDir string) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hydrated = append(f.hydrated, workingDir)
-	return f.err
+	return f.gen, f.err
 }
 
-func (f *fakeTransfer) Snapshot(_ context.Context, _, _, workingDir string) error {
+func (f *fakeTransfer) Snapshot(_ context.Context, _, _, workingDir string) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshots = append(f.snapshots, workingDir)
@@ -41,9 +44,9 @@ func (f *fakeTransfer) Snapshot(_ context.Context, _, _, workingDir string) erro
 	}
 	if f.cancelDuringSnapshot != nil {
 		f.cancelDuringSnapshot()
-		return context.Canceled
+		return 0, context.Canceled
 	}
-	return f.err
+	return f.gen, f.err
 }
 
 // equalLines reports whether two RCON-line slices are element-wise equal.

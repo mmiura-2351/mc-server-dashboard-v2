@@ -55,6 +55,7 @@ from tests.servers.fakes import (
     FakeControlPlane,
     FakeJarProvisioner,
     FakeServerRepository,
+    FakeStoreGenerationReader,
     FakeUnitOfWork,
 )
 
@@ -126,6 +127,7 @@ async def test_start_places_sets_running_and_dispatches() -> None:
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     result = await use_case(
@@ -174,6 +176,7 @@ async def test_start_forwards_request_memory_and_committed_accounting() -> None:
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
@@ -195,6 +198,7 @@ async def test_start_records_resolved_jar_key_in_config() -> None:
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(),
     )
 
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
@@ -215,6 +219,7 @@ async def test_start_fails_before_placement_when_jar_provisioning_fails() -> Non
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(fail=True),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with pytest.raises(JarProvisioningError):
@@ -248,6 +253,7 @@ async def test_start_when_already_running_is_conflict() -> None:
         control_plane=FakeControlPlane(),
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with pytest.raises(InvalidLifecycleTransitionError):
@@ -266,6 +272,7 @@ async def test_start_with_no_eligible_worker_is_typed_error() -> None:
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with pytest.raises(NoEligibleWorkerError):
@@ -290,6 +297,7 @@ async def test_start_hydrate_failure_compensates_without_dispatching_start() -> 
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -319,6 +327,7 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -351,6 +360,7 @@ async def test_start_failure_logs_warning_with_server_and_kind(
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with (
@@ -418,6 +428,7 @@ async def test_start_compensation_decrements_only_when_revert_applies() -> None:
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -470,6 +481,7 @@ async def test_start_compensation_skips_decrement_when_revert_loses_race() -> No
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -502,6 +514,7 @@ async def test_start_lost_race_is_conflict_without_dispatch_or_count() -> None:
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with pytest.raises(LifecycleTransitionConflictError):
@@ -530,6 +543,7 @@ async def test_two_sequential_starts_second_is_conflict() -> None:
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
@@ -573,6 +587,7 @@ async def test_start_compensation_failure_preserves_both_errors(
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
 
     with (
@@ -601,6 +616,7 @@ async def test_start_missing_server_is_not_found() -> None:
         control_plane=FakeControlPlane(),
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
     with pytest.raises(ServerNotFoundError):
         await use_case(
@@ -617,6 +633,7 @@ async def test_start_cross_community_is_not_found() -> None:
         control_plane=FakeControlPlane(),
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )
     with pytest.raises(ServerNotFoundError):
         await use_case(
@@ -741,6 +758,7 @@ async def test_stop_then_start_succeeds() -> None:
         control_plane=FakeControlPlane(place_to=WorkerId(next_worker)),
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )(community_id=CommunityId(community), server_id=ServerId(server_id))
 
     assert started.desired_state is DesiredState.RUNNING
@@ -963,6 +981,7 @@ async def test_stop_server_not_found_then_start_succeeds() -> None:
         control_plane=FakeControlPlane(place_to=WorkerId(next_worker)),
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
     )(community_id=CommunityId(community), server_id=ServerId(server_id))
 
     assert started.desired_state is DesiredState.RUNNING
@@ -1133,12 +1152,15 @@ async def test_command_when_not_running_is_conflict() -> None:
 # --- reconciler re-dispatch paths (issue #101) -----------------------------
 
 
-def _start_server(uow: FakeUnitOfWork, cp: FakeControlPlane) -> StartServer:
+def _start_server(
+    uow: FakeUnitOfWork, cp: FakeControlPlane, *, store_generation: int = 0
+) -> StartServer:
     return StartServer(
         uow=uow,
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(generation=store_generation),
     )
 
 
@@ -1281,7 +1303,7 @@ async def test_place_and_start_always_hydrates_even_if_worker_holds_working_set(
     )
     cp = FakeControlPlane(
         place_to=WorkerId(worker),
-        held={(WorkerId(worker), ServerId(server_id)): True},
+        held={(WorkerId(worker), ServerId(server_id)): 5},
     )
     await _start_server(uow, cp).place_and_start(
         community_id=CommunityId(community), server_id=ServerId(server_id)
@@ -1410,11 +1432,11 @@ async def test_redispatch_start_replays_launch_without_increment() -> None:
     assert result.observed_state is ObservedState.CRASHED
 
 
-async def test_redispatch_start_skips_hydrate_when_worker_holds_working_set() -> None:
-    # Presence-gated skip-hydrate (issue #696): a same-worker restart whose assigned
-    # Worker reports it still holds the live working set must NOT hydrate — the
-    # hydrate would clobber the newer scratch with the last snapshot and roll the
-    # world back. Start is still dispatched.
+async def test_redispatch_start_skips_hydrate_when_held_generation_is_fresh() -> None:
+    # Generation-gated skip-hydrate (issue #763): a same-worker restart whose
+    # assigned Worker reports holding a generation AT LEAST the store generation must
+    # NOT hydrate — the hydrate would clobber the newer scratch with the last
+    # snapshot and roll the world back. Start is still dispatched.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -1426,22 +1448,21 @@ async def test_redispatch_start_skips_hydrate_when_worker_holds_working_set() ->
             worker_id=worker,
         )
     )
+    # Worker holds generation 5, equal to the store generation -> skip hydrate.
     cp = FakeControlPlane(
-        held={(WorkerId(worker), ServerId(server_id)): True},
+        held={(WorkerId(worker), ServerId(server_id)): 5},
     )
-    await _start_server(uow, cp).redispatch_start(
+    await _start_server(uow, cp, store_generation=5).redispatch_start(
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
     # Hydrate is SKIPPED; only start is dispatched.
     assert [k for k, _, _ in cp.dispatched] == ["start"]
 
 
-async def test_redispatch_start_hydrates_when_worker_does_not_hold_working_set() -> (
-    None
-):
-    # The assigned Worker does NOT report holding the working set (a fresh/wiped
-    # scratch, or a Worker too old to report): hydrate then start, so a same-worker
-    # restart never silently boots an empty/absent working set (issue #696).
+async def test_redispatch_start_hydrates_when_held_generation_is_stale() -> None:
+    # Presence at a STALE generation must hydrate (issue #763): an A->B->A leftover
+    # scratch is present but older than the store generation B advanced past, so the
+    # reconciler hydrates rather than starting on the stale working set.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -1453,9 +1474,36 @@ async def test_redispatch_start_hydrates_when_worker_does_not_hold_working_set()
             worker_id=worker,
         )
     )
-    # No `held` entry -> holds_working_set is False -> hydrate.
+    # Worker holds generation 3, older than the store generation 8 -> hydrate.
+    cp = FakeControlPlane(
+        held={(WorkerId(worker), ServerId(server_id)): 3},
+    )
+    await _start_server(uow, cp, store_generation=8).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
+async def test_redispatch_start_hydrates_when_worker_does_not_hold_working_set() -> (
+    None
+):
+    # The assigned Worker does NOT report holding the working set (a fresh/wiped/GC'd
+    # scratch, or a Worker too old to report): hydrate then start, so a same-worker
+    # restart never silently boots an empty/absent working set (issue #763).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    # No `held` entry -> held_generation is None -> hydrate.
     cp = FakeControlPlane()
-    await _start_server(uow, cp).redispatch_start(
+    await _start_server(uow, cp, store_generation=2).redispatch_start(
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
