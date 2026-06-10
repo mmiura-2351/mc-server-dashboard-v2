@@ -26,28 +26,33 @@ silently corrected here — there is no in-line retry — but it is observable: 
 divergence shows up as ``desired_state`` not matching the Worker-reported
 ``observed_state``. Closing the window (re-dispatching durable-but-unsent intent)
 is a reconciler's job, tracked separately; the in-line compensation above covers
-only the case where the dispatch *ran* and the Worker refused it.
+only failures where the start command demonstrably never reached the Worker (a
+pre-dispatch failure, or the Worker explicitly refused the start). A
+timeout/lost-response AFTER the start was sent does NOT compensate — see the
+assignment-stickiness note below.
 
 Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
 ``StartServer`` first drives the Worker to pull the authoritative working set from
 Storage (a server with no published working set yet hydrates to an empty dir, the
-data-plane endpoint being 204), then dispatches the launch; either step failing
-compensates the committed intent. The launch carries a conventional ``server.jar``
+data-plane endpoint being 204), then dispatches the launch; a failure before the
+start command is sent (a failed hydrate, or a pre-dispatch
+``WorkerUnavailableError``) compensates the committed intent. The launch carries a
+conventional ``server.jar``
 relpath and the server's recorded MC version (FR-EXE-5: the Worker picks the Java
 runtime).
 
 Assignment stickiness after dispatch (the orphan-placement invariant, issue #101).
 ONCE A START COMMAND HAS BEEN SENT FOR A SERVER, THE RECONCILER NEVER PLACES IT ON
 A DIFFERENT WORKER until the assignment is cleared by an authoritative path (a stop,
-or worker-disconnect handling). The reconciler's ``place_and_start`` therefore
-distinguishes WHERE a launch failed: a pre-dispatch failure (placement, jar
-provisioning, a failed hydrate) is safe to ``_unassign`` for a later re-place, but a
-post-dispatch failure — a failed start outcome, or a timeout/lost-response
-``WorkerUnavailableError`` whose command MAY have been applied — KEEPS the
-assignment so the next tick redispatches to the SAME Worker (where an
-``INVALID_STATE`` resolves the lost-response case as already-running). The Worker's
-double-start guard is per-process, so re-placing a started server elsewhere would
-spawn a second live instance.
+or worker-disconnect handling). Both the normal start (``__call__``) and the
+reconciler's ``place_and_start`` therefore distinguish WHERE a launch failed: a
+pre-dispatch failure (placement, jar provisioning, a failed hydrate) is safe to
+revert, but a post-dispatch timeout/lost-response ``WorkerUnavailableError`` whose
+command MAY have been applied KEEPS the assignment and ``desired=running`` so the
+next reconcile tick redispatches to the SAME Worker (where an ``INVALID_STATE``
+resolves the lost-response case as already-running). The Worker's double-start guard
+is per-process, so reverting a possibly-started server — and letting a later start
+place it elsewhere — would spawn a second live instance (issue #773).
 """
 
 from __future__ import annotations
@@ -176,10 +181,22 @@ class StartServer:
             await self.uow.commit()
 
         self.control_plane.increment_assignment(worker_id=worker_id)
+        dispatch = _Dispatch()
         try:
-            outcome = await self._launch(server, community_id, server_id, worker_id)
+            outcome = await self._launch(
+                server, community_id, server_id, worker_id, dispatch
+            )
         except WorkerUnavailableError as exc:
-            await self._compensate(community_id, server_id, worker_id, original=exc)
+            # A timeout/lost-response AFTER the start was sent (dispatch.attempted)
+            # MAY have been applied by the Worker (issue #773, mirroring #101's fix
+            # to place_and_start): keep desired=running and the assignment so the
+            # reconciler redispatches to the SAME Worker, where an INVALID_STATE
+            # resolves it as already-running. Compensating here would orphan a live
+            # instance and let a later start place a second one on a different
+            # Worker. Only a PRE-dispatch unavailable (e.g. a failed hydrate) never
+            # reached the Worker, so the committed intent is safe to compensate.
+            if not dispatch.attempted:
+                await self._compensate(community_id, server_id, worker_id, original=exc)
             raise
         if not outcome.success:
             failure = _dispatch_failure(

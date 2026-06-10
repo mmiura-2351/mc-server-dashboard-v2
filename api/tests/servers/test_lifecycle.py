@@ -343,6 +343,73 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
+async def test_start_lost_response_after_dispatch_keeps_assignment() -> None:
+    # The lost-response case for the normal start (#773, mirroring #101's fix to
+    # place_and_start): hydrate succeeds, the start command is SENT, then its
+    # response is lost (WorkerUnavailableError, i.e. a CommandTimedOut / stream
+    # death). The Worker MAY have applied it, so __call__ must NOT compensate —
+    # keep desired=running and the assignment so the reconciler redispatches to
+    # the SAME Worker (an INVALID_STATE there resolves it as already-running).
+    # Compensating here would orphan a live instance and let a later start place
+    # a second one on a different Worker.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"start"})
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    with pytest.raises(WorkerUnavailableError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The start command was attempted (sent) before the response was lost.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate", "start"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    # No compensation: the load increment stands, nothing is decremented.
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == []
+
+
+async def test_start_pre_dispatch_unavailable_compensates() -> None:
+    # A WorkerUnavailableError BEFORE the start was sent (here a failed hydrate)
+    # means the start never reached the Worker, so __call__ must compensate the
+    # committed intent it created: revert desired->stopped, unassign, and
+    # decrement the load (#773). Mirrors the pre-dispatch leg of place_and_start.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"hydrate"})
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    with pytest.raises(WorkerUnavailableError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The start was never sent — only the hydrate was attempted.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate"]
+    reverted = uow.servers.by_id[ServerId(server_id)]
+    assert reverted.desired_state is DesiredState.STOPPED
+    assert reverted.assigned_worker_id is None
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == [WorkerId(worker)]
+
+
 async def test_start_failure_logs_warning_with_server_and_kind(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
