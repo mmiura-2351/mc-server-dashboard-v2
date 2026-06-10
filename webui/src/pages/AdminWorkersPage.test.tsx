@@ -144,7 +144,7 @@ describe("admin workers page", () => {
     const calls: { url: string; method: string }[] = [];
     signedIn((url, init) => {
       calls.push({ url, method: methodOf(init) });
-      return new Response(null, { status: 204 });
+      return jsonResponse({ servers_stopped: 0 });
     });
 
     renderApp({ path: "/admin/workers" });
@@ -167,6 +167,50 @@ describe("admin workers page", () => {
         method: "PUT",
       });
     });
+  });
+
+  it("shows convergence warning in the drain confirm dialog", async () => {
+    signedIn();
+
+    renderApp({ path: "/admin/workers" });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("admin.workers.drain") }),
+    );
+
+    // The convergence warning must be visible inside the dialog before confirming.
+    expect(
+      await screen.findByText(t("admin.workers.drainDialogConvergenceWarning")),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces servers_stopped count in the success toast after drain", async () => {
+    signedIn((_url, init) => {
+      if ((init?.method ?? "GET").toUpperCase() === "PUT") {
+        return jsonResponse({ servers_stopped: 3 });
+      }
+      return new Response(null, { status: 204 });
+    });
+
+    renderApp({ path: "/admin/workers" });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("admin.workers.drain") }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("admin.workers.drainConfirm"),
+      }),
+    );
+
+    // The toast must include the base message and the count suffix.
+    expect(
+      await screen.findByText(
+        t("admin.workers.drained") +
+          " 3" +
+          t("admin.workers.drainedCountSuffix"),
+      ),
+    ).toBeInTheDocument();
   });
 
   it("undrains a draining worker after confirm with DELETE /workers/{id}/drain", async () => {

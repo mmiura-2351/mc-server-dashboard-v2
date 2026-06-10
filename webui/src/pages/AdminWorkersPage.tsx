@@ -17,6 +17,7 @@ import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 // rather than duplicated (#477).
 
 type WorkerResponse = components["schemas"]["WorkerResponse"];
+type DrainResponse = components["schemas"]["DrainResponse"];
 
 // A modest poll keeps the fleet view fresh without a WS: heartbeats and drain
 // state change on the order of seconds, so 12s is a reasonable middle ground.
@@ -66,8 +67,15 @@ function Loaded({ workers }: { workers: WorkerResponse[] }) {
       api.put(
         apiPath("/api/workers/{worker_id}/drain", { worker_id: worker.id }),
       ),
-    onSuccess: () => {
-      showToast(t("admin.workers.drained"), "success");
+    onSuccess: (data: DrainResponse | undefined) => {
+      const count = data?.servers_stopped ?? 0;
+      showToast(
+        t("admin.workers.drained") +
+          (count > 0
+            ? " " + count + t("admin.workers.drainedCountSuffix")
+            : ""),
+        "success",
+      );
       queryClient.invalidateQueries({ queryKey: ["workers"] });
     },
     onError: (error) => {
@@ -210,6 +218,11 @@ function Loaded({ workers }: { workers: WorkerResponse[] }) {
             ? t("admin.workers.undrainDialogBody")
             : t("admin.workers.drainDialogBody")}
         </p>
+        {!isDraining && (
+          <p className="notice warning">
+            {t("admin.workers.drainDialogConvergenceWarning")}
+          </p>
+        )}
       </Modal>
     </>
   );
