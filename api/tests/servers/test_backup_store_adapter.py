@@ -311,3 +311,77 @@ async def test_size_reports_archive_byte_count(tmp_path: Path) -> None:
 
 async def _stream_of(data: bytes) -> AsyncIterator[bytes]:
     yield data
+
+
+async def test_check_backup_health_returns_corrupt_count(tmp_path: Path) -> None:
+    """The sweep seam (#744): a corrupt archive reports its corrupt-region count."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    good = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    bad = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+    )
+
+    assert (
+        await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref=good
+        )
+        == 0
+    )
+    assert (
+        await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref=bad
+        )
+        == 1
+    )
+
+
+async def test_check_backup_health_unknown_ref_translates_to_backup_not_found(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    with pytest.raises(BackupNotFoundError):
+        await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref="nope"
+        )
+
+
+async def test_check_current_health_returns_corrupt_count(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    assert (
+        await adapter.check_current_health(community_id=community, server_id=server)
+        == 0
+    )
+    # Corrupt the published snapshot in place, then re-check.
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    current = server_root / os.readlink(server_root / "current")
+    (current / "world" / "region" / "r.0.0.mca").write_bytes(corrupt_region_bytes())
+    assert (
+        await adapter.check_current_health(community_id=community, server_id=server)
+        == 1
+    )
+
+
+async def test_check_current_health_unpublished_returns_none(tmp_path: Path) -> None:
+    """No published snapshot -> the seam returns None so the sweep skips it (#744)."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    assert (
+        await adapter.check_current_health(community_id=community, server_id=server)
+        is None
+    )

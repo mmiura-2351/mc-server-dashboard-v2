@@ -100,6 +100,15 @@ BACKUP_DOWNLOAD: Final = "backup:download"
 # permission, so it names the operation, not a permission (free-text column, see
 # module docstring).
 BACKUP_FORCE_RESTORE: Final = "backup:force_restore"
+# The one-shot fsck/quarantine sweep marking an existing artifact corrupt (issue
+# #744): a backup re-checked and found structurally corrupt is quarantined, and a
+# published snapshot's ``current`` found corrupt is flagged (snapshots are
+# filesystem-only, so this is report/audit-only — no DB row). Both name the
+# maintenance operation, not a permission (the sweep is an admin command, not a
+# catalog-gated route); free-text column, see module docstring. The actor is the
+# operator who ran the command (``None`` when run headless).
+BACKUP_QUARANTINE: Final = "backup:quarantine"
+SNAPSHOT_QUARANTINE: Final = "snapshot:quarantine"
 
 # File upload / download / rename / delete / mkdir / search (FR-FILE-*, issue
 # #259) plus write / rollback (issue #263). Recorded under the file:edit /

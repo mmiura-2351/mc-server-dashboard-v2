@@ -99,6 +99,31 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         # forced corrupt restore (#743).
         return len(report.corrupt)
 
+    async def check_backup_health(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        community, server = _scope(community_id, server_id)
+        try:
+            report = await self._storage.check_backup_health(
+                community, server, BackupKey(storage_ref)
+            )
+        except NotFoundError as exc:
+            raise BackupNotFoundError(storage_ref) from exc
+        return len(report.corrupt)
+
+    async def check_current_health(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> int | None:
+        community, server = _scope(community_id, server_id)
+        try:
+            report = await self._storage.check_current_health(community, server)
+        except NotFoundError:
+            # No published snapshot for this server: nothing to fsck. The sweep
+            # treats this as "skip" rather than an error (a server may be created
+            # but never started/published).
+            return None
+        return len(report.corrupt)
+
     async def delete(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> None:
