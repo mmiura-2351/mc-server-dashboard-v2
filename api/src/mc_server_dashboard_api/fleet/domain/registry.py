@@ -41,6 +41,13 @@ class WorkerSnapshot:
     assigned to it (the placement 'load' axis, FR-WRK-3). At M1 it is tracked by
     the registry via :meth:`WorkerRegistry.increment_assignment` /
     :meth:`WorkerRegistry.decrement_assignment`.
+
+    It deliberately includes in-flight placement reservations (#778), so the read
+    view reports the SAME capacity-relevant load the placement decision sees rather
+    than only committed assignments. A start that loses its commit race transiently
+    inflates the count by one until its reservation is released; this never
+    under-reports load against capacity, so the count is conservative — a worker is
+    never shown with free slots it has already tentatively handed out.
     """
 
     id: WorkerId

@@ -342,8 +342,20 @@ async def test_two_concurrent_starts_only_one_takes_the_last_slot() -> None:
     registry.register(make_worker(worker_id=str(worker_uuid), max_servers=1, at=_NOW))
     cp = _registry_backed_control_plane(registry)
 
+    # Yield between placement and commit so BOTH starts read the worker's load
+    # (taking their reservation at _place) before EITHER commits and confirms.
+    # Without this barrier none of the fakes suspends between _place and commit, so
+    # asyncio.gather runs the two starts strictly sequentially and the second
+    # already sees the first's committed load — passing even with pre-fix semantics
+    # (no reservation). The reservation taken at _place time is what serializes the
+    # last slot (#778); this yield is what exercises that, failing without the fix.
+    class _YieldingUnitOfWork(FakeUnitOfWork):
+        async def commit(self) -> None:
+            await asyncio.sleep(0)
+            await super().commit()
+
     async def start(server_id: uuid.UUID) -> object:
-        uow = FakeUnitOfWork()
+        uow = _YieldingUnitOfWork()
         uow.servers.seed(_server(community_id=community, server_id=server_id))
         use_case = StartServer(
             uow=uow,
@@ -778,6 +790,89 @@ async def test_start_lost_race_is_conflict_without_dispatch_or_count() -> None:
     assert uow.commits == 0
     survivor = uow.servers.by_id[ServerId(server_id)]
     assert survivor.assigned_worker_id == WorkerId(winner_worker)
+
+
+async def test_start_release_reservation_when_commit_raises() -> None:
+    # The CAS applied but the commit itself raises (e.g. a DB error). The reservation
+    # taken at placement must be released so the tentatively-held slot is not leaked
+    # permanently (#778): a never-committed server id never enters the authoritative
+    # tally, so no reconnect rebuild would ever reclaim it. (If the commit actually
+    # landed, releasing only undercounts by one until the next rebuild — safe.)
+    from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+    from tests.fleet.fakes import FakeClock as FleetFakeClock
+    from tests.fleet.fakes import make_worker
+
+    community, server_id, _ = _ids()
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
+    )
+    registry.register(make_worker(worker_id=str(worker_uuid), max_servers=1, at=_NOW))
+    cp = _registry_backed_control_plane(registry)
+
+    class _FailingCommitUnitOfWork(FakeUnitOfWork):
+        async def commit(self) -> None:
+            raise RuntimeError("commit failed")
+
+    uow = _FailingCommitUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The reservation was released, so the worker's capacity is NOT shrunk: its load
+    # is back to 0 and it can accept a placement again (no API restart needed).
+    assert registry.list_workers()[0].assigned_count == 0
+
+
+async def test_start_release_reservation_when_cancelled() -> None:
+    # The request task is cancelled at the commit await (a client disconnect cancels
+    # the HTTP task). CancelledError is a BaseException, not Exception, so the leak
+    # fix must catch it explicitly to release the reservation before re-raising (#778).
+    import asyncio
+
+    from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+    from tests.fleet.fakes import FakeClock as FleetFakeClock
+    from tests.fleet.fakes import make_worker
+
+    community, server_id, _ = _ids()
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
+    )
+    registry.register(make_worker(worker_id=str(worker_uuid), max_servers=1, at=_NOW))
+    cp = _registry_backed_control_plane(registry)
+
+    class _CancelOnCommitUnitOfWork(FakeUnitOfWork):
+        async def commit(self) -> None:
+            raise asyncio.CancelledError()
+
+    uow = _CancelOnCommitUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The reservation was released despite the cancellation: capacity is not shrunk.
+    assert registry.list_workers()[0].assigned_count == 0
 
 
 async def test_two_sequential_starts_second_is_conflict() -> None:
@@ -1434,6 +1529,37 @@ async def test_place_and_start_assigns_an_orphan_and_dispatches() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
     assert cp.incremented == [WorkerId(worker)]
     assert uow.servers.by_id[ServerId(server_id)].desired_state is DesiredState.RUNNING
+
+
+async def test_place_and_start_releases_reservation_when_commit_raises() -> None:
+    # The leak fix applies to place_and_start too (#778): a raising commit between the
+    # CAS and the confirm must release the reservation, not leak the slot forever.
+    community, server_id, worker = _ids()
+
+    class _FailingCommitUnitOfWork(FakeUnitOfWork):
+        async def commit(self) -> None:
+            raise RuntimeError("commit failed")
+
+    uow = _FailingCommitUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await _start_server(uow, cp).place_and_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The reservation was released and never confirmed: no slot leak.
+    assert cp.released == [(WorkerId(worker), ServerId(server_id))]
+    assert cp.incremented == []
 
 
 async def test_start_sources_memory_limit_from_config_as_bytes() -> None:
