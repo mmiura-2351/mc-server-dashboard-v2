@@ -165,3 +165,72 @@ async def test_first_publish_crash_leaves_no_current(tmp_path: Path) -> None:
     await recovered.commit_snapshot(handle)
     blob = await drain(recovered.open_hydrate_source(community, server))
     assert read_tar(blob) == NEW
+
+
+def _prune_server_root(
+    tmp_path: Path, community: CommunityId, server: ServerId
+) -> Path:
+    return (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+
+
+async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
+    tmp_path: Path,
+) -> None:
+    # Crash-retry regression (#777): the prune unlinks the ``current`` symlink the
+    # instant final.tar.gz is durable, so a crash AFTER the unlink but before the
+    # tree GC leaves: final present + no current symlink + a leftover snapshots/
+    # tree. The retried DeleteServer must finish the GC WITHOUT re-packing, so it
+    # never overwrites the good final.tar.gz with a partial pack from the leftover.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(NEW))
+    await storage.commit_snapshot(handle)
+
+    # First attempt completes the durable part (final written, current unlinked).
+    await storage.prune_to_final_snapshot(community, server)
+    server_root = _prune_server_root(tmp_path, community, server)
+    final = server_root / "final.tar.gz"
+    good_bytes = final.read_bytes()
+    assert read_tar(good_bytes) == NEW
+    assert not (server_root / "current").exists()
+
+    # Simulate a crash that left the tree GC unfinished: a stray snapshots/ tree and
+    # a leaked ``.final.*.tmp`` spool survive. The current symlink stays absent (it
+    # is unlinked before any GC).
+    stale = server_root / "snapshots" / "dead"
+    stale.mkdir(parents=True)
+    (stale / "level.dat").write_bytes(b"stale")
+    leaked_tmp = server_root / ".final.deadbeef.tmp"
+    leaked_tmp.write_bytes(b"junk")
+
+    # The retry takes the no-current branch: GC completes, the leaked tmp is swept,
+    # final is byte-for-byte untouched (no partial re-pack), nothing republished.
+    await storage.prune_to_final_snapshot(community, server)
+    assert final.read_bytes() == good_bytes
+    assert read_tar(final.read_bytes()) == NEW
+    assert not (server_root / "snapshots").exists()
+    assert not (server_root / "current").exists()
+    assert not leaked_tmp.exists()
+    assert not list(server_root.glob(".final.*.tmp"))
+
+
+async def test_prune_drops_generation_marker(tmp_path: Path) -> None:
+    # Parity with the object adapter (#777 review): the fs prune drops the generation
+    # marker too, so the post-delete tree holds only backups/ + final.tar.gz.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(NEW))
+    await storage.commit_snapshot(handle)
+    server_root = _prune_server_root(tmp_path, community, server)
+    assert (server_root / "generation").exists()
+
+    await storage.prune_to_final_snapshot(community, server)
+
+    assert (server_root / "final.tar.gz").exists()
+    assert not (server_root / "generation").exists()
+    assert not (server_root / "snapshots").exists()
+    assert not (server_root / "current").exists()

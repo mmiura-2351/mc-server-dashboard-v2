@@ -725,15 +725,24 @@ class FsStorage(Storage):
         self, community_id: CommunityId, server_id: ServerId
     ) -> None:
         server_root = self._server_root(community_id, server_id)
+        # Sweep any ``.final.*.tmp`` left by an earlier crash mid-pack (the
+        # BaseException cleanup never ran), mirroring the tmp hygiene the publish
+        # path applies to its staging dirs. Keeps a crash-loop from leaking spools.
+        if server_root.is_dir():
+            for stale in server_root.glob(".final.*.tmp"):
+                stale.unlink(missing_ok=True)
         try:
             current = self._current_dir(community_id, server_id)
         except NotFoundError:
-            # No published snapshot: nothing to pack. Still drop any leftover
-            # working-set tree (a never-published incoming/versions) so the prune is
-            # idempotent and leaves only backups/ + an absent final archive.
+            # No live ``current`` symlink: nothing to pack. This is also the no-op
+            # branch a retried delete lands in (the symlink is unlinked the instant
+            # final.tar.gz is durable, below), so it must never re-pack — it only GCs
+            # any leftover working-set tree and the generation marker, leaving exactly
+            # backups/ + the (possibly already-written) final archive. Idempotent.
             for sub in ("snapshots", "incoming", "versions"):
                 _rmtree(server_root / sub)
             _rmtree(server_root / "current")
+            _rmtree(self._generation_path(server_root))
             return
         # Pack to a temp sibling first, then atomically rename into place: the tree
         # is removed ONLY after a complete final.tar.gz exists, so a pack failure
@@ -750,10 +759,17 @@ class FsStorage(Storage):
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
-        # The final archive is durable; reclaim the unpacked working-set tree.
+        # Unlink the ``current`` symlink FIRST, the instant final.tar.gz is durable:
+        # it is the one marker that says the working set is still live and re-packable.
+        # A crash after this point leaves no symlink, so a retried delete raises
+        # NotFoundError from ``_current_dir`` above and takes the GC-only branch — it
+        # never re-packs a half-removed snapshot tree over the good final.tar.gz (#777).
+        _rmtree(server_root / "current")
+        # The final archive is durable and ``current`` is gone; reclaim the unpacked
+        # working-set tree and the generation marker.
         for sub in ("snapshots", "incoming", "versions"):
             _rmtree(server_root / sub)
-        _rmtree(server_root / "current")
+        _rmtree(self._generation_path(server_root))
 
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey

@@ -192,17 +192,30 @@ class WorkingSetStore(abc.ABC):
 
         The DeleteServer reclaim path: pack the current authoritative working set
         (``current/``) into a single self-contained ``tar.gz`` retained at the
-        server root, then remove the unpacked working-set tree (``snapshots/``,
-        ``incoming/``, ``versions/``, and the ``current`` pointer). ``backups/`` is
-        left untouched — the caller prunes archives (keep newest, delete the rest)
-        through its own seam. After return, the server's only working-set artifact
-        is the final tar.gz, which carries no DB row.
+        server root, then remove everything else under the server prefix that is not
+        a backup archive — the unpacked working-set tree (``snapshots/``,
+        ``incoming/``, ``versions/``), the ``current`` pointer, and the generation
+        marker. ``backups/`` is left untouched — the caller prunes archives (keep
+        newest, delete the rest) through its own seam. After return, the server's
+        only non-backup artifact is the final tar.gz, which carries no DB row.
 
         Packing is mandatory and fail-closed: if the pack fails the working-set tree
         is left intact and the error propagates, so a failed delete never silently
         loses the latest state. A server with no published snapshot has nothing to
         pack and is a no-op (idempotent). The retained tar.gz uses the same codec as
         a backup archive (Section 2), so an operator can re-import it.
+
+        Crash-retry safety: the pointer (object) / ``current`` symlink (fs) — the one
+        marker that says the working set is still live and re-packable — is
+        invalidated the instant the final tar.gz is durable, before any other GC. A
+        retried delete that finds no pointer treats the working-set prune as already
+        done: it finishes the GC but never re-packs, so it cannot overwrite the good
+        final tar.gz with an empty/partial pack from a half-deleted source (#777).
+
+        Unlike :meth:`BackupStore.create_backup_from_current`, the final pack does
+        NOT gate on the #764 ``.mca`` integrity check: a corrupt server must still be
+        deletable, so a structurally torn region is packed as-is rather than blocking
+        the reclaim.
         """
 
 

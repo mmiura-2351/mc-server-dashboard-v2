@@ -12,7 +12,7 @@ import datetime as dt
 import io
 import uuid
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 
 from mc_server_dashboard_api.servers.domain.backup import (
@@ -761,6 +761,9 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # When set, ``prune_to_final_snapshot`` raises so a test can assert the
         # DeleteServer pack is fail-closed (#777).
         self.pack_fails = pack_fails
+        # Optional hook fired during the (potentially long) pack, so a test can
+        # simulate a server start landing in the DeleteServer pack window (#777).
+        self.on_prune: Callable[[], None] | None = None
         self.pruned: list[ServerId] = []
         self.archives: set[str] = set()
         # Bytes per stored archive, so open/store/size round-trip in tests.
@@ -836,6 +839,8 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # test can assert the delete aborts with the working set intact.
         if self.pack_fails:
             raise RuntimeError("pack failed")
+        if self.on_prune is not None:
+            self.on_prune()
         self.pruned.append(server_id)
 
     async def open(

@@ -585,12 +585,20 @@ class ObjectStorage(Storage):
                     )
                 finally:
                     await asyncio.to_thread(spool.unlink, missing_ok=True)
-            # The final archive is durable (or there was nothing to pack); reclaim the
-            # working-set objects and the pointer/generation markers.
+                # Invalidate the pointer FIRST, the instant final.tar.gz is durable:
+                # it is the one marker that says the working set is still live and
+                # re-packable. A crash after this point leaves no pointer, so a
+                # retried delete reads ``snapshot_prefix is None`` and takes the GC-
+                # only branch below — it never re-lists a half-deleted prefix and
+                # overwrites the good final.tar.gz with an empty/partial pack (#777).
+                await client.delete_object(server_prefix + _POINTER)
+            # The final archive is durable and the pointer is gone (or nothing was
+            # published); reclaim the remaining working-set objects and the generation
+            # marker. Idempotent: a retry that found no pointer arrives here directly
+            # and completes the GC without re-packing.
             await _delete_prefix(client, server_prefix + "snapshots/")
             await _delete_prefix(client, server_prefix + "incoming/")
             await _delete_prefix(client, server_prefix + "versions/")
-            await client.delete_object(server_prefix + _POINTER)
             await client.delete_object(server_prefix + _GENERATION)
 
     async def _check_staged_regions(

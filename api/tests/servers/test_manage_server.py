@@ -1599,6 +1599,35 @@ async def test_delete_rejects_while_running() -> None:
     assert store.pruned == []
 
 
+async def test_delete_rechecks_at_rest_after_the_pack_window() -> None:
+    # Two-transaction TOCTOU bound (#777 review): a start that lands DURING the
+    # (possibly minutes-long) pack must not delete a now-running server's row. The
+    # final transaction re-checks is_at_rest() before the row delete, so a server
+    # that started in the pack window is rejected and its row survives.
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+
+    def _start_during_pack() -> None:
+        server.desired_state = DesiredState.RUNNING
+        server.observed_state = ObservedState.RUNNING
+
+    store.on_prune = _start_during_pack
+
+    with pytest.raises(ServerNotStoppedError):
+        await DeleteServer(uow=uow, backup_store=store)(
+            community_id=community, server_id=server.id
+        )
+    # The pack already ran (working set packed) but the row survives and no grants
+    # were swept: the delete is rejected and retryable once the server stops again.
+    assert store.pruned == [server.id]
+    assert server.id in uow.servers.by_id
+    assert uow.resource_grants.swept == []
+    assert uow.commits == 0
+
+
 async def test_delete_other_communitys_server_is_not_found() -> None:
     uow = FakeUnitOfWork()
     store = FakeBackupArchiveStore()

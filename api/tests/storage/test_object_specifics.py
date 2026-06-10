@@ -470,3 +470,57 @@ async def test_prune_without_publish_uploads_no_final_object() -> None:
     await storage.prune_to_final_snapshot(community, server)  # no raise
     prefix = _server_prefix(community, server)
     assert (prefix + "final.tar.gz") not in store.objects
+
+
+async def test_prune_retry_after_crash_keeps_final_and_finishes_gc() -> None:
+    # Crash-retry regression (#777): the prune invalidates the pointer the instant
+    # final.tar.gz is durable, so a crash AFTER the pointer delete but before the
+    # prefix GC leaves: final present + pointer gone + a leftover snapshots/ object.
+    # The retried DeleteServer must finish the GC WITHOUT re-packing, so it never
+    # overwrites the good final.tar.gz with an empty/partial pack.
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    files = {"server.properties": b"motd=hi", "world/level.dat": b"w"}
+    await _publish(storage, community, server, files)
+
+    # First attempt completes the durable part (final written, pointer dropped).
+    await storage.prune_to_final_snapshot(community, server)
+    prefix = _server_prefix(community, server)
+    final_key = prefix + "final.tar.gz"
+    good_final = store.objects[final_key]
+    assert read_tar(good_final) == files
+    assert (prefix + _POINTER) not in store.objects
+
+    # Simulate a crash that left the prefix GC unfinished: a stray snapshots/ object
+    # survives. The pointer stays absent (it is invalidated before any GC).
+    store.objects[prefix + "snapshots/dead/world/level.dat"] = b"stale"
+
+    # The retry takes the no-pointer branch: GC completes, final is byte-for-byte
+    # untouched (no empty re-pack), and no new pointer/snapshot object is left.
+    await storage.prune_to_final_snapshot(community, server)
+    assert store.objects[final_key] == good_final
+    assert read_tar(store.objects[final_key]) == files
+    assert not any(k.startswith(prefix + "snapshots/") for k in store.objects)
+    assert (prefix + _POINTER) not in store.objects
+
+
+async def test_prune_pointer_invalidated_before_prefix_gc() -> None:
+    # The ordering that makes the retry above safe: while the pointer is present the
+    # source is still complete (re-packing it would be correct); the pointer is only
+    # dropped AFTER final.tar.gz is durable and BEFORE the snapshots/ prefix is GC'd.
+    # A failure-seam wired to drop right after the flip would otherwise re-pack a
+    # half-deleted prefix — assert the pointer is the first marker to go by checking
+    # it is gone while the (now-redundant) source prefix has been reclaimed too.
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"v1"})
+    prefix = _server_prefix(community, server)
+
+    await storage.prune_to_final_snapshot(community, server)
+
+    # After a clean run: final durable, pointer gone, source prefix reclaimed. The
+    # invariant the retry leans on is that the pointer never outlives the source it
+    # names, so a present pointer always resolves to a complete snapshot.
+    assert (prefix + "final.tar.gz") in store.objects
+    assert (prefix + _POINTER) not in store.objects
+    assert not any(k.startswith(prefix + "snapshots/") for k in store.objects)

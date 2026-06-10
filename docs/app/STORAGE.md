@@ -138,17 +138,34 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
 1. **The latest backup archive, if one exists** — `backups/<newest-id>.tar.gz`. The
    newest backup by `created_at` is kept; every older archive (and all retained
    per-file `versions/`) is deleted, archive-first per the `delete_backup` ordering
-   convention (Section 3.3).
+   convention (Section 3.3). Selection is the literal latest-by-`created_at`
+   **regardless of `health`** (owner ruling on #777: "latest existing"): a
+   QUARANTINED newest archive is still the one kept. The mandatory `final.tar.gz`
+   below is the safety net — it is strictly newer and is the recommended recovery
+   source if the retained backup is suspect.
 2. **The current working set, packed as `final.tar.gz`** — mandatory. The live
    `current/` snapshot is packed into a single self-contained `tar.gz` at the server
    root, then the unpacked working-set tree (`snapshots/`, `incoming/`, `versions/`,
-   the `current` pointer) is removed. Packing is **fail-closed**: if it fails, the
-   working set is left intact and the delete fails, so a deletion never silently
-   loses the latest state. A server that never published a snapshot has no
-   `final.tar.gz`.
+   the `current` pointer, and the generation marker) is removed. Packing is
+   **fail-closed**: if it fails, the working set is left intact and the delete fails,
+   so a deletion never silently loses the latest state. A server that never published
+   a snapshot has no `final.tar.gz`. The pack deliberately **bypasses the #764 `.mca`
+   integrity gate** (the gate applied to `create_backup_from_current`): a corrupt
+   server must still be deletable, so torn regions are packed as-is.
 
-Everything else for the server is removed. The retained archives are unreferenced
-orphans by design (not the bug the `delete_backup` ordering guards against).
+Everything else for the server is removed; after the prune the server directory
+holds only `backups/<newest-id>.tar.gz` (if any) and `final.tar.gz` (if published) —
+no `snapshots/`, `incoming/`, `versions/`, `current` pointer, or generation marker
+remain. The retained archives are unreferenced orphans by design (not the bug the
+`delete_backup` ordering guards against).
+
+**Crash-retry safety.** A `DeleteServer` retry is the advertised recovery path, so
+the working-set prune is ordered to be idempotent: the pointer (object adapter) /
+`current` symlink (fs adapter) — the one marker that says the working set is still
+live and re-packable — is invalidated the instant `final.tar.gz` is durable, before
+any other GC. A retry that finds the pointer already gone treats the prune as done
+and finishes the GC without re-packing, so it can never overwrite a good
+`final.tar.gz` with an empty/partial pack built from a half-deleted source.
 
 **Operator recovery / disk reclaim.** Both retained artifacts are plain `tar.gz`
 archives in the server's prior directory. To recover the data, an operator creates
@@ -183,7 +200,7 @@ authoritative-side stream and the atomic-publish handshake.
 | `write_snapshot(handle, WriteStream)` | Stream the Worker's working set into staging | Writes only into staging, never `current/`. May be called incrementally. |
 | `commit_snapshot(handle)` | Atomically publish the staged snapshot as the new authoritative copy | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. |
 | `abort_snapshot(handle)` | Discard an incomplete/failed transfer | Deletes the staging area; `current/` is untouched. Also the cleanup path for crash recovery (Section 4.3). |
-| `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1, issue #777). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, `current`; leaves `backups/`. Fail-closed on a pack failure; no-op if nothing is published. |
+| `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1, issue #777). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, the `current` pointer, and the generation marker; leaves `backups/`. The pointer/symlink is invalidated the instant `final.tar.gz` is durable, so a crash-retry is idempotent and never re-packs over a good final. Fail-closed on a pack failure; bypasses the #764 `.mca` gate so a corrupt server stays deletable; no-op if nothing is published. |
 
 The hydrate/snapshot **wire transport** (how `ReadStream`/`WriteStream` bytes
 cross the API↔Worker boundary) is the data plane (epic #8). `Storage` only
