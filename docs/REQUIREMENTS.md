@@ -394,13 +394,18 @@ Requirements:
   Storage backend directly; the API mediates all transfer (API-mediated data
   plane).
 - FR-DATA-4: Runtime data lifecycle (snapshot-based sync):
-  - **Start**: on placement onto a Worker that does not already hold the working
-    set, the API drives hydrate of the server's working set from Storage to that
-    Worker's local scratch; then the Worker launches MC. A same-worker restart
-    starts on the Worker's existing scratch (the live, newer working set) without
-    hydrating, so a restart does not roll the world back to the last snapshot
-    (issue #696). The Worker advertises which working sets it already holds at
-    registration, and the skip is gated on that live presence.
+  - **Start**: on placement onto a Worker that does not already hold a
+    sufficiently fresh working set, the API drives hydrate of the server's
+    working set from Storage to that Worker's local scratch; then the Worker
+    launches MC. A same-worker restart skips hydrate and starts on the Worker's
+    existing scratch (the live, newer working set) only when the Worker holds a
+    generation at least as fresh as the authoritative store generation —
+    otherwise it hydrates first, so a stale or absent scratch never silently
+    boots out-of-date world data (issues #696, #763). Each published snapshot
+    increments a monotonic generation counter; the Worker records the generation
+    locally after each snapshot commit and reports it to the API at
+    (re-)registration via `Register.held_servers`; the skip is gated on
+    `held_generation >= store_generation`.
   - **Running**: MC writes to the Worker's local scratch; the authoritative copy
     is temporarily stale.
   - **Stop / interval**: the Worker's working set is snapshotted back to Storage.

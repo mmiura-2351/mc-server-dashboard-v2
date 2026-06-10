@@ -41,6 +41,13 @@ class WorkerSnapshot:
     assigned to it (the placement 'load' axis, FR-WRK-3). At M1 it is tracked by
     the registry via :meth:`WorkerRegistry.increment_assignment` /
     :meth:`WorkerRegistry.decrement_assignment`.
+
+    It deliberately includes in-flight placement reservations (#778), so the read
+    view reports the SAME capacity-relevant load the placement decision sees rather
+    than only committed assignments. A start that loses its commit race transiently
+    inflates the count by one until its reservation is released; this never
+    under-reports load against capacity, so the count is conservative — a worker is
+    never shown with free slots it has already tentatively handed out.
     """
 
     id: WorkerId
@@ -130,10 +137,52 @@ class WorkerRegistry(abc.ABC):
         """
 
     @abc.abstractmethod
-    def increment_assignment(self, worker_id: WorkerId) -> None:
-        """Record that one more server has been assigned to the Worker (load++).
+    def reserve(self, worker_id: WorkerId, server_id: str, memory_mb: int) -> None:
+        """Tentatively place ``server_id`` on ``worker_id`` before its commit (#778).
 
-        A call for an unknown Worker is ignored.
+        Placement reserves a slot ATOMICALLY at decision time — in the same
+        await-free section that read the candidates' load — so two concurrent
+        starts cannot both read the same load/committed memory and both take a
+        Worker's last capacity slot. The reservation counts toward placement load
+        AND its ``memory_mb`` (0 = unset, not memory-gated) folds into the Worker's
+        committed memory, so neither the count cap nor the memory gate is
+        oversubscribed by the race. The reservation stands until the lifecycle layer
+        either confirms it (:meth:`increment_assignment`, the commit landed) or
+        releases it (:meth:`release_reservation`, the placement failed before
+        commit). A call for an unknown Worker is ignored.
+        """
+
+    @abc.abstractmethod
+    def reserved_memory_mb(self, worker_id: WorkerId) -> int:
+        """Return the summed declared memory of ``worker_id``'s reservations (#778).
+
+        The placement adapter folds this into the Worker's committed memory so the
+        memory gate accounts for in-flight placements. ``0`` for an unknown Worker
+        or one with no reservations.
+        """
+
+    @abc.abstractmethod
+    def release_reservation(self, worker_id: WorkerId, server_id: str) -> None:
+        """Drop the reservation for ``server_id`` made by :meth:`reserve` (#778).
+
+        Called when a placement fails BEFORE the lifecycle commit (a lost
+        compare-and-set), so the tentatively-held slot is freed without ever
+        counting as a committed assignment. A call for an unknown Worker or an
+        absent reservation is ignored.
+        """
+
+    @abc.abstractmethod
+    def increment_assignment(self, worker_id: WorkerId, server_id: str) -> None:
+        """Confirm ``server_id``'s reserved slot as a committed assignment (#778).
+
+        Called after the lifecycle commit lands. Converts the reservation made by
+        :meth:`reserve` into a committed assignment (load is unchanged — the
+        reservation already counted it). If no reservation is outstanding for
+        ``server_id``, this is a NO-OP: a re-registration between the commit and
+        this call already rebuilt the count from the authoritative tally
+        (:meth:`set_assignment`), which dropped this reservation because the
+        committed row was in the tally — so incrementing again would double-count
+        (#778). A call for an unknown Worker is ignored.
         """
 
     @abc.abstractmethod
@@ -144,14 +193,19 @@ class WorkerRegistry(abc.ABC):
         """
 
     @abc.abstractmethod
-    def set_assignment(self, worker_id: WorkerId, count: int) -> None:
-        """Set the Worker's assigned-server count to ``count`` (absolute load).
+    def set_assignment(self, worker_id: WorkerId, server_ids: set[str]) -> None:
+        """Rebuild the Worker's committed assignments from the authoritative tally.
 
-        Used to rebuild the count after a (re)registration reset it to zero: the
-        lifecycle layer tallies the Worker's running servers from authoritative
-        storage and writes the truth back here, so placement load is correct
-        after a reconnect (epic #7 reconciliation obligation). A call for an
-        unknown Worker is ignored.
+        Used after a (re)registration reset the count to zero: the lifecycle layer
+        tallies the server ids the Worker is running from authoritative storage and
+        writes the truth back here, so placement load is correct after a reconnect
+        (epic #7 reconciliation obligation). The committed count becomes
+        ``len(server_ids)``; any RESERVED placement whose server is already in
+        ``server_ids`` is dropped (the commit landed and is now counted in the
+        tally, so its pending :meth:`increment_assignment` must become a no-op to
+        avoid double-counting, #778), while a reservation NOT yet in the tally (its
+        commit not yet visible) is kept so its later confirm still counts. A call
+        for an unknown Worker is ignored.
         """
 
     @abc.abstractmethod

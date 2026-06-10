@@ -465,6 +465,7 @@ async def test_place_excludes_worker_over_committed_on_memory() -> None:
 
     # Committed 2048 + request 2048 = 4096 > 3072 usable -> excluded -> None.
     chosen = await adapter.place(
+        server_id=ServerId(uuid.uuid4()),
         backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
         committed_by_worker={WorkerId(worker_uuid): CommittedResources(memory_mb=2048)},
@@ -481,6 +482,7 @@ async def test_place_admits_worker_with_memory_room() -> None:
 
     # Committed 512 + request 2048 = 2560 <= 3072 usable -> fits.
     chosen = await adapter.place(
+        server_id=ServerId(uuid.uuid4()),
         backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
         committed_by_worker={WorkerId(worker_uuid): CommittedResources(memory_mb=512)},
@@ -496,9 +498,67 @@ async def test_place_unset_request_memory_is_not_gated() -> None:
     adapter = _registry_adapter(registry)
 
     chosen = await adapter.place(
+        server_id=ServerId(uuid.uuid4()),
         backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=None,
         committed_by_worker={WorkerId(worker_uuid): CommittedResources(memory_mb=4096)},
     )
 
     assert chosen == WorkerId(worker_uuid)
+
+
+# --- placement reservation closes the capacity race (#778) -------------------
+
+
+async def test_place_reserves_so_second_placement_sees_the_last_count_slot() -> None:
+    # Two placements against a worker with a single capacity slot: the first
+    # reserves it at decision time, so the second sees the slot taken and gets no
+    # eligible worker — the capacity race cannot oversubscribe max_servers (#778).
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), max_servers=1, at=_T0))
+    adapter = _registry_adapter(registry)
+
+    first = await adapter.place(
+        server_id=ServerId(uuid.uuid4()),
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=None,
+        committed_by_worker={},
+    )
+    second = await adapter.place(
+        server_id=ServerId(uuid.uuid4()),
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=None,
+        committed_by_worker={},
+    )
+
+    assert first == WorkerId(worker_uuid)
+    assert second is None
+
+
+async def test_place_reservation_folds_memory_into_the_gate() -> None:
+    # The reserved server's declared memory counts against the next placement's
+    # memory gate, so two memory-heavy starts cannot both take the last memory slot
+    # (#778). 4 GiB host -> 3072 usable; a 2048 reservation leaves room only below
+    # 1024 for the next request.
+    worker_uuid = uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), resources=_4GIB, at=_T0))
+    adapter = _registry_adapter(registry)
+
+    first = await adapter.place(
+        server_id=ServerId(uuid.uuid4()),
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=2048,
+        committed_by_worker={},
+    )
+    # 2048 reserved + 2048 requested = 4096 > 3072 usable -> excluded.
+    second = await adapter.place(
+        server_id=ServerId(uuid.uuid4()),
+        backend=ExecutionBackend.HOST_PROCESS,
+        memory_limit_mb=2048,
+        committed_by_worker={},
+    )
+
+    assert first == WorkerId(worker_uuid)
+    assert second is None

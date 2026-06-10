@@ -235,8 +235,11 @@ def test_increment_and_decrement_assignment() -> None:
     registry = _registry(clock)
     registry.register(make_worker(at=_T0))
 
-    registry.increment_assignment(WorkerId("worker-1"))
-    registry.increment_assignment(WorkerId("worker-1"))
+    # The reservation -> confirm lifecycle (#778): reserve then increment commits.
+    registry.reserve(WorkerId("worker-1"), "server-a", 0)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+    registry.reserve(WorkerId("worker-1"), "server-b", 0)
+    registry.increment_assignment(WorkerId("worker-1"), "server-b")
     registry.decrement_assignment(WorkerId("worker-1"))
 
     assert registry.list_workers()[0].assigned_count == 1
@@ -246,12 +249,116 @@ def test_reregistration_resets_assignment_count() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
     first = registry.register(make_worker(at=_T0))
-    registry.increment_assignment(WorkerId("worker-1"))
+    registry.reserve(WorkerId("worker-1"), "server-a", 0)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
     registry.mark_disconnected(WorkerId("worker-1"), first)
 
     registry.register(make_worker(at=_T0))
 
     assert registry.list_workers()[0].assigned_count == 0
+
+
+# --- placement reservations (#778) ------------------------------------------
+
+
+def test_reservation_counts_toward_load_before_commit() -> None:
+    # A reservation made at placement time counts as load immediately, so a
+    # concurrent placement sees the slot taken (#778).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0, max_servers=4))
+
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+
+    assert registry.candidates_for_placement()[0].load == 1
+    assert registry.list_workers()[0].assigned_count == 1
+
+
+def test_reserved_memory_is_summed_for_the_memory_gate() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.reserve(WorkerId("worker-1"), "server-b", 1024)
+
+    assert registry.reserved_memory_mb(WorkerId("worker-1")) == 1536
+
+
+def test_release_reservation_frees_the_slot() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.reserve(WorkerId("worker-1"), "server-a", 256)
+
+    registry.release_reservation(WorkerId("worker-1"), "server-a")
+
+    assert registry.list_workers()[0].assigned_count == 0
+    assert registry.reserved_memory_mb(WorkerId("worker-1")) == 0
+
+
+def test_increment_confirms_a_reservation_without_changing_load() -> None:
+    # Confirming a reservation moves it from reserved to committed; load (the sum)
+    # is unchanged because the reservation already counted it (#778).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.reserve(WorkerId("worker-1"), "server-a", 0)
+
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    assert registry.list_workers()[0].assigned_count == 1
+    # The slot is now committed, not reserved.
+    assert registry.reserved_memory_mb(WorkerId("worker-1")) == 0
+
+
+def test_increment_without_reservation_is_a_no_op() -> None:
+    # A reconnect rebuild (set_assignment) that already counted the committed row
+    # drops the reservation; the now-stale confirm must NOT double-count (#778).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    assert registry.list_workers()[0].assigned_count == 0
+
+
+def test_rebuild_drops_committed_reservation_so_later_confirm_no_ops() -> None:
+    # The re-register double-count variant (#778): a reservation made, then the
+    # worker re-registers and the rebuild tally already includes the committed row;
+    # the pending confirm must become a no-op, not add a second count.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.reserve(WorkerId("worker-1"), "server-a", 0)
+
+    # Re-register (resets committed count) then rebuild from the tally, which now
+    # already includes server-a (its commit landed before the rebuild ran).
+    registry.register(make_worker(at=_T0))
+    registry.set_assignment(WorkerId("worker-1"), {"server-a"})
+    # The deferred confirm now arrives; it must NOT add a second count.
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    assert registry.list_workers()[0].assigned_count == 1
+
+
+def test_rebuild_keeps_uncommitted_reservation_pending() -> None:
+    # A reservation whose commit is not yet in the tally survives the rebuild so its
+    # later confirm still counts (no undercount) (#778).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.reserve(WorkerId("worker-1"), "server-a", 0)
+
+    registry.register(make_worker(at=_T0))
+    # The tally does NOT yet include server-a (its commit has not landed).
+    registry.set_assignment(WorkerId("worker-1"), set())
+    # Reservation still counts as load while pending.
+    assert registry.list_workers()[0].assigned_count == 1
+    # When the commit finally lands, the confirm counts it as committed.
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+    assert registry.list_workers()[0].assigned_count == 1
 
 
 # --- per-id lookup (#322) --------------------------------------------------
@@ -295,7 +402,8 @@ def test_candidates_include_online_worker_with_load() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
     registry.register(make_worker(at=_T0, max_servers=4))
-    registry.increment_assignment(WorkerId("worker-1"))
+    registry.reserve(WorkerId("worker-1"), "server-a", 0)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
 
     candidates = registry.candidates_for_placement()
 
