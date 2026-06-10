@@ -341,7 +341,6 @@ assigned Worker.
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
 | `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK at M1** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; cleared by the API on Worker disconnect (FR-WRK-4) |
-| `store_generation` | bigint, NOT NULL default `0` | the authoritative working-set generation (issue #763): a per-server counter the authoritative Storage bumps on each `commit_snapshot`, persisted here by the snapshot data plane. The reconciler compares it against the generation a Worker reports holding to decide whether a same-worker restart must hydrate (a stale held generation hydrates). `0` means no snapshot has been published yet |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(community_id, name)`, `UNIQUE(game_port)` (deployment-wide,
