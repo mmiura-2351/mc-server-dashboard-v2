@@ -689,14 +689,14 @@ body.col-resizing {
   color: var(--red);
 }
 
-/* Component-agnostic base rules so a `.field-error` warning / `.field-inline`
- * row carries its intended styling anywhere — not only under the `.account` /
- * `.settings` / `.backups-schedule` scopes that also define them (#755). */
-.field-error {
+/* Force-restore confirmation dialog: the warning and ack row render inside a
+ * portaled Modal, out of reach of the page scopes that style `.field-error` /
+ * `.field-inline`, so they carry their own self-contained rules (#755). */
+.restore-damaged-warning {
   font-size: 12px;
   color: var(--red);
 }
-.field-inline {
+.restore-ack-row {
   display: flex;
   align-items: center;
   gap: 6px;
