@@ -17,8 +17,13 @@ type fakeTransfer struct {
 	mu        sync.Mutex
 	hydrated  []string // workingDir args
 	snapshots []string
-	err       error
-	seq       *[]string
+	// snapshotHadWorkingSet records, per Snapshot call, whether the working dir
+	// held a real working set at the moment the pack ran (issue #841): a graceful
+	// stop must not GC the scratch before the post-stop final SnapshotTrigger packs
+	// it, or the snapshot captures an empty/absent dir and is silently lost.
+	snapshotHadWorkingSet []bool
+	err                   error
+	seq                   *[]string
 	// gen is the store generation Hydrate/Snapshot report (issue #763); 0 by
 	// default. The manager records it in the working set's generation marker.
 	gen uint64
@@ -39,6 +44,7 @@ func (f *fakeTransfer) Snapshot(_ context.Context, _, _, workingDir string) (uin
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshots = append(f.snapshots, workingDir)
+	f.snapshotHadWorkingSet = append(f.snapshotHadWorkingSet, hasWorkingSet(workingDir))
 	if f.seq != nil {
 		*f.seq = append(*f.seq, "transfer")
 	}

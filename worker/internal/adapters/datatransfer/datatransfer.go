@@ -214,8 +214,9 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) (uint6
 // a held server, but the API only consults that list for ids it assigned, so a
 // crash-leftover .hydrate-* sibling is never matched; a stale one is also reclaimed
 // by the next hydrate's leftover sweep below (if the id is re-placed here) and by
-// the authoritative-stop scratch GC, which sweeps this id's .hydrate-<id>-* siblings
-// alongside removing scratchDir/<id> (issue #766, instancemanager.removeScratch).
+// the post-final-snapshot scratch GC, which sweeps this id's .hydrate-<id>-* siblings
+// alongside removing scratchDir/<id> once the stopped-id final snapshot publishes
+// (issue #766/#841/#842, instancemanager.removeScratch).
 //
 // Crash safety: the temp tree is built fully before any rename. The swap then does
 // (1) rename destDir -> trash, (2) rename temp -> destDir, (3) remove trash. A

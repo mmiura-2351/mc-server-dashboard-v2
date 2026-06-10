@@ -30,12 +30,18 @@ func TestHydrateRecordsGeneration(t *testing.T) {
 	}
 }
 
-// TestSnapshotRecordsNewGeneration proves a SnapshotTrigger records the NEW store
-// generation the publish produced, so the held generation advances to match the
-// scratch it pushed (issue #763).
+// TestSnapshotRecordsNewGeneration proves a RUNNING-server SnapshotTrigger records
+// the NEW store generation the publish produced, so the held generation advances to
+// match the scratch it pushed (issue #763). The running case is the one that retains
+// its scratch — a STOPPED-id snapshot is the post-stop final capture and GCs the
+// scratch instead of recording a generation onto a dir it is about to delete (#841).
 func TestSnapshotRecordsNewGeneration(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
-	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
 	seedScratch(t, m, "s1")
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
@@ -46,28 +52,35 @@ func TestSnapshotRecordsNewGeneration(t *testing.T) {
 	}
 }
 
-// TestGenerationMarkerRemovedOnAuthoritativeStop proves the generation marker
-// follows the scratch lifecycle: an authoritative stop GCs the scratch (issue
-// #762), which drops the marker with it, so a GC'd server reports holding nothing
-// and the API hydrates afresh (issue #763).
-func TestGenerationMarkerRemovedOnAuthoritativeStop(t *testing.T) {
-	d := &fakeDriver{}
-	m := newManager(t, d, nil)
+// TestGenerationMarkerRemovedAfterFinalSnapshot proves the generation marker
+// follows the scratch lifecycle: the post-stop final snapshot GCs the scratch
+// (issue #762/#841), which drops the marker with it, so a reclaimed server reports
+// holding nothing and the API hydrates afresh (issue #763). The stop itself now
+// RETAINS the marker so the final snapshot can still pack the working set (#841).
+func TestGenerationMarkerRemovedAfterFinalSnapshot(t *testing.T) {
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
 	if err := writeGeneration(dir, 7); err != nil {
 		t.Fatal(err)
 	}
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"})
-	if !res.Success {
+	if res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"}); !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
+	if _, err := os.Stat(generationMarkerPath(m, "s1")); err != nil {
+		t.Fatalf("generation marker dropped by the stop itself (final snapshot would pack empty, #841): %v", err)
+	}
+	// Post-stop final snapshot publishes, then the scratch (and its marker) is GC'd.
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("final snapshot = %+v, want success", res)
+	}
 	if _, err := os.Stat(generationMarkerPath(m, "s1")); !os.IsNotExist(err) {
-		t.Fatalf("generation marker survived an authoritative stop: stat err = %v", err)
+		t.Fatalf("generation marker survived the post-stop final snapshot GC: stat err = %v", err)
 	}
 	if held := ScanHeldServers(m.scratchDir); len(held) != 0 {
-		t.Fatalf("held = %v after authoritative stop, want none", held)
+		t.Fatalf("held = %v after final snapshot, want none", held)
 	}
 }
 

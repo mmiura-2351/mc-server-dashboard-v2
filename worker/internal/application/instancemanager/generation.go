@@ -12,9 +12,9 @@ import (
 // at (issue #763): the authoritative store generation the set was last hydrated
 // from or last snapshotted to. It lives INSIDE the scratch dir so it shares the
 // scratch's lifecycle — a same-Worker restart retains it (the API re-reports the
-// generation), and the authoritative-stop scratch GC (issue #762, removeScratch's
-// os.RemoveAll over scratchDir/<id>) drops it together with the working set, so a
-// GC'd server reports holding nothing and the API hydrates afresh.
+// generation), and the post-final-snapshot scratch GC (issue #762/#841,
+// removeScratch's os.RemoveAll over scratchDir/<id>) drops it together with the
+// working set, so a GC'd server reports holding nothing and the API hydrates afresh.
 const generationFile = ".mcsd_generation"
 
 // writeGeneration records gen as the working-set generation in workingDir. It is

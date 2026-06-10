@@ -2,6 +2,7 @@ package instancemanager
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,12 +25,16 @@ func seedScratch(t *testing.T, m *Manager, serverID string) string {
 	return dir
 }
 
-// A confirmed StopServer is an AUTHORITATIVE stop: every API path that sends a
-// bare StopServer to the Worker (StopServer, redispatch_stop) clears the server's
-// assignment on the confirmed stop. So the Worker GCs the local working set on a
-// successful stop — leftover scratch only accumulates disk and widens the
-// stale-leftover surface the #698 hydrate-skip reasons about (issue #762).
-func TestStopRemovesScratch(t *testing.T) {
+// A confirmed StopServer is an AUTHORITATIVE stop. The Worker must NOT GC the
+// local working set on the stop itself: the API sends the final SnapshotTrigger
+// for FR-DATA-7 only AFTER the stop's CommandResult (StopServer.__call__,
+// lifecycle.py), so a stop-time GC would leave that snapshot to pack an empty
+// dir and lose the world progressed since the last periodic snapshot (issue
+// #841). The scratch is GC'd only AFTER the post-stop final snapshot publishes
+// (TestStoppedSnapshotRemovesScratchAfterPublish); #762's anti-accumulation goal
+// is preserved by reclaiming it then (and, for a snapshot that never arrives, at
+// the next start's hydrate or worker-restart scan).
+func TestStopRetainsScratchForFinalSnapshot(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 	_ = m.Handle(context.Background(), startCmd())
@@ -39,21 +44,100 @@ func TestStopRemovesScratch(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("scratch dir removed by the stop itself (the post-stop final snapshot would pack an empty dir, issue #841): %v", err)
+	}
+}
+
+// The bug fixed by #841: the API drives a graceful stop, then sends the final
+// SnapshotTrigger for the same (now stopped, unassigned) id. The working set must
+// still be present when that snapshot packs it. Before the fix, handleStop GC'd
+// the scratch before returning, so the snapshot captured an empty dir and the
+// world progressed since the last periodic snapshot was silently lost.
+func TestStopThenFinalSnapshotPacksWorkingSet(t *testing.T) {
+	tr := &fakeTransfer{}
+	d := &fakeDriver{}
+	m := newManager(t, d, nil).WithTransfer(tr)
+	_ = m.Handle(context.Background(), startCmd())
+	seedScratch(t, m, "s1")
+
+	if res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"}); !res.Success {
+		t.Fatalf("stop = %+v, want success", res)
+	}
+	// API ordering: final SnapshotTrigger AFTER the stop CommandResult.
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("post-stop final snapshot = %+v, want success", res)
+	}
+	if len(tr.snapshotHadWorkingSet) != 1 || !tr.snapshotHadWorkingSet[0] {
+		t.Fatalf("post-stop final snapshot packed an empty/absent working dir (world silently lost, issue #841): hadWorkingSet=%v", tr.snapshotHadWorkingSet)
+	}
+}
+
+// #762's anti-accumulation goal, repositioned by #841: the scratch IS reclaimed,
+// but AFTER the post-stop final snapshot has published it — not before. Once the
+// stopped-id snapshot succeeds the working set is captured authoritatively and the
+// API has unassigned the Worker, so the local copy is safe to GC.
+func TestStoppedSnapshotRemovesScratchAfterPublish(t *testing.T) {
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	dir := seedScratch(t, m, "s1") // stopped id: no running instance
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("stopped-id snapshot = %+v, want success", res)
+	}
+	if len(tr.snapshotHadWorkingSet) != 1 || !tr.snapshotHadWorkingSet[0] {
+		t.Fatalf("snapshot did not see the working set before GC: %v", tr.snapshotHadWorkingSet)
+	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("scratch dir still present after authoritative stop: stat err = %v", err)
+		t.Fatalf("scratch dir not reclaimed after a successful stopped-id snapshot (breaks #762): stat err = %v", err)
+	}
+}
+
+// A FAILED stopped-id snapshot must RETAIN the scratch: the working set was not
+// captured, so GC-ing it would lose the world exactly as the stop-time GC did
+// (issue #841). The retained scratch is reclaimed on a later retry or at startup.
+func TestStoppedSnapshotFailureRetainsScratch(t *testing.T) {
+	tr := &fakeTransfer{err: errors.New("boom")}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	dir := seedScratch(t, m, "s1")
+
+	if res := m.Handle(context.Background(), snapshotCmd()); res.Success {
+		t.Fatalf("snapshot = %+v, want failure", res)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("scratch dir removed after a FAILED snapshot (world would be lost, issue #841): %v", err)
+	}
+}
+
+// A RUNNING-id snapshot (the periodic FR-DATA-7 path) must NOT GC the scratch:
+// the server is live and still owns its working set. Only the stopped-id snapshot
+// — the post-stop final capture — reclaims it.
+func TestRunningSnapshotRetainsScratch(t *testing.T) {
+	tr := &fakeTransfer{}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	_ = m.Handle(context.Background(), startCmd())
+	dir := seedScratch(t, m, "s1")
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("running-id snapshot = %+v, want success", res)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("scratch dir removed after a running-server snapshot: %v", err)
 	}
 }
 
 // A crash mid-hydrate (datatransfer.unpackAndSwap, issue #772) leaves
 // .hydrate-<id>-* temp/trash siblings in the scratch root. The next start's
-// leftover sweep only clears them if the id is re-placed onto this Worker, so an
-// authoritative stop (server delete / re-placed elsewhere) must sweep this id's
-// siblings too — otherwise the world-sized orphan leaks permanently (issue #806).
-func TestStopSweepsHydrateLeftovers(t *testing.T) {
-	d := &fakeDriver{}
-	m := newManager(t, d, nil)
-	_ = m.Handle(context.Background(), startCmd())
-	seedScratch(t, m, "s1")
+// leftover sweep only clears them if the id is re-placed onto this Worker, so the
+// authoritative reclamation (server delete / re-placed elsewhere) must sweep this
+// id's siblings too — otherwise the world-sized orphan leaks permanently (issue
+// #806). Since #841 that reclamation runs on the stopped-id final snapshot, not on
+// the stop itself: the scratch dir and this id's leftovers are reclaimed together.
+func TestFinalSnapshotSweepsHydrateLeftovers(t *testing.T) {
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	dir := seedScratch(t, m, "s1") // stopped id: no running instance
 
 	// A leftover temp/trash sibling for s1 from a crashed hydrate.
 	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
@@ -66,12 +150,14 @@ func TestStopSweepsHydrateLeftovers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"})
-	if !res.Success {
-		t.Fatalf("stop = %+v, want success", res)
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("stopped-id snapshot = %+v, want success", res)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("scratch dir not reclaimed after a successful stopped-id snapshot (breaks #762): stat err = %v", err)
 	}
 	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
-		t.Fatalf("s1 hydrate leftover still present after authoritative stop: stat err = %v", err)
+		t.Fatalf("s1 hydrate leftover still present after the final snapshot: stat err = %v", err)
 	}
 	if _, err := os.Stat(otherLeftover); err != nil {
 		t.Fatalf("another server's hydrate leftover was swept (must match s1's prefix only): %v", err)
