@@ -835,6 +835,45 @@ func TestStopWaitSatisfiedByCrash(t *testing.T) {
 	}
 }
 
+// Once a stop has begun, escalation is decoupled from the caller's context
+// (issue #770): a cancelled ctx — e.g. the gRPC session stream dropping mid-stop
+// — must NOT fail the docker calls/waits immediately and record a still-healthy,
+// still-stopping container as a failed-stop orphan. The RCON "stop" is accepted
+// and the container exits within its grace, so Stop completes cleanly without
+// docker stop/kill even though ctx was cancelled before Stop ran.
+func TestStopDetachesEscalationFromContextCancellation(t *testing.T) {
+	docker := newFakeDocker()
+	// RCON "stop" is accepted; the container exits shortly after, well inside the
+	// stop timeout. This models a graceful stop in flight.
+	ctrl := &fakeControl{onStop: func() {
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			docker.exit(0, nil)
+		}()
+	}}
+	d := newTestDriver(docker, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// ctx is already cancelled, modelling the dropped stream. Pre-fix the cancelled
+	// ctx made waitExit return false instantly and docker Stop/Kill fail, recording
+	// a failed-stop orphan; now the escalation runs on a detached context, so the
+	// container keeps its full grace and exits on its own.
+	if err := inst.Stop(ctx, true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if docker.stopWasCalled() || docker.killWasCalled() {
+		t.Fatal("Stop escalated to docker stop/kill despite the RCON stop succeeding within grace")
+	}
+}
+
 // When RCON is unavailable, a graceful stop falls back to docker stop.
 func TestGracefulStopFallsBackToDockerStop(t *testing.T) {
 	docker := newFakeDocker()
