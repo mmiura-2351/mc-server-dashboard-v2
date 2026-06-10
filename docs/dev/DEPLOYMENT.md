@@ -197,6 +197,14 @@ the installer downloads Forge's libraries. The installer's combined output is
 written to `logs/forge-install.log` in the server's working set, readable through
 the file API — check it if a Forge first start fails or stalls.
 
+The Forge installer forks Java grandchild processes that can outlive their parent
+and re-parent to the worker. In the `compose.yaml` deployment this is handled by
+`init: true` on the worker service (Docker injects tini as PID 1). If you run the
+worker outside Compose — as a bare-metal process or in a container launched by hand
+— ensure it is started under an init process (e.g. `tini -- ./worker`) or pass
+`--init` to `docker run`. Without an init, these grandchildren become zombies that
+accumulate until the worker process exits.
+
 ## 6. How Minecraft server ports reach clients
 
 The worker's container driver reads each server's `server.properties` and

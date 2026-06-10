@@ -122,6 +122,10 @@ services:
       # paths. Identical paths make the worker's in-container path a valid host
       # path. The worker-id under it also survives container recreation this way.
       - ${MCSD_SCRATCH_DIR}:${MCSD_SCRATCH_DIR}
+    # init: true injects Docker's tini as PID 1 so it reaps zombie grandchildren
+    # (e.g. processes re-parented from Forge installer forks) that exec.Cmd.Wait
+    # cannot reap because the worker itself runs as PID 1 without an init.
+    init: true
     depends_on:
       - api
 

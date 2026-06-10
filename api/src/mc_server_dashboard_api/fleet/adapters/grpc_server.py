@@ -344,7 +344,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
         if payload == "command_result":
             # Match the result to its in-flight command by command_id, carried as
             # the enclosing message's correlation_id (CONTROL_PLANE.md Section 3).
-            self._control_plane.resolve(message.correlation_id, message.command_result)
+            # The reporting worker is passed so a result forged for another
+            # worker's command is dropped, not applied (issue #789).
+            self._control_plane.resolve(
+                message.correlation_id, worker_id, message.command_result
+            )
             return
         if payload != "event":
             return

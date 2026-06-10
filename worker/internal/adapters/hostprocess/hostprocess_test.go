@@ -660,11 +660,23 @@ func TestStopWaitSatisfiedByCrash(t *testing.T) {
 	}
 }
 
-// waitExit honours the caller's context: a cancelled ctx unblocks Stop before
-// the stop timeout, and the driver then escalates to Kill().
-func TestStopHonoursContextCancellation(t *testing.T) {
+// Once a stop has begun, escalation is decoupled from the caller's context
+// (issue #770): a cancelled ctx — e.g. the gRPC session stream dropping mid-stop
+// — must NOT collapse the grace period into an immediate SIGKILL mid-save. The
+// RCON "stop" is accepted and the process exits within its grace, so Stop
+// completes cleanly without SIGTERM or SIGKILL even though ctx was cancelled
+// before Stop ran.
+func TestStopDetachesEscalationFromContextCancellation(t *testing.T) {
 	proc := newFakeProcess()
-	d := newTestDriver(t, proc, nil, errors.New("no rcon"))
+	// RCON "stop" is accepted; the process saves and exits shortly after, well
+	// inside the stop timeout. This models a graceful stop in flight.
+	ctrl := &fakeControl{onStop: func() {
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			proc.exit(nil)
+		}()
+	}}
+	d := newTestDriver(t, proc, ctrl, nil)
 
 	inst, err := d.Start(context.Background(), spec())
 	if err != nil {
@@ -674,14 +686,19 @@ func TestStopHonoursContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	// The process never exits on SIGTERM; with ctx already cancelled, waitExit
-	// returns immediately and Stop escalates to Kill(), which releases Wait.
+	// ctx is already cancelled, modelling the dropped stream. Pre-fix the cancelled
+	// ctx made waitExit return false instantly and Stop escalated to SIGTERM then
+	// SIGKILL; now the escalation runs on a detached context, so the process keeps
+	// its full grace and exits on its own.
 	if err := inst.Stop(ctx, true); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	drainTo(t, inst.Events(), execution.StateStopped)
-	if !proc.killed {
-		t.Fatal("expected Kill() escalation after context cancellation")
+	if proc.gotSignal(syscall.SIGTERM) {
+		t.Fatal("Stop escalated to SIGTERM despite the RCON stop succeeding within grace")
+	}
+	if proc.killed {
+		t.Fatal("Stop escalated to SIGKILL despite the RCON stop succeeding within grace")
 	}
 }
 
