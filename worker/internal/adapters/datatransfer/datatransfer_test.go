@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -594,5 +595,82 @@ func TestWriteRegularShrinkingFile(t *testing.T) {
 	// First 3 bytes are the file content; last 3 are zero-padding.
 	if string(content) != "hi!\x00\x00\x00" {
 		t.Fatalf("entry content = %q, want %q", content, "hi!\x00\x00\x00")
+	}
+}
+
+// sweepHydrateLeftovers reclaims this id's .hydrate-<id>-* temp/trash siblings a
+// crashed hydrate left behind, and touches nothing else (issue #806).
+func TestSweepHydrateLeftovers(t *testing.T) {
+	scratch := t.TempDir()
+	// A stale leftover for "server" from a crashed hydrate.
+	stale := filepath.Join(scratch, ".hydrate-server-stale")
+	if err := os.MkdirAll(stale, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// The live working dir and another server's leftover must be retained: the sweep
+	// is an exact-prefix match for the given id only.
+	live := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(live, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(scratch, ".hydrate-other-stale")
+	if err := os.MkdirAll(other, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepHydrateLeftovers(scratch, "server")
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf(".hydrate-server-stale not removed: stat err = %v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("live working dir wrongly removed: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("another server's leftover wrongly removed: %v", err)
+	}
+}
+
+// When the final temp->destDir swap rename fails after the old working set was
+// already moved aside to trash, unpackAndSwap must restore the old copy so no data
+// is lost (the crash-safety restore branch, issue #772 / #806).
+func TestHydrateRestoresOldCopyWhenSwapRenameFails(t *testing.T) {
+	orig := swapRename
+	swapRename = func(_, _ string) error { return errors.New("forced swap failure") }
+	defer func() { swapRename = orig }()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	// A pre-existing (old) working set the swap must not lose.
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "level.dat"), []byte("old-world"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	body := tarOf(map[string]string{"level.dat": "new-world"})
+	err := unpackAndSwap(bytes.NewReader(body), dest)
+	if err == nil {
+		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
+	}
+
+	// The old copy must be back at destDir (restored from trash) with its content.
+	got, err := os.ReadFile(filepath.Join(dest, "level.dat"))
+	if err != nil {
+		t.Fatalf("old working set not restored to destDir: %v", err)
+	}
+	if string(got) != "old-world" {
+		t.Fatalf("destDir/level.dat = %q, want %q (old copy)", got, "old-world")
+	}
+	// No .hydrate-* leftovers should remain to leak disk.
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "server" {
+			t.Fatalf("leftover entry in scratch root after failed swap: %q", e.Name())
+		}
 	}
 }
