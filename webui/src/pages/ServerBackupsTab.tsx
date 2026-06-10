@@ -668,7 +668,7 @@ function RestoreDialog({
       {stopped ? (
         <>
           {quarantined && (
-            <p className="field-error">
+            <p className="restore-damaged-warning">
               {t("backups.restoreDialog.damagedWarning")}
             </p>
           )}
@@ -683,13 +683,13 @@ function RestoreDialog({
             />
           </label>
           {quarantined && (
-            <label className="field-inline">
+            <label className="restore-ack-row">
               <input
                 type="checkbox"
                 checked={acknowledged}
                 onChange={(e) => setAcknowledged(e.target.checked)}
               />
-              {t("backups.health.quarantinedTitle")}
+              {t("backups.restoreDialog.damagedAck")}
             </label>
           )}
         </>

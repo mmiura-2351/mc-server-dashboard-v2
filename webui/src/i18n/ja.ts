@@ -412,6 +412,10 @@ export const ja: Record<TranslationKey, string> = {
     "このバックアップのデータは破損していることが判明しています。復元するとサーバーのワールドが壊れた状態になる可能性があり、その後修復する方法はありません。",
   "backups.restoreDialog.damagedConfirm":
     "破損したバックアップを承知のうえで復元",
+  // Acknowledgement checkbox label gating the force-restore — affirmation phrased
+  // (the user asserts they accept the risk), not a restatement of the warning.
+  "backups.restoreDialog.damagedAck":
+    "このバックアップが破損しており、修復できない壊れたワールドになる可能性があることを理解しました。",
   // Delete dialog (typed confirm).
   "backups.deleteDialog.title": "バックアップを削除",
   "backups.deleteDialog.body":

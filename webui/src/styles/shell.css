@@ -689,6 +689,19 @@ body.col-resizing {
   color: var(--red);
 }
 
+/* Force-restore confirmation dialog: the warning and ack row render inside a
+ * portaled Modal, out of reach of the page scopes that style `.field-error` /
+ * `.field-inline`, so they carry their own self-contained rules (#755). */
+.restore-damaged-warning {
+  font-size: 12px;
+  color: var(--red);
+}
+.restore-ack-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* ---------- Modal primitive ---------- */
 .modal-layer {
   position: fixed;

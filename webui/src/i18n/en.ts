@@ -407,6 +407,10 @@ export const en = {
   "backups.restoreDialog.damagedWarning":
     "This backup's data is known to be damaged. Restoring it may leave the server with a broken world, and there is no way to repair it afterwards.",
   "backups.restoreDialog.damagedConfirm": "Restore the damaged backup anyway",
+  // Acknowledgement checkbox label gating the force-restore — affirmation phrased
+  // (the user asserts they accept the risk), not a restatement of the warning.
+  "backups.restoreDialog.damagedAck":
+    "I understand this backup is damaged and may leave a broken world that cannot be repaired.",
   // Delete dialog (typed confirm).
   "backups.deleteDialog.title": "Delete backup",
   "backups.deleteDialog.body":
