@@ -14,6 +14,7 @@ import datetime as dt
 import os
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace as dc_replace
 
 import pytest
 from sqlalchemy import text
@@ -143,6 +144,35 @@ async def test_add_list_newest_first_and_delete(engine: AsyncEngine) -> None:
     async with ServersUnitOfWork(factory) as uow:
         remaining = await uow.backups.list_for_server(ServerId(server_id))
     assert [b.id for b in remaining] == [older.id]
+
+
+async def test_list_breaks_created_at_ties_by_id_descending(
+    engine: AsyncEngine,
+) -> None:
+    # Deterministic ordering (#777 review): two backups with the SAME created_at
+    # must list in a stable order so the retained "newest" head is deterministic.
+    # The secondary id-desc tie-break pins it.
+    from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    lo = _backup(server_id, ref="lo", created_at=_NOW)
+    hi = _backup(server_id, ref="hi", created_at=_NOW)
+    # Pin the relative id order so the assertion is deterministic regardless of
+    # which UUIDs new() minted.
+    lo_id, hi_id = sorted([lo.id, hi.id], key=lambda b: b.value)
+    lo = dc_replace(lo, id=lo_id)
+    hi = dc_replace(hi, id=hi_id)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.add(lo)
+        await uow.backups.add(hi)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        listed = await uow.backups.list_for_server(ServerId(server_id))
+    # Equal created_at -> the higher id sorts first (id desc tie-break).
+    assert [b.id for b in listed] == [hi_id, lo_id]
 
 
 async def test_health_round_trips(engine: AsyncEngine) -> None:

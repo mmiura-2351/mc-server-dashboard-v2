@@ -96,6 +96,20 @@ class BackupArchiveStore(abc.ABC):
         """Remove an archive. Idempotent (a missing archive is a no-op)."""
 
     @abc.abstractmethod
+    async def prune_to_final_snapshot(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        """Collapse the working set to one retained final-state archive (issue #777).
+
+        The DeleteServer reclaim path: pack the authoritative ``current/`` into a
+        single retained ``tar.gz`` and drop the unpacked working-set tree, leaving
+        ``backups/`` for the caller to prune separately. Packing is mandatory and
+        fail-closed — a pack failure leaves the working set intact and the error
+        propagates, so a failed delete never silently loses the latest state. A
+        server with no published snapshot is a no-op (nothing to pack).
+        """
+
+    @abc.abstractmethod
     def open(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> AsyncIterator[bytes]:

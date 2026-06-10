@@ -1227,13 +1227,6 @@ def get_update_server(
     )
 
 
-def get_delete_server(request: Request) -> DeleteServer:
-    """Assemble the :class:`DeleteServer` use case (server:delete)."""
-
-    session_factory = create_session_factory(get_engine(request))
-    return DeleteServer(uow=ServersUnitOfWork(session_factory))
-
-
 def get_create_group(request: Request) -> CreateGroup:
     """Assemble the :class:`CreateGroup` use case (group:manage, issue #276)."""
 
@@ -1647,6 +1640,23 @@ def get_servers_backup_store(
     """Bind the servers backup seam to the authoritative Storage backup slice."""
 
     return StorageBackupStoreAdapter(storage=storage)
+
+
+def get_delete_server(
+    request: Request,
+    backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+) -> DeleteServer:
+    """Assemble the :class:`DeleteServer` use case (server:delete).
+
+    Binds the Storage backup seam so the delete can prune the server's archives and
+    pack its working set into the retained final tar.gz (issue #777).
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteServer(
+        uow=ServersUnitOfWork(session_factory),
+        backup_store=backup_store,
+    )
 
 
 def get_create_backup(
