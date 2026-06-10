@@ -69,7 +69,10 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     SnapshotId,
     VersionId,
 )
-from mc_server_dashboard_api.storage.integrity.region import check_working_set
+from mc_server_dashboard_api.storage.integrity.region import (
+    WorkingSetReport,
+    check_working_set,
+)
 
 # Read/stream chunk size for hydrate / JAR egress.
 _CHUNK = 1024 * 1024
@@ -555,8 +558,13 @@ class FsStorage(Storage):
         ]
 
     async def restore_backup(
-        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
-    ) -> None:
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey,
+        *,
+        force: bool = False,
+    ) -> WorkingSetReport:
         archive = (
             self._server_root(community_id, server_id)
             / "backups"
@@ -579,7 +587,24 @@ class FsStorage(Storage):
             await asyncio.to_thread(
                 _extract_tar_gz_into, archive, staging, self._max_restore_bytes
             )
+            # Restore-direction integrity gate (issue #743): walk the extracted
+            # staging for structurally corrupt ``.mca`` region files (issue #738)
+            # BEFORE publishing it into ``current``. A backup predating the create
+            # gate (#749), or an uploaded one, may carry corruption that would
+            # re-poison ``current`` on restore. By default (``force=False``) a corrupt
+            # staging is refused: clean it (mirroring abort) and raise so the prior
+            # ``current`` is left untouched (last-known-good, #703). With
+            # ``force=True`` the operator override publishes anyway (better a
+            # deliberate corrupt restore than no restore, #703). The report is
+            # returned either way so the use case can quarantine + audit a forced
+            # corrupt restore; the adapter stays filesystem-only and never touches
+            # the DB.
+            report = await asyncio.to_thread(check_working_set, staging)
+            if not report.healthy and not force:
+                await asyncio.to_thread(_rmtree, staging)
+                raise IntegrityCheckError(report)
             await asyncio.to_thread(self._publish, community_id, server_id, staging)
+            return report
         except BaseException:
             await asyncio.to_thread(_rmtree, staging)
             raise

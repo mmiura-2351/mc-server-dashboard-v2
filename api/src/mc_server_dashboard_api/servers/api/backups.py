@@ -285,14 +285,24 @@ async def restore_backup(
     ],
     use_case: Annotated[RestoreBackup, Depends(get_restore_backup)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    force: bool = False,
 ) -> None:
-    """Restore a backup; requires the server stopped (FR-BAK-4 -> 409 if running)."""
+    """Restore a backup; requires the server stopped (FR-BAK-4 -> 409 if running).
+
+    The restore validates the extracted backup against the integrity gate (#743): a
+    corrupt backup is refused with 500 ``working_set_corrupt`` (the use case has
+    quarantined it). ``?force=true`` is the operator override — it publishes a
+    known-corrupt backup anyway (#703), records a distinct ``backup:force_restore``
+    audit entry naming who forced it and the corrupt count, and quarantines it. The
+    create-direction gate (#749) has no such override.
+    """
 
     try:
-        await use_case(
+        result = await use_case(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
             backup_id=BackupId(backup_id),
+            force=force,
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
@@ -309,6 +319,45 @@ async def restore_backup(
             target_type=ops.TARGET_BACKUP,
         )
         raise _conflict("server_not_stopped") from exc
+    except BackupCorruptError as exc:
+        # The backup's extracted working set is structurally corrupt and force was
+        # not set (#743): the restore was refused and the backup quarantined. Like
+        # the create-direction gate (#749), this is a server-side data fault, not a
+        # client error -> 500 with a machine-readable reason; the refusal is logged
+        # and audited with the corrupt-file count.
+        _logger.warning(
+            "backup restore refused: corrupt backup %s for server %s "
+            "(%d corrupt region file(s))",
+            backup_id,
+            server_id,
+            exc.corrupt_count,
+        )
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
+        raise _integrity_error("working_set_corrupt") from exc
+    if result.forced_corrupt:
+        # An operator forced the restore of a known-corrupt backup over the gate
+        # (#703): it published. Log and audit the deliberate corrupt restore under a
+        # distinct operation so it is queryable apart from a routine restore.
+        _logger.warning(
+            "backup force-restore: operator %s published known-corrupt backup %s "
+            "for server %s (%d corrupt region file(s))",
+            authorized.user_id.value,
+            backup_id,
+            server_id,
+            result.corrupt_count,
+        )
+        await _record(
+            recorder, ops.BACKUP_FORCE_RESTORE, authorized, community_id, backup_id
+        )
+        return
     await _record(recorder, ops.BACKUP_RESTORE, authorized, community_id, backup_id)
 
 

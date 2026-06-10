@@ -762,6 +762,13 @@ export interface paths {
         /**
          * Restore Backup
          * @description Restore a backup; requires the server stopped (FR-BAK-4 -> 409 if running).
+         *
+         *     The restore validates the extracted backup against the integrity gate (#743): a
+         *     corrupt backup is refused with 500 ``working_set_corrupt`` (the use case has
+         *     quarantined it). ``?force=true`` is the operator override — it publishes a
+         *     known-corrupt backup anyway (#703), records a distinct ``backup:force_restore``
+         *     audit entry naming who forced it and the corrupt count, and quarantines it. The
+         *     create-direction gate (#749) has no such override.
          */
         post: operations["restore_backup_api_communities__community_id__servers__server_id__backups__backup_id__restore_post"];
         delete?: never;
@@ -4048,7 +4055,9 @@ export interface operations {
     };
     restore_backup_api_communities__community_id__servers__server_id__backups__backup_id__restore_post: {
         parameters: {
-            query?: never;
+            query?: {
+                force?: boolean;
+            };
             header?: never;
             path: {
                 community_id: string;

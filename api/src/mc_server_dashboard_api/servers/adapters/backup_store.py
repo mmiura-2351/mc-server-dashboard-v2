@@ -72,15 +72,32 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         return key.value
 
     async def restore(
-        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
-    ) -> None:
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        storage_ref: str,
+        force: bool = False,
+    ) -> int:
         community, server = _scope(community_id, server_id)
         try:
-            await self._storage.restore_backup(
-                community, server, BackupKey(storage_ref)
+            report = await self._storage.restore_backup(
+                community, server, BackupKey(storage_ref), force=force
             )
         except NotFoundError as exc:
             raise BackupNotFoundError(storage_ref) from exc
+        except IntegrityCheckError as exc:
+            # The extracted backup is structurally corrupt and ``force`` was not
+            # set: Storage refused to publish it (#743). Translate to the servers
+            # error so no storage type crosses the seam, carrying the corrupt count
+            # for the edge log/audit; ``current`` is untouched.
+            raise BackupCorruptError(
+                storage_ref, corrupt_count=len(exc.report.corrupt)
+            ) from exc
+        # A forced restore can publish a corrupt working set; return the corrupt
+        # region count (0 when healthy) so the use case can quarantine + audit the
+        # forced corrupt restore (#743).
+        return len(report.corrupt)
 
     async def delete(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str

@@ -176,6 +176,29 @@ async def test_health_round_trips(engine: AsyncEngine) -> None:
     assert fetched.health is BackupHealth.HEALTHY
 
 
+async def test_update_health_sets_quarantined(engine: AsyncEngine) -> None:
+    """``update_health`` rewrites just the health column (the restore gate, #743)."""
+
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    backup = _backup(server_id, ref="q", created_at=_NOW, health=BackupHealth.HEALTHY)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.add(backup)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.update_health(backup.id, BackupHealth.QUARANTINED)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        fetched = await uow.backups.get_by_id(backup.id)
+    assert fetched is not None
+    assert fetched.health is BackupHealth.QUARANTINED
+    # Only the health changed; the rest of the row is intact.
+    assert fetched.storage_ref == "q"
+
+
 async def test_deleting_server_cascades_to_backups(engine: AsyncEngine) -> None:
     server_id = await _seed_server(engine)
     factory = create_session_factory(engine)

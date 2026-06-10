@@ -35,6 +35,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
     VersionId,
 )
+from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
 
 # A byte stream: async so an adapter can read/transfer without buffering the whole
 # working set or JAR in memory (STORAGE.md Sections 3.1, 3.2).
@@ -217,13 +218,29 @@ class BackupStore(abc.ABC):
 
     @abc.abstractmethod
     async def restore_backup(
-        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
-    ) -> None:
-        """Atomically republish a backup into ``current/`` (FR-BAK-4).
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey,
+        *,
+        force: bool = False,
+    ) -> WorkingSetReport:
+        """Atomically republish a backup into ``current/`` (FR-BAK-4, issue #743).
 
-        Atomic publish (Section 4): stage the extracted archive, then flip. The
-        application enforces the stop precondition; Storage enforces atomicity.
-        Raises :class:`~.errors.NotFoundError` for an unknown key.
+        Atomic publish (Section 4): stage the extracted archive, run the
+        restore-direction integrity gate over it (issue #738), then flip. A backup
+        predating the create gate (#749) or an uploaded one may carry structurally
+        corrupt ``.mca`` region files; by default (``force=False``) a corrupt
+        staging is refused with :class:`~.errors.IntegrityCheckError` (carrying the
+        report) and ``current`` is left untouched (last-known-good, #703). With
+        ``force=True`` the operator override publishes the corrupt working set
+        anyway (better a deliberate corrupt restore than none, #703).
+
+        Returns the :class:`~...integrity.region.WorkingSetReport` of the extracted
+        working set either way (healthy on a clean restore, non-healthy on a forced
+        corrupt one) so the caller can quarantine + audit. The application enforces
+        the stop precondition; Storage enforces atomicity and stays DB-free. Raises
+        :class:`~.errors.NotFoundError` for an unknown key.
         """
 
     @abc.abstractmethod

@@ -88,6 +88,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     SnapshotId,
     VersionId,
 )
+from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
 
 # Egress chunk size for hydrate / JAR streaming (one tar member-chunk at a time).
 _CHUNK = 1024 * 1024
@@ -628,8 +629,19 @@ class ObjectStorage(Storage):
         return keys
 
     async def restore_backup(
-        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
-    ) -> None:
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey,
+        *,
+        force: bool = False,
+    ) -> WorkingSetReport:
+        # The restore-direction integrity gate (issue #743) is fs-only: it walks a
+        # local working-set directory (issue #738), which the object backend does
+        # not stage — it streams members straight to object storage. Like the
+        # create-direction gate (#749), the object adapter is ungated, so ``force``
+        # is a no-op here and a healthy report is returned to satisfy the Port.
+        del force
         backup_key = self._backup_key(community_id, server_id, key)
         transfer_id = f"restore-{key.value}-{uuid.uuid4().hex}"
         incoming = self._incoming_prefix(community_id, server_id, transfer_id)
@@ -666,6 +678,7 @@ class ObjectStorage(Storage):
                     await asyncio.to_thread(spool.unlink, missing_ok=True)
         finally:
             self._release_staging(incoming)
+        return WorkingSetReport()
 
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey

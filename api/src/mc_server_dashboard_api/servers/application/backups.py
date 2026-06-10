@@ -68,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupCorruptError,
     BackupNotFoundError,
     BackupUnsettledError,
     FileTooLargeError,
@@ -210,12 +211,34 @@ class ListBackups:
 
 
 @dataclass(frozen=True)
+class RestoreResult:
+    """The outcome of a restore, so the edge can audit it (issue #743).
+
+    ``forced_corrupt`` is ``True`` only when an operator forced the restore of a
+    known-corrupt backup over the integrity gate; ``corrupt_count`` is then the
+    number of corrupt region files. A healthy restore is ``(False, 0)``.
+    """
+
+    forced_corrupt: bool
+    corrupt_count: int
+
+
+@dataclass(frozen=True)
 class RestoreBackup:
     """Restore a backup into the authoritative copy (backup:restore, FR-BAK-4).
 
     Requires the server at rest: a hot replacement of a live working set is unsafe
     (Section 6.9), so a running (or transitional) server is 409. The republish is
     atomic (Storage); the restored state hydrates on the next start.
+
+    Integrity gate (issue #743): the restore validates the extracted backup before
+    publishing it. A corrupt backup (one predating the create gate #749, or an
+    uploaded one) is refused by default — :class:`BackupCorruptError` propagates and
+    the backup is marked ``QUARANTINED`` so an operator does not unknowingly retry
+    it; ``current`` is untouched. With ``force=True`` the operator override (#703)
+    publishes the corrupt working set anyway, marks the backup ``QUARANTINED`` (it
+    IS known-corrupt), and the returned :class:`RestoreResult` flags the forced
+    corrupt restore so the edge audits who forced it.
     """
 
     uow: UnitOfWork
@@ -227,7 +250,8 @@ class RestoreBackup:
         community_id: CommunityId,
         server_id: ServerId,
         backup_id: BackupId,
-    ) -> None:
+        force: bool = False,
+    ) -> RestoreResult:
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             backup = await self.uow.backups.get_by_id(backup_id)
@@ -236,11 +260,31 @@ class RestoreBackup:
             storage_ref = backup.storage_ref
         if not server.is_at_rest():
             raise ServerNotStoppedError(str(server_id.value))
-        await self.backup_store.restore(
-            community_id=community_id,
-            server_id=server_id,
-            storage_ref=storage_ref,
-        )
+        try:
+            corrupt_count = await self.backup_store.restore(
+                community_id=community_id,
+                server_id=server_id,
+                storage_ref=storage_ref,
+                force=force,
+            )
+        except BackupCorruptError:
+            # Refused restore (corrupt, no force): quarantine the backup so an
+            # operator sees it is corrupt, then re-raise for the edge to surface
+            # and audit. ``current`` was left untouched by Storage.
+            await self._quarantine(backup_id)
+            raise
+        if corrupt_count > 0:
+            # Forced restore of a known-corrupt backup: it published, but the
+            # backup IS corrupt, so quarantine it; the edge audits the forced
+            # corrupt restore.
+            await self._quarantine(backup_id)
+            return RestoreResult(forced_corrupt=True, corrupt_count=corrupt_count)
+        return RestoreResult(forced_corrupt=False, corrupt_count=0)
+
+    async def _quarantine(self, backup_id: BackupId) -> None:
+        async with self.uow:
+            await self.uow.backups.update_health(backup_id, BackupHealth.QUARANTINED)
+            await self.uow.commit()
 
 
 @dataclass(frozen=True)
