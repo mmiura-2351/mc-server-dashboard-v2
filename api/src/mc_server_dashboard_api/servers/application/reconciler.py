@@ -32,8 +32,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   orphan path has no assigned Worker, so it is unaffected by this skip.
 
 Grace window — a divergence is acted on only once it has persisted past
-``grace_seconds`` (measured from ``observed_at``, or ``updated_at`` when the server
-has never been reported). This gives the normal in-flight path time to converge
+``grace_seconds`` (measured from ``max(updated_at, observed_at or updated_at)`` —
+the later of the last intent commit and the last Worker report). This gives the
+normal in-flight path time to converge
 (a start that is mid-launch reports ``starting``, not a divergence) before the
 reconciler intervenes.
 
