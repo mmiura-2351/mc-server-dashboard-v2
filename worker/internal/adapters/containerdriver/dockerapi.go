@@ -65,6 +65,12 @@ func installContainerName(serverID string) string {
 type dockerAPI interface {
 	// Create creates a container from spec and returns its id.
 	Create(ctx context.Context, spec CreateSpec) (string, error)
+	// ImagePull pulls the image ref ("name:tag") from its registry, draining the
+	// Engine's progress stream to completion. It errors when the daemon rejects the
+	// request outright OR when the progress stream ends on an error message (an
+	// offline host, a denied or unknown image). The driver runs it once on an
+	// image-missing create failure, then retries the create (issue #904).
+	ImagePull(ctx context.Context, image string) error
 	// Start starts a created container.
 	Start(ctx context.Context, id string) error
 	// Stop sends SIGTERM and, after timeout, SIGKILL (the `docker stop` semantics).

@@ -401,6 +401,85 @@ func TestEngineClientCreateNonConflictIsNotTyped(t *testing.T) {
 	}
 }
 
+// ImagePull splits the image ref into fromImage/tag, drains the progress stream
+// to completion, and returns nil when the stream ends without an error (issue
+// #904).
+func TestEngineClientImagePullDrainsStream(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"Pulling from library/eclipse-temurin"}` + "\n"))
+		_, _ = w.Write([]byte(`{"status":"Download complete"}` + "\n"))
+	})
+	c := d.client(t)
+
+	if err := c.ImagePull(context.Background(), "eclipse-temurin:21-jre"); err != nil {
+		t.Fatalf("ImagePull: %v", err)
+	}
+	req := d.requests[0]
+	if req.method != http.MethodPost || req.path != "/v1.43/images/create" {
+		t.Fatalf("request = %s %s", req.method, req.path)
+	}
+	q, err := url.ParseQuery(req.query)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", req.query, err)
+	}
+	if q.Get("fromImage") != "eclipse-temurin" || q.Get("tag") != "21-jre" {
+		t.Fatalf("query = %q, want fromImage=eclipse-temurin&tag=21-jre", req.query)
+	}
+}
+
+// A pull whose progress stream ends on an error object (an offline host, a denied
+// or unknown image) fails even though the HTTP status was 200: the Engine returns
+// 200 then reports the failure in the stream (issue #904).
+func TestEngineClientImagePullStreamErrorFails(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"Pulling from library/eclipse-temurin"}` + "\n"))
+		_, _ = w.Write([]byte(`{"errorDetail":{"message":"pull access denied"},"error":"pull access denied"}` + "\n"))
+	})
+	c := d.client(t)
+
+	err := c.ImagePull(context.Background(), "eclipse-temurin:21-jre")
+	if err == nil {
+		t.Fatal("expected ImagePull to fail on an in-stream error")
+	}
+	if !strings.Contains(err.Error(), "pull access denied") {
+		t.Fatalf("ImagePull err = %v, want it to carry the daemon's pull error", err)
+	}
+}
+
+// A non-2xx response (the daemon rejecting the request outright) fails the pull
+// directly (issue #904).
+func TestEngineClientImagePullNon2xxFails(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"boom"}`))
+	})
+	c := d.client(t)
+
+	if err := c.ImagePull(context.Background(), "img"); err == nil {
+		t.Fatal("expected ImagePull to fail on a non-2xx daemon response")
+	}
+}
+
+// splitImageTag splits on the tag colon, defaulting to latest when none is given
+// and leaving a registry host:port (which precedes a "/") untagged (issue #904).
+func TestSplitImageTag(t *testing.T) {
+	cases := []struct {
+		image, name, tag string
+	}{
+		{"eclipse-temurin:21-jre", "eclipse-temurin", "21-jre"},
+		{"azul/zulu-openjdk:7", "azul/zulu-openjdk", "7"},
+		{"img", "img", "latest"},
+		{"registry:5000/img", "registry:5000/img", "latest"},
+		{"registry:5000/img:1.21", "registry:5000/img", "1.21"},
+	}
+	for _, tc := range cases {
+		name, tag := splitImageTag(tc.image)
+		if name != tc.name || tag != tc.tag {
+			t.Errorf("splitImageTag(%q) = (%q, %q), want (%q, %q)", tc.image, name, tag, tc.name, tc.tag)
+		}
+	}
+}
+
 // Inspect decodes the container id, labels, and running state used to resolve a
 // create name conflict (issue #226).
 func TestEngineClientInspectDecodesLabelsAndState(t *testing.T) {

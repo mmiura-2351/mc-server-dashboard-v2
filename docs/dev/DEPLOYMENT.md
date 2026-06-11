@@ -40,7 +40,23 @@ on it as a substitute for keeping heavy build pipelines off the game host.
 - The host user in the `docker` group (or run compose with sufficient
   privileges). The worker container needs access to the Docker socket.
 - Outbound network access from the host: the API fetches Minecraft/Paper version
-  manifests and JARs, and the worker pulls the per-Java base images.
+  manifests and JARs, and the worker pulls the per-Java base image on first use.
+  The first start of a given Java tier therefore needs outbound network and may
+  take minutes while the base image downloads (hundreds of MB); the image is
+  cached on the host afterwards. On an offline host the start fails with an
+  `image_missing` error.
+
+To warm the cache up front on a production host so the first start of each tier
+is instant, pre-pull the base images (the set comes from the worker's
+`driver.container.images` config; the defaults are below):
+
+```sh
+for img in eclipse-temurin:8-jre eclipse-temurin:11-jre eclipse-temurin:16-jdk \
+           eclipse-temurin:17-jre eclipse-temurin:21-jre eclipse-temurin:25-jre \
+           azul/zulu-openjdk:7; do
+  docker pull "$img"
+done
+```
 
 ## 3. Configure `.env`
 
