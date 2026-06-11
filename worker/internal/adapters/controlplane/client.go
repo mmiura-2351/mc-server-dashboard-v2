@@ -134,6 +134,7 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 	return session.RegisterAck{
 		Accepted:          ack.GetAccepted(),
 		HeartbeatInterval: ack.GetHeartbeatInterval().AsDuration(),
+		TransferDeadline:  ack.GetTransferDeadline().AsDuration(),
 		RejectionReason:   ack.GetRejectionReason(),
 	}, nil
 }

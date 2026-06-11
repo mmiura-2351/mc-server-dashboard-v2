@@ -563,6 +563,7 @@ class RegisterAck(_message.Message):
     ACCEPTED_FIELD_NUMBER: _builtins.int
     HEARTBEAT_INTERVAL_FIELD_NUMBER: _builtins.int
     REJECTION_REASON_FIELD_NUMBER: _builtins.int
+    TRANSFER_DEADLINE_FIELD_NUMBER: _builtins.int
     accepted: _builtins.bool
     """accepted is true when the API admitted this Worker into the registry."""
     rejection_reason: _builtins.str
@@ -577,16 +578,29 @@ class RegisterAck(_message.Message):
         FR-WRK-2).
         """
 
+    @_builtins.property
+    def transfer_deadline(self) -> _duration_pb2.Duration:
+        """transfer_deadline bounds a single data-plane transfer (the snapshot upload
+        and the hydrate download) Worker-side. The API derives it from its own
+        hydrate/snapshot budgets plus a small margin, so it is always >= the API
+        budget: the API-side timeout fires first and this Worker bound is the
+        cleanup backstop that structurally closes the unbounded-upload case (an
+        upload outliving snapshot_timeout_seconds indefinitely, #874/#869). The
+        Worker applies it as a per-transfer context deadline; a non-positive or
+        unset value (an older API) leaves the transfer unbounded as before.
+        """
+
     def __init__(
         self,
         *,
         accepted: _builtins.bool = ...,
         heartbeat_interval: _duration_pb2.Duration | None = ...,
         rejection_reason: _builtins.str = ...,
+        transfer_deadline: _duration_pb2.Duration | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["heartbeat_interval", b"heartbeat_interval"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["heartbeat_interval", b"heartbeat_interval", "transfer_deadline", b"transfer_deadline"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["accepted", b"accepted", "heartbeat_interval", b"heartbeat_interval", "rejection_reason", b"rejection_reason"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accepted", b"accepted", "heartbeat_interval", b"heartbeat_interval", "rejection_reason", b"rejection_reason", "transfer_deadline", b"transfer_deadline"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

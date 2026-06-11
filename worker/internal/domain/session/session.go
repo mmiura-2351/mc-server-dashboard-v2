@@ -152,7 +152,16 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 	r.logger.Info("registered with API",
 		"worker_id", r.caps.WorkerID,
 		"heartbeat_interval", interval,
+		"transfer_deadline", ack.TransferDeadline,
 	)
+
+	// Hand the ack's data-plane transfer bound to the handler so it can apply a
+	// per-transfer deadline (issue #874). The handler derives the bound from this
+	// one source (the API's budget + margin); a non-positive value (an older API)
+	// leaves transfers unbounded, the prior behavior.
+	if setter, ok := r.handler.(TransferDeadlineSetter); ok {
+		setter.SetTransferDeadline(ack.TransferDeadline)
+	}
 
 	return true, r.serve(ctx, transport, interval)
 }

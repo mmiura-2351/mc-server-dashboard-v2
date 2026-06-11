@@ -159,6 +159,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         clock: Clock,
         worker_credential: str,
         heartbeat_timeout: dt.timedelta,
+        transfer_deadline: dt.timedelta,
         control_plane: ControlPlaneState,
         state_sink: ServerStateSink,
         real_time_events: RealTimeEvents,
@@ -167,6 +168,12 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self._clock = clock
         self._credential = worker_credential
         self._heartbeat_interval = heartbeat_timeout / _HEARTBEAT_INTERVAL_DIVISOR
+        # Worker-side bound for one data-plane transfer (issue #874). It is the
+        # API's hydrate/snapshot budget plus a margin, so it is always >= the API
+        # budget: the API-side dispatch timeout fires first, this is the cleanup
+        # backstop. Advertised in RegisterAck so the Worker derives it from one
+        # source (mirrors heartbeat_interval).
+        self._transfer_deadline = transfer_deadline
         self._control_plane = control_plane
         self._state_sink = state_sink
         self._real_time_events = real_time_events
@@ -473,6 +480,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
     def _register_ack(self, *, correlation_id: str) -> pb.ApiMessage:
         ack = pb.RegisterAck(accepted=True)
         ack.heartbeat_interval.FromTimedelta(self._heartbeat_interval)
+        ack.transfer_deadline.FromTimedelta(self._transfer_deadline)
         return pb.ApiMessage(correlation_id=correlation_id, register_ack=ack)
 
 
@@ -516,6 +524,7 @@ def make_grpc_server(
     clock: Clock,
     worker_credential: str,
     heartbeat_timeout: dt.timedelta,
+    transfer_deadline: dt.timedelta,
     control_plane: ControlPlaneState,
     state_sink: ServerStateSink,
     real_time_events: RealTimeEvents,
@@ -538,6 +547,7 @@ def make_grpc_server(
         clock=clock,
         worker_credential=worker_credential,
         heartbeat_timeout=heartbeat_timeout,
+        transfer_deadline=transfer_deadline,
         control_plane=control_plane,
         state_sink=state_sink,
         real_time_events=real_time_events,

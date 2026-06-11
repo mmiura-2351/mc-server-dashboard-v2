@@ -72,6 +72,7 @@ def _make_server(
         clock=FakeClock(_T0),
         worker_credential=_CREDENTIAL,
         heartbeat_timeout=_TIMEOUT,
+        transfer_deadline=dt.timedelta(seconds=660),
         control_plane=ControlPlaneState(),
         state_sink=FakeServerStateSink(),
         real_time_events=RecordingRealTimeEvents(),

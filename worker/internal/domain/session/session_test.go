@@ -935,3 +935,33 @@ func TestCleanShutdownOnCancel(t *testing.T) {
 		t.Error("transport not closed on shutdown")
 	}
 }
+
+// The RegisterAck's transfer_deadline is pushed onto a handler that implements
+// the optional TransferDeadlineSetter after registration (issue #874), so the
+// instance manager can bound its data-plane transfers from one source.
+func TestRegisterAckTransferDeadlinePlumbedToHandler(t *testing.T) {
+	ack := acceptedAck()
+	ack.TransferDeadline = 11 * time.Minute
+	transport := newFakeTransport(ack)
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool {
+		_, set := handler.transferDeadlineCopy()
+		return set
+	})
+	got, _ := handler.transferDeadlineCopy()
+	if got != 11*time.Minute {
+		t.Fatalf("pushed transfer deadline = %v, want 11m", got)
+	}
+
+	cancel()
+	<-done
+}
