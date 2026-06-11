@@ -773,7 +773,8 @@ def test_database_max_overflow_from_toml(
 def test_database_pool_size_must_be_positive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # pool_size = 0 would leave no permanent connections; reject it.
+    # pool_size = 0 would lift the connection cap entirely (SQLAlchemy treats 0
+    # as no-limit); reject it to avoid accidentally uncapped pools.
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     cfg = _write_toml(tmp_path, "[database]\npool_size = 0\n")
     with pytest.raises(ValidationError):
@@ -788,3 +789,17 @@ def test_database_max_overflow_must_be_nonnegative(
     cfg = _write_toml(tmp_path, "[database]\nmax_overflow = -1\n")
     with pytest.raises(ValidationError):
         load_settings(config_file=cfg)
+
+
+def test_database_pool_size_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_DATABASE__POOL_SIZE", "20")
+    settings = load_settings(config_file=None)
+    assert settings.database.pool_size == 20
+
+
+def test_database_max_overflow_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_DATABASE__MAX_OVERFLOW", "15")
+    settings = load_settings(config_file=None)
+    assert settings.database.max_overflow == 15
