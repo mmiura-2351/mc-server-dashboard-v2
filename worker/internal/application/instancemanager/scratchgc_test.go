@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -311,17 +312,19 @@ func TestSnapshotFailureRetainsDisplacedTree(t *testing.T) {
 
 // A .displaced-<id> tree must never be treated as a LIVE scratch: it is dot-prefixed
 // so it cannot collide with a server-id scratch dir, and the id-scoped sweeps touch
-// only their own server's siblings (issue #906). ScanHeldServers may list it, but the
-// API only consults held entries for ids it assigned, never ".displaced-*".
+// only their own server's siblings (issue #906). ScanHeldServers must SKIP the
+// .displaced- prefix entirely (issue #910): reporting it triggers a per-boot header
+// fsck of a world-sized recovery tree and a confusing server_id=.displaced-<id>
+// corrupt warning.
 func TestDisplacedTreeNotTreatedAsLiveScratch(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	displaced := seedDisplaced(t, m, "s1")
 
-	// A held-server scan never reports an id named "s1" off the displaced tree (the
-	// scan sees ".displaced-s1", which the API never matches to the assigned id "s1").
+	// A held-server scan never reports the displaced tree at all: neither under the
+	// assigned id "s1" nor under its on-disk ".displaced-s1" name.
 	for _, h := range ScanHeldServers(m.scratchDir, nil) {
-		if h.ServerID == "s1" {
-			t.Fatalf("displaced tree reported as held server id %q (would be hydrated/started from)", h.ServerID)
+		if h.ServerID == "s1" || strings.HasPrefix(h.ServerID, ".displaced-") {
+			t.Fatalf("displaced tree reported as held server id %q (issue #910: must be skipped)", h.ServerID)
 		}
 	}
 	// The hydrate-leftover sweep for s1 must not remove the displaced tree (different

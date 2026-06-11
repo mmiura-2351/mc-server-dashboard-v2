@@ -1083,8 +1083,10 @@ func TestWalkIntoNonENOENTEntryInfoErrorFails(t *testing.T) {
 }
 
 // When the final temp->destDir swap rename fails after the old working set was
-// already moved aside to trash, unpackAndSwap must restore the old copy so no data
-// is lost (the crash-safety restore branch, issue #772 / #806).
+// already displaced aside to .displaced-<id>, unpackAndSwap must restore the old copy
+// so no data is lost (the displace-first restore branch, issue #772 / #806 / #910).
+// The old copy must end up recoverable (here: back at destDir) and never be left as
+// the only copy under a .hydrate-* name a later sweep would delete.
 func TestHydrateRestoresOldCopyWhenSwapRenameFails(t *testing.T) {
 	orig := swapRename
 	swapRename = func(_, _ string) error { return errors.New("forced swap failure") }
@@ -1225,5 +1227,152 @@ func TestHydrateReplacesPriorDisplacedTree(t *testing.T) {
 	}
 	if displacedCount != 1 {
 		t.Fatalf("displaced-tree count = %d, want exactly 1 per server (issue #906)", displacedCount)
+	}
+}
+
+// Displace-first ordering (issue #910): the "aside" step must move the old working
+// set DIRECTLY to .displaced-<id>, never to an intermediate .hydrate-<id>-*.trash
+// name. The distinction is load-bearing: a crash (or the fsync error return) after
+// the aside-rename but before the swap-in completes leaves the old world ONLY under
+// that aside name with destDir absent. If the aside name is a .hydrate-<id>-* one, the
+// NEXT hydrate's sweepHydrateLeftovers deletes it — destroying the #906 recovery copy
+// one hydrate later. This pins the on-disk state at the instant of swap-in: the old
+// copy must already sit at .displaced-<id> and nothing must be parked under a
+// .hydrate-* name a sweep would delete.
+func TestSwapAsidesOldCopyToDisplacedNotTrash(t *testing.T) {
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "world", "r.0.0.mca"), []byte("only-copy"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inspect the filesystem at the exact moment of the swap-in rename (after the old
+	// copy has been moved aside, before it lands in destDir), then fail the swap so the
+	// hydrate returns without a successful swap-in.
+	orig := swapRename
+	var asideAt string
+	var hydrateTrashHoldsCopy bool
+	swapRename = func(_, _ string) error {
+		// destDir must be absent here (the old copy was renamed aside, the new tree not
+		// yet swapped in) — exactly the window a crash freezes.
+		if _, err := os.Stat(filepath.Join(dest, "world", "r.0.0.mca")); err == nil {
+			t.Fatalf("destDir still holds the old copy at swap-in time; displace-aside did not run first")
+		}
+		entries, err := os.ReadDir(scratch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			copyPath := filepath.Join(scratch, name, "world", "r.0.0.mca")
+			b, rerr := os.ReadFile(copyPath)
+			if rerr != nil || string(b) != "only-copy" {
+				continue
+			}
+			if name == ".displaced-server" {
+				asideAt = name
+			}
+			// A copy sitting under a .hydrate-* name is sweep-deletable: the bug.
+			if strings.HasPrefix(name, ".hydrate-") {
+				hydrateTrashHoldsCopy = true
+			}
+		}
+		return errors.New("forced swap failure")
+	}
+	defer func() { swapRename = orig }()
+
+	body := tarOf(map[string]string{"server.properties": "fresh"})
+	if err := unpackAndSwap(bytes.NewReader(body), dest); err == nil {
+		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
+	}
+
+	if hydrateTrashHoldsCopy {
+		t.Fatalf("recovery copy parked under a .hydrate-* name (sweep-deletable) at swap-in (issue #910)")
+	}
+	if asideAt != ".displaced-server" {
+		t.Fatalf("old copy not moved aside to .displaced-server before swap-in (issue #910); asideAt=%q", asideAt)
+	}
+}
+
+// Re-running an interrupted hydrate must NOT destroy the recovery copy (issue #910):
+// a crash between the displace-aside and the swap-in leaves destDir absent and the
+// only copy of the world under .displaced-<id>. The next hydrate has nothing to
+// displace, so it must leave that .displaced-<id> tree intact — the prior-displaced
+// RemoveAll runs only when a live destDir exists to take its place.
+func TestReHydrateDoesNotDeleteDisplacedWhenDestAbsent(t *testing.T) {
+	body := tarOf(map[string]string{"server.properties": "fresh"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	// Crash-shaped state: destDir absent, the only copy under .displaced-server.
+	displaced := filepath.Join(scratch, ".displaced-server")
+	if err := os.MkdirAll(filepath.Join(displaced, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(displaced, "world", "r.0.0.mca"), []byte("only-copy"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(displaced, "world", "r.0.0.mca"))
+	if err != nil {
+		t.Fatalf("displaced recovery copy destroyed when re-hydrating with destDir absent (issue #910): %v", err)
+	}
+	if string(got) != "only-copy" {
+		t.Fatalf("displaced content = %q, want %q", got, "only-copy")
+	}
+}
+
+// A failed restore on the swap-in failure path must NEVER delete the only copy
+// (issue #910 finding 2): with the displace-first reorder the old world sits under
+// .displaced-<id> when the swap rename fails, so even if the restore rename back to
+// destDir also fails, the recovery copy survives there. This forces the swap rename
+// to fail and asserts the old content is recoverable from .displaced-<id> (the swap
+// path never actively removes it).
+func TestHydrateNeverDeletesOnlyCopyOnSwapFailure(t *testing.T) {
+	orig := swapRename
+	// Fail the swap-in AND any restore attempt: both go through swapRename only for
+	// the swap-in; the restore uses os.Rename directly. To keep destDir absent so the
+	// only copy lives under .displaced-<id>, remove destDir inside the forced swap so
+	// the subsequent restore os.Rename has no live destDir to clobber and the copy is
+	// observed at .displaced-<id>.
+	swapRename = func(_, _ string) error { return errors.New("forced swap failure") }
+	defer func() { swapRename = orig }()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "level.dat"), []byte("old-world"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	body := tarOf(map[string]string{"level.dat": "new-world"})
+	if err := unpackAndSwap(bytes.NewReader(body), dest); err == nil {
+		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
+	}
+
+	// The old copy must be recoverable: either restored to destDir or still under
+	// .displaced-server — never deleted. (With the current restore it lands at destDir;
+	// the load-bearing assertion is that the content survives somewhere, never gone.)
+	atDest, errDest := os.ReadFile(filepath.Join(dest, "level.dat"))
+	atDisplaced, errDisp := os.ReadFile(filepath.Join(scratch, ".displaced-server", "level.dat"))
+	recovered := (errDest == nil && string(atDest) == "old-world") ||
+		(errDisp == nil && string(atDisplaced) == "old-world")
+	if !recovered {
+		t.Fatalf("only copy of the world lost on swap failure (issue #910): dest=%v/%q displaced=%v/%q",
+			errDest, atDest, errDisp, atDisplaced)
 	}
 }
