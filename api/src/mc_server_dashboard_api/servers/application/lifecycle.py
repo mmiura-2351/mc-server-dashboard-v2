@@ -26,12 +26,15 @@ silently corrected here — there is no in-line retry — but it is observable: 
 divergence shows up as ``desired_state`` not matching the Worker-reported
 ``observed_state``. Closing the window (re-dispatching durable-but-unsent intent)
 is a reconciler's job, tracked separately; the in-line compensation above covers
-only pre-dispatch failures — failures where the start command demonstrably never
-reached the Worker (placement, jar provisioning, a failed hydrate, or a
-pre-dispatch ``WorkerUnavailableError``). A timeout/lost-response AFTER the start
-was sent, and an ``INVALID_STATE`` outcome (the Worker refusing because an
-instance is already live there), both do NOT compensate — see the
-assignment-stickiness note below.
+every failure where NO instance can be live on the assigned Worker — not only
+pre-dispatch ones. That includes the pre-dispatch failures where the start command
+demonstrably never reached the Worker (placement, jar provisioning, a failed
+hydrate, or a pre-dispatch ``WorkerUnavailableError``) AND a post-dispatch explicit
+refusal that definitively did not start (``PORT_CONFLICT``, ``IMAGE_MISSING``,
+``DRIVER_UNAVAILABLE``, ``INTERNAL``). Only a timeout/lost-response AFTER the start
+was sent (the command MAY have been applied), and an ``INVALID_STATE`` outcome (the
+Worker refusing because an instance is already live there), do NOT compensate — see
+the assignment-stickiness note below.
 
 Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
 ``StartServer`` first drives the Worker to pull the authoritative working set from

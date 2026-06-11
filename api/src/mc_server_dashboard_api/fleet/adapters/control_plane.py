@@ -309,7 +309,12 @@ class GrpcControlPlane(ControlPlane):
         self._timeout = timeout_seconds
 
     async def dispatch(
-        self, *, worker_id: WorkerId, server_id: str, command: Command
+        self,
+        *,
+        worker_id: WorkerId,
+        server_id: str,
+        command: Command,
+        timeout_override: float | None = None,
     ) -> CommandResult:
         queue = self._state.outbound_for(worker_id)
         if queue is None:
@@ -320,8 +325,11 @@ class GrpcControlPlane(ControlPlane):
         await queue.put(
             pb.ApiMessage(correlation_id=command_id, api_command=api_command)
         )
+        # A longer per-command budget (the start's hydrate phase, issue #822)
+        # overrides the default command deadline for this one dispatch.
+        timeout = self._timeout if timeout_override is None else timeout_override
         try:
-            result = await asyncio.wait_for(future, timeout=self._timeout)
+            result = await asyncio.wait_for(future, timeout=timeout)
         except TimeoutError as exc:
             self._state.discard_pending(command_id)
             raise CommandTimedOutError(command_id) from exc

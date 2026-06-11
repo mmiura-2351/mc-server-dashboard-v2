@@ -260,7 +260,12 @@ class ControlPlane(abc.ABC):
 
     @abc.abstractmethod
     async def dispatch(
-        self, *, worker_id: WorkerId, server_id: str, command: Command
+        self,
+        *,
+        worker_id: WorkerId,
+        server_id: str,
+        command: Command,
+        timeout_override: float | None = None,
     ) -> CommandResult:
         """Send ``command`` for ``server_id`` to ``worker_id`` and await the result.
 
@@ -268,4 +273,9 @@ class ControlPlane(abc.ABC):
         session, and :class:`CommandTimedOutError` if no correlated result
         arrives before the deadline. Otherwise returns the :class:`CommandResult`
         (success or a typed failure).
+
+        ``timeout_override`` replaces the adapter's default command deadline for
+        this one dispatch (issue #822): the hydrate phase of a start gets a longer
+        budget than the general command timeout because pulling a large working set
+        routinely outlasts it. ``None`` keeps the default.
         """

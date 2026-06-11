@@ -67,12 +67,19 @@ _TIMEOUT = dt.timedelta(seconds=30)
 class _CapturingFleetControlPlane(FleetControlPlane):
     def __init__(self, *, result: CommandResult | None = None) -> None:
         self.last: Command | None = None
+        self.last_timeout_override: float | None = None
         self._result = result or CommandResult(code=CommandResultCode.OK)
 
     async def dispatch(
-        self, *, worker_id: FleetWorkerId, server_id: str, command: Command
+        self,
+        *,
+        worker_id: FleetWorkerId,
+        server_id: str,
+        command: Command,
+        timeout_override: float | None = None,
     ) -> CommandResult:
         self.last = command
+        self.last_timeout_override = timeout_override
         return self._result
 
 
@@ -104,6 +111,46 @@ async def test_hydrate_builds_working_set_url_and_token() -> None:
         f"/servers/{server}/working-set"
     )
     assert fleet.last.transfer_token == "shhh"
+
+
+async def test_hydrate_carries_the_hydrate_timeout_override() -> None:
+    # The start's hydrate phase dispatches with the longer hydrate budget so a
+    # large-world pull does not time out under the general command deadline (#822).
+    fleet = _CapturingFleetControlPlane()
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]  # unused by hydrate
+        control_plane=fleet,
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+        hydrate_timeout_seconds=600,
+    )
+
+    await adapter.hydrate(
+        worker_id=WorkerId(uuid.uuid4()),
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+    )
+
+    assert fleet.last_timeout_override == 600
+
+
+async def test_non_hydrate_commands_use_the_default_timeout() -> None:
+    # Only the hydrate dispatch overrides the deadline; every other command stays
+    # on the default command timeout (override is None).
+    fleet = _CapturingFleetControlPlane()
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]
+        control_plane=fleet,
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+        hydrate_timeout_seconds=600,
+    )
+
+    await adapter.stop(
+        worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4())
+    )
+
+    assert fleet.last_timeout_override is None
 
 
 async def test_snapshot_builds_snapshot_url() -> None:

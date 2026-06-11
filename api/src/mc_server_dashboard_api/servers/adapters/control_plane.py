@@ -160,6 +160,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         control_plane: FleetControlPlane,
         data_plane_base_url: str | None = None,
         worker_credential: str | None = None,
+        hydrate_timeout_seconds: float | None = None,
     ) -> None:
         self._registry = registry
         self._control_plane = control_plane
@@ -168,6 +169,10 @@ class FleetControlPlaneAdapter(ControlPlane):
         # hydrate/snapshot; lifecycle-only callers may leave them unset.
         self._data_plane_base_url = data_plane_base_url
         self._worker_credential = worker_credential
+        # The hydrate phase of a start gets its own (longer) command budget so a
+        # large-world working-set pull does not time out the start under the
+        # general command deadline (issue #822). ``None`` keeps the default.
+        self._hydrate_timeout_seconds = hydrate_timeout_seconds
 
     async def place(
         self,
@@ -311,6 +316,7 @@ class FleetControlPlaneAdapter(ControlPlane):
             worker_id,
             server_id,
             HydrateCommand(transfer_url=url, transfer_token=self._token()),
+            timeout_override=self._hydrate_timeout_seconds,
         )
 
     async def snapshot(
@@ -388,12 +394,15 @@ class FleetControlPlaneAdapter(ControlPlane):
         | ReadFileCommand
         | EditFileCommand
         | ListFilesCommand,
+        *,
+        timeout_override: float | None = None,
     ) -> CommandOutcome:
         try:
             result = await self._control_plane.dispatch(
                 worker_id=_fleet_worker(worker_id),
                 server_id=str(server_id.value),
                 command=command,
+                timeout_override=timeout_override,
             )
         except (WorkerNotConnectedError, CommandTimedOutError) as exc:
             raise WorkerUnavailableError(str(worker_id.value)) from exc

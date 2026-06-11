@@ -157,7 +157,8 @@ marks keys with no default.
 | `control.tls.insecure` | `false` | | When `true`, bind the control-plane gRPC listener in plaintext (no TLS). Local/dev only; the API logs a `WARN` at startup. Required to opt out of TLS when no cert/key pair is set. |
 | `control.tls.client_ca_file` | — | | **Deferred (M1).** Reserved for client-certificate (mTLS) verification of the Worker. Unused today — the shared `control.worker_credential` authenticates the Worker (NFR-SEC-1), so M1 ships server-side TLS only. Documented to keep the config shape forward-compatible. |
 | `control.heartbeat_timeout_seconds` | `30` | | Liveness window: a Worker missing heartbeats past this is marked disconnected (REQUIREMENTS.md FR-WRK-2). Must be positive. |
-| `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). Must be positive. |
+| `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). Must be positive. See the reconciler grace floor below.³ |
+| `control.hydrate_timeout_seconds` | `600` | | Separate, longer deadline for the **hydrate** phase of a start (issue #822): pulling a large world's working set routinely outlasts `command_timeout_seconds`, so the hydrate trigger gets its own budget instead of forcing the global command timeout up (which governs every other command and widens the duplicate-start window). Only the start's hydrate dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. See the reconciler grace floor below.³ |
 
 ² `control.tls.cert_file` and `control.tls.key_file` are required **together,
 unless** `control.tls.insecure=true`. With neither the cert/key pair nor
@@ -168,6 +169,18 @@ terminate TLS at a reverse proxy and run the listener `insecure=true` behind it
 — see CONTROL_PLANE.md Section 2). This mirrors the Worker's `api.tls.*`
 required-unless-insecure rule (Section 6.1): the Worker verifies this
 certificate against its `api.tls.ca_file`.
+
+³ **Reconciler grace floor (duplicate-start safety, issue #774/#812/#822).** Keep
+`reconciler.grace_seconds > control.hydrate_timeout_seconds + control.command_timeout_seconds`.
+The reconciler must wait out the longest a started server's FIRST dispatch
+round-trip can still be in flight before it re-dispatches; a start's dispatch is
+hydrate-then-start, so that round-trip is bounded by the hydrate budget plus the
+start command deadline. Below the floor, a slow start crashed/timed-out mid-flight
+can still be converging on its assigned Worker when the reconciler's orphan path
+re-places it elsewhere and starts a **second** live instance. `create_app` logs a
+`WARN` (not a hard failure) when the floor is violated. The defaults
+(`120 ≤ 600 + 30`) trip the warning, so raise `grace_seconds` (or lower the
+timeouts) when running the reconciler with a large hydrate budget.
 
 > **Upgrade impact (existing dev setups).** This is a behavior change: a dev
 > process with `control.enabled=true` that previously bound plaintext now fails

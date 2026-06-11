@@ -82,3 +82,37 @@ def test_create_app_succeeds_with_control_tls_insecure(
     monkeypatch.setenv("MCD_API_CONTROL__WORKER_CREDENTIAL", "shared-secret")
     monkeypatch.setenv("MCD_API_CONTROL__TLS__INSECURE", "true")
     create_app()  # no raise
+
+
+def _enable_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_CONTROL__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_CONTROL__WORKER_CREDENTIAL", "shared-secret")
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__INSECURE", "true")
+
+
+def test_create_app_warns_when_grace_below_hydrate_plus_command_floor(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Duplicate-start safety (issue #774/#812/#822) requires
+    # grace > hydrate_timeout + command_timeout. At/below the floor, create_app
+    # warns (not fatal): 80 <= 60 + 30.
+    _enable_control(monkeypatch)
+    monkeypatch.setenv("MCD_API_CONTROL__HYDRATE_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("MCD_API_CONTROL__COMMAND_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("MCD_API_RECONCILER__GRACE_SECONDS", "80")
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert any("grace_seconds" in r.message for r in caplog.records)
+
+
+def test_create_app_does_not_warn_when_grace_above_floor(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Above the floor (200 > 60 + 30), no duplicate-start warning fires.
+    _enable_control(monkeypatch)
+    monkeypatch.setenv("MCD_API_CONTROL__HYDRATE_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("MCD_API_CONTROL__COMMAND_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("MCD_API_RECONCILER__GRACE_SECONDS", "200")
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert not any("grace_seconds" in r.message for r in caplog.records)
