@@ -85,6 +85,9 @@ from mc_server_dashboard_api.servers.adapters.control_plane import (
 from mc_server_dashboard_api.servers.adapters.jar_provisioner import (
     CatalogJarProvisioner,
 )
+from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
+    ServersLateSnapshotResultSink,
+)
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
     run_reconciler_loop,
@@ -433,6 +436,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # this sink (its own session per call; the servicer has no request UoW).
         state_sink = ServersServerStateSink(
             create_session_factory(engine), clock=ServersSystemClock()
+        )
+        # A final-snapshot result that arrives after its dispatch timed out (a late
+        # TRANSFER_FAILED once the worker's transfer bound aborts the upload, or a
+        # late SUCCESS) releases the held assignment immediately instead of waiting
+        # out the reconciler grace (issue #891). The sink runs the same guarded
+        # clear the final-snapshot path uses; its control-plane dependency is only
+        # the StopServer constructor's (the clear dispatches no command). Injected
+        # after construction because the state, the GrpcControlPlane adapter, and
+        # this sink form a construction chain.
+        control_plane_state.set_late_snapshot_sink(
+            ServersLateSnapshotResultSink(
+                create_session_factory(engine),
+                control_plane=FleetControlPlaneAdapter(
+                    registry=registry,
+                    control_plane=app.state.control_plane,
+                ),
+                clock=ServersSystemClock(),
+            )
         )
         # Process-wide in-process real-time event bus (FR-MON-1..4): the gRPC
         # servicer publishes status/log/metrics events onto it; the WebSocket
