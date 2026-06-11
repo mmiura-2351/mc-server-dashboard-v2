@@ -22,13 +22,22 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 _LOG = logging.getLogger(__name__)
 
-# Sanitized start-failure categories the Worker classifies (issue #225). Their
-# status maps directly to the 409 body reason so an operator sees e.g.
+# Sanitized start-failure categories the Worker classifies (issue #225/#824).
+# Their status maps directly to the 409 body reason so an operator sees e.g.
 # ``port_conflict`` instead of the generic ``command_failed`` -- without the raw
 # daemon text (still log-only) leaking into the response.
+#
+# ``worker_busy`` (issue #867): the Worker has an in-flight reservation for this
+# server (a mutating lifecycle command is already running on the Worker side), so
+# the start was refused without being applied -- the row keeps desired=running +
+# the assignment and self-heals once the in-flight command settles. Clients can
+# distinguish this from ``server_busy`` (#876), which is an API-side lifecycle
+# lock contention (a gated op holds the lock past the acquire budget), and retry
+# in a moment rather than treating it as a settled failure.
 _SANITIZED_REASONS: dict[CommandStatus, str] = {
     CommandStatus.PORT_CONFLICT: "port_conflict",
     CommandStatus.IMAGE_MISSING: "image_missing",
+    CommandStatus.BUSY: "worker_busy",
 }
 
 

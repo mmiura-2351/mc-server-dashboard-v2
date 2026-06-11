@@ -403,8 +403,8 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		//     no overwrite. And this is a PERIODIC snapshot of a still-running server, not
 		//     the post-stop FINAL one (a stopped-id snapshot, which DOES reserve below),
 		//     so a refused capture simply retries on the next tick — nothing is lost.
-		// A reservation would only convert that refused-and-retried outcome into an
-		// INVALID_STATE-rejected one — same net effect, more coordination state — so it
+		// A reservation would only convert that refused-and-retried outcome into a
+		// BUSY-rejected one — same net effect, more coordination state — so it
 		// is intentionally not taken.
 		restore := m.quiesceRunning(ctx, cmd.ServerID)
 		defer restore()
@@ -416,7 +416,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// while it is mid-fsck/tar — a mixed capture whose .mca files are each valid
 		// would slip past the #749 integrity gate (the snapshot×hydrate cross-race the
 		// #780 review confirmed). A reservation already held by such a racing command
-		// rejects with INVALID_STATE. Running-id snapshots stay reservation-free: a
+		// rejects with BUSY. Running-id snapshots stay reservation-free: a
 		// running instance already blocks reserve(), and the save-off bracket above is
 		// their quiesce. Released on every return below.
 		if ok, code, msg := m.reserve(cmd.ServerID); !ok {
@@ -718,7 +718,7 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 // takeOutcome is the result of takeStoppableReserve: an instance to stop was
 // taken and reserved, no live instance exists (genuinely unknown -> SERVER_NOT_FOUND),
 // or a lifecycle command is already reserved in flight for the id (a detached stop
-// still confirming, or a start/hydrate mid-operation -> INVALID_STATE, issue #780).
+// still confirming, or a start/hydrate mid-operation -> BUSY, issue #780/#824).
 type takeOutcome int
 
 const (
@@ -756,7 +756,7 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 	// instance a second time; both stops then run their deferred release, and stop1's
 	// release steals the reservation out from under the still-running stop2 — worst
 	// case leaving stop2 to drive removeScratch unreserved. Honoring the reservation
-	// first rejects stop2 with takeInFlight (-> INVALID_STATE) instead, exactly as it
+	// first rejects stop2 with takeInFlight (-> BUSY) instead, exactly as it
 	// already does for a detached running-instance stop (issue #780).
 	if m.reserved[serverID] {
 		return nil, takeInFlight
@@ -835,7 +835,7 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	if !ok {
 		// No tracked running instance: takeRunningReserve distinguishes a genuinely
 		// unknown id (SERVER_NOT_FOUND) from a reserved in-flight command — a detached
-		// stop or a start/hydrate mid-operation (INVALID_STATE, issue #780).
+		// stop or a start/hydrate mid-operation (BUSY, issue #780/#824).
 		_, _, outcome := m.takeRunningReserve(cmd.ServerID)
 		if outcome == takeInFlight {
 			return fail(cmd.CommandID, session.CommandErrorBusy,

@@ -204,28 +204,51 @@ hooks-install:
 	git config core.hooksPath .githooks
 	@echo "git hooks installed (core.hooksPath -> .githooks)"
 
-# Preflight for `make check`: warn (do not fail) when core.hooksPath is not
-# pointing at the checked-in .githooks, which silently disables the pre-commit /
-# pre-push / post-checkout gates for every checkout sharing this .git/config.
-# The parallel-worktree tooling has been seen resetting it (#551). This only
-# reads the config -- it never mutates it -- and warns rather than failing so it
-# stays out of the way on CI runners (which never install the hooks); it also
-# short-circuits when CI=true. Run `make hooks-install` to restore.
+# Preflight for `make check`: assert core.hooksPath and git identity on the
+# PRIMARY checkout; skip silently on CI runners and on agent worktrees (which
+# live under .claude/worktrees/ and are expected to leave main). The parallel-
+# worktree tooling has been seen resetting hooksPath to the absolute .git/hooks
+# path (#551/#867), silently disabling the pre-commit / pre-push / post-checkout
+# gates. This FAILs (not warns) on the primary checkout so the breakage is
+# visible before it causes further damage. Run `make hooks-install` to restore.
+#
+# Also asserts user.name/user.email are not the test identity (Test /
+# test@example.com) — a GIT_DIR-leak incident once wrote those into the shared
+# .git/config and caused commits to carry the wrong author (#867).
 hooks-check:
-	@if [ "$$CI" != "true" ] && [ "$$(git config core.hooksPath)" != ".githooks" ]; then \
+	@if [ "$$CI" = "true" ]; then exit 0; fi; \
+	_toplevel="$$(git rev-parse --show-toplevel 2>/dev/null)"; \
+	case "$$_toplevel" in */.claude/worktrees/*) exit 0 ;; esac; \
+	_fail=0; \
+	if [ "$$(git config core.hooksPath)" != ".githooks" ]; then \
 		echo "============================================================"; \
-		echo "WARNING: git core.hooksPath is not '.githooks'"; \
+		echo "FAIL: git core.hooksPath is not '.githooks'"; \
 		echo "  current: $$(git config core.hooksPath || echo '<unset>')"; \
 		echo "  The pre-commit / pre-push / post-checkout hooks are DISABLED"; \
-		echo "  for every checkout sharing this .git/config (see #551)."; \
+		echo "  for every checkout sharing this .git/config (see #551/#867)."; \
 		echo "  Restore them with: make hooks-install"; \
 		echo "============================================================"; \
-	fi
+		_fail=1; \
+	fi; \
+	_name="$$(git config user.name 2>/dev/null || true)"; \
+	_email="$$(git config user.email 2>/dev/null || true)"; \
+	if [ "$$_name" = "Test" ] || [ "$$_email" = "test@example.com" ]; then \
+		echo "============================================================"; \
+		echo "FAIL: git identity is the test identity (Test/test@example.com)."; \
+		echo "  user.name=$$_name  user.email=$$_email"; \
+		echo "  A GIT_DIR-leak incident wrote this into .git/config (#867)."; \
+		echo "  Fix: git config user.name 'Your Name'"; \
+		echo "       git config user.email 'your@email.com'"; \
+		echo "============================================================"; \
+		_fail=1; \
+	fi; \
+	exit $$_fail
 
 # Unit-test the checked-in git hooks. Pure bash + a temp git repo; no external
 # test runner required. Included in `make test`.
 hooks-test:
 	bash .githooks/test-post-checkout.sh
+	bash .githooks/test-hooks-check.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.

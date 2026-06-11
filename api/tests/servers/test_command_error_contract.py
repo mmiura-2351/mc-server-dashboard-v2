@@ -76,9 +76,11 @@ API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     *((kind, CommandStatus.SERVER_NOT_FOUND) for kind in _FILE_READ_KINDS),
     *((kind, CommandStatus.FILE_ACCESS_DENIED) for kind in _FILE_KINDS),
     # command_dispatch.py: a sanitized start failure maps its status onto the 409
-    # body reason (port_conflict / image_missing) instead of command_failed (#225).
+    # body reason (port_conflict / image_missing / worker_busy) instead of
+    # command_failed (#225/#867).
     ("StartServer", CommandStatus.PORT_CONFLICT),
     ("StartServer", CommandStatus.IMAGE_MISSING),
+    ("StartServer", CommandStatus.BUSY),
 )
 
 
@@ -119,13 +121,14 @@ def test_no_undeclared_match_sites() -> None:
     # both special-case a BUSY start as retry-no-converge (#824), stop convergence,
     # graceful-stop "not SERVER_NOT_FOUND", redispatch_stop's snapshot-skip
     # "not SERVER_NOT_FOUND" (#846), SendServerCommand); files.py has 2
-    # (_map_file_status); command_dispatch.py has 2 (the sanitized start-failure
-    # reason map, issue #225). Bump this with intent when a genuinely new
-    # convergence/special-case match is added -- and add it to API_MATCH_SITES so it
-    # is checked against the contract table.
-    assert found == 12, (
+    # (_map_file_status); command_dispatch.py has 3 (the sanitized start-failure
+    # reason map: port_conflict, image_missing, worker_busy; issues #225/#867).
+    # Bump this with intent when a genuinely new convergence/special-case match is
+    # added -- and add it to API_MATCH_SITES so it is checked against the contract
+    # table.
+    assert found == 13, (
         f"found {found} CommandStatus references in lifecycle.py/files.py/"
-        "command_dispatch.py, expected 12. A convergence/special-case match was "
+        "command_dispatch.py, expected 13. A convergence/special-case match was "
         "added or removed: update API_MATCH_SITES (so it is checked against the "
         "contract table) and this count."
     )
