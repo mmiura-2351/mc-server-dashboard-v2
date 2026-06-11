@@ -86,6 +86,17 @@ class SqlAlchemyBackupRepository(BackupRepository):
         )
         await self._session.execute(stmt)
 
+    async def update_size(self, backup_id: BackupId, size_bytes: int) -> None:
+        # Backfill the size column on a legacy NULL-size row (issue #661). A
+        # staged UPDATE within the enclosing unit of work; commit is the unit of
+        # work's job. A missing id matches no row — a harmless no-op.
+        stmt = (
+            update(BackupModel)
+            .where(BackupModel.id == backup_id.value)
+            .values(size_bytes=size_bytes)
+        )
+        await self._session.execute(stmt)
+
     async def global_statistics(self) -> BackupStatistics:
         # One aggregate query over the whole table: count, summed known sizes, the
         # NULL-size count (legacy rows, excluded from the sum), and the time bounds.

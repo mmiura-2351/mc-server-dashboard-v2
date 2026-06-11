@@ -229,6 +229,31 @@ async def test_update_health_sets_quarantined(engine: AsyncEngine) -> None:
     assert fetched.storage_ref == "q"
 
 
+async def test_update_size_backfills_null_row(engine: AsyncEngine) -> None:
+    """``update_size`` rewrites just the size column on a legacy NULL row (#661)."""
+
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    legacy = dc_replace(
+        _backup(server_id, ref="legacy", created_at=_NOW), size_bytes=None
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.add(legacy)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.update_size(legacy.id, 4096)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        fetched = await uow.backups.get_by_id(legacy.id)
+    assert fetched is not None
+    assert fetched.size_bytes == 4096
+    # Only the size changed; the rest of the row is intact.
+    assert fetched.storage_ref == "legacy"
+
+
 async def test_deleting_server_cascades_to_backups(engine: AsyncEngine) -> None:
     server_id = await _seed_server(engine)
     factory = create_session_factory(engine)

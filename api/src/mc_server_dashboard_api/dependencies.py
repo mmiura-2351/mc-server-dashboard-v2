@@ -1713,11 +1713,16 @@ def get_create_backup(
     )
 
 
-def get_list_backups(request: Request) -> ListBackups:
+def get_list_backups(
+    request: Request,
+    backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+) -> ListBackups:
     """Assemble the :class:`ListBackups` use case (backup:read)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return ListBackups(uow=ServersUnitOfWork(session_factory))
+    return ListBackups(
+        uow=ServersUnitOfWork(session_factory), backup_store=backup_store
+    )
 
 
 def get_restore_backup(
@@ -1775,11 +1780,16 @@ def get_upload_backup(
     )
 
 
-def get_server_backup_statistics(request: Request) -> ServerBackupStatistics:
+def get_server_backup_statistics(
+    request: Request,
+    backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+) -> ServerBackupStatistics:
     """Assemble the per-server :class:`ServerBackupStatistics` (backup:read)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return ServerBackupStatistics(uow=ServersUnitOfWork(session_factory))
+    return ServerBackupStatistics(
+        uow=ServersUnitOfWork(session_factory), backup_store=backup_store
+    )
 
 
 def get_global_backup_statistics(request: Request) -> GlobalBackupStatistics:
