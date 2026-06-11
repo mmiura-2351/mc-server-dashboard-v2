@@ -347,7 +347,9 @@ class FsStorage(Storage):
         finally:
             await asyncio.to_thread(spool.unlink, missing_ok=True)
 
-    async def commit_snapshot(self, handle: SnapshotHandle) -> int:
+    async def commit_snapshot(
+        self, handle: SnapshotHandle, *, publisher: str | None = None
+    ) -> int:
         fs_handle = _as_fs_handle(handle)
         if fs_handle.consumed:
             raise SnapshotHandleError("snapshot handle already committed or aborted")
@@ -382,6 +384,7 @@ class FsStorage(Storage):
             fs_handle.community_id,
             fs_handle.server_id,
             staging,
+            publisher,
         )
         # Publish moved the staging dir into snapshots/; release its active-staging
         # lease so a later sweep is not blocked by a now-dead handle (issue #183).
@@ -390,7 +393,11 @@ class FsStorage(Storage):
         return generation
 
     def _publish_and_bump(
-        self, community_id: CommunityId, server_id: ServerId, staging: Path
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        staging: Path,
+        publisher: str | None,
     ) -> int:
         """Publish the snapshot, then bump and return the generation (issue #763).
 
@@ -400,11 +407,19 @@ class FsStorage(Storage):
         regardless). It is bumped after ``current`` points at the new snapshot, so
         the persisted generation never claims a set newer than ``current`` resolves
         to.
+
+        The ``publisher`` (the producing Worker's id, issue #847 bug 3) is recorded
+        AFTER the generation bump, so the publisher marker can never claim a newer
+        publisher than the generation/``current`` it names. A ``None`` publisher
+        clears the marker — the last publish declared no id, so the guard cannot
+        prove a foreign publisher.
         """
 
         server_root = self._server_root(community_id, server_id)
         self._publish(community_id, server_id, staging)
-        return self._bump_generation(server_root)
+        generation = self._bump_generation(server_root)
+        self._write_publisher(server_root, publisher)
+        return generation
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
         fs_handle = _as_fs_handle(handle)
@@ -494,6 +509,42 @@ class FsStorage(Storage):
             tmp.unlink(missing_ok=True)
             raise
         return new_generation
+
+    def _publisher_path(self, server_root: Path) -> Path:
+        return server_root / "publisher"
+
+    def _read_publisher(self, server_root: Path) -> str | None:
+        # The Worker id recorded for the latest publish (issue #847 bug 3). Absent
+        # (never published, an older Worker, or a None publisher) -> no claim, so the
+        # guard cannot prove a foreign publisher and stays permissive.
+        try:
+            value = self._publisher_path(server_root).read_text().strip()
+        except FileNotFoundError:
+            return None
+        return value or None
+
+    def _write_publisher(self, server_root: Path, publisher: str | None) -> None:
+        # A None publisher clears the marker (the last publish declared no id), so a
+        # stale read can never wrongly attribute current to a foreign Worker.
+        path = self._publisher_path(server_root)
+        if publisher is None:
+            path.unlink(missing_ok=True)
+            _fsync_dir(server_root)
+            return
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(server_root), prefix=".publisher.", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w") as out:
+                out.write(publisher)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp, path)
+            _fsync_dir(server_root)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     # --- JAR store / reuse (Section 3.2) -----------------------------------
 
@@ -729,6 +780,13 @@ class FsStorage(Storage):
         server_root = self._server_root(community_id, server_id)
         return await asyncio.to_thread(self._read_generation, server_root)
 
+    async def current_publisher(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> str | None:
+        # Read the Worker id recorded for the latest publish (issue #847 bug 3).
+        server_root = self._server_root(community_id, server_id)
+        return await asyncio.to_thread(self._read_publisher, server_root)
+
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId
     ) -> WorkingSetReport:
@@ -769,6 +827,7 @@ class FsStorage(Storage):
                 _rmtree(server_root / sub)
             _rmtree(server_root / "current")
             _rmtree(self._generation_path(server_root))
+            _rmtree(self._publisher_path(server_root))
             return
         # Pack to a temp sibling first, then atomically rename into place: the tree
         # is removed ONLY after a complete final.tar.gz exists, so a pack failure
@@ -806,10 +865,11 @@ class FsStorage(Storage):
         # never re-packs a half-removed snapshot tree over the good final.tar.gz (#777).
         _rmtree(server_root / "current")
         # The final archive is durable and ``current`` is gone; reclaim the unpacked
-        # working-set tree and the generation marker.
+        # working-set tree and the generation + publisher markers.
         for sub in ("snapshots", "incoming", "versions"):
             _rmtree(server_root / sub)
         _rmtree(self._generation_path(server_root))
+        _rmtree(self._publisher_path(server_root))
 
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey

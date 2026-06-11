@@ -94,6 +94,33 @@ async def test_commit_bumps_generation_and_round_trips(
     assert await harness.storage.current_generation(community, server) == 2
 
 
+async def test_commit_records_publisher_and_reads_it_back(
+    harness: StorageHarness,
+) -> None:
+    # commit_snapshot records the publishing Worker id alongside the generation and
+    # current_publisher reads it back (issue #847 bug 3). A never-published server has
+    # no publisher; a publish with no declared id leaves it None (a permissive guard).
+    community, server = new_scope()
+    assert await harness.storage.current_publisher(community, server) is None
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"v1"}))
+    await harness.storage.commit_snapshot(handle, publisher="worker-a")
+    assert await harness.storage.current_publisher(community, server) == "worker-a"
+
+    # A later publish overwrites the recorded publisher with the new producer.
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"v2"}))
+    await harness.storage.commit_snapshot(handle, publisher="worker-b")
+    assert await harness.storage.current_publisher(community, server) == "worker-b"
+
+    # A publish declaring no id clears the marker back to None.
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"v3"}))
+    await harness.storage.commit_snapshot(handle)
+    assert await harness.storage.current_publisher(community, server) is None
+
+
 async def test_generation_is_per_server(harness: StorageHarness) -> None:
     # The generation counter is scoped per server, not global (issue #763).
     community, server_a = new_scope()

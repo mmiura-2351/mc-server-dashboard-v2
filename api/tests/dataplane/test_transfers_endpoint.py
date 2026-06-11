@@ -86,7 +86,12 @@ def _scope() -> tuple[uuid.UUID, uuid.UUID]:
 
 
 async def _publish(
-    storage: FsStorage, c: uuid.UUID, s: uuid.UUID, files: dict[str, bytes]
+    storage: FsStorage,
+    c: uuid.UUID,
+    s: uuid.UUID,
+    files: dict[str, bytes],
+    *,
+    publisher: str | None = None,
 ) -> None:
     handle = await storage.begin_snapshot(CommunityId(c), ServerId(s))
 
@@ -94,7 +99,7 @@ async def _publish(
         yield _tar_bytes(files)
 
     await storage.write_snapshot(handle, _stream())  # type: ignore[arg-type]
-    await storage.commit_snapshot(handle)
+    await storage.commit_snapshot(handle, publisher=publisher)
 
 
 def test_hydrate_rejects_missing_credential(tmp_path: Path) -> None:
@@ -265,18 +270,25 @@ def test_snapshot_matching_base_generation_publishes(tmp_path: Path) -> None:
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"gen2"}
 
 
-def test_snapshot_stale_base_generation_is_refused_and_not_published(
+def test_snapshot_stale_base_from_different_publisher_is_refused(
     tmp_path: Path,
 ) -> None:
-    # Issue #847 publish-time generation guard: a Worker whose declared base
-    # generation no longer matches the store's current generation hydrated from a
-    # now-superseded state. The publish is refused (409 stale_generation) BEFORE
-    # staging, so the prior authoritative copy is untouched.
+    # Issue #847 publish-time generation guard (bug 3): an A->B->A stale-scratch
+    # publish. Worker B published the current generation; Worker A then returns with
+    # a leftover scratch hydrated from the OLDER generation and tries to publish. The
+    # store's current was published by a DIFFERENT worker (B), so A's stale publish is
+    # refused (409 stale_generation) BEFORE staging — the prior authoritative copy is
+    # untouched.
     import asyncio
+
+    worker_a = str(uuid.uuid4())
+    worker_b = str(uuid.uuid4())
 
     client, storage = _setup(tmp_path)
     community, server = _scope()
-    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+    # A published gen1, then B published gen2 (the current authoritative copy).
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker_a))
+    asyncio.run(_publish(storage, community, server, {"k": b"g2"}, publisher=worker_b))
     current = asyncio.run(
         storage.current_generation(CommunityId(community), ServerId(server))
     )
@@ -286,13 +298,17 @@ def test_snapshot_stale_base_generation_is_refused_and_not_published(
         resp = client.post(
             _url(community, server, "snapshot"),
             content=body,
-            # Declare an OLDER base than the store currently holds.
-            headers={**_auth(), "X-Working-Set-Base-Generation": str(current - 1)},
+            # A declares the OLDER base it still holds and its own id.
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current - 1),
+                "X-Worker-Id": worker_a,
+            },
         )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "stale_generation"
 
-    # The prior authoritative copy survives the refused publish.
+    # B's authoritative copy survives the refused publish.
     async def _read() -> bytes:
         return b"".join(
             [
@@ -303,7 +319,53 @@ def test_snapshot_stale_base_generation_is_refused_and_not_published(
             ]
         )
 
-    assert _read_tar(asyncio.run(_read())) == {"keep.txt": b"prior"}
+    assert _read_tar(asyncio.run(_read())) == {"k": b"g2"}
+
+
+def test_snapshot_stale_base_from_same_publisher_self_heals(tmp_path: Path) -> None:
+    # Issue #847 publish-time generation guard (bug 3): a LOST publish response. The
+    # worker published gen N+1 (store advanced) but the HTTP response was lost, so its
+    # local marker stayed at base N. Its next publish declares base N < current N+1 —
+    # but it is the SAME worker that produced current, so refusing would wedge it
+    # forever. The guard allows a stale publish from the publisher of current, so the
+    # lost-response case self-heals (the publish lands and advances the store again).
+    import asyncio
+
+    worker = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker))
+    asyncio.run(_publish(storage, community, server, {"k": b"g2"}, publisher=worker))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"republished"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            # Same worker re-publishing with its stale base after a lost response.
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current - 1),
+                "X-Worker-Id": worker,
+            },
+        )
+    assert resp.status_code == 204
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"republished"}
 
 
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:

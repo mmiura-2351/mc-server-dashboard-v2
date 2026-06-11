@@ -330,6 +330,17 @@ class SqlAlchemyServerRepository(ServerRepository):
                     ServerModel.desired_state == stopped,
                     ServerModel.observed_state == ObservedState.RUNNING.value,
                 ),
+                # desired=stopped, observed=stopped, still assigned (issue #847,
+                # bug 2): a stop wedged because its deferred unassign never ran (an
+                # API crash or HTTP-task cancellation mid final-snapshot). No other
+                # path converges this triple — StartServer's require_unassigned CAS
+                # 409s before flipping desired, and the sink no longer unassigns —
+                # so the reconciler's stale-stop arm releases the assignment.
+                and_(
+                    ServerModel.desired_state == stopped,
+                    ServerModel.observed_state == ObservedState.STOPPED.value,
+                    ServerModel.assigned_worker_id.is_not(None),
+                ),
             )
         )
         rows = (await self._session.execute(stmt)).scalars().all()

@@ -112,6 +112,11 @@ _POINTER = "current.json"
 # The single counter object holding the working-set generation (issue #763): the
 # value ``commit_snapshot`` bumps and the hydrate data plane stamps onto a transfer.
 _GENERATION = "generation"
+# The single object recording the Worker id that published ``current`` (issue #847
+# bug 3): the publish-time generation guard reads it to allow a same-Worker
+# re-publish (lost-response self-heal) while refusing a different-Worker stale
+# publish (A->B->A).
+_PUBLISHER = "publisher"
 
 
 @dataclass(frozen=True)
@@ -327,6 +332,30 @@ class ObjectStorage(Storage):
         )
         return new_generation
 
+    async def _read_publisher(self, client: S3Client, server_prefix: str) -> str | None:
+        """Return the Worker id recorded for the latest publish (issue #847 bug 3).
+
+        Absent (never published, an older Worker, or a None publisher) -> no claim,
+        so the guard cannot prove a foreign publisher and stays permissive.
+        """
+
+        key = server_prefix + _PUBLISHER
+        if await client.head_object(key) is None:
+            return None
+        value = (await _read_all(client, key)).decode().strip()
+        return value or None
+
+    async def _write_publisher(
+        self, client: S3Client, server_prefix: str, publisher: str | None
+    ) -> None:
+        # A None publisher clears the marker (the last publish declared no id), so a
+        # stale read can never wrongly attribute current to a foreign Worker.
+        key = server_prefix + _PUBLISHER
+        if publisher is None:
+            await client.delete_object(key)
+            return
+        await client.put_object(key, publisher.encode())
+
     async def _live_snapshot_prefix(
         self, client: S3Client, community_id: CommunityId, server_id: ServerId
     ) -> str:
@@ -485,7 +514,9 @@ class ObjectStorage(Storage):
             finally:
                 await asyncio.to_thread(spool.unlink, missing_ok=True)
 
-    async def commit_snapshot(self, handle: SnapshotHandle) -> int:
+    async def commit_snapshot(
+        self, handle: SnapshotHandle, *, publisher: str | None = None
+    ) -> int:
         h = _as_object_handle(handle)
         if h.consumed:
             raise SnapshotHandleError("snapshot handle already committed or aborted")
@@ -518,6 +549,10 @@ class ObjectStorage(Storage):
             # holds no scratch, so the reconciler hydrates regardless).
             server_prefix = self._server_prefix(h.community_id, h.server_id)
             generation = await self._bump_generation(client, server_prefix)
+            # Record the publishing Worker AFTER the generation bump (issue #847 bug
+            # 3), so the publisher marker never names a newer publisher than the
+            # generation/pointer it describes.
+            await self._write_publisher(client, server_prefix, publisher)
         # Publish reclaimed the staging prefix; release its active-staging lease so
         # a later sweep is not blocked by a now-dead handle (issue #160).
         self._release_staging(incoming)
@@ -540,6 +575,14 @@ class ObjectStorage(Storage):
         server_prefix = self._server_prefix(community_id, server_id)
         async with self._client_factory() as client:
             return await self._read_generation(client, server_prefix)
+
+    async def current_publisher(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> str | None:
+        # Read the Worker id recorded for the latest publish (issue #847 bug 3).
+        server_prefix = self._server_prefix(community_id, server_id)
+        async with self._client_factory() as client:
+            return await self._read_publisher(client, server_prefix)
 
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId
@@ -600,6 +643,7 @@ class ObjectStorage(Storage):
             await _delete_prefix(client, server_prefix + "incoming/")
             await _delete_prefix(client, server_prefix + "versions/")
             await client.delete_object(server_prefix + _GENERATION)
+            await client.delete_object(server_prefix + _PUBLISHER)
 
     async def _check_staged_regions(
         self, client: S3Client, staged_prefix: str, staged: list[S3Object]

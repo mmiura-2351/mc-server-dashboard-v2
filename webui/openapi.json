@@ -6009,7 +6009,7 @@
     },
     "/api/data-plane/communities/{community_id}/servers/{server_id}/snapshot": {
       "post": {
-        "description": "Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).\n\nThe \"proven complete\" gate: a missing Content-Length is 411, an oversized one\nis 413, a streamed-byte count that does not match Content-Length is 400, and a\nbody that stages zero files (an empty working set) is 400 ``empty_snapshot`` \u2014\nin every reject path the staged transfer is aborted, so ``current/`` keeps the\nprior authoritative copy (FR-DATA-6, STORAGE.md Section 4.1).\n\nThe cap and the declared length are both enforced *during* streaming, not only\nagainst the header: an under-declaring client (small Content-Length, longer\nbody) or one that over-runs the cap is aborted as soon as the counted bytes\ncross the boundary, so a misdeclared length cannot spool the whole body to disk\nbefore the mismatch is caught.\n\nA publish-time generation guard (issue #847) refuses, BEFORE staging, a publish\nwhose declared base generation (the store generation this Worker hydrated from)\nno longer matches the store's current generation: the set it holds was hydrated\nfrom a now-superseded store state, so committing it would clobber a newer\nauthoritative copy with stale progression. An absent base-generation header (a\nWorker that never hydrated, or an older Worker) skips the guard \u2014 the publish\nproceeds as before. This dovetails with #847's primary fix (the API holds the\nassignment across the final snapshot, so a stale cross-worker publish cannot\narise in the first place); the guard is defense-in-depth on the data plane,\nwhere the only prior protection was the Worker-side per-stream ctx cancel.",
+        "description": "Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).\n\nThe \"proven complete\" gate: a missing Content-Length is 411, an oversized one\nis 413, a streamed-byte count that does not match Content-Length is 400, and a\nbody that stages zero files (an empty working set) is 400 ``empty_snapshot`` \u2014\nin every reject path the staged transfer is aborted, so ``current/`` keeps the\nprior authoritative copy (FR-DATA-6, STORAGE.md Section 4.1).\n\nThe cap and the declared length are both enforced *during* streaming, not only\nagainst the header: an under-declaring client (small Content-Length, longer\nbody) or one that over-runs the cap is aborted as soon as the counted bytes\ncross the boundary, so a misdeclared length cannot spool the whole body to disk\nbefore the mismatch is caught.\n\nA publish-time generation guard (issue #847) refuses, BEFORE staging, a publish\nwhose declared base generation (the store generation this Worker hydrated from)\nis OLDER than the store's current generation AND whose current was published by a\nDIFFERENT Worker: the set it holds was hydrated from a now-superseded state that\nanother Worker has already advanced past, so committing it would clobber that\nnewer authoritative copy with stale progression (the A->B->A stale-scratch case).\n\nPublisher identity is what keeps the guard from wedging a lost publish-response\n(issue #847 bug 3): a Worker that published generation N+1 but lost the HTTP\nresponse keeps its local marker at base N, so its next publish declares base\nN < current N+1 \u2014 but it is the SAME Worker that produced current, so the guard\nALLOWS it and the publish self-heals (advancing the store again) instead of\nrefusing forever. An absent base-generation header (never hydrated / older\nWorker), a base at or ahead of current, or an unknown current-publisher (an older\npublish that recorded no id) all skip the refusal \u2014 the guard stays permissive,\nand #847's primary fix (the API holds the assignment across the final snapshot)\nalready prevents the genuine stale cross-worker publish from arising. The guard is\ndefense-in-depth on the data plane, where the only prior protection was the\nWorker-side per-stream ctx cancel.",
         "operationId": "publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post",
         "parameters": [
           {
@@ -6062,6 +6062,22 @@
                 }
               ],
               "title": "X-Working-Set-Base-Generation"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Worker-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Worker-Id"
             }
           },
           {

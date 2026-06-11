@@ -60,6 +60,14 @@ const generationHeader = "X-Working-Set-Generation"
 // then has no base to compare and the publish proceeds as before.
 const baseGenerationHeader = "X-Working-Set-Base-Generation"
 
+// workerIDHeader is the REQUEST header the Worker stamps on a snapshot publish with
+// its own id (issue #847 bug 3), recorded by the API alongside the generation so the
+// guard can tell a same-Worker re-publish (lost-response self-heal) from a
+// different-Worker stale-scratch publish (A->B->A). Omitted when empty (an
+// unconfigured Worker): the guard then treats the publisher as unknown and stays
+// permissive.
+const workerIDHeader = "X-Worker-Id"
+
 // parseGeneration reads the store generation from a response header, returning 0
 // when it is absent or unparseable (the safe direction: the API treats 0 as older
 // than any published store generation and re-hydrates).
@@ -179,7 +187,7 @@ func SweepSnapshotSpools(scratchRoot string) {
 // request body, and removed on every path (delta/streamed snapshot is deferred,
 // FR-DATA-5). A crash before that deferred remove leaks the spool; SweepSnapshotSpools
 // reclaims such leftovers at startup (issue #787).
-func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGeneration uint64) (uint64, error) {
+func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGeneration uint64, workerID string) (uint64, error) {
 	spool, err := os.CreateTemp(filepath.Dir(srcDir), snapshotSpoolPrefix+"*.tar")
 	if err != nil {
 		return 0, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
@@ -212,6 +220,13 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 	// proceeds as before.
 	if baseGeneration != 0 {
 		req.Header.Set(baseGenerationHeader, strconv.FormatUint(baseGeneration, 10))
+	}
+	// Declare this Worker's own id (issue #847 bug 3) so the guard can tell a
+	// same-Worker re-publish (lost-response self-heal, allowed) from a different-Worker
+	// stale-scratch publish (A->B->A, refused). Omit it when unknown (empty) — the
+	// guard then treats the publisher as unknown and stays permissive.
+	if workerID != "" {
+		req.Header.Set(workerIDHeader, workerID)
 	}
 	// Set an explicit length so the API's proven-complete gate can match it.
 	req.ContentLength = size

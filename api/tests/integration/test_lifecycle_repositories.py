@@ -512,13 +512,17 @@ async def test_sink_drops_status_from_non_owning_worker(engine: AsyncEngine) -> 
     assert loaded.observed_state is ObservedState.STOPPED
 
 
-async def test_sink_unassigns_when_owning_worker_reports_stopped_under_desired_stopped(
+async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_stopped(
     engine: AsyncEngine,
 ) -> None:
-    # Timeout-resilient confirmation point (issue #217): when the stop dispatch
-    # outcome times out, the in-band #209 unassign is lost. The owning worker's
-    # later StatusChange(stopped) under desired=stopped is the authoritative "no
-    # live instance" signal, so the sink clears the assignment in the same write.
+    # Issue #847: the sink must NOT unassign on a stopped report, even under
+    # desired=stopped. The old #217 sink-unassign raced the final-snapshot window —
+    # the still-owning worker's terminal StatusChange(stopped) released the
+    # assignment milliseconds into a snapshot that can last minutes, reopening the
+    # stop->re-place generation race. The stop flow now owns the unassign end-to-end
+    # (it clears the assignment only AFTER the final snapshot settles), and the
+    # reconciler's stale-stop arm recovers a row wedged at (stopped, stopped,
+    # assigned) by a crash/timeout. So the sink only caches the observed state.
     community_id = await _seed_community(engine)
     server_id = await _create_server(engine, community_id, "survival")
     worker = uuid.uuid4()
@@ -528,7 +532,7 @@ async def test_sink_unassigns_when_owning_worker_reports_stopped_under_desired_s
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         # desired_state stays STOPPED (a graceful stop already flipped intent);
-        # the row is still assigned because the outcome timed out.
+        # the row is still assigned while the final snapshot is in flight.
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
@@ -545,7 +549,7 @@ async def test_sink_unassigns_when_owning_worker_reports_stopped_under_desired_s
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.STOPPED
-    assert loaded.assigned_worker_id is None
+    assert loaded.assigned_worker_id == WorkerId(worker)
 
 
 async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_running(
@@ -585,8 +589,8 @@ async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_ru
 async def test_sink_keeps_assignment_for_non_stopped_reports_under_desired_stopped(
     engine: AsyncEngine, state: str
 ) -> None:
-    # Only a stopped report confirms no live instance; running/crashed never
-    # unassign, even under desired=stopped (issue #217).
+    # The sink never unassigns from a status report (issue #847); a fortiori a
+    # running/crashed report under desired=stopped keeps the assignment.
     community_id = await _seed_community(engine)
     server_id = await _create_server(engine, community_id, "survival")
     worker = uuid.uuid4()

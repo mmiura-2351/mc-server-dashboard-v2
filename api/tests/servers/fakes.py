@@ -438,7 +438,14 @@ class FakeServerRepository(ServerRepository):
             stop_undelivered = (
                 stopped and server.observed_state is ObservedState.RUNNING
             )
-            if stale_running or orphan or stop_undelivered:
+            # Issue #847 (bug 2): a stop wedged at (stopped, stopped, assigned) when
+            # the deferred unassign never ran (crash/cancel mid final-snapshot).
+            stop_wedged = (
+                stopped
+                and server.observed_state is ObservedState.STOPPED
+                and server.assigned_worker_id is not None
+            )
+            if stale_running or orphan or stop_undelivered or stop_wedged:
                 out.append(replace(server))
         return out
 

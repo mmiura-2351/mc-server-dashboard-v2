@@ -1344,6 +1344,46 @@ async def test_stop_start_race_cannot_replace_until_final_snapshot_settles() -> 
     assert stored.assigned_worker_id is None
 
 
+async def test_stop_cancelled_mid_snapshot_still_releases_assignment() -> None:
+    # Issue #847 (bug 2): if the HTTP request task is cancelled WHILE the final
+    # snapshot is in flight (a client disconnect cancels the task at the snapshot
+    # await), the deferred unassign must still run rather than leaving the row wedged
+    # at (stopped, stopped, assigned) until the reconciler's grace lapses. The clear
+    # runs in a cancellation-safe path, then the CancelledError propagates.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotCancelled(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            # The client disconnects: the request task is cancelled at this await.
+            raise asyncio.CancelledError
+
+    cp = _SnapshotCancelled()
+    with pytest.raises(asyncio.CancelledError):
+        await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The CancelledError propagated, but the assignment was still released — no
+    # wedge waiting on the reconciler.
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id is None
+
+
 async def test_stop_unassigns_even_when_final_snapshot_fails() -> None:
     # Issue #847 / #845: on a FAILED final snapshot the assignment is still cleared
     # so the next same-worker start reuses the retained scratch (#845). Cross-worker

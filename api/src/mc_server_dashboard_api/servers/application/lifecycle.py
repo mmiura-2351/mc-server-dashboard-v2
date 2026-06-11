@@ -875,14 +875,39 @@ class StopServer:
         # Final snapshot AFTER the process has exited (the confirmed stop returns
         # only once the Worker reports the process gone) and BEFORE the unassign, so
         # the captured working set is quiescent (FR-DATA-4, FR-DATA-7).
-        await self._final_snapshot(
-            worker_id=worker_id, community_id=community_id, server_id=server_id
-        )
-        if not applied:
-            return
-        # The snapshot has settled: now release the assignment so a later start can
-        # re-place under require_unassigned (issue #206/#847). Guarded so it only
-        # clears OUR still-held assignment.
+        #
+        # The deferred clear runs in a ``finally`` so it is NOT skipped when the HTTP
+        # request task is cancelled at the snapshot await — a client disconnect
+        # cancels the task there, and without this the row would wedge at
+        # (stopped, stopped, assigned) until the reconciler's stale-stop arm lapses
+        # the grace window (issue #847 bug 2). The clear itself is ``asyncio.shield``ed
+        # so the outer cancellation does not abort the DB write mid-commit; the
+        # CancelledError still propagates after the clear settles. A clear after a
+        # cancelled/incomplete snapshot carries the same documented exposure as the
+        # failure path (a cross-worker re-placement loses the never-published final).
+        try:
+            await self._final_snapshot(
+                worker_id=worker_id, community_id=community_id, server_id=server_id
+            )
+        finally:
+            # Skip the clear only when the observed write was dropped by the #216
+            # guard (a fresher write already won and owns convergence).
+            if applied:
+                await asyncio.shield(
+                    self._clear_held_assignment(server, worker_id, server_id)
+                )
+
+    async def _clear_held_assignment(
+        self, server: Server, worker_id: WorkerId, server_id: ServerId
+    ) -> None:
+        """Release the assignment held across the final snapshot (issue #847).
+
+        Guarded so it only clears OUR still-held assignment: a start cannot have
+        re-placed during the window (its ``require_unassigned`` CAS saw the held
+        assignment), so the guard normally matches; it makes the clear a no-op rather
+        than a clobber if the row moved by any other path.
+        """
+
         async with self.uow:
             cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
                 server_id, worker_id
@@ -1010,6 +1035,58 @@ class StopServer:
             community_id=community_id,
             server_id=server_id,
         )
+        return server
+
+    async def clear_stale_assignment(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> Server:
+        """Release a stop wedged at (stopped, stopped, assigned) (issue #847 bug 2).
+
+        The reconciler's recovery arm for a stop whose deferred unassign never ran
+        — an API crash or an HTTP-task cancellation between the observed=stopped
+        commit and the post-snapshot clear in ``_record_stopped_then_final_snapshot``
+        leaves the row assigned forever. No other path converges it: ``StartServer``
+        409s on ``require_unassigned`` before flipping desired, and the sink no
+        longer unassigns from a status report (bug 1). This deliberate recovery
+        replaces #217's sink-unassign, which used to rescue the case but raced the
+        snapshot window.
+
+        Clears ONLY the assignment via the same guard the deferred clear uses
+        (``clear_assignment_after_final_snapshot``): a still desired=stopped row
+        still assigned to that worker. No command is dispatched — the server is
+        already stopped — and no placement-load decrement (the stop that wedged the
+        row already decremented). The clear is logged loud: the final snapshot was
+        never published, so a later cross-worker re-placement loses progression
+        since the last periodic snapshot (the documented #845/#847 exposure; a
+        same-worker start reuses the retained scratch, #767).
+        """
+
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+            worker_id = server.assigned_worker_id
+            if (
+                server.desired_state is not DesiredState.STOPPED
+                or server.observed_state is not ObservedState.STOPPED
+                or worker_id is None
+            ):
+                # The row moved since list_reconcilable snapshotted it; nothing for
+                # this recovery arm to do.
+                raise InvalidLifecycleTransitionError(str(server_id.value))
+            cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
+                server_id, worker_id
+            )
+            await self.uow.commit()
+        if cleared:
+            server.assigned_worker_id = None
+            _LOG.warning(
+                "recovered a stop wedged at (stopped, stopped, assigned) for server "
+                "%s: released worker %s. The final snapshot was never published, so "
+                "a cross-worker re-placement loses progression since the last "
+                "periodic snapshot (#845/#847); a same-worker start reuses the "
+                "retained scratch (#767)",
+                server_id.value,
+                worker_id.value,
+            )
         return server
 
 
