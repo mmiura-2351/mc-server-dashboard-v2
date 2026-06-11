@@ -69,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
+    ServerBusyError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -340,6 +341,22 @@ def test_list_transitional_server_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
+
+
+def test_write_server_busy_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        write=_FakeUseCase(error=ServerBusyError("s")),
+    )
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "level.dat"},
+        json={"content_base64": "dGVzdA=="},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_busy"
 
 
 def test_write_decodes_base64_and_passes_bytes() -> None:

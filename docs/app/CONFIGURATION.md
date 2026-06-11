@@ -217,6 +217,20 @@ Only the keys for the selected `storage.backend` are read; the rest are ignored
 (Section 4). The authoritative per-backend key list and the atomic-snapshot
 publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md (#17).
 
+**Connection-pool sizing and the lifecycle lock (#827/#876).** Every at-rest-gated
+operation (restore, delete, the file mutations, update, create-backup) and every
+`StartServer` flip holds a *per-server* advisory lock on a **dedicated** pool
+connection for the operation's duration — a long gated op (a minutes-long
+restore/delete pack) thus pins one connection on top of the connection its own
+unit-of-work uses. The lock's acquire is *bounded*: a waiter that cannot take the
+lock within a few seconds gives up with a `409 server_busy` rather than block (and
+pin a slot) indefinitely, so contention cannot deadlock the pool — but the *holders*
+still consume one extra connection each for as long as they run. Size the SQLAlchemy
+pool with that headroom in mind: budget roughly two connections per *concurrent*
+gated operation you expect (the op's own work plus its lock connection), not one,
+so a burst of concurrent restores/deletes does not starve ordinary request traffic.
+The pool uses fixed defaults: 5 connections (`pool_size`) with 10 overflow slots (`max_overflow`); each held lock and each bounded waiter pins one connection for its duration. A configuration knob for pool sizing is tracked in a follow-up issue (#884).
+
 ### 5.3 Authentication: tokens and password hashing
 
 | Key | Default | Secret | Meaning |
