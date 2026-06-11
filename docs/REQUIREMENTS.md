@@ -200,7 +200,7 @@ holding different roles in each, and may also be a platform administrator.
               commands ↓│↑ events (status / log / metrics)             │ transfer (world/jar/backup)
         ┌───────────────┴────────────────────────────────────────────▼────────────────────┐
         │  Worker (stateless / replaceable)                                                 │
-        │  ExecutionDriver ──▶ [ host-process | container | (k8s-ready) ]                   │
+        │  ExecutionDriver ──▶ [ container | (k8s-ready) ]                                 │
         │  Runs MC in a local scratch working dir; manages it (RCON, signals)               │
         │  Holds no authoritative data: hydrate on placement, snapshot on stop / interval   │
         └───────────────────────────────────────────────────────────────────────────────────┘

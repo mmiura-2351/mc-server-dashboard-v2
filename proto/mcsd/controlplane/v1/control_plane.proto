@@ -147,6 +147,9 @@ message HostResources {
 // ExecutionDriverKind enumerates the execution backends (FR-EXE-2, FR-EXE-4).
 enum ExecutionDriverKind {
   EXECUTION_DRIVER_KIND_UNSPECIFIED = 0;
+  // HOST_PROCESS named the host-process driver, removed in issue #781. The
+  // number stays reserved (the enum is NOT renumbered) to preserve wire
+  // compatibility, but no Worker advertises it and no shipped driver maps to it.
   EXECUTION_DRIVER_KIND_HOST_PROCESS = 1;
   EXECUTION_DRIVER_KIND_CONTAINER = 2;
 }

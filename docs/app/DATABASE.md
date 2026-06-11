@@ -334,7 +334,7 @@ assigned Worker.
 | `mc_edition` | text | e.g. `java` |
 | `mc_version` | text | e.g. `1.21.1` (FR-SRV-1) |
 | `server_type` | text | `vanilla` / `paper` / `fabric` / `forge` / `spigot` (CHECK enum). `vanilla`/`paper`/`fabric`/`forge` are resolvable by the version catalog (forge resolves to the installer JAR — the worker runs `--installServer` on first start); `spigot` (no official distribution API) is accepted by the schema but rejected at create-time by version-validation (FR-VER-1) |
-| `execution_backend` | text | `host_process` / `container` (CHECK enum) |
+| `execution_backend` | text | `host_process` / `container` (CHECK enum). `container` is the only shipped backend; `host_process` is retained in the CHECK for historical rows only — the Worker host-process driver was removed in issue #781, so no new server uses it (the value is left in place to avoid a migration; see issue #781) |
 | `config` | jsonb | server configuration blob (properties, JVM args, plus the reserved keys catalogued below) |
 | `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
@@ -357,8 +357,8 @@ here when it is added, so the blob does not accumulate undocumented keys.
 | `resolved_jar_sha256` | string (JAR content hash) | **system** — written by the start use case when a JAR is resolved; hidden from the config-overrides editor (issue #701) and never operator-settable | issue #118 |
 | `snapshot_interval_seconds` | integer seconds | **operator** — per-server snapshot-cadence override (FR-DATA-7), clamped up to the configured floor | issue #107 |
 | `backup_interval_hours` | integer hours | **operator** — per-server backup-schedule interval (Section 8); absent means no scheduled backups | issue #117 |
-| `memory_limit_mb` | integer mebibytes (MiB) | **operator** — per-server memory limit; absent means no limit (the JVM heap stays at its default). The worker derives the JVM heap from it; whether it is also a *hard* ceiling is per-driver (`container` enforces it, `host-process` is best-effort heap-only — see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #705 |
-| `cpu_millis` | integer millicores (1000 = one core) | **operator** — per-server CPU allocation; absent means no allocation (the driver's default share). A **soft, rough relative share** (owner decision), not a hard cap; whether it is enforced at all is per-driver (`container` translates it to a relative weight `CPUShares` that bites only under contention; `host-process` does **not** enforce CPU — container-only — see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #722 |
+| `memory_limit_mb` | integer mebibytes (MiB) | **operator** — per-server memory limit; absent means no limit (the JVM heap stays at its default). The worker derives the JVM heap from it; the `container` driver also enforces it as a *hard* ceiling (see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #705 |
+| `cpu_millis` | integer millicores (1000 = one core) | **operator** — per-server CPU allocation; absent means no allocation (the driver's default share). A **soft, rough relative share** (owner decision), not a hard cap; the `container` driver translates it to a relative weight `CPUShares` that bites only under contention (see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #722 |
 
 The operator-settable keys are validated on write (a bad value is `422`), and the
 update permission gate branches on the changed-key set: an edit that touches only

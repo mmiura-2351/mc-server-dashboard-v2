@@ -108,7 +108,8 @@ the Go side). The exact tooling and how to run it locally are in
 `api/` is the obvious Hexagonal target (persistence, auth, transport are all
 swappable technologies). `worker/` benefits equally: its domain core is "the
 desired/observed lifecycle of a local server instance", its key Port is
-`ExecutionDriver`, and its adapters are the host-process and container drivers.
+`ExecutionDriver`, whose only shipped adapter is the container driver (the
+host-process driver was removed in issue #781).
 Keeping the Worker Hexagonal means a Kubernetes driver
 (REQUIREMENTS.md FR-EXE-4) could drop in without touching Worker business logic,
 and lets the Worker's lifecycle logic be unit-tested with a fake driver
@@ -131,7 +132,7 @@ repo/
 |---|---|---|
 | `proto/` | buf (protobuf) | the typed control-plane contract: the bidi-stream service, command and event messages, capability advertisement. No logic. |
 | `api/` | Python | identity & auth, Communities/membership, authorization, server lifecycle records, the `Storage` Port + adapters, Worker registry & placement, both planes' API-side ends, audit, version/JAR resolution. The authoritative state. |
-| `worker/` | Go | the gRPC stream client to the API, the `ExecutionDriver` Port + host-process/container adapters, local scratch working-dir management, Java-runtime selection, hydrate/snapshot transfer client, RCON, log/metric/heartbeat emission. No authoritative state. |
+| `worker/` | Go | the gRPC stream client to the API, the `ExecutionDriver` Port + container adapter, local scratch working-dir management, Java-runtime selection, hydrate/snapshot transfer client, RCON, log/metric/heartbeat emission. No authoritative state. |
 
 ### 3.2 Dependency direction between modules
 
@@ -218,7 +219,7 @@ here.
 
 | Port | Purpose (req. ref) | M1 adapter(s) |
 |---|---|---|
-| `ExecutionDriver` | Realize logical start/stop/restart for a backend (FR-EXE-1, FR-EXE-2, FR-EXE-4) | host-process driver, container (Docker) driver |
+| `ExecutionDriver` | Realize logical start/stop/restart for a backend (FR-EXE-1, FR-EXE-2, FR-EXE-4) | container (Docker) driver (the host-process driver was removed in issue #781) |
 | `JavaRuntimeSelector` | Pick the Java runtime for a server's MC version (FR-EXE-5) | local-installs selector (legacy JAVA_COMPATIBILITY mapping) |
 | `WorkingDir` | Manage the local scratch working set per server; path-traversal-safe file access (FR-DATA-4, FR-FILE-4) | local-filesystem adapter |
 | `DataTransfer` | Pull (hydrate) / push (snapshot) the working set via the API HTTP data-plane (FR-DATA-3, FR-DATA-4) | HTTP client to the API |
@@ -262,8 +263,10 @@ design decisions and do not change the requirements.
 
 ### 7.1 Execution backend is fixed for a server's lifetime (FR-EXE-3)
 
-**Decision.** The execution backend (host-process vs container) is chosen at
-server creation and is **immutable for the server's lifetime** in M1. Changing
+**Decision.** The execution backend is chosen at
+server creation and is **immutable for the server's lifetime** in M1. (Container
+is the only shipped backend since the host-process driver was removed in issue
+#781; the immutability rule is retained for any future backend.) Changing
 backend means deleting and recreating the server (its world data can be carried
 over via backup/restore through `Storage`).
 

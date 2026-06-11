@@ -38,8 +38,10 @@ const TYPE_SUB: Record<string, TranslationKey> = {
   spigot: "serverCreate.typeSub.spigot",
 };
 
-type Backend = "host_process" | "container";
-const BACKENDS: Backend[] = ["host_process", "container"];
+// host_process was dropped as a selectable backend in issue #781 (the worker
+// host-process driver was removed); container is the only shipped backend.
+type Backend = "container";
+const BACKENDS: Backend[] = ["container"];
 
 // Per-server memory limit / CPU allocation in the create wizard (issue #715),
 // mirroring the Settings tab (ServerDetailPage.tsx). Both ride the `config` blob
@@ -200,7 +202,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   const [step, setStep] = useState(1);
   const [type, setType] = useState<CatalogType | null>(null);
   const [version, setVersion] = useState("");
-  const [backend, setBackend] = useState<Backend>("host_process");
+  const [backend, setBackend] = useState<Backend>("container");
   const [port, setPort] = useState("");
   // Once the user edits the port, the auto-suggest must never overwrite it.
   const [portTouched, setPortTouched] = useState(false);
@@ -714,7 +716,7 @@ function ImportForm({ communityId }: { communityId: string }) {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const [name, setName] = useState("");
-  const [backend, setBackend] = useState<Backend>("host_process");
+  const [backend, setBackend] = useState<Backend>("container");
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [nameError, setNameError] = useState<string | undefined>();

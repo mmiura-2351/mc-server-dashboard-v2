@@ -570,7 +570,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.typeSub.spigot": "非対応",
   // Step 2 — runtime.
   "serverCreate.backendLabel": "実行バックエンド",
-  "serverCreate.backend.host_process": "ホストプロセス",
   "serverCreate.backend.container": "コンテナ",
   "serverCreate.portLabel": "ゲームポート",
   "serverCreate.portHint": "次の空きポートから自動提案されました。",

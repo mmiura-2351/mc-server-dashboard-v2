@@ -289,8 +289,8 @@ Its handling depends on `driver.container.network` (env
   (a `docker network create` network, as the pinned `mcsd` is): the default
   `bridge` has no container-name DNS, so pointing this at `bridge` lets the
   attach succeed but the RCON dial silently fails.
-- **Unset** (bare-metal worker / host-process parity): RCON is published to the
-  host loopback (`127.0.0.1`) and dialed there, the historical behavior.
+- **Unset** (bare-metal worker): RCON is published to the host loopback
+  (`127.0.0.1`) and dialed there, the historical behavior.
 
 ## 7. TLS guidance
 

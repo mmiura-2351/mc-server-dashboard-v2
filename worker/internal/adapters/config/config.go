@@ -181,7 +181,10 @@ type fileConfig struct {
 func defaults() Config {
 	return Config{
 		Worker: WorkerConfig{
-			Drivers:    []string{"host-process"},
+			// No default driver: the only shipped driver is "container", which
+			// requires driver.container.images, so there is no zero-config driver to
+			// fall back to. worker.drivers is therefore effectively required and
+			// validate() rejects an empty set (issue #781).
 			MaxServers: 0,
 		},
 		Driver: DriverConfig{
@@ -410,8 +413,8 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: worker.drivers: must advertise at least one driver")
 	}
 	for _, d := range c.Worker.Drivers {
-		if d != "host-process" && d != "container" {
-			return fmt.Errorf("config: worker.drivers: unknown driver %q (want host-process or container)", d)
+		if d != "container" {
+			return fmt.Errorf("config: worker.drivers: unknown driver %q (want container)", d)
 		}
 		if d == "container" && len(c.Driver.Container.Images) == 0 {
 			return fmt.Errorf("config: driver.container.images is required when worker.drivers advertises \"container\"")

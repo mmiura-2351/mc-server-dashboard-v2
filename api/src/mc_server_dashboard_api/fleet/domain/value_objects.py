@@ -15,7 +15,13 @@ from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
 
 
 class DriverKind(enum.Enum):
-    """An execution backend a Worker can offer (FR-EXE-2)."""
+    """An execution backend a Worker can offer (FR-EXE-2).
+
+    ``HOST_PROCESS`` mirrors the reserved ``EXECUTION_DRIVER_KIND_HOST_PROCESS``
+    wire value but is no longer a shipped driver: the Worker host-process driver
+    was removed in issue #781. It is kept so the wire enum mapping stays total; no
+    Worker advertises it.
+    """
 
     HOST_PROCESS = "host-process"
     CONTAINER = "container"

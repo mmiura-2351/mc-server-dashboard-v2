@@ -27,8 +27,6 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/datatransfer"
-	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/hostprocess"
-	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/javaruntime"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
@@ -124,10 +122,6 @@ func run(ctx context.Context) error {
 // containers from a previous run before any server is launched.
 func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.Logger) (*instancemanager.Manager, error) {
 	wc := cfg.Worker
-	// The host-process driver always dials RCON on the host loopback (empty host).
-	openLoopbackControl := func(ctx context.Context, spec execution.InstanceSpec) (execution.ServerControl, error) {
-		return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir, "")
-	}
 
 	// containerRconHost resolves the RCON dial host for a server. It is empty
 	// (loopback) unless a container driver with a configured network is built, in
@@ -138,13 +132,6 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	drivers := map[string]execution.ExecutionDriver{}
 	for _, name := range wc.Drivers {
 		switch name {
-		case "host-process":
-			drivers[name] = hostprocess.New(
-				javaruntime.New(wc.Java.Runtimes),
-				hostprocess.RealSpawn,
-				openLoopbackControl,
-				hostprocess.Options{StopTimeout: 30 * time.Second},
-			)
 		case "container":
 			docker, err := containerdriver.NewEngineClient(cfg.Driver.Container.DockerHost)
 			if err != nil {
@@ -180,9 +167,8 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	// ServerCommand forwarding and the pre-snapshot save-all open RCON by server
 	// id; the dial host is resolved from the driver that actually runs that server.
 	// Only a container-driven server with a configured network is dialed over the
-	// network (its container name); every other server — including a host-process
-	// server on a worker that also advertises the container driver — keeps the host
-	// loopback, so a mixed-driver worker resolves each server correctly (issue #218).
+	// network (its container name); any other server keeps the host loopback
+	// (issue #218).
 	openControl := func(ctx context.Context, serverID, driver string) (execution.ServerControl, error) {
 		host := resolveRconHost(driver, containerRconHost, serverID)
 		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host)
@@ -196,9 +182,8 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 // loopback) for every server except a container-driven one, which is dialed at
 // the host the container driver derives from its topology (its container name
 // when a network is configured). containerRconHost is the container driver's
-// resolver, or the no-container-driver stub that always returns empty. This is
-// the mixed-driver gate: a host-process server on a worker that also advertises
-// the container driver keeps the loopback (issue #218).
+// resolver, or the no-container-driver stub that always returns empty (issue
+// #218).
 func resolveRconHost(driver string, containerRconHost func(string) string, serverID string) string {
 	if driver == "container" {
 		return containerRconHost(serverID)
