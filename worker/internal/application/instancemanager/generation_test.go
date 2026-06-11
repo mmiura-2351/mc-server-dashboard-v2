@@ -124,7 +124,7 @@ func TestGenerationMarkerRemovedAfterFinalSnapshot(t *testing.T) {
 	if _, err := os.Stat(generationMarkerPath(m, "s1")); !os.IsNotExist(err) {
 		t.Fatalf("generation marker survived the post-stop final snapshot GC: stat err = %v", err)
 	}
-	if held := ScanHeldServers(m.scratchDir); len(held) != 0 {
+	if held := ScanHeldServers(m.scratchDir, nil); len(held) != 0 {
 		t.Fatalf("held = %v after final snapshot, want none", held)
 	}
 }
