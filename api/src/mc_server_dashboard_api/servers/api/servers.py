@@ -103,6 +103,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
+    RemovedExecutionBackendError,
     ServerBusyError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
@@ -266,6 +267,10 @@ async def create_server(
         raise _unprocessable("invalid_server_type") from exc
     except UnknownExecutionBackendError as exc:
         raise _unprocessable("invalid_execution_backend") from exc
+    except RemovedExecutionBackendError as exc:
+        # A known-but-removed backend (host_process, issue #781): no Worker can run
+        # it, so reject create rather than stage an unplaceable server.
+        raise _unprocessable("removed_execution_backend") from exc
     except SpigotUnsupportedError as exc:
         # Spigot is schema-valid but has no official distribution API
         # (BuildTools-only): a distinct reason so the client can surface the
@@ -358,6 +363,10 @@ async def import_server(
         raise _unprocessable("invalid_server_type") from exc
     except UnknownExecutionBackendError as exc:
         raise _unprocessable("invalid_execution_backend") from exc
+    except RemovedExecutionBackendError as exc:
+        # Import shares the create use case, so a removed backend (host_process,
+        # issue #781) is rejected here too.
+        raise _unprocessable("removed_execution_backend") from exc
     except SpigotUnsupportedError as exc:
         raise _unprocessable("spigot_unsupported") from exc
     except UnsupportedServerTypeError as exc:

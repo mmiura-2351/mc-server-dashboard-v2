@@ -174,6 +174,31 @@ func TestLoadRejectsHostProcessDriver(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsOmittedDrivers pins the headline breaking change (issue #781):
+// worker.drivers no longer has a zero-config default, so a config that simply
+// omits it is rejected — the path every previously-zero-config worker now hits.
+// The error names "container" so the operator knows what to advertise.
+func TestLoadRejectsOmittedDrivers(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret",
+		"MCD_WORKER_API_TLS_INSECURE":        "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      "/scratch",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
+	})
+
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("Load() with omitted worker.drivers: want error, got nil")
+	}
+	if !contains(err.Error(), "worker.drivers") {
+		t.Errorf("error %q does not name worker.drivers", err.Error())
+	}
+	if !contains(err.Error(), "container") {
+		t.Errorf("error %q does not name the valid container driver", err.Error())
+	}
+}
+
 func TestLoadRejectsMalformedMaxServers(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
@@ -238,75 +263,6 @@ func TestLoadAcceptsCAFileWithoutInsecure(t *testing.T) {
 	}
 	if cfg.API.TLS.Insecure {
 		t.Error("TLS.Insecure = true, want false (default)")
-	}
-}
-
-func TestLoadJavaRuntimesFromFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "worker.toml")
-	body := `
-[api]
-grpc_endpoint = "api:50051"
-credential = "secret"
-
-[api.tls]
-insecure = true
-
-[worker]
-scratch_dir = "` + t.TempDir() + `"
-drivers = ["container"]
-
-[worker.java.runtimes]
-17 = "/jvm/17/bin/java"
-21 = "/jvm/21/bin/java"
-
-[driver.container.images]
-21 = "eclipse-temurin:21-jre"
-`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path, emptyEnv)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Worker.Java.Runtimes[17] != "/jvm/17/bin/java" || cfg.Worker.Java.Runtimes[21] != "/jvm/21/bin/java" {
-		t.Fatalf("Java.Runtimes = %v, want 17 and 21 entries", cfg.Worker.Java.Runtimes)
-	}
-}
-
-func TestLoadJavaRuntimesFromEnv(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":          "secret",
-		"MCD_WORKER_API_TLS_INSECURE":        "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
-		"MCD_WORKER_WORKER_JAVA_RUNTIMES":    "8=/jvm/8/bin/java, 21=/jvm/21/bin/java",
-		"MCD_WORKER_WORKER_DRIVERS":          "container",
-		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
-	})
-
-	cfg, err := Load("", env)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Worker.Java.Runtimes[8] != "/jvm/8/bin/java" || cfg.Worker.Java.Runtimes[21] != "/jvm/21/bin/java" {
-		t.Fatalf("Java.Runtimes = %v, want 8 and 21 entries", cfg.Worker.Java.Runtimes)
-	}
-}
-
-func TestLoadRejectsMalformedJavaRuntimesEnv(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":    "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":       "secret",
-		"MCD_WORKER_API_TLS_INSECURE":     "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":   "/scratch",
-		"MCD_WORKER_WORKER_JAVA_RUNTIMES": "notamajor=/jvm/java",
-	})
-
-	if _, err := Load("", env); err == nil {
-		t.Fatal("Load() with non-integer Java major: want error, got nil")
 	}
 }
 

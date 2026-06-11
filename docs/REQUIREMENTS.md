@@ -340,8 +340,9 @@ Requirements:
 - FR-EXE-1: Execution method is abstracted as an `ExecutionDriver` interface
   inside the Worker. The API sends logical commands ("start this server"); the
   driver realizes them for its backend.
-- FR-EXE-2: M1 implements two drivers: **host process** (run `java` directly on
-  the Worker host) and **container (Docker)**.
+- FR-EXE-2: M1 ships one driver: **container (Docker)**. The `ExecutionDriver`
+  abstraction stays pluggable (FR-EXE-1, FR-EXE-4); the host-process driver was
+  removed in issue #781.
 - FR-EXE-3: The execution backend is selectable per server, chosen at creation.
   Whether and how it may be changed afterward is a design-phase question (see
   9.1); the M1 baseline assumption is that it is fixed for a server's lifetime.

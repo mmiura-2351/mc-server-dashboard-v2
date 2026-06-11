@@ -373,36 +373,18 @@ section fixes only what the operator configures.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `worker.scratch_dir` | *required* | | Local scratch directory where the Worker hydrates a server's working set and runs it (REQUIREMENTS.md FR-DATA-4); the `WorkingDir` Port's root (ARCHITECTURE.md Section 5.2). |
-| `worker.java.runtimes` | *(empty)* | | Map of Java **major version** to the `java` binary path for it; the `JavaRuntimeSelector` picks the entry matching a server's Minecraft version (REQUIREMENTS.md FR-EXE-5, ARCHITECTURE.md Section 7.3). See below. |
 | `driver.container.docker_host` | *(daemon default)* | | Docker daemon endpoint when the `container` driver is enabled. Only a `unix://` socket is supported in M1; empty uses the daemon's default socket. |
-| `driver.container.images` | *(empty)* | | Map of Java **major version** to the base container image providing that JRE; the `container` driver picks the image matching a server's Minecraft version by the same bracket logic as `worker.java.runtimes`. **Required** when `worker.drivers` advertises `container`. See below. |
+| `driver.container.images` | *(empty)* | | Map of Java **major version** to the base container image providing that JRE; the `container` driver picks the image matching a server's Minecraft version by the legacy version→major bracket logic (REQUIREMENTS.md FR-EXE-5, ARCHITECTURE.md Section 7.3). **Required** when `worker.drivers` advertises `container`. See below. |
 | `driver.container.game_bind_ip` | `127.0.0.1` | | Host interface the `container` driver publishes each server's **game** port on. The default is loopback-only; set `0.0.0.0` to accept players from outside the host (the firewall then governs exposure). Must be a valid IP address. RCON always stays on loopback regardless of this value. |
 | `driver.container.network` | *(empty)* | | User-defined Docker network the `container` driver attaches each MC container to. Empty (default) keeps the historical behavior: containers run on the default bridge and RCON is published to the host loopback. When set — the containerized-worker topology — the driver attaches MC containers to this network, **drops** the host RCON publication, and dials RCON at the container's name over the network (the network's container-name DNS resolves it). The game-port publication is unchanged either way. **Must be a *user-defined* network** (`docker network create …`): the default `bridge` has no container-name DNS, so the RCON dial would silently fail. The value is not validated against the daemon at config load. |
-| `java.install_dir` | *(auto-discover)* | | Directory of installed Java runtimes for future auto-discovery of `worker.java.runtimes`; not yet implemented. |
 
-The `worker.java.runtimes` map keys are Java major versions; values are absolute
-paths to the matching `java` binary. The Worker maps a server's Minecraft version
-to a required Java major (legacy
+The `container` driver picks a base image per server: `driver.container.images`
+maps a Java major version to a base image that provides that JRE (the server JAR
+is bind-mounted from the scratch dir and run with the image's `java`). The Worker
+maps a server's Minecraft version to a required Java major (legacy
 [JAVA_COMPATIBILITY.md](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/JAVA_COMPATIBILITY.md)
-reference) and launches that runtime; a version with no configured runtime fails
+reference) and selects the image for it; a version with no configured image fails
 the launch.
-
-```toml
-[worker.java.runtimes]
-8  = "/usr/lib/jvm/temurin-8/bin/java"
-17 = "/usr/lib/jvm/temurin-17/bin/java"
-21 = "/usr/lib/jvm/temurin-21/bin/java"
-```
-
-The environment-variable form is a comma-separated `major=path` list:
-`MCD_WORKER_WORKER_JAVA_RUNTIMES="17=/jvm/17/bin/java,21=/jvm/21/bin/java"`.
-
-The `container` driver mirrors this: `driver.container.images` maps a Java major
-version to a base image that provides that JRE (the server JAR is bind-mounted
-from the scratch dir and run with the image's `java`). The version→major mapping
-is shared with `worker.java.runtimes`, so a server runs on the same Java major
-whether it executes as a host process or in a container. A version with no
-configured image fails the launch.
 
 ```toml
 [driver.container]

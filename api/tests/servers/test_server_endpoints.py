@@ -68,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
+    RemovedExecutionBackendError,
     ServerNotFoundError,
     ServerNotStoppedError,
     UnknownExecutionBackendError,
@@ -396,6 +397,18 @@ def test_create_unknown_backend_is_422() -> None:
     resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_execution_backend"
+
+
+def test_create_removed_backend_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(error=RemovedExecutionBackendError("host_process")),
+    )
+    client = next(_client(app))
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "removed_execution_backend"
 
 
 def test_create_unsupported_type_forge_is_422() -> None:

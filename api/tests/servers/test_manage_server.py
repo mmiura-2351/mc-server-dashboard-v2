@@ -43,6 +43,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
+    RemovedExecutionBackendError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -165,7 +166,7 @@ async def test_create_accepts_java_edition() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     assert server.mc_edition == "java"
@@ -187,7 +188,7 @@ async def test_create_accepts_valid_memory_limit() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={MEMORY_LIMIT_CONFIG_KEY: 2048},
     )
     assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 2048
@@ -210,7 +211,7 @@ async def test_create_rejects_invalid_memory_limit() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="host_process",
+            execution_backend="container",
             config={MEMORY_LIMIT_CONFIG_KEY: 1},
         )
     assert uow.commits == 0
@@ -231,7 +232,7 @@ async def test_create_without_memory_limit_writes_no_key() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={"motd": "hi"},
     )
     assert MEMORY_LIMIT_CONFIG_KEY not in server.config
@@ -251,7 +252,7 @@ async def test_create_accepts_valid_cpu_allocation() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={CPU_ALLOCATION_CONFIG_KEY: 2000},
     )
     assert server.config[CPU_ALLOCATION_CONFIG_KEY] == 2000
@@ -274,7 +275,7 @@ async def test_create_rejects_invalid_cpu_allocation() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="host_process",
+            execution_backend="container",
             config={CPU_ALLOCATION_CONFIG_KEY: 1},
         )
     assert uow.commits == 0
@@ -295,7 +296,7 @@ async def test_create_without_cpu_allocation_writes_no_key() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={"motd": "hi"},
     )
     assert CPU_ALLOCATION_CONFIG_KEY not in server.config
@@ -317,7 +318,7 @@ async def test_create_rejects_non_java_edition() -> None:
             mc_edition="bedrock",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
         )
     # Rejected before staging or even consulting the catalog (Java-only at M1).
@@ -340,7 +341,7 @@ async def test_create_rejects_unknown_server_type() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="bedrock-not-supported",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
         )
     assert uow.commits == 0
@@ -367,6 +368,31 @@ async def test_create_rejects_unknown_execution_backend() -> None:
     assert uow.commits == 0
 
 
+async def test_create_rejects_removed_host_process_backend() -> None:
+    # host_process is a known enum value retained for historical rows (#781), but
+    # the driver was removed, so a freshly-created host_process server would be
+    # unplaceable. Create rejects it (distinct from a wholly unknown backend) and
+    # never stages a row.
+    uow = FakeUnitOfWork()
+    with pytest.raises(RemovedExecutionBackendError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=_PORTS,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="s",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="host_process",
+            config={},
+        )
+    assert uow.commits == 0
+
+
 async def test_create_rejects_unsupported_type_forge() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(UnsupportedServerTypeError):
@@ -382,7 +408,7 @@ async def test_create_rejects_unsupported_type_forge() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="forge",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
         )
     assert uow.commits == 0
@@ -403,7 +429,7 @@ async def test_create_rejects_spigot_recommending_paper() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="spigot",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
         )
     assert "paper" in str(exc.value).lower()
@@ -425,7 +451,7 @@ async def test_create_rejects_unknown_version() -> None:
             mc_edition="java",
             mc_version="9.9.9",
             server_type="vanilla",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
         )
     assert uow.commits == 0
@@ -457,7 +483,7 @@ async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
         accept_eula=True,
     )
@@ -490,7 +516,7 @@ async def test_create_without_accept_eula_still_seeds_properties() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     assert file_store.writes == [("server.properties", _SEEDED_PROPERTIES)]
@@ -514,7 +540,7 @@ async def test_create_seeds_rcon_with_random_password_by_default() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     seeded = file_store.files["server.properties"].decode()
@@ -552,7 +578,7 @@ async def test_create_auto_assigns_lowest_free_port() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     assert server.game_port == 25567
@@ -579,7 +605,7 @@ async def test_create_honors_explicit_free_port() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
         game_port=25600,
     )
@@ -605,7 +631,7 @@ async def test_create_rejects_explicit_taken_port() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
             game_port=25600,
         )
@@ -627,7 +653,7 @@ async def test_create_rejects_explicit_out_of_range_port() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
             game_port=80,
         )
@@ -654,7 +680,7 @@ async def test_create_raises_when_range_exhausted() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
         )
     assert uow.commits == 0
@@ -677,7 +703,7 @@ async def test_create_seed_failure_surfaces_after_commit() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
         )
     # The row committed before seeding; it is left in place (repairable).
@@ -1702,7 +1728,7 @@ async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
         accept_eula=True,
     )
@@ -1746,7 +1772,7 @@ async def test_create_without_accept_eula_seeds_properties_at_rest(
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
 
@@ -1784,7 +1810,7 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     assert server.game_port == 25565

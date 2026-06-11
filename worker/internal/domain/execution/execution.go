@@ -1,10 +1,10 @@
 // Package execution holds the Worker's execution-backend core: the
 // ExecutionDriver Port that realizes logical start/stop for a server instance,
-// the JavaRuntimeSelector and ServerControl Ports, and the value types they
-// exchange. It depends on the standard library only (ARCHITECTURE.md Section 2,
-// Section 5.2). Concrete drivers (host process, container, future k8s) live in
-// the adapters layer and implement these interfaces, so the application and
-// session layers never know which backend runs a server (FR-EXE-1, FR-EXE-4).
+// the ServerControl Port, and the value types they exchange. It depends on the
+// standard library only (ARCHITECTURE.md Section 2, Section 5.2). Concrete drivers
+// (container, future k8s) live in the adapters layer and implement these
+// interfaces, so the application and session layers never know which backend runs
+// a server (FR-EXE-1, FR-EXE-4).
 package execution
 
 import (
@@ -201,15 +201,6 @@ type Instance interface {
 	Events() <-chan StatusEvent
 }
 
-// JavaRuntimeSelector picks the local Java runtime path for a server's Minecraft
-// version (FR-EXE-5). Selection is the Worker's concern, never the API's
-// (ARCHITECTURE.md Section 7.3).
-type JavaRuntimeSelector interface {
-	// Select returns the absolute path to the java binary for mcVersion, or an
-	// error if no configured runtime satisfies the version.
-	Select(mcVersion string) (string, error)
-}
-
 // ServerControl is the RCON seam over a running server (ARCHITECTURE.md Section
 // 5.2): forward console/RCON commands (FR-SRV-5) and issue save-all / stop for
 // the graceful-stop path.
@@ -220,8 +211,8 @@ type ServerControl interface {
 	Close() error
 }
 
-// ErrNoRuntime is returned by a JavaRuntimeSelector when no configured runtime
-// matches the requested Minecraft version.
+// ErrNoRuntime is returned by the container driver's image selector when no
+// configured image matches the Java major the requested Minecraft version needs.
 var ErrNoRuntime = errors.New("execution: no Java runtime for Minecraft version")
 
 // ErrUnknownServer is returned by the instance manager when a command targets a

@@ -220,7 +220,7 @@ here.
 | Port | Purpose (req. ref) | M1 adapter(s) |
 |---|---|---|
 | `ExecutionDriver` | Realize logical start/stop/restart for a backend (FR-EXE-1, FR-EXE-2, FR-EXE-4) | container (Docker) driver (the host-process driver was removed in issue #781) |
-| `JavaRuntimeSelector` | Pick the Java runtime for a server's MC version (FR-EXE-5) | local-installs selector (legacy JAVA_COMPATIBILITY mapping) |
+| Java-major selection (FR-EXE-5) | Pick the Java major a server's MC version needs | container `ImageSelector` resolves the major to a `driver.container.images` base image (legacy JAVA_COMPATIBILITY mapping); the host-process runtime selector was removed in issue #781 |
 | `WorkingDir` | Manage the local scratch working set per server; path-traversal-safe file access (FR-DATA-4, FR-FILE-4) | local-filesystem adapter |
 | `DataTransfer` | Pull (hydrate) / push (snapshot) the working set via the API HTTP data-plane (FR-DATA-3, FR-DATA-4) | HTTP client to the API |
 | `ServerControl` (RCON) | `save-all`, commands, graceful stop on the running process (FR-SRV-5, Section 6.9) | RCON client |
@@ -320,10 +320,11 @@ protection is enforced on the Worker side as well as in the `Storage` adapter
   persists the JAR through `Storage` for reuse across servers (FR-VER-1,
   FR-VER-2, FR-VER-3). The JAR reaches a Worker as part of the normal hydrate
   (data plane) — the Worker never fetches JARs from the internet.
-- **Java runtime selection is Worker-side.** The Worker (its `ExecutionDriver` /
-  `JavaRuntimeSelector` Port) chooses the correct locally-installed Java runtime
-  for the server's MC version at launch (FR-EXE-5). The API does not know or
-  care which `java` binary runs.
+- **Java runtime selection is Worker-side.** The Worker (its `ExecutionDriver`)
+  chooses the correct Java major for the server's MC version at launch (FR-EXE-5):
+  the container driver's `ImageSelector` resolves the major to a configured base
+  image (`driver.container.images`). The API does not know or care which `java`
+  runs.
 
 **Alternatives considered.**
 1. *Worker fetches JARs directly* — Worker talks to external sources.
