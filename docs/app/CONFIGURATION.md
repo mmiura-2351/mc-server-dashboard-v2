@@ -116,15 +116,17 @@ reads the selector, constructs that adapter, and binds it to the Port
 |---|---|---|---|
 | `Storage` (FR-DATA-2) | `storage.backend` | `fs` / `remote-fs` / `object` | api |
 | `PasswordHasher` (FR-AUTH-3) | `auth.password.hash` | `argon2` / `bcrypt` | api |
-| `ExecutionDriver` (FR-EXE-2) | `worker.drivers` | subset of `host-process` / `container` | worker |
+| `ExecutionDriver` (FR-EXE-2) | `worker.drivers` | `container` (only shipped driver) | worker |
 
 Notes:
 
+- The `ExecutionDriver` Port is **pluggable** by design (FR-EXE-2): the seam
+  admits future backends (e.g. a Kubernetes driver). `container` is the only
+  driver shipped today; the host-process driver was removed in issue #781.
 - The Worker's `ExecutionDriver` selection is a **set**, not one value: a Worker
   advertises *which* drivers it offers (Section 6), and the API's greedy
   placement filters Workers by the driver a server needs (REQUIREMENTS.md
-  FR-WRK-3). Selecting `host-process` only, `container` only, or both is a
-  per-Worker configuration choice.
+  FR-WRK-3).
 - The `Storage` adapter contract and the per-backend keys' full semantics are
   owned by STORAGE.md (#17); this document fixes only the **selector** and the
   shape of the adapter-specific groups (Section 5.2).
@@ -360,7 +362,7 @@ FR-WRK-1); these feed the API's greedy placement filter (FR-WRK-3).
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `worker.drivers` | `host-process` | | `ExecutionDriver` set this Worker offers (Section 4): any subset of `host-process` / `container`. Advertised as a capability. |
+| `worker.drivers` | *(required)* | | `ExecutionDriver` set this Worker offers (Section 4). `container` is the only shipped driver (the host-process driver was removed in issue #781), and it requires `driver.container.images`, so there is no zero-config default: the set must be supplied and must be non-empty. Advertised as a capability. |
 | `worker.max_servers` | `0` | | Free-capacity hint for placement; `0` means "no advertised cap" at this scale. |
 
 The concrete capability message on the wire is defined in `proto/` (#2); this
@@ -371,36 +373,18 @@ section fixes only what the operator configures.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `worker.scratch_dir` | *required* | | Local scratch directory where the Worker hydrates a server's working set and runs it (REQUIREMENTS.md FR-DATA-4); the `WorkingDir` Port's root (ARCHITECTURE.md Section 5.2). |
-| `worker.java.runtimes` | *(empty)* | | Map of Java **major version** to the `java` binary path for it; the `JavaRuntimeSelector` picks the entry matching a server's Minecraft version (REQUIREMENTS.md FR-EXE-5, ARCHITECTURE.md Section 7.3). See below. |
 | `driver.container.docker_host` | *(daemon default)* | | Docker daemon endpoint when the `container` driver is enabled. Only a `unix://` socket is supported in M1; empty uses the daemon's default socket. |
-| `driver.container.images` | *(empty)* | | Map of Java **major version** to the base container image providing that JRE; the `container` driver picks the image matching a server's Minecraft version by the same bracket logic as `worker.java.runtimes`. **Required** when `worker.drivers` advertises `container`. See below. |
+| `driver.container.images` | *(empty)* | | Map of Java **major version** to the base container image providing that JRE; the `container` driver picks the image matching a server's Minecraft version by the legacy version→major bracket logic (REQUIREMENTS.md FR-EXE-5, ARCHITECTURE.md Section 7.3). **Required** when `worker.drivers` advertises `container`. See below. |
 | `driver.container.game_bind_ip` | `127.0.0.1` | | Host interface the `container` driver publishes each server's **game** port on. The default is loopback-only; set `0.0.0.0` to accept players from outside the host (the firewall then governs exposure). Must be a valid IP address. RCON always stays on loopback regardless of this value. |
 | `driver.container.network` | *(empty)* | | User-defined Docker network the `container` driver attaches each MC container to. Empty (default) keeps the historical behavior: containers run on the default bridge and RCON is published to the host loopback. When set — the containerized-worker topology — the driver attaches MC containers to this network, **drops** the host RCON publication, and dials RCON at the container's name over the network (the network's container-name DNS resolves it). The game-port publication is unchanged either way. **Must be a *user-defined* network** (`docker network create …`): the default `bridge` has no container-name DNS, so the RCON dial would silently fail. The value is not validated against the daemon at config load. |
-| `java.install_dir` | *(auto-discover)* | | Directory of installed Java runtimes for future auto-discovery of `worker.java.runtimes`; not yet implemented. |
 
-The `worker.java.runtimes` map keys are Java major versions; values are absolute
-paths to the matching `java` binary. The Worker maps a server's Minecraft version
-to a required Java major (legacy
+The `container` driver picks a base image per server: `driver.container.images`
+maps a Java major version to a base image that provides that JRE (the server JAR
+is bind-mounted from the scratch dir and run with the image's `java`). The Worker
+maps a server's Minecraft version to a required Java major (legacy
 [JAVA_COMPATIBILITY.md](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/JAVA_COMPATIBILITY.md)
-reference) and launches that runtime; a version with no configured runtime fails
+reference) and selects the image for it; a version with no configured image fails
 the launch.
-
-```toml
-[worker.java.runtimes]
-8  = "/usr/lib/jvm/temurin-8/bin/java"
-17 = "/usr/lib/jvm/temurin-17/bin/java"
-21 = "/usr/lib/jvm/temurin-21/bin/java"
-```
-
-The environment-variable form is a comma-separated `major=path` list:
-`MCD_WORKER_WORKER_JAVA_RUNTIMES="17=/jvm/17/bin/java,21=/jvm/21/bin/java"`.
-
-The `container` driver mirrors this: `driver.container.images` maps a Java major
-version to a base image that provides that JRE (the server JAR is bind-mounted
-from the scratch dir and run with the image's `java`). The version→major mapping
-is shared with `worker.java.runtimes`, so a server runs on the same Java major
-whether it executes as a host process or in a container. A version with no
-configured image fails the launch.
 
 ```toml
 [driver.container]
@@ -432,19 +416,12 @@ A server's `memory_limit_mb` (the operator-set per-server limit,
 derives the JVM heap from it: `-Xms = -Xmx = limit − max(limit/5, 256 MiB)`,
 reserving headroom for JVM off-heap/native overhead so the heap stays under the
 limit (issue #706). **An unset limit leaves the heap at the JVM default** (the
-pre-limit launch). The heap is derived identically for both drivers; what differs
-is whether the limit is also a **hard ceiling** the process cannot exceed:
+pre-limit launch). The limit is also a **hard ceiling** the process cannot
+exceed:
 
 | Driver | Memory guarantee | Mechanism |
 |---|---|---|
 | `container` | **Hard ceiling — enforced.** The process cannot exceed the limit; the kernel OOM-kills it if it tries. | Docker `Memory` set to the limit, plus the derived `-Xmx` (added in issue #707). |
-| `host-process` | **Best-effort, heap-only — NOT enforced.** Only the derived `-Xmx` constrains the JVM heap; there is **no hard cap**, so a misbehaving server (native libs, off-heap buffers, runaway plugins) can exceed the limit and starve other servers on the host. | Derived `-Xmx` only. |
-
-The `host-process` heap-only stance is the deliberate first cut for that driver
-(it is a bare `os/exec` subprocess with no cgroup). Hard enforcement for
-`host-process` via cgroup v2 is deferred and tracked in issue #718. Operators who
-need a hard per-server memory ceiling should run those servers under the
-`container` driver.
 
 #### Per-server CPU allocation: per-driver guarantee
 
@@ -458,13 +435,6 @@ share.** What each driver does with it differs:
 | Driver | CPU guarantee | Mechanism |
 |---|---|---|
 | `container` | **Soft relative share — enforced under contention only.** The allocation sets the server's CPU weight proportional to other containers; when the host is otherwise idle the server may burst above it. There is **no hard cap**. | Docker `CPUShares`, proportional to the allocation (issue #724). |
-| `host-process` | **NOT enforced — container-only.** A host-process server is not CPU-constrained: there is no CPU-share mechanism for a bare `os/exec` subprocess without cgroups, so `cpu_millis` does not reach the launch and has no effect. | None. |
-
-The `host-process` no-CPU-enforcement stance follows the same first-cut posture
-as its memory handling (no cgroup). Hard/soft CPU enforcement for `host-process`
-via cgroup v2 (`cpu.weight`/quota) is deferred and tracked in issue #718.
-Operators who need a CPU share honoured under contention should run those servers
-under the `container` driver.
 
 These guarantees cover memory and CPU; disk quotas remain deferred (epic
 #704, REQUIREMENTS.md Section 2.2).
@@ -480,10 +450,10 @@ These guarantees cover memory and CPU; disk quotas remain deferred (epic
 The Worker captures each running server's console output and streams it to the
 API as `LogLine` events (FR-MON-2), and samples basic per-server runtime metrics
 (CPU and resident memory; CPU in thousandths of a core) on the
-`worker.metrics_interval_seconds` cadence (FR-MON-3). The host-process driver
-reads metrics from `/proc/<pid>` (Linux only); the container driver reads the
-Docker Engine stats endpoint. When a metric source is unavailable (a non-Linux
-host, an unreachable daemon, an exited process) the Worker emits an *up-only*
+`worker.metrics_interval_seconds` cadence (FR-MON-3). The container driver reads
+metrics from the Docker Engine stats endpoint. When a metric source is
+unavailable (an unreachable daemon, an exited process) the Worker emits an
+*up-only*
 sample — the server id with zero stats — so the API still learns the server is
 running.
 

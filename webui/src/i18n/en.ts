@@ -563,7 +563,6 @@ export const en = {
   "serverCreate.typeSub.spigot": "unsupported",
   // Step 2 — runtime.
   "serverCreate.backendLabel": "Execution backend",
-  "serverCreate.backend.host_process": "Host process",
   "serverCreate.backend.container": "Container",
   "serverCreate.portLabel": "Game port",
   "serverCreate.portHint": "Auto-suggested from the next free port.",

@@ -85,8 +85,8 @@ with the API surface it consumes.
 - Community management and membership (many-to-many users ↔ Communities).
 - Authentication, and authorization via custom roles + per-resource grants.
 - Minecraft server lifecycle (create, configure, start, stop, restart, delete).
-- Two execution backends behind a driver abstraction: **host process** and
-  **container (Docker)**.
+- One execution backend behind a driver abstraction: **container (Docker)**.
+  (The host-process driver was removed in issue #781.)
 - Worker registration, liveness, and server assignment.
 - Pluggable authoritative storage (fs / remote-fs / object) on the API side.
 - Runtime data staging between authoritative storage and stateless Workers.
@@ -200,7 +200,7 @@ holding different roles in each, and may also be a platform administrator.
               commands ↓│↑ events (status / log / metrics)             │ transfer (world/jar/backup)
         ┌───────────────┴────────────────────────────────────────────▼────────────────────┐
         │  Worker (stateless / replaceable)                                                 │
-        │  ExecutionDriver ──▶ [ host-process | container | (k8s-ready) ]                   │
+        │  ExecutionDriver ──▶ [ container | (k8s-ready) ]                                 │
         │  Runs MC in a local scratch working dir; manages it (RCON, signals)               │
         │  Holds no authoritative data: hydrate on placement, snapshot on stop / interval   │
         └───────────────────────────────────────────────────────────────────────────────────┘
@@ -340,8 +340,9 @@ Requirements:
 - FR-EXE-1: Execution method is abstracted as an `ExecutionDriver` interface
   inside the Worker. The API sends logical commands ("start this server"); the
   driver realizes them for its backend.
-- FR-EXE-2: M1 implements two drivers: **host process** (run `java` directly on
-  the Worker host) and **container (Docker)**.
+- FR-EXE-2: M1 ships one driver: **container (Docker)**. The `ExecutionDriver`
+  abstraction stays pluggable (FR-EXE-1, FR-EXE-4); the host-process driver was
+  removed in issue #781.
 - FR-EXE-3: The execution backend is selectable per server, chosen at creation.
   Whether and how it may be changed afterward is a design-phase question (see
   9.1); the M1 baseline assumption is that it is fixed for a server's lifetime.

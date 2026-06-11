@@ -544,7 +544,7 @@ describe("import tab", () => {
     });
     const form = mockApi.postForm.mock.calls[0][1] as FormData;
     expect(form.get("name")).toBe("restored");
-    expect(form.get("execution_backend")).toBe("host_process");
+    expect(form.get("execution_backend")).toBe("container");
     expect(form.get("file")).toBeInstanceOf(File);
   });
 

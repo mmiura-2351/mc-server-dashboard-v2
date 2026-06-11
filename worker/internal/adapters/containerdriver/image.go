@@ -7,11 +7,10 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
-// ImageSelector resolves a Minecraft version to a base container image. It
-// mirrors the JavaRuntimeSelector concept (CONFIGURATION.md worker section):
+// ImageSelector resolves a Minecraft version to a base container image:
 // driver.container.images maps a Java major version to an image ref, and the
-// version→major bracket logic is shared with javaruntime so a server runs on the
-// same Java major whether it executes as a host process or in a container.
+// version→major bracket logic comes from javaruntime so a server runs on the Java
+// major its Minecraft version requires (FR-EXE-5).
 type ImageSelector struct {
 	// images maps a Java major version to the base image ref providing that JRE.
 	images map[int]string

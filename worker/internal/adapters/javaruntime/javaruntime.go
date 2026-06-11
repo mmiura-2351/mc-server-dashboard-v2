@@ -1,56 +1,21 @@
-// Package javaruntime implements the execution.JavaRuntimeSelector Port: it maps
-// a Minecraft version to the required Java major version, then resolves that to a
-// configured local runtime path (FR-EXE-5, ARCHITECTURE.md Section 7.3).
+// Package javaruntime maps a Minecraft version to the required Java major
+// version(s) via the legacy compatibility table (FR-EXE-5, ARCHITECTURE.md
+// Section 7.3). The container driver resolves a base image by this bracket logic.
 //
 // The version→Java mapping follows the legacy reference
-// (https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/JAVA_COMPATIBILITY.md);
-// the runtime paths come from worker.java.runtimes config (CONFIGURATION.md
-// Section 6.3).
+// (https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/JAVA_COMPATIBILITY.md).
 package javaruntime
 
 import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
-
-// Selector resolves Minecraft versions to installed Java runtime paths.
-type Selector struct {
-	// runtimes maps a Java major version to the java binary path for it.
-	runtimes map[int]string
-}
-
-// New builds a Selector over the configured Java-major→path runtimes map.
-func New(runtimes map[int]string) *Selector {
-	return &Selector{runtimes: runtimes}
-}
-
-// Select returns the java binary path for mcVersion. It picks the required Java
-// major from the legacy mapping, then resolves the configured path; the
-// 1.7.10-1.16.5 bracket prefers Java 8 and falls back to Java 11 when 8 is not
-// installed (the only bracket with a fallback). It returns execution.ErrNoRuntime
-// when no configured runtime satisfies the version, or a parse error when
-// mcVersion is not a recognizable version string.
-func (s *Selector) Select(mcVersion string) (string, error) {
-	majors, err := MajorsFor(mcVersion)
-	if err != nil {
-		return "", err
-	}
-	for _, major := range majors {
-		if path, ok := s.runtimes[major]; ok {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("%w: Minecraft %s needs Java %v, none configured", execution.ErrNoRuntime, mcVersion, majors)
-}
 
 // MajorsFor returns the acceptable Java major versions for a Minecraft version,
 // most-preferred first. The legacy mapping pins a single Java major per bracket
 // except 1.7.10-1.16.5, which prefers 8 with an 11 fallback. It is exported so
-// the container driver can resolve a base image by the same bracket logic the
-// host-process selector uses for runtime paths.
+// the container driver can resolve a base image by this bracket logic.
 func MajorsFor(mcVersion string) ([]int, error) {
 	v, err := parseVersion(mcVersion)
 	if err != nil {

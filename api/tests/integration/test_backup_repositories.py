@@ -93,7 +93,7 @@ async def _seed_server(engine: AsyncEngine) -> uuid.UUID:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     return server.id.value

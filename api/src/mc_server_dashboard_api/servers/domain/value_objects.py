@@ -107,6 +107,12 @@ class ExecutionBackend(enum.Enum):
     enum mandates (``host_process``), whereas the fleet wire-facing ``DriverKind``
     uses the hyphen spelling (``host-process``). Mapping between the two, when
     placement lands, is an adapter concern, not a shared domain type.
+
+    ``HOST_PROCESS`` is retained but no longer a shipped backend: the Worker's
+    host-process driver was removed in issue #781. The value is kept here (and in
+    the DATABASE.md CHECK enum) so historical rows stay readable and the wire
+    round-trip is preserved; no Worker advertises it, so a ``host_process`` server
+    is unplaceable. New servers are created with ``CONTAINER`` only.
     """
 
     HOST_PROCESS = "host_process"

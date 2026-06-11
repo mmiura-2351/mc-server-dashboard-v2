@@ -38,6 +38,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
     InvalidFilePathError,
+    RemovedExecutionBackendError,
     ServerFilesUnsettledError,
     WorkingSetSeedFailedError,
 )
@@ -199,7 +200,7 @@ async def test_export_then_import_round_trips_files_and_metadata() -> None:
     server = await imp(
         community_id=CommunityId(community),
         name="imported",
-        execution_backend="host_process",
+        execution_backend="container",
         content=archive,
     )
 
@@ -238,7 +239,7 @@ async def test_import_enforces_rcon_on_disabled_properties() -> None:
     await imp(
         community_id=CommunityId(community),
         name="fresh",
-        execution_backend="host_process",
+        execution_backend="container",
         content=archive,
     )
     props = dict(
@@ -271,7 +272,7 @@ async def test_import_preserves_existing_non_empty_rcon_password() -> None:
     await imp(
         community_id=CommunityId(community),
         name="fresh",
-        execution_backend="host_process",
+        execution_backend="container",
         content=archive,
     )
     props = dict(
@@ -296,7 +297,7 @@ async def test_import_seeds_rcon_when_archive_has_no_properties() -> None:
     await imp(
         community_id=CommunityId(community),
         name="fresh",
-        execution_backend="host_process",
+        execution_backend="container",
         content=archive,
     )
     props = dict(
@@ -321,7 +322,7 @@ async def test_import_rejects_non_zip_body() -> None:
         await imp(
             community_id=CommunityId(uuid.uuid4()),
             name="x",
-            execution_backend="host_process",
+            execution_backend="container",
             content=b"not a zip",
         )
 
@@ -335,7 +336,7 @@ async def test_import_rejects_missing_metadata() -> None:
         await imp(
             community_id=CommunityId(uuid.uuid4()),
             name="x",
-            execution_backend="host_process",
+            execution_backend="container",
             content=_zip({"server.properties": b"motd=hi"}),
         )
 
@@ -350,7 +351,7 @@ async def test_import_rejects_wrong_format_version() -> None:
         await imp(
             community_id=CommunityId(uuid.uuid4()),
             name="x",
-            execution_backend="host_process",
+            execution_backend="container",
             content=bad,
         )
 
@@ -365,7 +366,7 @@ async def test_import_rejects_malformed_json() -> None:
         await imp(
             community_id=CommunityId(uuid.uuid4()),
             name="x",
-            execution_backend="host_process",
+            execution_backend="container",
             content=bad,
         )
 
@@ -380,7 +381,7 @@ async def test_import_spigot_metadata_is_unsupported() -> None:
         await imp(
             community_id=CommunityId(uuid.uuid4()),
             name="x",
-            execution_backend="host_process",
+            execution_backend="container",
             content=archive,
         )
 
@@ -395,10 +396,29 @@ async def test_import_assigns_game_port() -> None:
     server = await imp(
         community_id=CommunityId(community),
         name="fresh",
-        execution_backend="host_process",
+        execution_backend="container",
         content=archive,
     )
     assert _PORT_RANGE.start <= server.game_port <= _PORT_RANGE.end  # type: ignore[operator]
+
+
+async def test_import_rejects_removed_host_process_backend() -> None:
+    # Import shares the create use case, so the removed-backend guard (#781) applies
+    # here too: a host_process import 422s with no row left behind.
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata()})
+    with pytest.raises(RemovedExecutionBackendError):
+        await imp(
+            community_id=CommunityId(community),
+            name="fresh",
+            execution_backend="host_process",
+            content=archive,
+        )
+    assert dst_uow.commits == 0
 
 
 async def test_import_oversized_is_too_large() -> None:
@@ -421,7 +441,7 @@ async def test_import_oversized_is_too_large() -> None:
         await imp(
             community_id=CommunityId(community),
             name="fresh",
-            execution_backend="host_process",
+            execution_backend="container",
             content=archive,
         )
     # The validate-first pass (#277) rejects the hostile archive BEFORE the row is
@@ -442,7 +462,7 @@ async def test_import_zip_slip_entry_creates_no_row() -> None:
         await imp(
             community_id=CommunityId(community),
             name="fresh",
-            execution_backend="host_process",
+            execution_backend="container",
             content=archive,
         )
     assert len(dst_uow.servers.by_id) == 0
@@ -477,7 +497,7 @@ async def test_import_publish_failure_is_seed_failed() -> None:
         await imp(
             community_id=CommunityId(community),
             name="fresh",
-            execution_backend="host_process",
+            execution_backend="container",
             content=archive,
         )
     # The row was created before the publish failed (degraded but repairable).
