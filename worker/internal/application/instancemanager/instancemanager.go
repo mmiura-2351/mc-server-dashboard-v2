@@ -468,6 +468,10 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// the store generation (the API then skips the destructive hydrate). Best-effort
 		// (logged, not failed) — see recordGeneration.
 		m.recordGeneration(workingDir, cmd.ServerID, gen)
+		// GC the displaced tree a prior hydrate kept aside (issue #906): a successful
+		// publish proves the store now holds (and supersedes) this server's world, so the
+		// recovery copy is no longer needed. Mirrors the #845 GC-on-success pattern.
+		m.sweepDisplaced(cmd.ServerID)
 	} else {
 		// Stopped-id snapshot succeeded: this is the post-stop FINAL snapshot (or a
 		// snapshot of an at-rest set). The working set is now captured authoritatively
@@ -692,6 +696,21 @@ func (m *Manager) removeScratch(serverID string) {
 			"server_id", serverID, "dir", dir, "error", err)
 	}
 	m.sweepHydrateLeftovers(serverID)
+	// The successful stopped-id snapshot proves the store supersedes this server's
+	// world, so a displaced tree a prior hydrate kept aside for recovery (issue #906)
+	// is now redundant and reclaimed alongside the scratch.
+	m.sweepDisplaced(serverID)
+}
+
+// sweepDisplaced removes the .displaced-<id> tree a prior hydrate moved aside for
+// recovery (issue #906). It runs on the next SUCCESSFUL snapshot for the id — the
+// moment the store provably supersedes the displaced world — mirroring the #845
+// GC-on-success reclamation. The name matches datatransfer.displacedDir exactly
+// (".displaced-<id>"), so only this id's displaced tree is touched. Best-effort: a
+// removal failure is ignored (the leftover is wasted disk, never a correctness
+// problem). A missing tree is a no-op (os.RemoveAll returns nil).
+func (m *Manager) sweepDisplaced(serverID string) {
+	_ = os.RemoveAll(filepath.Join(m.scratchDir, ".displaced-"+serverID))
 }
 
 // sweepHydrateLeftovers removes the .hydrate-<id>-* temp/trash siblings a crashed
