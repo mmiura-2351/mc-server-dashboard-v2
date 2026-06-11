@@ -49,6 +49,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     memory_limit_from_config,
 )
@@ -418,6 +422,7 @@ class UpdateServer:
     file_store: FileStore
     port_range: PortRange
     min_interval_seconds: int = 0
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -450,70 +455,77 @@ class UpdateServer:
             # Range is a pure 422 that runs before the state gate (the precedence
             # ruling), so an out-of-range port on a running server is a 422.
             raise PortOutOfRangeError(str(game_port))
-        async with self.uow:
-            server = await self.uow.servers.get_by_id(server_id)
-            if server is None or server.community_id != community_id:
-                raise ServerNotFoundError(str(server_id.value))
-            if execution_backend is not None and (
-                _parse_execution_backend(execution_backend)
-                is not server.execution_backend
-            ):
-                # The backend is immutable for the server's lifetime (FR-EXE-3).
-                raise ExecutionBackendImmutableError(execution_backend)
-            # The config diff drives two gates. The at-rest gate (issue #115)
-            # applies unless this is a safe-keys-only config edit: a config update
-            # whose changed keys are all in ``_SAFE_CONFIG_KEYS``, with no name
-            # change and no port change, may run in any state. The permission gate
-            # (issue #458) branches by the same changed-key set: scheduling-only
-            # edits need ``backup:schedule``; any other change needs
-            # ``server:update``; a mixed edit needs both. The permission gate runs
-            # after existence (a missing server is 404, no existence signal) and
-            # before the at-rest gate.
-            changed_keys = (
-                set() if config is None else _changed_config_keys(server.config, config)
-            )
-            await self._authorize_update(
-                authorize=authorize,
-                new_name=new_name,
-                game_port=game_port,
-                execution_backend=execution_backend,
-                changed_keys=changed_keys,
-            )
-            safe_only = (
-                new_name is None
-                and game_port is None
-                and config is not None
-                and changed_keys <= _SAFE_CONFIG_KEYS
-            )
-            if not safe_only and not server.is_at_rest():
-                raise ServerNotStoppedError(str(server_id.value))
-            if new_name is not None and new_name != server.name:
-                clash = await self.uow.servers.get_by_community_and_name(
-                    community_id, new_name
+        # Hold the per-server lifecycle lock around the read-check-mutate-commit
+        # transaction (issue #827): the at-rest gate and the same-transaction
+        # server.properties rewrite must serialize against a concurrent start, so a
+        # start cannot flip desired=running between the at-rest check and the commit.
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await self.uow.servers.get_by_id(server_id)
+                if server is None or server.community_id != community_id:
+                    raise ServerNotFoundError(str(server_id.value))
+                if execution_backend is not None and (
+                    _parse_execution_backend(execution_backend)
+                    is not server.execution_backend
+                ):
+                    # The backend is immutable for the server's lifetime (FR-EXE-3).
+                    raise ExecutionBackendImmutableError(execution_backend)
+                # The config diff drives two gates. The at-rest gate (issue #115)
+                # applies unless this is a safe-keys-only config edit: a config update
+                # whose changed keys are all in ``_SAFE_CONFIG_KEYS``, with no name
+                # change and no port change, may run in any state. The permission gate
+                # (issue #458) branches by the same changed-key set: scheduling-only
+                # edits need ``backup:schedule``; any other change needs
+                # ``server:update``; a mixed edit needs both. The permission gate runs
+                # after existence (a missing server is 404, no existence signal) and
+                # before the at-rest gate.
+                changed_keys = (
+                    set()
+                    if config is None
+                    else _changed_config_keys(server.config, config)
                 )
-                if clash is not None and clash.id != server_id:
-                    raise ServerNameAlreadyExistsError(new_name.value)
-                server.name = new_name
-            if config is not None:
-                server.config = config
-            if game_port is not None and game_port != server.game_port:
-                # Uniqueness check excluding the server's own current port, then
-                # rewrite the at-rest server.properties before committing the row.
-                taken = await self.uow.servers.list_game_ports()
-                if server.game_port is not None:
-                    taken.discard(server.game_port)
-                if game_port in taken:
-                    raise PortAlreadyTakenError(str(game_port))
-                await self._rewrite_server_port(
-                    community_id=community_id,
-                    server_id=server_id,
-                    port=game_port,
+                await self._authorize_update(
+                    authorize=authorize,
+                    new_name=new_name,
+                    game_port=game_port,
+                    execution_backend=execution_backend,
+                    changed_keys=changed_keys,
                 )
-                server.game_port = game_port
-            server.updated_at = self.clock.now()
-            await self.uow.servers.update(server)
-            await self.uow.commit()
-        return server
+                safe_only = (
+                    new_name is None
+                    and game_port is None
+                    and config is not None
+                    and changed_keys <= _SAFE_CONFIG_KEYS
+                )
+                if not safe_only and not server.is_at_rest():
+                    raise ServerNotStoppedError(str(server_id.value))
+                if new_name is not None and new_name != server.name:
+                    clash = await self.uow.servers.get_by_community_and_name(
+                        community_id, new_name
+                    )
+                    if clash is not None and clash.id != server_id:
+                        raise ServerNameAlreadyExistsError(new_name.value)
+                    server.name = new_name
+                if config is not None:
+                    server.config = config
+                if game_port is not None and game_port != server.game_port:
+                    # Uniqueness check excluding the server's own current port, then
+                    # rewrite the at-rest server.properties before committing the row.
+                    taken = await self.uow.servers.list_game_ports()
+                    if server.game_port is not None:
+                        taken.discard(server.game_port)
+                    if game_port in taken:
+                        raise PortAlreadyTakenError(str(game_port))
+                    await self._rewrite_server_port(
+                        community_id=community_id,
+                        server_id=server_id,
+                        port=game_port,
+                    )
+                    server.game_port = game_port
+                server.updated_at = self.clock.now()
+                await self.uow.servers.update(server)
+                await self.uow.commit()
+            return server
 
     async def _authorize_update(
         self,
@@ -625,14 +637,13 @@ class DeleteServer:
 
     Two-transaction shape (the DeleteBackup pattern): the at-rest check and the
     destructive prune live in separate transactions with a potentially minutes-long
-    pack between them. The final transaction re-checks ``is_at_rest()`` before the
-    row delete to bound the worst case, but a residual TOCTOU window remains — any
-    concurrent Storage operation that lands AFTER that re-check but before the commit
-    races the prune: a start yields a running server whose working set was already
-    pruned, and a concurrent restore or CreateBackup writes into ``current`` while it
-    is being packed/torn down. Closing it fully needs a per-server lifecycle lock that
-    does not yet exist project-wide (#827); this is the same residual window
-    DeleteBackup carries.
+    pack between them. The whole sequence runs under the per-server lifecycle lock
+    (#827): ``StartServer`` takes the same lock for its desired-state flip, so a
+    start cannot flip ``desired=running`` between the at-rest check and the commit —
+    it blocks until this delete releases, then 409s on the now-deleted (or still
+    at-rest) row. The final transaction still re-checks ``is_at_rest()`` as
+    belt-and-suspenders — redundant while the real lock is wired, but it keeps the
+    never-delete-a-running-server invariant if the lock is ever a no-op.
 
     The backups list is read in that SAME final transaction (not before the pack):
     a backup created during the pack window would otherwise be neither the head nor
@@ -643,49 +654,58 @@ class DeleteServer:
 
     uow: UnitOfWork
     backup_store: BackupArchiveStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(self, *, community_id: CommunityId, server_id: ServerId) -> None:
-        async with self.uow:
-            server = await self.uow.servers.get_by_id(server_id)
-            if server is None or server.community_id != community_id:
-                raise ServerNotFoundError(str(server_id.value))
-            if not server.is_at_rest():
-                raise ServerNotStoppedError(str(server_id.value))
-        # Pack the working set into the retained final tar.gz first. This is
-        # mandatory and fail-closed (#777): if it raises, the row is untouched and
-        # the whole delete fails rather than dropping the latest state.
-        await self.backup_store.prune_to_final_snapshot(
-            community_id=community_id, server_id=server_id
-        )
-        async with self.uow:
-            # Re-check at-rest in the final transaction: a start could have landed
-            # in the (possibly minutes-long) pack window above. Re-checking bounds
-            # the worst case to the small TOCTOU window between here and the commit
-            # (see the class docstring); without a per-server lifecycle lock it
-            # cannot be fully closed.
-            server = await self.uow.servers.get_by_id(server_id)
-            if server is None or server.community_id != community_id:
-                raise ServerNotFoundError(str(server_id.value))
-            if not server.is_at_rest():
-                raise ServerNotStoppedError(str(server_id.value))
-            # Re-list backups HERE, not before the pack: a backup created during the
-            # (minutes-long) pack window would otherwise be neither the snapshotted
-            # head nor in the snapshotted tail, surviving as a third orphan archive
-            # (#777 review). The fresh list keeps the "latest existing at delete time"
-            # semantics — the head is the newest row at this point — and archive-first
-            # ordering holds because the tail is deleted before the row delete below
-            # cascades the rows away. Newest-first; head retained, tail deleted.
-            backups = await self.uow.backups.list_for_server(server_id)
-            for backup in backups[1:]:
-                await self.backup_store.delete(
-                    community_id=community_id,
-                    server_id=server_id,
-                    storage_ref=backup.storage_ref,
-                )
-            await self.uow.servers.delete(server_id)
-            # No FK on resource_grant.resource_id, so the server delete does not
-            # cascade; sweep the grants in the same transaction (Section 10).
-            await self.uow.resource_grants.delete_for_resource(
-                _SERVER_RESOURCE_TYPE, server_id.value
+        # Hold the per-server lifecycle lock across the at-rest check, the
+        # (possibly minutes-long) pack, and the final row-delete commit (issue
+        # #827): a start cannot flip desired=running anywhere in this window, since
+        # StartServer takes the same lock for its desired-state flip and blocks
+        # until this delete releases. This closes the check-then-pack TOCTOU the
+        # second-transaction re-check used to only bound, so that re-check is gone.
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await self.uow.servers.get_by_id(server_id)
+                if server is None or server.community_id != community_id:
+                    raise ServerNotFoundError(str(server_id.value))
+                if not server.is_at_rest():
+                    raise ServerNotStoppedError(str(server_id.value))
+            # Pack the working set into the retained final tar.gz first. This is
+            # mandatory and fail-closed (#777): if it raises, the row is untouched
+            # and the whole delete fails rather than dropping the latest state.
+            await self.backup_store.prune_to_final_snapshot(
+                community_id=community_id, server_id=server_id
             )
-            await self.uow.commit()
+            async with self.uow:
+                # Re-check at-rest in the final transaction as belt-and-suspenders:
+                # the lifecycle lock already blocks a concurrent start for the whole
+                # delete, so this cannot fire in normal operation, but it keeps the
+                # never-delete-a-running-server invariant if the lock is ever
+                # mis-wired (e.g. a NullLifecycleLock), independent of the lock.
+                server = await self.uow.servers.get_by_id(server_id)
+                if server is None or server.community_id != community_id:
+                    raise ServerNotFoundError(str(server_id.value))
+                if not server.is_at_rest():
+                    raise ServerNotStoppedError(str(server_id.value))
+                # Re-list backups HERE, not before the pack: a backup created during
+                # the (minutes-long) pack window would otherwise be neither the
+                # snapshotted head nor in the snapshotted tail, surviving as a third
+                # orphan archive (#777 review). The fresh list keeps the "latest
+                # existing at delete time" semantics — the head is the newest row at
+                # this point — and archive-first ordering holds because the tail is
+                # deleted before the row delete below cascades the rows away.
+                # Newest-first; head retained, tail deleted.
+                backups = await self.uow.backups.list_for_server(server_id)
+                for backup in backups[1:]:
+                    await self.backup_store.delete(
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=backup.storage_ref,
+                    )
+                await self.uow.servers.delete(server_id)
+                # No FK on resource_grant.resource_id, so the server delete does not
+                # cascade; sweep the grants in the same transaction (Section 10).
+                await self.uow.resource_grants.delete_for_resource(
+                    _SERVER_RESOURCE_TYPE, server_id.value
+                )
+                await self.uow.commit()

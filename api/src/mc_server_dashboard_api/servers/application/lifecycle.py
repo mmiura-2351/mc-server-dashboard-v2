@@ -97,6 +97,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotRunningError,
 )
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioner
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     memory_limit_from_config,
 )
@@ -159,11 +163,19 @@ class StartServer:
     clock: Clock
     jar_provisioner: JarProvisioner
     store_generation: StoreGenerationReader
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> Server:
-        async with self.uow:
+        # Take the per-server lifecycle lock around the desired-state flip (issue
+        # #827): an at-rest-gated operation (restore, delete, file edit) holds the
+        # same lock for its whole check-mutate-commit, so this start blocks until
+        # that operation releases — it cannot flip desired=running into the middle
+        # of a Storage mutation. The lock is held only across the flip+commit, not
+        # the post-commit dispatch: once the intent is durable the gated ops see
+        # desired=running and 409, so the slow network launch needs no lock.
+        async with self.lifecycle_lock.hold(server_id), self.uow:
             server = await _load(self.uow, community_id, server_id)
             if server.desired_state is DesiredState.RUNNING:
                 raise InvalidLifecycleTransitionError(str(server_id.value))

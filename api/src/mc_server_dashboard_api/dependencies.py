@@ -191,6 +191,7 @@ from mc_server_dashboard_api.servers.adapters.file_store import (
 from mc_server_dashboard_api.servers.adapters.jar_provisioner import (
     CatalogJarProvisioner,
 )
+from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
 )
@@ -306,6 +307,17 @@ def get_engine(connection: HTTPConnection) -> AsyncEngine:
 
     engine: AsyncEngine = connection.app.state.engine
     return engine
+
+
+def get_lifecycle_lock(request: Request) -> PgLifecycleLock:
+    """Assemble the per-server :class:`LifecycleLock` (issue #827).
+
+    Backed by a PostgreSQL session-level advisory lock on a dedicated connection
+    from the shared engine, so it serializes a start against an at-rest-gated
+    operation across every API worker process.
+    """
+
+    return PgLifecycleLock(engine=get_engine(request))
 
 
 def get_settings(request: Request) -> Settings:
@@ -1230,6 +1242,7 @@ def get_update_server(
         # The per-server snapshot-interval override carried on config is validated
         # against the configured floor here (CONFIGURATION.md Section 5.4).
         min_interval_seconds=get_settings(request).snapshot.min_interval_seconds,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1403,6 +1416,7 @@ def get_start_server(
         clock=ServersSystemClock(),
         jar_provisioner=CatalogJarProvisioner(ensure_jar=ensure_jar),
         store_generation=StorageGenerationReader(storage=get_storage(request)),
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1497,6 +1511,7 @@ def get_write_file(
         uow=ServersUnitOfWork(session_factory),
         control_plane=control_plane,
         file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1523,6 +1538,7 @@ def get_rollback_file(
     return RollbackFile(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1536,6 +1552,7 @@ def get_upload_file(
     return UploadFile(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1600,6 +1617,7 @@ def get_delete_file(
     return DeleteFile(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1613,6 +1631,7 @@ def get_make_dir(
     return MakeDir(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1626,6 +1645,7 @@ def get_rename_file(
     return RenameFile(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1664,6 +1684,7 @@ def get_delete_server(
     return DeleteServer(
         uow=ServersUnitOfWork(session_factory),
         backup_store=backup_store,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1708,6 +1729,7 @@ def get_restore_backup(
     return RestoreBackup(
         uow=ServersUnitOfWork(session_factory),
         backup_store=backup_store,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -1721,6 +1743,7 @@ def get_delete_backup(
     return DeleteBackup(
         uow=ServersUnitOfWork(session_factory),
         backup_store=backup_store,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 

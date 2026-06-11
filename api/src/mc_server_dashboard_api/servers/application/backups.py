@@ -76,6 +76,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotStoppedError,
 )
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -243,6 +247,7 @@ class RestoreBackup:
 
     uow: UnitOfWork
     backup_store: BackupArchiveStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -252,34 +257,40 @@ class RestoreBackup:
         backup_id: BackupId,
         force: bool = False,
     ) -> RestoreResult:
-        async with self.uow:
-            server = await _load(self.uow, community_id, server_id)
-            backup = await self.uow.backups.get_by_id(backup_id)
-            if backup is None or backup.server_id != server_id:
-                raise BackupNotFoundError(str(backup_id.value))
-            storage_ref = backup.storage_ref
-        if not server.is_at_rest():
-            raise ServerNotStoppedError(str(server_id.value))
-        try:
-            corrupt_count = await self.backup_store.restore(
-                community_id=community_id,
-                server_id=server_id,
-                storage_ref=storage_ref,
-                force=force,
-            )
-        except BackupCorruptError:
-            # Refused restore (corrupt, no force): quarantine the backup so an
-            # operator sees it is corrupt, then re-raise for the edge to surface
-            # and audit. ``current`` was left untouched by Storage.
-            await self._quarantine(backup_id)
-            raise
-        if corrupt_count > 0:
-            # Forced restore of a known-corrupt backup: it published, but the
-            # backup IS corrupt, so quarantine it; the edge audits the forced
-            # corrupt restore.
-            await self._quarantine(backup_id)
-            return RestoreResult(forced_corrupt=True, corrupt_count=corrupt_count)
-        return RestoreResult(forced_corrupt=False, corrupt_count=0)
+        # Hold the per-server lifecycle lock across the at-rest check, the Storage
+        # republish, and the quarantine commit (issue #827): a start that flips
+        # desired=running must serialize with this restore, not race the
+        # ``current`` republish underneath it. The lock spans the two transactions
+        # the at-rest check and the (re)publish straddle.
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
+                backup = await self.uow.backups.get_by_id(backup_id)
+                if backup is None or backup.server_id != server_id:
+                    raise BackupNotFoundError(str(backup_id.value))
+                storage_ref = backup.storage_ref
+            if not server.is_at_rest():
+                raise ServerNotStoppedError(str(server_id.value))
+            try:
+                corrupt_count = await self.backup_store.restore(
+                    community_id=community_id,
+                    server_id=server_id,
+                    storage_ref=storage_ref,
+                    force=force,
+                )
+            except BackupCorruptError:
+                # Refused restore (corrupt, no force): quarantine the backup so an
+                # operator sees it is corrupt, then re-raise for the edge to surface
+                # and audit. ``current`` was left untouched by Storage.
+                await self._quarantine(backup_id)
+                raise
+            if corrupt_count > 0:
+                # Forced restore of a known-corrupt backup: it published, but the
+                # backup IS corrupt, so quarantine it; the edge audits the forced
+                # corrupt restore.
+                await self._quarantine(backup_id)
+                return RestoreResult(forced_corrupt=True, corrupt_count=corrupt_count)
+            return RestoreResult(forced_corrupt=False, corrupt_count=0)
 
     async def _quarantine(self, backup_id: BackupId) -> None:
         async with self.uow:
@@ -298,6 +309,7 @@ class DeleteBackup:
 
     uow: UnitOfWork
     backup_store: BackupArchiveStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -306,21 +318,26 @@ class DeleteBackup:
         server_id: ServerId,
         backup_id: BackupId,
     ) -> None:
-        async with self.uow:
-            await _load(self.uow, community_id, server_id)
-            backup = await self.uow.backups.get_by_id(backup_id)
-            if backup is None or backup.server_id != server_id:
-                raise BackupNotFoundError(str(backup_id.value))
-            storage_ref = backup.storage_ref
-        # Delete the archive first (idempotent), then the metadata row last.
-        await self.backup_store.delete(
-            community_id=community_id,
-            server_id=server_id,
-            storage_ref=storage_ref,
-        )
-        async with self.uow:
-            await self.uow.backups.delete(backup_id)
-            await self.uow.commit()
+        # Hold the per-server lifecycle lock across the archive delete and the row
+        # delete (issue #827): a concurrent restore that republishes from this same
+        # backup, or a delete-server pruning the working set, must serialize with
+        # the archive removal rather than race it across the two transactions.
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                await _load(self.uow, community_id, server_id)
+                backup = await self.uow.backups.get_by_id(backup_id)
+                if backup is None or backup.server_id != server_id:
+                    raise BackupNotFoundError(str(backup_id.value))
+                storage_ref = backup.storage_ref
+            # Delete the archive first (idempotent), then the metadata row last.
+            await self.backup_store.delete(
+                community_id=community_id,
+                server_id=server_id,
+                storage_ref=storage_ref,
+            )
+            async with self.uow:
+                await self.uow.backups.delete(backup_id)
+                await self.uow.commit()
 
 
 async def _load_backup(
