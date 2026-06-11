@@ -62,6 +62,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -299,6 +303,7 @@ class WriteFile:
     uow: UnitOfWork
     control_plane: ControlPlane
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -311,43 +316,48 @@ class WriteFile:
         if len(content) > MAX_EDIT_BYTES:
             raise FileTooLargeError(str(len(content)))
 
-        async with self.uow:
-            server = await _load(self.uow, community_id, server_id)
+        # Hold the per-server lifecycle lock across the at-rest check and the
+        # Storage write (issue #827): a start that flips desired=running must
+        # serialize with an at-rest edit, not race the authoritative write. The
+        # running/crashed branches take it harmlessly (no Storage mutation races).
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
 
-        if server.is_at_rest():
-            await self.file_store.write_file(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path=rel_path,
-                content=content,
-            )
-            return
-        if _is_running(server):
-            self.file_store.validate_rel_path(rel_path)
-            # Version the authoritative copy before the worker overwrites the live
-            # working set, so a running edit is as recoverable as an at-rest one
-            # (FR-FILE-3, #344). The worker's EditFile mutates only the live set and
-            # the stop-time snapshot then publishes it as the new authoritative copy,
-            # laundering away whatever it replaced — so the prior content must be
-            # snapshotted HERE or it is lost forever.
-            await self._snapshot_authoritative(community_id, server_id, rel_path)
-            outcome = await self.control_plane.edit_file(
-                worker_id=server.assigned_worker_id,  # type: ignore[arg-type]
-                server_id=server_id,
-                rel_path=rel_path,
-                content=content,
-            )
-            if not outcome.success:
-                _map_file_status(server_id, "WriteFile", outcome)
-            return
-        # A crashed server (desired=RUNNING, observed=CRASHED) lands here -> 409,
-        # not an at-rest Storage edit. Rationale: every (re)start hydrates the
-        # working set from the authoritative copy, but a subsequent Stop dispatches
-        # a final snapshot of the crashed working set, which would CLOBBER any
-        # authoritative edit made while crashed. Requiring stop-first guarantees
-        # that final snapshot lands before any at-rest edit. (A smarter crashed-edit
-        # flow is possible post-M1.)
-        raise ServerFilesUnsettledError(str(server_id.value))
+            if server.is_at_rest():
+                await self.file_store.write_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=rel_path,
+                    content=content,
+                )
+                return
+            if _is_running(server):
+                self.file_store.validate_rel_path(rel_path)
+                # Version the authoritative copy before the worker overwrites the
+                # live working set, so a running edit is as recoverable as an
+                # at-rest one (FR-FILE-3, #344). The worker's EditFile mutates only
+                # the live set and the stop-time snapshot then publishes it as the
+                # new authoritative copy, laundering away whatever it replaced — so
+                # the prior content must be snapshotted HERE or it is lost forever.
+                await self._snapshot_authoritative(community_id, server_id, rel_path)
+                outcome = await self.control_plane.edit_file(
+                    worker_id=server.assigned_worker_id,  # type: ignore[arg-type]
+                    server_id=server_id,
+                    rel_path=rel_path,
+                    content=content,
+                )
+                if not outcome.success:
+                    _map_file_status(server_id, "WriteFile", outcome)
+                return
+            # A crashed server (desired=RUNNING, observed=CRASHED) lands here -> 409,
+            # not an at-rest Storage edit. Rationale: every (re)start hydrates the
+            # working set from the authoritative copy, but a subsequent Stop dispatches
+            # a final snapshot of the crashed working set, which would CLOBBER any
+            # authoritative edit made while crashed. Requiring stop-first guarantees
+            # that final snapshot lands before any at-rest edit. (A smarter crashed-edit
+            # flow is possible post-M1.)
+            raise ServerFilesUnsettledError(str(server_id.value))
 
     async def _snapshot_authoritative(
         self, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -414,6 +424,7 @@ class RollbackFile:
 
     uow: UnitOfWork
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -423,16 +434,19 @@ class RollbackFile:
         rel_path: str,
         version_id: str,
     ) -> None:
-        async with self.uow:
-            server = await _load(self.uow, community_id, server_id)
-        if not server.is_at_rest():
-            raise ServerNotStoppedError(str(server_id.value))
-        await self.file_store.rollback(
-            community_id=community_id,
-            server_id=server_id,
-            rel_path=rel_path,
-            version_id=version_id,
-        )
+        # Hold the per-server lifecycle lock across the at-rest check and the
+        # republish so a concurrent start cannot race the rollback (issue #827).
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
+            if not server.is_at_rest():
+                raise ServerNotStoppedError(str(server_id.value))
+            await self.file_store.rollback(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=rel_path,
+                version_id=version_id,
+            )
 
 
 def _join(dir_path: str, name: str) -> str:
@@ -608,6 +622,7 @@ class UploadFile:
     # the defaults.
     max_bytes: int = MAX_UPLOAD_BYTES
     max_entries: int = MAX_ARCHIVE_ENTRIES
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -624,46 +639,50 @@ class UploadFile:
         self.file_store.validate_rel_path(dir_path)
         _check_entry_path(filename)
 
-        async with self.uow:
-            server = await _load(self.uow, community_id, server_id)
-        if not server.is_at_rest():
-            raise ServerFilesUnsettledError(str(server_id.value))
+        # Hold the per-server lifecycle lock across the at-rest check and the
+        # (multi-file) republish so a concurrent start cannot race the upload
+        # writing into the authoritative copy (issue #827).
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
+            if not server.is_at_rest():
+                raise ServerFilesUnsettledError(str(server_id.value))
 
-        if extract:
-            # Validate the whole archive (traversal / symlink / size / entry-count)
-            # in a dry-run pass BEFORE writing anything: a mid-archive rejection
-            # then leaves no partially-written versioned files (issue #269). The
-            # archive bytes are already in memory, so the second pass is cheap.
-            _validate_archive(
-                filename,
-                content,
-                max_bytes=self.max_bytes,
-                max_entries=self.max_entries,
-            )
-            # Duplicate entry names (two members with the same path) are written
-            # in archive order, so the last occurrence wins — the same last-write
-            # semantics a sequence of plain writes would have. Left as-is (no
-            # de-dup / reject) for M2; an archive with colliding names is
-            # malformed and the resulting authoritative copy is well-defined.
-            for entry_path, data in _archive_entries(
-                filename,
-                content,
-                max_bytes=self.max_bytes,
-                max_entries=self.max_entries,
-            ):
-                await self.file_store.write_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=_join(dir_path, entry_path),
-                    content=data,
+            if extract:
+                # Validate the whole archive (traversal / symlink / size / entry-count)
+                # in a dry-run pass BEFORE writing anything: a mid-archive rejection
+                # then leaves no partially-written versioned files (issue #269). The
+                # archive bytes are already in memory, so the second pass is cheap.
+                _validate_archive(
+                    filename,
+                    content,
+                    max_bytes=self.max_bytes,
+                    max_entries=self.max_entries,
                 )
-            return
-        await self.file_store.write_file(
-            community_id=community_id,
-            server_id=server_id,
-            rel_path=_join(dir_path, filename),
-            content=content,
-        )
+                # Duplicate entry names (two members with the same path) are written
+                # in archive order, so the last occurrence wins — the same last-write
+                # semantics a sequence of plain writes would have. Left as-is (no
+                # de-dup / reject) for M2; an archive with colliding names is
+                # malformed and the resulting authoritative copy is well-defined.
+                for entry_path, data in _archive_entries(
+                    filename,
+                    content,
+                    max_bytes=self.max_bytes,
+                    max_entries=self.max_entries,
+                ):
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=_join(dir_path, entry_path),
+                        content=data,
+                    )
+                return
+            await self.file_store.write_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=_join(dir_path, filename),
+                content=content,
+            )
 
 
 @dataclass(frozen=True)
@@ -840,6 +859,7 @@ class DeleteFile:
 
     uow: UnitOfWork
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -848,20 +868,25 @@ class DeleteFile:
             # Refuse to delete the working-set root itself: that is a wipe, not a
             # file op (use backups/restore for whole-working-set lifecycle).
             raise InvalidFilePathError(rel_path)
-        async with self.uow:
-            server = await _load(self.uow, community_id, server_id)
-        if not server.is_at_rest():
-            raise ServerFilesUnsettledError(str(server_id.value))
+        # Hold the per-server lifecycle lock across the at-rest check and the
+        # delete so a concurrent start cannot race the mutation (issue #827).
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
+            if not server.is_at_rest():
+                raise ServerFilesUnsettledError(str(server_id.value))
 
-        is_dir = await _path_is_dir(self.file_store, community_id, server_id, rel_path)
-        if is_dir:
-            await self.file_store.delete_dir(
-                community_id=community_id, server_id=server_id, rel_path=rel_path
+            is_dir = await _path_is_dir(
+                self.file_store, community_id, server_id, rel_path
             )
-        else:
-            await self.file_store.delete_file(
-                community_id=community_id, server_id=server_id, rel_path=rel_path
-            )
+            if is_dir:
+                await self.file_store.delete_dir(
+                    community_id=community_id, server_id=server_id, rel_path=rel_path
+                )
+            else:
+                await self.file_store.delete_file(
+                    community_id=community_id, server_id=server_id, rel_path=rel_path
+                )
 
 
 @dataclass(frozen=True)
@@ -875,18 +900,22 @@ class MakeDir:
 
     uow: UnitOfWork
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.file_store.validate_rel_path(rel_path)
-        async with self.uow:
-            server = await _load(self.uow, community_id, server_id)
-        if not server.is_at_rest():
-            raise ServerFilesUnsettledError(str(server_id.value))
-        await self.file_store.make_dir(
-            community_id=community_id, server_id=server_id, rel_path=rel_path
-        )
+        # Hold the per-server lifecycle lock across the at-rest check and the
+        # make-dir so a concurrent start cannot race the mutation (issue #827).
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
+            if not server.is_at_rest():
+                raise ServerFilesUnsettledError(str(server_id.value))
+            await self.file_store.make_dir(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
 
 
 @dataclass(frozen=True)
@@ -911,6 +940,7 @@ class RenameFile:
 
     uow: UnitOfWork
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -922,37 +952,40 @@ class RenameFile:
     ) -> None:
         self.file_store.validate_rel_path(from_path)
         self.file_store.validate_rel_path(to_path)
-        async with self.uow:
-            server = await _load(self.uow, community_id, server_id)
-        if not server.is_at_rest():
-            raise ServerFilesUnsettledError(str(server_id.value))
+        # Hold the per-server lifecycle lock across the at-rest check and the
+        # write+delete republish so a concurrent start cannot race it (issue #827).
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
+            if not server.is_at_rest():
+                raise ServerFilesUnsettledError(str(server_id.value))
 
-        if from_path == to_path:
-            # A no-op rename onto itself: confirm the source exists (404 if not),
-            # then return without rewriting (no spurious version).
-            await self.file_store.read_file(
+            if from_path == to_path:
+                # A no-op rename onto itself: confirm the source exists (404 if not),
+                # then return without rewriting (no spurious version).
+                await self.file_store.read_file(
+                    community_id=community_id, server_id=server_id, rel_path=from_path
+                )
+                return
+
+            # Read the source first (404 if missing). A directory source raises here
+            # (read_file of a dir is NotFound), so a directory rename is refused as a
+            # missing file rather than partially moved.
+            content = await self.file_store.read_file(
                 community_id=community_id, server_id=server_id, rel_path=from_path
             )
-            return
+            if await _path_exists(self.file_store, community_id, server_id, to_path):
+                raise FileAlreadyExistsError(to_path)
 
-        # Read the source first (404 if missing). A directory source raises here
-        # (read_file of a dir is NotFound), so a directory rename is refused as a
-        # missing file rather than partially moved.
-        content = await self.file_store.read_file(
-            community_id=community_id, server_id=server_id, rel_path=from_path
-        )
-        if await _path_exists(self.file_store, community_id, server_id, to_path):
-            raise FileAlreadyExistsError(to_path)
-
-        await self.file_store.write_file(
-            community_id=community_id,
-            server_id=server_id,
-            rel_path=to_path,
-            content=content,
-        )
-        await self.file_store.delete_file(
-            community_id=community_id, server_id=server_id, rel_path=from_path
-        )
+            await self.file_store.write_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=to_path,
+                content=content,
+            )
+            await self.file_store.delete_file(
+                community_id=community_id, server_id=server_id, rel_path=from_path
+            )
 
 
 @dataclass(frozen=True)

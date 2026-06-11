@@ -13,6 +13,7 @@ import io
 import uuid
 import zipfile
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import replace
 
 from mc_server_dashboard_api.servers.domain.backup import (
@@ -52,6 +53,7 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     JarProvisioningError,
 )
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
@@ -617,6 +619,27 @@ class FakeUnitOfWork(UnitOfWork):
 
     async def rollback(self) -> None:
         return None
+
+
+class FakeLifecycleLock(LifecycleLock):
+    """Recording :class:`LifecycleLock` double for the use-case tests.
+
+    Records ``(server_id, "acquire"|"release")`` events in order so a test can
+    assert a gated use case (and StartServer's flip) takes the lock around its
+    work. The actual cross-connection blocking is pinned against a real
+    PostgreSQL advisory lock in the integration suite.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[tuple[ServerId, str]] = []
+
+    @asynccontextmanager
+    async def hold(self, server_id: ServerId) -> "AsyncIterator[None]":
+        self.events.append((server_id, "acquire"))
+        try:
+            yield
+        finally:
+            self.events.append((server_id, "release"))
 
 
 class FakeControlPlane(ControlPlane):
