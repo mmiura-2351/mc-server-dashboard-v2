@@ -178,9 +178,10 @@ hydrate-then-start, so that round-trip is bounded by the hydrate budget plus the
 start command deadline. Below the floor, a slow start crashed/timed-out mid-flight
 can still be converging on its assigned Worker when the reconciler's orphan path
 re-places it elsewhere and starts a **second** live instance. `create_app` logs a
-`WARN` (not a hard failure) when the floor is violated. The defaults
-(`120 ≤ 600 + 30`) trip the warning, so raise `grace_seconds` (or lower the
-timeouts) when running the reconciler with a large hydrate budget.
+`WARN` (not a hard failure) when the floor is violated. The stock default
+(`grace_seconds=660`) already exceeds the stock floor (600 + 30), so no warning
+fires out of the box; lower `grace_seconds` (or raise the timeouts) only when
+adjusting the reconciler for non-default budgets.
 
 > **Upgrade impact (existing dev setups).** This is a behavior change: a dev
 > process with `control.enabled=true` that previously bound plaintext now fails
@@ -254,7 +255,7 @@ channel there is nothing to re-dispatch.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `reconciler.interval_seconds` | `60` | | Loop resolution: how often the reconciler scans for diverged servers. Must be positive. |
-| `reconciler.grace_seconds` | `120` | | How long a divergence must persist (measured from the last Worker report) before it is acted on, so the normal in-flight lifecycle path has time to converge first. Must be positive. |
+| `reconciler.grace_seconds` | `660` | | How long a divergence must persist (measured from the last Worker report) before it is acted on, so the normal in-flight lifecycle path has time to converge first. Must be positive and `> control.hydrate_timeout_seconds + control.command_timeout_seconds` (the start round-trip budget); below the floor the reconciler can re-dispatch a first start before it settles, risking a duplicate live instance (a `WARN` fires on boot). The stock default (660) satisfies the stock floor (600 + 30). |
 | `reconciler.backoff_base_seconds` | `30` | | Base of the per-server exponential backoff after a failed re-dispatch; the wait doubles per consecutive failure. Must be positive. |
 | `reconciler.backoff_max_seconds` | `3600` | | Cap on the per-server backoff wait. Also doubles as the slack past `next_eligible_at` that keeps crash-loop damping alive across a slow (modded) boot's `starting` window. Must be positive, `>=` `backoff_base_seconds`, and `>= 600` (a smaller slack lets a still-diverged server expire and reset its failure count, re-arming the boot-crash loop). |
 

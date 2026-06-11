@@ -13,7 +13,7 @@ block on the stops completing, and no new orchestration loop is introduced.
 
 Convergence is ASYNCHRONOUS and needs the Worker connected: the actual stop +
 snapshot only happen after the reconciler's grace window (``grace_seconds``,
-120s default) plus a reconciler tick, and only while the Worker stays
+660s default) plus a reconciler tick, and only while the Worker stays
 heartbeating (the reconciler skips disconnected Workers). An operator following
 the FR-WRK-5 workflow MUST keep the Worker up until the stops converge —
 shutting the host down immediately defers every stop (and its final snapshot)
