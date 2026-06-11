@@ -22,11 +22,26 @@ import uuid
 import pytest
 
 from mc_server_dashboard_api.servers.application.backups import (
+    CreateBackup,
     DeleteBackup,
     RestoreBackup,
 )
+from mc_server_dashboard_api.servers.application.files import (
+    DeleteFile,
+    MakeDir,
+    RenameFile,
+    RollbackFile,
+    UploadFile,
+    WriteFile,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import StartServer
-from mc_server_dashboard_api.servers.application.manage_server import DeleteServer
+from mc_server_dashboard_api.servers.application.manage_server import (
+    DeleteServer,
+    UpdateServer,
+)
+from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
+    SnapshotServer,
+)
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
@@ -34,6 +49,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -49,6 +65,7 @@ from tests.servers.fakes import (
     FakeBackupRepository,
     FakeClock,
     FakeControlPlane,
+    FakeFileStore,
     FakeJarProvisioner,
     FakeLifecycleLock,
     FakeServerRepository,
@@ -240,3 +257,130 @@ async def test_restore_releases_lock_on_corrupt(force: bool) -> None:
             )
 
     assert lock.events[-1] == (server.id, "release")
+
+
+_ACQUIRE_RELEASE = "acquire", "release"
+
+
+def _seeded() -> tuple[Server, FakeServerRepository, FakeLifecycleLock]:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    return server, repo, FakeLifecycleLock()
+
+
+async def test_write_file_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    await WriteFile(
+        uow=FakeUnitOfWork(servers=repo),
+        control_plane=FakeControlPlane(),
+        file_store=FakeFileStore(),
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, rel_path="a.txt", content=b"x")
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_rollback_file_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    await RollbackFile(
+        uow=FakeUnitOfWork(servers=repo),
+        file_store=FakeFileStore(),
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, rel_path="a.txt", version_id="v1")
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_upload_file_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    await UploadFile(
+        uow=FakeUnitOfWork(servers=repo),
+        file_store=FakeFileStore(),
+        lifecycle_lock=lock,
+    )(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        dir_path="",
+        filename="a.txt",
+        content=b"x",
+        extract=False,
+    )
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_delete_file_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    await DeleteFile(
+        uow=FakeUnitOfWork(servers=repo),
+        file_store=FakeFileStore(),
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, rel_path="a.txt")
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_make_dir_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    await MakeDir(
+        uow=FakeUnitOfWork(servers=repo),
+        file_store=FakeFileStore(),
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, rel_path="d")
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_rename_file_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    store = FakeFileStore()
+    store.files["a.txt"] = b"x"
+    # Rename onto itself: a no-op that only reads the source, so the at-rest path
+    # runs without the fake's always-succeeds list_dir making the destination look
+    # taken — the lock scope is what this asserts, not the move semantics.
+    await RenameFile(
+        uow=FakeUnitOfWork(servers=repo),
+        file_store=store,
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, from_path="a.txt", to_path="a.txt")
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_update_server_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+
+    async def _allow(_perm: str) -> bool:
+        return True
+
+    await UpdateServer(
+        uow=FakeUnitOfWork(servers=repo),
+        clock=FakeClock(_NOW),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+        lifecycle_lock=lock,
+    )(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        name="renamed",
+        authorize=_allow,
+    )
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_create_backup_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    archive = FakeBackupArchiveStore()
+    uow = FakeUnitOfWork(servers=repo, backups=FakeBackupRepository())
+    await CreateBackup(
+        uow=uow,
+        control_plane=FakeControlPlane(),
+        backup_store=archive,
+        snapshot_server=SnapshotServer(uow=uow, control_plane=FakeControlPlane()),
+        clock=FakeClock(_NOW),
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL)
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]

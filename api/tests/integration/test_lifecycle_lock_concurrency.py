@@ -26,6 +26,7 @@ import uuid
 from collections.abc import AsyncIterator
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
@@ -37,6 +38,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.servers.adapters import (
+    lifecycle_lock as lifecycle_lock_mod,
+)
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
@@ -52,6 +56,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import ServerBusyError
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -235,3 +240,51 @@ async def test_start_blocks_until_restore_releases_the_lock(
     persisted = await _load(engine, server.id)
     assert persisted is not None
     assert persisted.desired_state is DesiredState.RUNNING
+
+
+async def test_held_lock_connection_is_not_idle_in_transaction(
+    engine: AsyncEngine,
+) -> None:
+    # Regression for issue #876: without AUTOCOMMIT the dedicated lock connection
+    # autobegins a transaction on the acquire SELECT and never commits, so it sits
+    # idle-in-transaction for the whole gated op -- a deployment with
+    # idle_in_transaction_session_timeout then kills it mid-op and the lock silently
+    # drops. Assert that while the lock is held, no backend is idle-in-transaction.
+    server = await _create_at_rest_server(engine)
+    lock = PgLifecycleLock(engine=engine)
+
+    async with lock.hold(server.id):
+        async with engine.connect() as probe:
+            idle_in_txn = await probe.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE state = 'idle in transaction'"
+                )
+            )
+    # The probe connection itself runs in a transaction, but a plain SELECT leaves it
+    # 'active' while the query runs, not 'idle in transaction'; the lock connection
+    # must not be idle-in-transaction either.
+    assert idle_in_txn == 0
+
+
+async def test_second_acquire_raises_server_busy_when_lock_is_held(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bounded acquire (issue #876): a waiter does not block indefinitely (pinning a
+    # pool slot) -- it gives up after the budget and raises ServerBusyError, a 409
+    # the caller retries. Shrink the budget so the test is fast.
+    monkeypatch.setattr(lifecycle_lock_mod, "_ACQUIRE_BUDGET_SECONDS", 0.3)
+    monkeypatch.setattr(lifecycle_lock_mod, "_ACQUIRE_POLL_SECONDS", 0.05)
+    server = await _create_at_rest_server(engine)
+    lock = PgLifecycleLock(engine=engine)
+
+    async with lock.hold(server.id):
+        with pytest.raises(ServerBusyError):
+            async with lock.hold(server.id):
+                pass  # pragma: no cover - the acquire raises before the body
+
+    # After the holder releases, the lock is acquirable again (the failed waiter did
+    # not leave it stuck).
+    async with lock.hold(server.id):
+        pass

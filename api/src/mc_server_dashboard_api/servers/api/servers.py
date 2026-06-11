@@ -103,6 +103,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
+    ServerBusyError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -542,6 +543,10 @@ async def update_server(
         raise _conflict("execution_backend_immutable") from exc
     except ServerNotStoppedError as exc:
         raise _conflict("server_not_stopped") from exc
+    except ServerBusyError as exc:
+        # A concurrent lifecycle op held the per-server lock past the acquire
+        # budget (issue #876): a transient 409 the caller retries.
+        raise _conflict("server_busy") from exc
     except InvalidServerNameError as exc:
         raise _unprocessable("invalid_server_name") from exc
     except InvalidSnapshotIntervalError as exc:
@@ -601,6 +606,10 @@ async def delete_server(
         raise _not_found() from exc
     except ServerNotStoppedError as exc:
         raise _conflict("server_not_stopped") from exc
+    except ServerBusyError as exc:
+        # A concurrent lifecycle op held the per-server lock past the acquire
+        # budget (issue #876): a transient 409 the caller retries.
+        raise _conflict("server_busy") from exc
     await _record(recorder, ops.SERVER_DELETE, authorized, community_id, server_id)
 
 
@@ -818,6 +827,11 @@ async def _read_capped_upload(file: UploadFile) -> bytes:
 _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     InvalidLifecycleTransitionError: (Outcome.DENIED, "invalid_transition"),
     LifecycleTransitionConflictError: (Outcome.DENIED, "transition_conflict"),
+    # StartServer holds the per-server lifecycle lock for its flip; if a gated op
+    # holds it past the acquire budget the start is refused as a transient 409
+    # ``server_busy`` (issue #876), the same retry-able conflict the gated routes
+    # surface. Only start takes the lock, so stop/restart never raise this.
+    ServerBusyError: (Outcome.DENIED, "server_busy"),
     CommandDispatchError: (Outcome.DENIED, "command_failed"),
     ServerNotRunningError: (Outcome.DENIED, "server_not_running"),
     NoEligibleWorkerError: (Outcome.ERROR, "no_eligible_worker"),

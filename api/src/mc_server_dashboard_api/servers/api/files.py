@@ -103,6 +103,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
+    ServerBusyError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -322,6 +323,11 @@ async def write_file(
             recorder, ops.FILE_WRITE, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_WRITE, authorized, community_id, server_id
+        )
+        raise _conflict("server_busy") from exc
     except WorkerUnavailableError as exc:
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
@@ -411,6 +417,11 @@ async def rollback_file(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
         )
         raise _conflict("server_not_stopped") from exc
+    except ServerBusyError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
+        )
+        raise _conflict("server_busy") from exc
     await _record_file(recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id)
 
 
@@ -467,6 +478,11 @@ async def upload_file(
             recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
+        )
+        raise _conflict("server_busy") from exc
     await _record_file(recorder, ops.FILE_UPLOAD, authorized, community_id, server_id)
 
 
@@ -601,6 +617,11 @@ async def rename_file(
             recorder, ops.FILE_RENAME, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_RENAME, authorized, community_id, server_id
+        )
+        raise _conflict("server_busy") from exc
     await _record_file(recorder, ops.FILE_RENAME, authorized, community_id, server_id)
 
 
@@ -650,6 +671,11 @@ async def delete_file(
             recorder, ops.FILE_DELETE, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_DELETE, authorized, community_id, server_id
+        )
+        raise _conflict("server_busy") from exc
     await _record_file(recorder, ops.FILE_DELETE, authorized, community_id, server_id)
 
 
@@ -699,6 +725,11 @@ async def make_directory(
             recorder, ops.FILE_MKDIR, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_MKDIR, authorized, community_id, server_id
+        )
+        raise _conflict("server_busy") from exc
     await _record_file(recorder, ops.FILE_MKDIR, authorized, community_id, server_id)
 
 

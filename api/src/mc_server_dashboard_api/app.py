@@ -85,6 +85,7 @@ from mc_server_dashboard_api.servers.adapters.control_plane import (
 from mc_server_dashboard_api.servers.adapters.jar_provisioner import (
     CatalogJarProvisioner,
 )
+from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
     run_reconciler_loop,
 )
@@ -564,6 +565,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         )
                     ),
                     store_generation=StorageGenerationReader(storage=storage),
+                    # Carry the real per-server lock so the reconciler's own start
+                    # serializes against an at-rest-gated op the same way the HTTP
+                    # start does (issue #876): a reconciler tick must not flip
+                    # desired=running into the middle of a restore/delete either.
+                    lifecycle_lock=PgLifecycleLock(engine=engine),
                 ),
                 make_stop_server=lambda: StopServer(
                     uow=ServersUnitOfWork(create_session_factory(engine)),

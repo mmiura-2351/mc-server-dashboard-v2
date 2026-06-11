@@ -127,6 +127,7 @@ class CreateBackup:
     backup_store: BackupArchiveStore
     snapshot_server: SnapshotServer
     clock: Clock
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -136,42 +137,52 @@ class CreateBackup:
         source: BackupSource,
         created_by: uuid.UUID | None = None,
     ) -> Backup:
-        async with self.uow:
-            server = await _load(self.uow, community_id, server_id)
+        # Hold the per-server lifecycle lock across the at-rest check, the
+        # (possibly running-path save-all + snapshot) source preparation, and the
+        # archive of ``current`` (issue #827, #876): a lock-holding restore that
+        # republishes ``current`` mid-tar would otherwise tear the archive (the
+        # #827-class gap noted in #827). The same lock serializes this archive
+        # against a concurrent restore/delete just as RestoreBackup serializes its
+        # republish.
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
 
-        if _is_running(server):
-            await self._save_all_and_snapshot(server)
-        elif not server.is_at_rest():
-            # starting / stopping / restarting / crashed / mismatch: no source.
-            raise BackupUnsettledError(str(server_id.value))
+            if _is_running(server):
+                await self._save_all_and_snapshot(server)
+            elif not server.is_at_rest():
+                # starting / stopping / restarting / crashed / mismatch: no source.
+                raise BackupUnsettledError(str(server_id.value))
 
-        # Both the at-rest path and the running path (after the snapshot just
-        # published) archive the authoritative copy (Section 6.9, FR-BAK-2).
-        storage_ref = await self.backup_store.create_from_current(
-            community_id=community_id, server_id=server_id
-        )
-        # Record the archive size now that it exists, so the row carries it (older
-        # rows predate this and stay NULL — reported as unknown in stats, #281).
-        size_bytes = await self.backup_store.size(
-            community_id=community_id, server_id=server_id, storage_ref=storage_ref
-        )
-        backup = Backup(
-            id=BackupId.new(),
-            server_id=server_id,
-            storage_ref=storage_ref,
-            size_bytes=size_bytes,
-            source=source,
-            # Healthy by construction: ``create_from_current`` runs through the
-            # integrity gate (#749), which refuses to archive a corrupt working
-            # set — so reaching here means the archived contents were sound (#742).
-            health=BackupHealth.HEALTHY,
-            created_by=created_by,
-            created_at=self.clock.now(),
-        )
-        async with self.uow:
-            await self.uow.backups.add(backup)
-            await self.uow.commit()
-        return backup
+            # Both the at-rest path and the running path (after the snapshot just
+            # published) archive the authoritative copy (Section 6.9, FR-BAK-2).
+            storage_ref = await self.backup_store.create_from_current(
+                community_id=community_id, server_id=server_id
+            )
+            # Record the archive size now that it exists, so the row carries it
+            # (older rows predate this and stay NULL — reported as unknown in stats,
+            # #281).
+            size_bytes = await self.backup_store.size(
+                community_id=community_id, server_id=server_id, storage_ref=storage_ref
+            )
+            backup = Backup(
+                id=BackupId.new(),
+                server_id=server_id,
+                storage_ref=storage_ref,
+                size_bytes=size_bytes,
+                source=source,
+                # Healthy by construction: ``create_from_current`` runs through the
+                # integrity gate (#749), which refuses to archive a corrupt working
+                # set — so reaching here means the archived contents were sound
+                # (#742).
+                health=BackupHealth.HEALTHY,
+                created_by=created_by,
+                created_at=self.clock.now(),
+            )
+            async with self.uow:
+                await self.uow.backups.add(backup)
+                await self.uow.commit()
+            return backup
 
     async def _save_all_and_snapshot(self, server: Server) -> None:
         """Flush the live world (save-all) then publish an on-demand snapshot.

@@ -36,9 +36,13 @@ class LifecycleLock(abc.ABC):
     def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
         """Acquire the per-server lock; release it when the context exits.
 
-        Blocks until the lock is free for ``server_id``. The returned context
-        manager holds the lock for its body and releases on exit (normal or
-        error).
+        Waits until the lock is free for ``server_id``, but the wait is *bounded*
+        (issue #876): a real implementation that would otherwise pin a scarce
+        resource (a DB pool connection) gives up after a short budget and raises
+        :class:`~mc_server_dashboard_api.servers.domain.errors.ServerBusyError`
+        (a transient 409 the caller retries) when another lifecycle operation holds
+        the lock too long. The returned context manager holds the lock for its body
+        and releases on exit (normal or error).
         """
 
 

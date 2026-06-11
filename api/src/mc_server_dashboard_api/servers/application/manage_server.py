@@ -661,8 +661,9 @@ class DeleteServer:
         # (possibly minutes-long) pack, and the final row-delete commit (issue
         # #827): a start cannot flip desired=running anywhere in this window, since
         # StartServer takes the same lock for its desired-state flip and blocks
-        # until this delete releases. This closes the check-then-pack TOCTOU the
-        # second-transaction re-check used to only bound, so that re-check is gone.
+        # until this delete releases. This closes the check-then-pack TOCTOU; the
+        # second-transaction re-check below is now belt-and-suspenders (it only
+        # fires if the lock is ever a no-op), kept rather than removed.
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
