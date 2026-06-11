@@ -237,3 +237,101 @@ func TestFailedStopRetainsScratch(t *testing.T) {
 		t.Fatalf("scratch dir removed on a failed stop (the orphan may still be writing it): %v", err)
 	}
 }
+
+// seedDisplaced creates a .displaced-<id> tree, as a prior hydrate would have left
+// when it moved a retained-for-recovery scratch aside (issue #906). Returns the path
+// so a test can assert whether a snapshot reclaimed it.
+func seedDisplaced(t *testing.T, m *Manager, serverID string) string {
+	t.Helper()
+	dir := filepath.Join(m.scratchDir, ".displaced-"+serverID)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "level.dat"), []byte("recoverable"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// A successful STOPPED-id snapshot proves the store now supersedes this server's
+// world, so the .displaced-<id> recovery tree a prior hydrate kept aside (issue #906)
+// is reclaimed alongside the scratch — mirroring the #845 GC-on-success pattern.
+func TestStoppedSnapshotGCsDisplacedTree(t *testing.T) {
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	seedScratch(t, m, "s1") // stopped id: no running instance
+	displaced := seedDisplaced(t, m, "s1")
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("stopped-id snapshot = %+v, want success", res)
+	}
+	if _, err := os.Stat(displaced); !os.IsNotExist(err) {
+		t.Fatalf("displaced tree not reclaimed after a successful stopped-id snapshot (issue #906): stat err = %v", err)
+	}
+}
+
+// A successful RUNNING-id snapshot also supersedes any displaced recovery tree (the
+// store now holds the live world), so it GCs .displaced-<id> too (issue #906). The
+// live scratch dir itself is retained — the server still owns it.
+func TestRunningSnapshotGCsDisplacedTree(t *testing.T) {
+	tr := &fakeTransfer{}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	_ = m.Handle(context.Background(), startCmd())
+	dir := seedScratch(t, m, "s1")
+	displaced := seedDisplaced(t, m, "s1")
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("running-id snapshot = %+v, want success", res)
+	}
+	if _, err := os.Stat(displaced); !os.IsNotExist(err) {
+		t.Fatalf("displaced tree not reclaimed after a successful running-id snapshot (issue #906): stat err = %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("live scratch dir wrongly removed by a running-server snapshot: %v", err)
+	}
+}
+
+// A FAILED snapshot must RETAIN the displaced recovery tree: the store did not
+// capture the world, so the .displaced-<id> copy is still the only one — GC-ing it
+// would defeat the recovery insurance entirely (issue #906).
+func TestSnapshotFailureRetainsDisplacedTree(t *testing.T) {
+	tr := &fakeTransfer{err: errors.New("boom")}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	seedScratch(t, m, "s1")
+	displaced := seedDisplaced(t, m, "s1")
+
+	if res := m.Handle(context.Background(), snapshotCmd()); res.Success {
+		t.Fatalf("snapshot = %+v, want failure", res)
+	}
+	if _, err := os.Stat(displaced); err != nil {
+		t.Fatalf("displaced tree removed after a FAILED snapshot (recovery copy lost, issue #906): %v", err)
+	}
+}
+
+// A .displaced-<id> tree must never be treated as a LIVE scratch: it is dot-prefixed
+// so it cannot collide with a server-id scratch dir, and the id-scoped sweeps touch
+// only their own server's siblings (issue #906). ScanHeldServers may list it, but the
+// API only consults held entries for ids it assigned, never ".displaced-*".
+func TestDisplacedTreeNotTreatedAsLiveScratch(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	displaced := seedDisplaced(t, m, "s1")
+
+	// A held-server scan never reports an id named "s1" off the displaced tree (the
+	// scan sees ".displaced-s1", which the API never matches to the assigned id "s1").
+	for _, h := range ScanHeldServers(m.scratchDir, nil) {
+		if h.ServerID == "s1" {
+			t.Fatalf("displaced tree reported as held server id %q (would be hydrated/started from)", h.ServerID)
+		}
+	}
+	// The hydrate-leftover sweep for s1 must not remove the displaced tree (different
+	// prefix), and a displaced sweep for a DIFFERENT id must not touch s1's displaced.
+	m.sweepHydrateLeftovers("s1")
+	if _, err := os.Stat(displaced); err != nil {
+		t.Fatalf("displaced tree removed by the s1 hydrate-leftover sweep: %v", err)
+	}
+	m.sweepDisplaced("s2")
+	if _, err := os.Stat(displaced); err != nil {
+		t.Fatalf("displaced tree for s1 removed by an s2 displaced sweep (wrong id): %v", err)
+	}
+}

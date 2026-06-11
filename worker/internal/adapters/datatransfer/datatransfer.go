@@ -262,12 +262,27 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // alongside removing scratchDir/<id> once the stopped-id final snapshot publishes
 // (issue #766/#841/#842, instancemanager.removeScratch).
 //
+// Displaced-tree retention (issue #906): the old working set this hydrate replaces
+// is NOT deleted — it is renamed aside to the per-server .displaced-<id> sibling.
+// When the final stop snapshot definitively failed (e.g. refused by an integrity
+// gate, #905), #845 retained the scratch precisely so the only copy of the world
+// survives; deleting it here on the next start's hydrate would destroy that copy.
+// Moving it aside keeps it recoverable by an operator after such an incident. The
+// displaced tree is dot-prefixed so it is never mistaken for a live scratch (same
+// reasoning as the .hydrate-* siblings above): ScanHeldServers reports it but the
+// API never matches .displaced-* to an assigned id. At most one displaced tree exists
+// per server — a new hydrate removes the prior one first (it predates the store state
+// the newer tree was displaced by). It is GC'd on the next SUCCESSFUL snapshot for
+// this id, the moment the store provably supersedes it (instancemanager.sweepDisplaced,
+// mirroring the #845 GC-on-success pattern).
+//
 // Crash safety: the temp tree is built fully before any rename. The swap then does
-// (1) rename destDir -> trash, (2) rename temp -> destDir, (3) remove trash. A
-// crash between (1) and (2) leaves destDir absent but BOTH the trash (old) and temp
-// (new) copies on disk, so no data is lost; the next start re-hydrates regardless
-// (the missing destDir reports as "holding nothing") and the leftover sweep clears
-// the orphans. A crash after (2) leaves a stale trash dir, swept next time.
+// (1) rename destDir -> trash, (2) rename temp -> destDir, (3) rename trash ->
+// .displaced-<id> (replacing any prior displaced tree first). A crash between (1) and
+// (2) leaves destDir absent but BOTH the trash (old) and temp (new) copies on disk,
+// so no data is lost; the next start re-hydrates regardless (the missing destDir
+// reports as "holding nothing") and the leftover sweep clears the orphans. A crash
+// after (2) leaves a stale trash dir, swept next time.
 func unpackAndSwap(r io.Reader, destDir string) error {
 	parent := filepath.Dir(destDir)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
@@ -324,10 +339,34 @@ func unpackAndSwap(r io.Reader, destDir string) error {
 		return err
 	}
 	if swapped {
-		_ = os.RemoveAll(trashDir)
+		// Move the displaced old working set aside rather than deleting it (issue
+		// #906): it is the only copy of the world whenever the final stop snapshot
+		// definitively failed and #845 retained the scratch for recovery. Replace any
+		// prior displaced tree first so at most one is kept per server. Best-effort:
+		// a failure to relocate (or to clear a prior one) only costs disk, never
+		// correctness, so the swap is not failed on it; on a relocate failure the trash
+		// is removed so a half-displaced tree never lingers.
+		displaced := displacedDir(destDir)
+		_ = os.RemoveAll(displaced)
+		if err := os.Rename(trashDir, displaced); err != nil {
+			_ = os.RemoveAll(trashDir)
+		}
 	}
 	return nil
 }
+
+// displacedDir is the per-server path the swap moves a displaced old working set to
+// (issue #906): a dot-prefixed sibling of destDir so it cannot collide with a
+// server-id scratch dir and is never matched to an assigned id by the API. One per
+// server (no random suffix), so a new hydrate's RemoveAll keeps exactly one.
+func displacedDir(destDir string) string {
+	return filepath.Join(filepath.Dir(destDir), displacedPrefix+filepath.Base(destDir))
+}
+
+// displacedPrefix is the dot-prefixed name prefix for a displaced old working set
+// (issue #906), kept aside by a hydrate and GC'd on the next successful snapshot for
+// the server (instancemanager.sweepDisplaced).
+const displacedPrefix = ".displaced-"
 
 // swapRename is the final temp->destDir swap rename, indirected through a package
 // var so a test can force it to fail and exercise the trash-restore path (the swap

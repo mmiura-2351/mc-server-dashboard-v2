@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -1122,5 +1123,107 @@ func TestHydrateRestoresOldCopyWhenSwapRenameFails(t *testing.T) {
 		if e.Name() != "server" {
 			t.Fatalf("leftover entry in scratch root after failed swap: %q", e.Name())
 		}
+	}
+}
+
+// A hydrate over an existing scratch must MOVE the displaced old working set aside to
+// .displaced-<id> rather than delete it (issue #906): when the final stop snapshot
+// definitively failed, #845 retained that scratch as the only copy of the world, and
+// the next start's hydrate would otherwise destroy it. The displaced tree's content
+// must be preserved intact for operator recovery.
+func TestHydrateDisplacesOldWorkingSetInsteadOfDeleting(t *testing.T) {
+	body := tarOf(map[string]string{"server.properties": "new"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	// A pre-existing working set holding the only copy of a world progressed past the
+	// store (the retained-for-recovery scratch, #845).
+	if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "world", "r.0.0.mca"), []byte("unsnapshotted"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	// The new working set is in place.
+	got, err := os.ReadFile(filepath.Join(dest, "server.properties"))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("server.properties = %q, %v (want %q)", got, err, "new")
+	}
+	// The displaced old tree survives at .displaced-server with its content intact.
+	displaced := filepath.Join(scratch, ".displaced-server")
+	got, err = os.ReadFile(filepath.Join(displaced, "world", "r.0.0.mca"))
+	if err != nil {
+		t.Fatalf("displaced old working set not retained for recovery (issue #906): %v", err)
+	}
+	if string(got) != "unsnapshotted" {
+		t.Fatalf("displaced world content = %q, want %q", got, "unsnapshotted")
+	}
+}
+
+// A SECOND hydrate over the same id must REPLACE the prior displaced tree, keeping at
+// most one per server (issue #906): the older displaced tree predates the store state
+// the newer one was displaced by, so replacing it is correct and bounds disk to one
+// extra working set per server.
+func TestHydrateReplacesPriorDisplacedTree(t *testing.T) {
+	body := tarOf(map[string]string{"server.properties": "x"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	seed := func(marker string) {
+		if err := os.MkdirAll(dest, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dest, "gen"), []byte(marker), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c := New(srv.Client())
+	// First hydrate displaces working set "v1".
+	seed("v1")
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("first Hydrate: %v", err)
+	}
+	// Second hydrate displaces working set "v2", which must replace the v1 displaced tree.
+	seed("v2")
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("second Hydrate: %v", err)
+	}
+
+	// Exactly one displaced tree, holding the most recent (v2) displaced content.
+	got, err := os.ReadFile(filepath.Join(scratch, ".displaced-server", "gen"))
+	if err != nil {
+		t.Fatalf("displaced tree missing after second hydrate: %v", err)
+	}
+	if string(got) != "v2" {
+		t.Fatalf("displaced content = %q, want %q (newer displacement replaces the prior one)", got, "v2")
+	}
+	// No second .displaced-* sibling accumulated.
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	displacedCount := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".displaced-") {
+			displacedCount++
+		}
+	}
+	if displacedCount != 1 {
+		t.Fatalf("displaced-tree count = %d, want exactly 1 per server (issue #906)", displacedCount)
 	}
 }
