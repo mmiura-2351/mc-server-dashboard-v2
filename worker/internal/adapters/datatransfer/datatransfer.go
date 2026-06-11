@@ -341,6 +341,13 @@ var swapRename = os.Rename
 // needing to race real filesystem timings. Production always uses os.Open.
 var openFile = os.Open
 
+// readDir is the function used by walkInto to list a directory. Indirected
+// through a package var for the same reason as openFile: a test can inject ENOENT
+// for a specific directory (simulating a rotated log dir / plugin temp dir
+// deleted between the parent's walk and this read) without racing real timings.
+// Production always uses os.ReadDir.
+var readDir = os.ReadDir
+
 // fsyncTree fsyncs every directory in the tree rooted at dir (post-order, so a
 // child dir is durable before its parent's entry for it). File contents are already
 // fsynced as written (writeFile); this makes the directory entries durable so a
@@ -524,8 +531,24 @@ func packTar(srcDir string, w io.Writer, log *slog.Logger) error {
 // walkInto adds the contents of dir (relative to root) to tw, recursing in
 // lexicographic order for a deterministic-ish archive.
 func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// The directory vanished between the parent's ReadDir and this read
+			// (rotated log dirs, plugin temp dirs) — the directory analog of the
+			// #853 file-vanish race. Skip the subtree with a Warn rather than
+			// failing the whole snapshot: by the same argument as #853 this is a
+			// non-world dir (a world's region dirs cannot vanish under quiesce —
+			// Minecraft never unlinks them mid-write), and a partial-loss of region
+			// files is now caught downstream by the API missing-region gate (#854).
+			rel, relErr := filepath.Rel(root, dir)
+			if relErr != nil {
+				rel = dir
+			}
+			log.Warn("snapshot: directory vanished between walk and read; skipping",
+				"path", filepath.ToSlash(rel))
+			return nil
+		}
 		return err
 	}
 	// os.ReadDir already returns entries sorted by name.

@@ -169,6 +169,108 @@ def check_region_bytes(name: str, data: bytes) -> RegionFinding | None:
     return RegionFinding(path=Path(name), reason=reason)
 
 
+@dataclass(frozen=True)
+class MissingRegionFinding:
+    """One region-bearing directory that LOST some-but-not-all of its files.
+
+    ``directory`` is the region dir relative to the working-set root (e.g.
+    ``region``, ``DIM-1/region``, ``dimensions/<ns>/<dim>/region``); ``lost`` is
+    the sorted set of ``.mca`` file names present in the reference set but absent
+    from the new one. A partial loss is the corruption signature this check
+    catches (issue #854).
+    """
+
+    directory: Path
+    lost: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MissingRegionReport:
+    """The aggregate of comparing a new working set against the prior one (#854).
+
+    ``partial_loss`` lists one finding per region dir that lost SOME-but-not-ALL
+    of its ``.mca`` files between the reference (prior ``current/``) set and the
+    new (staged) set. A directory that lost ALL of its region files — a legitimate
+    full-dimension/world delete — is deliberately NOT flagged; only a partial loss,
+    which MC would silently regenerate as fresh empty chunks, is suspect.
+    """
+
+    partial_loss: list[MissingRegionFinding] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return not self.partial_loss
+
+
+def _region_sets_by_dir(root: Path) -> dict[Path, set[str]]:
+    """Map each region-bearing directory (relative to ``root``) to its ``.mca``
+    file-name set.
+
+    A "region-bearing directory" is any directory that directly contains at least
+    one ``*.mca`` file; this is the natural per-dimension grouping (``region/``,
+    ``entities/``, ``poi/``, ``DIM*/region``, ``dimensions/**/region``) without
+    hard-coding the dimension taxonomy. Returns an empty map when ``root`` is
+    absent (an unpublished server has no prior set to compare against).
+    """
+    by_dir: dict[Path, set[str]] = {}
+    if not root.is_dir():
+        return by_dir
+    for path in root.rglob("*.mca"):
+        if not path.is_file():
+            continue
+        rel_dir = path.parent.relative_to(root)
+        by_dir.setdefault(rel_dir, set()).add(path.name)
+    return by_dir
+
+
+def compare_region_name_sets(
+    new: dict[Path, set[str]], reference: dict[Path, set[str]]
+) -> MissingRegionReport:
+    """Diff two region-dir -> ``.mca`` name-set maps for partial region loss (#854).
+
+    The adapter-agnostic core behind :func:`check_missing_regions` (a local tree)
+    and the object backend (object keys grouped by prefix). For each directory in
+    ``reference`` that is still present in ``new`` (a NON-EMPTY new set), every name
+    the reference had but the new set lacks is a lost region. A directory whose new
+    set is EMPTY — all regions gone — is a legitimate full-dimension/world delete
+    and is not flagged. Findings are sorted by directory for a stable report.
+    """
+    partial_loss: list[MissingRegionFinding] = []
+    for rel_dir, prior_names in reference.items():
+        new_names = new.get(rel_dir, set())
+        # All gone -> full-dimension delete (legitimate); skip. Otherwise any name
+        # the prior set had that the new set lacks is a partial loss.
+        if not new_names:
+            continue
+        lost = prior_names - new_names
+        if lost:
+            partial_loss.append(
+                MissingRegionFinding(directory=rel_dir, lost=tuple(sorted(lost)))
+            )
+    partial_loss.sort(key=lambda finding: finding.directory.as_posix())
+    return MissingRegionReport(partial_loss=partial_loss)
+
+
+def check_missing_regions(new_root: Path, reference_root: Path) -> MissingRegionReport:
+    """Compare a new working set against the prior one for partial region loss (#854).
+
+    Every other integrity gate validates only files that EXIST, so a region file
+    that vanished is structurally valid absence: the snapshot publishes, the
+    restore succeeds, and MC silently regenerates the chunks. This catches the
+    corruption signature directly — for each region-bearing directory present in
+    BOTH sets, a NEW ``.mca`` set that is a non-empty strict subset of the
+    reference set means some regions were lost while the dimension still exists
+    (partial loss). A directory whose region files are ALL gone is treated as a
+    legitimate full-dimension/world delete and is NOT flagged (false-positive
+    care). A directory new to ``new_root`` only adds regions and is never flagged.
+
+    Read-only over both trees (reads directory entries, never file bodies).
+    """
+    return compare_region_name_sets(
+        _region_sets_by_dir(new_root), _region_sets_by_dir(reference_root)
+    )
+
+
 def check_working_set(root: Path) -> WorkingSetReport:
     """Walk ``root`` recursively and validate every ``*.mca`` file beneath it.
 
