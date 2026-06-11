@@ -491,6 +491,11 @@ class FakeBackupRepository(BackupRepository):
         if backup is not None:
             self.by_id[backup_id] = replace(backup, health=health)
 
+    async def update_size(self, backup_id: BackupId, size_bytes: int) -> None:
+        backup = self.by_id.get(backup_id)
+        if backup is not None:
+            self.by_id[backup_id] = replace(backup, size_bytes=size_bytes)
+
     async def global_statistics(self) -> BackupStatistics:
         rows = list(self.by_id.values())
         known = [b.size_bytes for b in rows if b.size_bytes is not None]
@@ -847,6 +852,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.current_corrupt: dict[ServerId, int] = {}
         self.deleted: list[tuple[ServerId, str]] = []
         self.stored: list[ServerId] = []
+        # storage_refs that ``size`` was called for, so a test can assert the
+        # lazy size backfill (#661) only calls per NULL row and not again once
+        # the row's size is persisted.
+        self.size_calls: list[str] = []
         self._counter = 0
 
     async def create_from_current(
@@ -932,6 +941,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     async def size(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> int:
+        self.size_calls.append(storage_ref)
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         return len(self.bytes_by_ref[storage_ref])

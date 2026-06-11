@@ -56,6 +56,18 @@ class BackupRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def update_size(self, backup_id: BackupId, size_bytes: int) -> None:
+        """Record an archive's size on a legacy NULL-size row (issue #661).
+
+        The lazy backfill on read: a row created before size tracking (#281)
+        keeps ``size_bytes = NULL`` forever, so the WebUI "Total size" stays a
+        partial sum. When such a row is listed and its archive still exists, the
+        size is computed on demand and persisted here, making it a one-time
+        per-row cost. A staged UPDATE within the enclosing unit of work; a
+        missing id matches no row — a harmless no-op.
+        """
+
+    @abc.abstractmethod
     async def global_statistics(self) -> BackupStatistics:
         """Aggregate backup usage across the whole platform (issue #281).
 

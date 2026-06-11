@@ -213,16 +213,27 @@ class ListBackups:
 
     Community-scoped: a backup whose server is outside the path community is never
     returned (no cross-community signal, FR-COMM-3).
+
+    Lazily backfills legacy NULL ``size_bytes`` rows on read (issue #661): a row
+    created before size tracking landed (#281) keeps ``size_bytes = NULL``, so the
+    WebUI shows it as "unknown" and excludes it from the total. When such a row is
+    listed and its archive still exists, the size is computed via the archive
+    store and persisted, so it becomes a one-time per-row cost and the total
+    becomes a full sum.
     """
 
     uow: UnitOfWork
+    backup_store: BackupArchiveStore
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> list[Backup]:
         async with self.uow:
             await _load(self.uow, community_id, server_id)
-            return await self.uow.backups.list_for_server(server_id)
+            rows = await self.uow.backups.list_for_server(server_id)
+            return await _backfill_null_sizes(
+                self.uow, self.backup_store, community_id, server_id, rows
+            )
 
 
 @dataclass(frozen=True)
@@ -468,9 +479,14 @@ class ServerBackupStatistics:
     sums only the rows whose ``size_bytes`` is recorded; legacy NULL-size rows are
     counted in ``unknown_size_count`` and excluded from the total — an honest
     "unknown" rather than a wrong sum.
+
+    Lazily backfills legacy NULL ``size_bytes`` rows whose archive still exists
+    (issue #661), so once backfilled they join the total rather than staying an
+    honest-but-partial unknown.
     """
 
     uow: UnitOfWork
+    backup_store: BackupArchiveStore
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -478,6 +494,9 @@ class ServerBackupStatistics:
         async with self.uow:
             await _load(self.uow, community_id, server_id)
             rows = await self.uow.backups.list_for_server(server_id)
+            rows = await _backfill_null_sizes(
+                self.uow, self.backup_store, community_id, server_id, rows
+            )
         return _aggregate(rows)
 
 
@@ -496,6 +515,45 @@ class GlobalBackupStatistics:
     async def __call__(self) -> BackupStatistics:
         async with self.uow:
             return await self.uow.backups.global_statistics()
+
+
+async def _backfill_null_sizes(
+    uow: UnitOfWork,
+    backup_store: BackupArchiveStore,
+    community_id: CommunityId,
+    server_id: ServerId,
+    rows: list[Backup],
+) -> list[Backup]:
+    """Compute + persist ``size_bytes`` for legacy NULL rows whose archive exists.
+
+    The lazy backfill on read (issue #661). Only NULL-size rows trigger a store
+    call, and the persisted value makes it one-time per row. Best-effort: if the
+    archive is gone (``BackupNotFoundError``), the row stays NULL — an honest
+    "unknown" rather than a failed listing. Runs inside the caller's open unit of
+    work; the returned rows carry any computed size so the listing/total reflect
+    it immediately. Returns ``rows`` unchanged when nothing needed backfilling.
+    """
+
+    changed = False
+    backfilled: list[Backup] = []
+    for row in rows:
+        if row.size_bytes is None:
+            try:
+                size_bytes = await backup_store.size(
+                    community_id=community_id,
+                    server_id=server_id,
+                    storage_ref=row.storage_ref,
+                )
+            except BackupNotFoundError:
+                backfilled.append(row)
+                continue
+            await uow.backups.update_size(row.id, size_bytes)
+            row.size_bytes = size_bytes
+            changed = True
+        backfilled.append(row)
+    if changed:
+        await uow.commit()
+    return backfilled
 
 
 def _aggregate(rows: list[Backup]) -> BackupStatistics:
