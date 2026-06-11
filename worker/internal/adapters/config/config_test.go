@@ -18,10 +18,12 @@ func mapEnv(m map[string]string) func(string) string {
 
 func TestLoadAppliesDefaults(t *testing.T) {
 	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":     "secret-token",
-		"MCD_WORKER_API_TLS_INSECURE":   "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR": t.TempDir(),
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret-token",
+		"MCD_WORKER_API_TLS_INSECURE":        "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":          "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
 	})
 
 	cfg, err := Load("", env)
@@ -35,8 +37,11 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if got := cfg.Log.Format; got != "json" {
 		t.Errorf("Log.Format = %q, want default %q", got, "json")
 	}
-	if len(cfg.Worker.Drivers) != 1 || cfg.Worker.Drivers[0] != "host-process" {
-		t.Errorf("Worker.Drivers = %v, want default [host-process]", cfg.Worker.Drivers)
+	// worker.drivers has no default (issue #781): "container" is the only shipped
+	// driver and needs images, so the value must be supplied. Verify it passes
+	// through.
+	if len(cfg.Worker.Drivers) != 1 || cfg.Worker.Drivers[0] != "container" {
+		t.Errorf("Worker.Drivers = %v, want [container]", cfg.Worker.Drivers)
 	}
 	if cfg.Worker.MaxServers != 0 {
 		t.Errorf("Worker.MaxServers = %d, want default 0", cfg.Worker.MaxServers)
@@ -75,7 +80,7 @@ insecure = true
 
 [worker]
 scratch_dir = "` + scratch + `"
-drivers = ["host-process", "container"]
+drivers = ["container"]
 max_servers = 4
 metrics_interval_seconds = 30
 
@@ -115,8 +120,8 @@ level = "debug"
 	if cfg.Worker.MetricsIntervalSeconds != 30 {
 		t.Errorf("MetricsIntervalSeconds = %d, want 30 from file", cfg.Worker.MetricsIntervalSeconds)
 	}
-	if len(cfg.Worker.Drivers) != 2 {
-		t.Errorf("Drivers = %v, want two entries", cfg.Worker.Drivers)
+	if len(cfg.Worker.Drivers) != 1 || cfg.Worker.Drivers[0] != "container" {
+		t.Errorf("Drivers = %v, want [container] from file", cfg.Worker.Drivers)
 	}
 	if cfg.Log.Level != "debug" {
 		t.Errorf("Log.Level = %q, want file value debug", cfg.Log.Level)
@@ -128,11 +133,12 @@ level = "debug"
 
 func TestLoadRejectsUnknownDriver(t *testing.T) {
 	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":     "secret",
-		"MCD_WORKER_API_TLS_INSECURE":   "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
-		"MCD_WORKER_WORKER_DRIVERS":     "host-process,bogus",
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret",
+		"MCD_WORKER_API_TLS_INSECURE":        "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      "/scratch",
+		"MCD_WORKER_WORKER_DRIVERS":          "container,bogus",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
 	})
 
 	_, err := Load("", env)
@@ -141,6 +147,55 @@ func TestLoadRejectsUnknownDriver(t *testing.T) {
 	}
 	if !contains(err.Error(), "bogus") {
 		t.Errorf("error %q does not name the bad driver", err.Error())
+	}
+}
+
+// TestLoadRejectsHostProcessDriver pins that the removed host-process driver
+// (issue #781) is no longer an accepted worker.drivers value: it is rejected as
+// an unknown driver with a clear error that names it and the valid driver.
+func TestLoadRejectsHostProcessDriver(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":     "secret",
+		"MCD_WORKER_API_TLS_INSECURE":   "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
+		"MCD_WORKER_WORKER_DRIVERS":     "host-process",
+	})
+
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("Load() with host-process driver: want error, got nil")
+	}
+	if !contains(err.Error(), "host-process") {
+		t.Errorf("error %q does not name the rejected host-process driver", err.Error())
+	}
+	if !contains(err.Error(), "container") {
+		t.Errorf("error %q does not name the valid container driver", err.Error())
+	}
+}
+
+// TestLoadRejectsOmittedDrivers pins the headline breaking change (issue #781):
+// worker.drivers no longer has a zero-config default, so a config that simply
+// omits it is rejected — the path every previously-zero-config worker now hits.
+// The error names "container" so the operator knows what to advertise.
+func TestLoadRejectsOmittedDrivers(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret",
+		"MCD_WORKER_API_TLS_INSECURE":        "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      "/scratch",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
+	})
+
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("Load() with omitted worker.drivers: want error, got nil")
+	}
+	if !contains(err.Error(), "worker.drivers") {
+		t.Errorf("error %q does not name worker.drivers", err.Error())
+	}
+	if !contains(err.Error(), "container") {
+		t.Errorf("error %q does not name the valid container driver", err.Error())
 	}
 }
 
@@ -191,10 +246,12 @@ func TestLoadFailsFastWhenTLSNeitherCAFileNorInsecure(t *testing.T) {
 
 func TestLoadAcceptsCAFileWithoutInsecure(t *testing.T) {
 	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":     "secret",
-		"MCD_WORKER_API_TLS_CA_FILE":    "/etc/ssl/ca.pem",
-		"MCD_WORKER_WORKER_SCRATCH_DIR": t.TempDir(),
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret",
+		"MCD_WORKER_API_TLS_CA_FILE":         "/etc/ssl/ca.pem",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":          "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
 	})
 
 	cfg, err := Load("", env)
@@ -206,69 +263,6 @@ func TestLoadAcceptsCAFileWithoutInsecure(t *testing.T) {
 	}
 	if cfg.API.TLS.Insecure {
 		t.Error("TLS.Insecure = true, want false (default)")
-	}
-}
-
-func TestLoadJavaRuntimesFromFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "worker.toml")
-	body := `
-[api]
-grpc_endpoint = "api:50051"
-credential = "secret"
-
-[api.tls]
-insecure = true
-
-[worker]
-scratch_dir = "` + t.TempDir() + `"
-
-[worker.java.runtimes]
-17 = "/jvm/17/bin/java"
-21 = "/jvm/21/bin/java"
-`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path, emptyEnv)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Worker.Java.Runtimes[17] != "/jvm/17/bin/java" || cfg.Worker.Java.Runtimes[21] != "/jvm/21/bin/java" {
-		t.Fatalf("Java.Runtimes = %v, want 17 and 21 entries", cfg.Worker.Java.Runtimes)
-	}
-}
-
-func TestLoadJavaRuntimesFromEnv(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":    "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":       "secret",
-		"MCD_WORKER_API_TLS_INSECURE":     "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":   t.TempDir(),
-		"MCD_WORKER_WORKER_JAVA_RUNTIMES": "8=/jvm/8/bin/java, 21=/jvm/21/bin/java",
-	})
-
-	cfg, err := Load("", env)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Worker.Java.Runtimes[8] != "/jvm/8/bin/java" || cfg.Worker.Java.Runtimes[21] != "/jvm/21/bin/java" {
-		t.Fatalf("Java.Runtimes = %v, want 8 and 21 entries", cfg.Worker.Java.Runtimes)
-	}
-}
-
-func TestLoadRejectsMalformedJavaRuntimesEnv(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":    "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":       "secret",
-		"MCD_WORKER_API_TLS_INSECURE":     "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":   "/scratch",
-		"MCD_WORKER_WORKER_JAVA_RUNTIMES": "notamajor=/jvm/java",
-	})
-
-	if _, err := Load("", env); err == nil {
-		t.Fatal("Load() with non-integer Java major: want error, got nil")
 	}
 }
 
@@ -447,6 +441,8 @@ func TestLoadRejectsMalformedGameBindIP(t *testing.T) {
 		"MCD_WORKER_API_CREDENTIAL":                "secret",
 		"MCD_WORKER_API_TLS_INSECURE":              "true",
 		"MCD_WORKER_WORKER_SCRATCH_DIR":            "/scratch",
+		"MCD_WORKER_WORKER_DRIVERS":                "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":       "21=eclipse-temurin:21-jre",
 		"MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP": "not-an-ip",
 	})
 

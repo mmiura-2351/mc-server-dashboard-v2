@@ -10,10 +10,12 @@ import (
 // explicit worker.id, so worker id resolution is exercised.
 func baseEnv(dir string) map[string]string {
 	return map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":     "secret",
-		"MCD_WORKER_API_TLS_INSECURE":   "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR": dir,
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret",
+		"MCD_WORKER_API_TLS_INSECURE":        "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      dir,
+		"MCD_WORKER_WORKER_DRIVERS":          "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
 	}
 }
 

@@ -28,10 +28,10 @@ func TestRunFailsFastOnMissingConfig(t *testing.T) {
 	}
 }
 
-// TestResolveRconHost pins the mixed-driver RCON host-resolution gate (issue
-// #218): only a container-driven server consults the container driver's
-// resolver; every other server (and a worker with no container driver built)
-// dials the host loopback (empty host).
+// TestResolveRconHost pins the RCON host-resolution gate (issue #218): only a
+// container-driven server consults the container driver's resolver; every other
+// server (and a worker with no container driver built) dials the host loopback
+// (empty host).
 func TestResolveRconHost(t *testing.T) {
 	containerResolver := func(serverID string) string {
 		if serverID == "srv-1" {
@@ -56,8 +56,8 @@ func TestResolveRconHost(t *testing.T) {
 			want:              "mc-srv-1",
 		},
 		{
-			name:              "host-process driver keeps the loopback",
-			driver:            "host-process",
+			name:              "non-container driver keeps the loopback",
+			driver:            "other",
 			containerRconHost: containerResolver,
 			serverID:          "srv-1",
 			want:              "",

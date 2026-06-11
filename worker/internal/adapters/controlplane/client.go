@@ -319,8 +319,6 @@ func mapDrivers(names []string) []controlplanev1.ExecutionDriverKind {
 	out := make([]controlplanev1.ExecutionDriverKind, 0, len(names))
 	for _, n := range names {
 		switch n {
-		case "host-process":
-			out = append(out, controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_HOST_PROCESS)
 		case "container":
 			out = append(out, controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER)
 		default:
@@ -468,11 +466,11 @@ func toFileListing(listing *session.FileListing) *controlplanev1.FileListing {
 }
 
 // driverName maps the wire driver enum to the configured driver name used by the
-// handler and capability config.
+// handler and capability config. The HOST_PROCESS enum value is reserved on the
+// wire (issue #781) but no longer shipped, so it maps to the empty (unknown)
+// name and any command carrying it fails to resolve a driver.
 func driverName(kind controlplanev1.ExecutionDriverKind) string {
 	switch kind {
-	case controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_HOST_PROCESS:
-		return "host-process"
 	case controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER:
 		return "container"
 	default:

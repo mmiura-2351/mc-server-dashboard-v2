@@ -23,6 +23,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathTraversalError,
     SnapshotHandleError,
 )
+from mc_server_dashboard_api.storage.domain.port import RESTORE_PUBLISHER
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
     JarKey,
@@ -381,6 +382,29 @@ async def test_backup_create_list_restore_round_trip(
     assert read_tar(blob) == original
 
 
+async def test_restore_bumps_generation_and_records_sentinel_publisher(
+    harness: StorageHarness,
+) -> None:
+    # A restore is an authoritative publish that replaces ``current/``, so it MUST
+    # advance the working-set generation (issue #873) just like a snapshot commit —
+    # otherwise a same-worker scratch with held == store would skip the post-restore
+    # hydrate (#767) and boot the PRE-restore world. The publisher is stamped with the
+    # RESTORE_PUBLISHER sentinel so the publish-time guard refuses an in-flight stale
+    # snapshot from a real Worker (different publisher), closing the clobber window.
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})  # generation 1
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    await harness.publish(community, server, {"f": b"v2"})  # generation 2
+    assert await harness.storage.current_generation(community, server) == 2
+
+    await harness.storage.restore_backup(community, server, key)
+    assert await harness.storage.current_generation(community, server) == 3
+    assert (
+        await harness.storage.current_publisher(community, server) == RESTORE_PUBLISHER
+    )
+
+
 async def test_backup_from_current_without_publish_is_not_found(
     harness: StorageHarness,
 ) -> None:
@@ -519,6 +543,25 @@ async def test_prune_without_published_snapshot_is_a_noop(
     await harness.storage.prune_to_final_snapshot(community, server)  # no raise
     with pytest.raises(NotFoundError):
         await drain(harness.storage.open_hydrate_source(community, server))
+
+
+async def test_prune_after_restore_still_drops_working_set(
+    harness: StorageHarness,
+) -> None:
+    # A restore now bumps the generation (issue #873). Prune keys off the ``current``
+    # pointer (not the generation value) and unconditionally drops the marker, so a
+    # restore-bumped generation must not break the prune-to-final reclaim (#825/#777):
+    # the working set is still collapsed and the backup is retained.
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"w"})
+    key = await harness.storage.create_backup_from_current(community, server)
+    await harness.storage.restore_backup(community, server, key)
+
+    await harness.storage.prune_to_final_snapshot(community, server)
+
+    with pytest.raises(NotFoundError):
+        await drain(harness.storage.open_hydrate_source(community, server))
+    assert await harness.storage.list_backups(community, server) == [key]
 
 
 # --- backup transfer: open / put / size (Section 3.3, issue #281) -----------

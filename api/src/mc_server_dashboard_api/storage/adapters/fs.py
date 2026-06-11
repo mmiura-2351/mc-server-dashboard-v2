@@ -54,6 +54,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     SnapshotHandleError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
+    RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
     JarPoolEntry,
@@ -421,12 +422,13 @@ class FsStorage(Storage):
     ) -> int:
         """Publish the snapshot, then bump and return the generation (issue #763).
 
-        The generation advances ONLY on a snapshot publish (the worker pushed a new
-        working set), not on a restore or an authoritative file edit (those go to a
-        stopped server whose worker holds no scratch, so the reconciler hydrates
-        regardless). It is bumped after ``current`` points at the new snapshot, so
-        the persisted generation never claims a set newer than ``current`` resolves
-        to.
+        The generation advances on every authoritative publish that replaces
+        ``current/`` — a snapshot commit (the worker pushed a new working set) and a
+        backup restore (issue #873). A restore that did NOT bump would let a
+        same-worker scratch with held == store skip the hydrate (#767) on the next
+        start and boot the PRE-restore world. It is bumped after ``current`` points
+        at the new snapshot, so the persisted generation never claims a set newer
+        than ``current`` resolves to.
 
         The generation and the ``publisher`` (the producing Worker's id, issue #847)
         are written as ONE atomic marker: a crash between two separate writes could
@@ -745,7 +747,20 @@ class FsStorage(Storage):
             if not report.healthy and not force:
                 await asyncio.to_thread(_rmtree, staging)
                 raise IntegrityCheckError(report)
-            await asyncio.to_thread(self._publish, community_id, server_id, staging)
+            # Bump the generation on this authoritative publish (issue #873): a
+            # restore replaces ``current/`` just like a snapshot commit, so it MUST
+            # advance the store generation. Otherwise a same-worker scratch with
+            # held == store would skip the hydrate (#767) on the next start and boot
+            # the PRE-restore world. The sentinel publisher (RESTORE_PUBLISHER) makes
+            # the publish-time guard refuse an in-flight stale snapshot from a real
+            # Worker (different publisher), closing the restore-clobber window (#873).
+            await asyncio.to_thread(
+                self._publish_and_bump,
+                community_id,
+                server_id,
+                staging,
+                RESTORE_PUBLISHER,
+            )
             return report
         except BaseException:
             await asyncio.to_thread(_rmtree, staging)

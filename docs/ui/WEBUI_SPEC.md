@@ -127,7 +127,7 @@ Server state model: `desired_state` ∈ {running, stopped};
 `observed_state` ∈ {starting, running, stopping, stopped, restarting, crashed,
 unknown} + `observed_at` + `assigned_worker_id`.
 Server types: vanilla / paper / fabric / forge (spigot persisted but rejected).
-Execution backends: `host_process` / `container`.
+Execution backends: `container` (the only shipped backend; the host-process driver was removed in issue #781, so `host_process` is no longer offered in the create wizard).
 
 ### 2.4 Versions, ports, fleet, audit, platform
 
@@ -273,7 +273,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 1. **Type & version** — type cards from `GET /versions`; version dropdown
    from `GET /versions/{type}` (latest preselected). Spigot shown disabled
    with "use Paper" hint.
-2. **Runtime** — execution backend (host_process / container), game port:
+2. **Runtime** — execution backend (`container`; host_process removed in issue #781), game port:
    auto-suggest from `GET /ports/available`, validate via
    `GET /ports/check/{port}` on blur.
 3. **Config & EULA** — name, optional `server.properties` overrides (key

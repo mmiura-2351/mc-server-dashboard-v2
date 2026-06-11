@@ -81,17 +81,6 @@ type WorkerConfig struct {
 	// MetricsIntervalSeconds is the cadence for periodic per-server Metrics events
 	// (FR-MON-3). 0 keeps the in-code default.
 	MetricsIntervalSeconds uint32
-	// Java holds the Java-runtime selection inputs.
-	Java JavaConfig
-}
-
-// JavaConfig configures the JavaRuntimeSelector (CONFIGURATION.md Section 6.3,
-// FR-EXE-5).
-type JavaConfig struct {
-	// Runtimes maps a Java major version to the absolute java binary path for it
-	// (e.g. 21 -> /usr/lib/jvm/temurin-21/bin/java). The selector picks the entry
-	// for the major a server's Minecraft version requires.
-	Runtimes map[int]string
 }
 
 // DriverConfig holds per-driver settings (CONFIGURATION.md Section 6.3). Only the
@@ -108,8 +97,8 @@ type ContainerConfig struct {
 	// daemon default socket.
 	DockerHost string
 	// Images maps a Java major version to the base container image providing that
-	// JRE, mirroring worker.java.runtimes. The driver selects the image for the
-	// major a server's Minecraft version requires.
+	// JRE. The driver selects the image for the major a server's Minecraft version
+	// requires.
 	Images map[int]string
 	// GameBindIP is the host interface the driver publishes each server's game
 	// port on. The in-code default is 127.0.0.1 (loopback-only, preserving the
@@ -153,11 +142,6 @@ type fileConfig struct {
 		MaxServers             *uint32  `toml:"max_servers"`
 		ScratchDir             *string  `toml:"scratch_dir"`
 		MetricsIntervalSeconds *uint32  `toml:"metrics_interval_seconds"`
-		Java                   struct {
-			// Runtimes maps a Java major (as a string key, e.g. "21") to the java
-			// binary path. TOML table keys are strings; they are parsed to ints.
-			Runtimes map[string]string `toml:"runtimes"`
-		} `toml:"java"`
 	} `toml:"worker"`
 	Driver struct {
 		Container struct {
@@ -181,7 +165,10 @@ type fileConfig struct {
 func defaults() Config {
 	return Config{
 		Worker: WorkerConfig{
-			Drivers:    []string{"host-process"},
+			// No default driver: the only shipped driver is "container", which
+			// requires driver.container.images, so there is no zero-config driver to
+			// fall back to. worker.drivers is therefore effectively required and
+			// validate() rejects an empty set (issue #781).
 			MaxServers: 0,
 		},
 		Driver: DriverConfig{
@@ -258,13 +245,6 @@ func applyFile(cfg *Config, path string) error {
 		cfg.Worker.MetricsIntervalSeconds = *fc.Worker.MetricsIntervalSeconds
 	}
 	setString(&cfg.Worker.ScratchDir, fc.Worker.ScratchDir)
-	if fc.Worker.Java.Runtimes != nil {
-		runtimes, err := parseMajorMap("worker.java.runtimes", fc.Worker.Java.Runtimes)
-		if err != nil {
-			return err
-		}
-		cfg.Worker.Java.Runtimes = runtimes
-	}
 	setString(&cfg.Driver.Container.DockerHost, fc.Driver.Container.DockerHost)
 	setString(&cfg.Driver.Container.GameBindIP, fc.Driver.Container.GameBindIP)
 	setString(&cfg.Driver.Container.Network, fc.Driver.Container.Network)
@@ -317,16 +297,6 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 			return fmt.Errorf("config: %sWORKER_METRICS_INTERVAL_SECONDS: %w", EnvPrefix, err)
 		}
 		cfg.Worker.MetricsIntervalSeconds = uint32(n)
-	}
-
-	// WORKER_JAVA_RUNTIMES is a comma-separated list of major=path pairs, e.g.
-	// "17=/jvm/17/bin/java,21=/jvm/21/bin/java".
-	if v := getenv(EnvPrefix + "WORKER_JAVA_RUNTIMES"); v != "" {
-		runtimes, err := parseRuntimePairs(v)
-		if err != nil {
-			return fmt.Errorf("config: %sWORKER_JAVA_RUNTIMES: %w", EnvPrefix, err)
-		}
-		cfg.Worker.Java.Runtimes = runtimes
 	}
 
 	setEnvString(&cfg.Driver.Container.DockerHost, getenv, "DRIVER_CONTAINER_DOCKER_HOST")
@@ -407,11 +377,11 @@ func (c Config) validate() error {
 	}
 
 	if len(c.Worker.Drivers) == 0 {
-		return fmt.Errorf("config: worker.drivers: must advertise at least one driver")
+		return fmt.Errorf("config: worker.drivers: must advertise at least one driver (want container)")
 	}
 	for _, d := range c.Worker.Drivers {
-		if d != "host-process" && d != "container" {
-			return fmt.Errorf("config: worker.drivers: unknown driver %q (want host-process or container)", d)
+		if d != "container" {
+			return fmt.Errorf("config: worker.drivers: unknown driver %q (want container)", d)
 		}
 		if d == "container" && len(c.Driver.Container.Images) == 0 {
 			return fmt.Errorf("config: driver.container.images is required when worker.drivers advertises \"container\"")

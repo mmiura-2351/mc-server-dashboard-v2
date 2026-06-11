@@ -2311,6 +2311,34 @@ async def test_redispatch_start_hydrates_when_held_generation_is_stale() -> None
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
 
 
+async def test_redispatch_start_hydrates_after_a_restore_bumped_the_generation() -> (
+    None
+):
+    # Issue #873: the worker produced and holds generation 5; the server was stopped
+    # and an API restore replaced current/, bumping the store generation to 6. On the
+    # next start the gate now sees held(5) < store(6) and HYDRATES the restored world,
+    # instead of the pre-fix held(5) == store(5) skip that would boot the PRE-restore
+    # scratch. (Before the fix a restore left the store generation at 5.)
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+    await _start_server(uow, cp, store_generation=6).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
 async def test_redispatch_start_hydrates_when_worker_does_not_hold_working_set() -> (
     None
 ):

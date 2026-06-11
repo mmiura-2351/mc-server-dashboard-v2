@@ -40,7 +40,7 @@ test("owner creates a server via the wizard", async ({ page, request }) => {
     .toBeGreaterThan(0);
   await page.getByRole("button", { name: "Next" }).click();
 
-  // Step 2: runtime. Keep the defaults (host_process, auto-suggested port).
+  // Step 2: runtime. Keep the defaults (container, auto-suggested port).
   await page.getByRole("button", { name: "Next" }).click();
 
   // Step 3: config & EULA. Name it, accept the EULA, create.

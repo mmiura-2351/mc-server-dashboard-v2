@@ -37,6 +37,17 @@ class UnknownExecutionBackendError(ServerError):
     """The ``execution_backend`` is not a known driver kind (CHECK enum, FR-EXE-2)."""
 
 
+class RemovedExecutionBackendError(ServerError):
+    """Creation requested a backend that is a known enum value but no longer shipped.
+
+    ``host_process`` is retained in the CHECK enum so historical rows stay readable
+    (issue #781), but no Worker advertises it, so a freshly-created ``host_process``
+    server would be unplaceable. Create rejects it at the API validation layer; the
+    edge maps this to a 422. Update is unaffected — the immutability check compares
+    the parsed backend against the existing row, so historical rows remain updatable.
+    """
+
+
 class ServerNotFoundError(ServerError):
     """The targeted server does not exist in the community.
 

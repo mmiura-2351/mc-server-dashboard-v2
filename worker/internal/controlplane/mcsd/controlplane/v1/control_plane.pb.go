@@ -38,7 +38,10 @@ const (
 type ExecutionDriverKind int32
 
 const (
-	ExecutionDriverKind_EXECUTION_DRIVER_KIND_UNSPECIFIED  ExecutionDriverKind = 0
+	ExecutionDriverKind_EXECUTION_DRIVER_KIND_UNSPECIFIED ExecutionDriverKind = 0
+	// HOST_PROCESS named the host-process driver, removed in issue #781. The
+	// number stays reserved (the enum is NOT renumbered) to preserve wire
+	// compatibility, but no Worker advertises it and no shipped driver maps to it.
 	ExecutionDriverKind_EXECUTION_DRIVER_KIND_HOST_PROCESS ExecutionDriverKind = 1
 	ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER    ExecutionDriverKind = 2
 )

@@ -48,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
+    RemovedExecutionBackendError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
     WorkingSetSeedFailedError,
@@ -300,6 +301,23 @@ def test_import_invalid_metadata_is_422() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_export_metadata"
+
+
+def test_import_removed_backend_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(error=RemovedExecutionBackendError("host_process")),
+    )
+    client = next(_client(app))
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "removed_execution_backend"
 
 
 def test_import_spigot_metadata_is_422() -> None:

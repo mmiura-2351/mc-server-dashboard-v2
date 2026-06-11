@@ -39,6 +39,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PermissionDeniedError,
     PortAlreadyTakenError,
     PortOutOfRangeError,
+    RemovedExecutionBackendError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -233,6 +234,15 @@ class CreateServer:
             raise UnsupportedEditionError(mc_edition)
         parsed_type = _parse_server_type(server_type)
         parsed_backend = _parse_execution_backend(execution_backend)
+        if parsed_backend is ExecutionBackend.HOST_PROCESS:
+            # The host-process driver was removed (issue #781); no Worker advertises
+            # it, so a freshly-created host_process server is unplaceable. Reject it
+            # at create (a known-but-removed backend), distinct from a wholly unknown
+            # one. This guard also covers the import flow (export_import.py), which
+            # shares this use case. Update is untouched: the immutability check
+            # compares against the existing row, so historical host_process rows stay
+            # readable and updatable.
+            raise RemovedExecutionBackendError(execution_backend)
         # A per-server memory limit carried on config (#705) is validated before
         # the row is staged: a bad shape/range 422s. Range only — host capacity
         # is the deferred placement sub-issue #710.
