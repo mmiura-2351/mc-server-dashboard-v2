@@ -80,7 +80,7 @@ across servers (FR-VER-3) and contain no Community data.
 │       └── servers/
 │           └── <server-id>/
 │               ├── current -> snapshots/<snapshot-id>/  # symlink to the live snapshot; the publish pointer (Section 4)
-│               ├── generation                # combined marker (Section 3.1): line 1 the monotonic working-set generation counter (bumped on each commit_snapshot), line 2 (optional) the publishing Worker id (#847)
+│               ├── generation                # combined marker (Section 3.1): line 1 the monotonic working-set generation counter (bumped on each authoritative publish: commit_snapshot + restore_backup, #873), line 2 (optional) the publishing Worker id (#847)
 │               ├── snapshots/                # published working-set snapshots; current points at the live one
 │               │   └── <snapshot-id>/        # the full working directory for one published state
 │               │       ├── world/
@@ -137,10 +137,11 @@ Notes:
   a crash between two separate writes could attribute the *previous* publisher to
   the *new* generation and invert the guard, so the pair must be all-or-nothing.
   The marker is written immediately after the `current` pointer flip inside
-  `commit_snapshot` as a separate sequential write; a crash in the window between
-  the flip and the marker write leaves the generation one behind (under-states by
-  one — the safe direction). After any successful `commit_snapshot` return the
-  pointer, generation, and publisher are in agreement. A publish that declared no
+  every authoritative publish (`commit_snapshot` and `restore_backup`, #873) as a
+  separate sequential write; a crash in the window between the flip and the marker
+  write leaves the generation one behind (under-states by one — the safe
+  direction). After any successful publish return the pointer, generation, and
+  publisher are in agreement. A publish that declared no
   Worker id omits line 2 (no publisher claim, so the guard stays permissive). A
   server with no published snapshot has no `generation` marker; reading it in that
   state returns generation 0 / no publisher. On object backends it is a single key
@@ -281,7 +282,7 @@ depend on a Worker.
 |---|---|---|
 | `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (Section 6.9). For a **running** server the application first does `save-all` → on-demand snapshot (`commit_snapshot`) → then calls this; `Storage` only ever archives the authoritative copy. |
 | `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (#15); this returns the keys. |
-| `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. The extracted backup is validated through the integrity gate (issue #743): a corrupt backup is refused with `IntegrityCheckError` (carrying the `WorkingSetReport`); `current/` is left untouched. Quarantining the backup is an application-layer concern — the caller receives the report and decides what to do. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and returns the `WorkingSetReport` so the caller can quarantine and audit. |
+| `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. A restore replaces `current/`, so it **bumps the working-set generation** like a `commit_snapshot` (issue #873) — otherwise a same-Worker scratch with `held == store` would skip the post-restore hydrate (#767) on the next start and boot the PRE-restore world. The publisher is stamped with the `api-restore` sentinel (no producing Worker), so the publish-time guard (Section 8) treats an in-flight stale snapshot from a real Worker as a different-publisher publish and refuses it, closing the restore-clobber window. The extracted backup is validated through the integrity gate (issue #743): a corrupt backup is refused with `IntegrityCheckError` (carrying the `WorkingSetReport`); `current/` is left untouched. Quarantining the backup is an application-layer concern — the caller receives the report and decides what to do. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and returns the `WorkingSetReport` so the caller can quarantine and audit. |
 | `delete_backup(community_id, server_id, BackupKey)` | Remove a backup archive | Idempotent. |
 | `open_backup(community_id, server_id, BackupKey) -> ReadStream` | Stream a stored archive in its native format | Download (issue #281): yields the archive bytes **verbatim** — the adapter-internal `tar.gz` (Section 2), no recompression. `NotFoundError` for an unknown key. |
 | `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload (issue #281): the **application** has already validated the archive (opens + traversal-safe entries) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. |

@@ -41,6 +41,15 @@ from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
 # working set or JAR in memory (STORAGE.md Sections 3.1, 3.2).
 ByteStream = AsyncIterator[bytes]
 
+# The publisher id recorded for an API-initiated restore (issue #873). A restore is
+# an authoritative publish with no producing Worker, so it bumps the generation like
+# a snapshot commit and stamps this sentinel as the publisher. Recording a sentinel
+# (rather than ``None``) makes the publish-time guard (Section 8) treat an in-flight
+# stale snapshot from a real Worker as a different-publisher publish and REFUSE it,
+# closing the restore-clobber window (#873): no live Worker can ever legitimately
+# claim this id, so the guard never wrongly refuses a same-Worker self-heal.
+RESTORE_PUBLISHER = "api-restore"
+
 
 @dataclass(frozen=True)
 class DirEntry:
