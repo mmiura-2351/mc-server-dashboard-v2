@@ -81,8 +81,8 @@ def test_sums_declared_resources_per_worker() -> None:
     result = committed_resources_by_worker(servers)
 
     assert result == {
-        WorkerId(worker_a): CommittedResources(memory_mb=3072, cpu_millis=1500),
-        WorkerId(worker_b): CommittedResources(memory_mb=4096, cpu_millis=2000),
+        WorkerId(worker_a): CommittedResources(cpu_millis=1500),
+        WorkerId(worker_b): CommittedResources(cpu_millis=2000),
     }
 
 
@@ -96,6 +96,4 @@ def test_unset_resources_contribute_zero() -> None:
 
     result = committed_resources_by_worker(servers)
 
-    assert result == {
-        WorkerId(worker): CommittedResources(memory_mb=2048, cpu_millis=1000)
-    }
+    assert result == {WorkerId(worker): CommittedResources(cpu_millis=1000)}

@@ -228,7 +228,7 @@ async def test_start_forwards_request_memory_and_committed_accounting() -> None:
 
     assert cp.place_memory_limit_mb == 2048
     assert cp.place_committed_by_worker == {
-        WorkerId(other_worker): CommittedResources(memory_mb=4096, cpu_millis=1500)
+        WorkerId(other_worker): CommittedResources(cpu_millis=1500)
     }
 
 
