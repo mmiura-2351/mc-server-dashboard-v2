@@ -10,7 +10,7 @@ covered in the per-adapter files.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 import pytest
@@ -23,11 +23,16 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathTraversalError,
     SnapshotHandleError,
 )
-from mc_server_dashboard_api.storage.domain.port import RESTORE_PUBLISHER
+from mc_server_dashboard_api.storage.domain.port import (
+    API_EDIT_PUBLISHER,
+    RESTORE_PUBLISHER,
+)
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
+    CommunityId,
     JarKey,
     RelPath,
+    ServerId,
 )
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
@@ -402,6 +407,100 @@ async def test_restore_bumps_generation_and_records_sentinel_publisher(
     assert await harness.storage.current_generation(community, server) == 3
     assert (
         await harness.storage.current_publisher(community, server) == RESTORE_PUBLISHER
+    )
+
+
+async def _edit_write_file(
+    harness: StorageHarness, community: CommunityId, server: ServerId
+) -> int:
+    await harness.storage.write_file(community, server, RelPath("a.txt"), b"edited")
+    return 1
+
+
+async def _edit_delete_file(
+    harness: StorageHarness, community: CommunityId, server: ServerId
+) -> int:
+    await harness.storage.delete_file(community, server, RelPath("a.txt"))
+    return 1
+
+
+async def _edit_delete_dir(
+    harness: StorageHarness, community: CommunityId, server: ServerId
+) -> int:
+    await harness.storage.delete_dir(community, server, RelPath("d"))
+    return 1
+
+
+async def _edit_make_dir(
+    harness: StorageHarness, community: CommunityId, server: ServerId
+) -> int:
+    await harness.storage.make_dir(community, server, RelPath("plugins"))
+    return 1
+
+
+async def _edit_rollback_file(
+    harness: StorageHarness, community: CommunityId, server: ServerId
+) -> int:
+    # An edit then a roll back to the captured version: BOTH are authoritative writes
+    # (rollback writes the old bytes), so the generation advances twice.
+    await harness.storage.write_file(community, server, RelPath("a.txt"), b"v2")
+    versions = await harness.storage.list_file_versions(
+        community, server, RelPath("a.txt")
+    )
+    await harness.storage.rollback_file(
+        community, server, RelPath("a.txt"), versions[0]
+    )
+    return 2
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        _edit_write_file,
+        _edit_delete_file,
+        _edit_delete_dir,
+        _edit_make_dir,
+        _edit_rollback_file,
+    ],
+    ids=["write_file", "delete_file", "delete_dir", "make_dir", "rollback_file"],
+)
+async def test_authoritative_edit_bumps_generation_with_api_sentinel(
+    harness: StorageHarness,
+    edit: Callable[[StorageHarness, CommunityId, ServerId], Awaitable[int]],
+) -> None:
+    # Every authoritative ``current/`` mutation replaces the published world, so it
+    # MUST advance the generation and stamp the API_EDIT_PUBLISHER sentinel (issue
+    # #889) — otherwise a same-worker scratch with held == store skips the post-edit
+    # hydrate (#767) and boots the PRE-edit world, and that scratch's in-flight stale
+    # snapshot (same publisher, base == current) clobbers the edit.
+    community, server = new_scope()
+    await harness.publish(
+        community, server, {"a.txt": b"v1", "d/inner": b"x"}
+    )  # generation 1
+    assert await harness.storage.current_generation(community, server) == 1
+
+    bumps = await edit(harness, community, server)
+
+    assert await harness.storage.current_generation(community, server) == 1 + bumps
+    assert (
+        await harness.storage.current_publisher(community, server) == API_EDIT_PUBLISHER
+    )
+
+
+async def test_write_file_on_never_published_server_bumps_past_zero(
+    harness: StorageHarness,
+) -> None:
+    # The first write to a never-snapshotted server publishes an initial working set
+    # (issue #205). That is an authoritative edit too, so it bumps past generation 0
+    # and stamps the API_EDIT_PUBLISHER sentinel (issue #889).
+    community, server = new_scope()
+    assert await harness.storage.current_generation(community, server) == 0
+
+    await harness.storage.write_file(community, server, RelPath("a.txt"), b"first")
+
+    assert await harness.storage.current_generation(community, server) == 1
+    assert (
+        await harness.storage.current_publisher(community, server) == API_EDIT_PUBLISHER
     )
 
 

@@ -54,6 +54,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     SnapshotHandleError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
+    API_EDIT_PUBLISHER,
     RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
@@ -560,6 +561,23 @@ class FsStorage(Storage):
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
+
+    def _bump_marker(self, server_root: Path, publisher: str | None) -> None:
+        """Bump the generation in place and stamp ``publisher`` (issue #889).
+
+        An authoritative file edit (``write_file`` / ``delete_file`` / ``delete_dir``
+        / ``make_dir``) mutates ``current/`` directly rather than flipping a fresh
+        snapshot, but it still replaces the published world, so it MUST advance the
+        generation exactly like ``_publish_and_bump`` does. Otherwise a same-worker
+        scratch with held == store would skip the post-edit hydrate (#767) and boot
+        the PRE-edit world, and that scratch's in-flight stale snapshot (same
+        publisher, base == current) would pass the publish-time guard and clobber the
+        edits. Stamping the API_EDIT_PUBLISHER sentinel makes that snapshot a
+        different-publisher publish whose base now lags, so the guard refuses it.
+        """
+
+        generation = self._read_generation(server_root) + 1
+        self._write_marker(server_root, generation, publisher)
 
     # --- JAR store / reuse (Section 3.2) -----------------------------------
 
@@ -1080,6 +1098,12 @@ class FsStorage(Storage):
         self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
         target.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write(target, data)
+        # Bump the generation on this authoritative edit (issue #889): an in-place
+        # write replaces the published world just like a snapshot/restore, so it
+        # advances the store generation and stamps the API_EDIT_PUBLISHER sentinel.
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     def _publish_initial(
         self,
@@ -1104,6 +1128,12 @@ class FsStorage(Storage):
             target.parent.mkdir(parents=True, exist_ok=True)
             self._atomic_write(target, data)
             self._publish(community_id, server_id, staging)
+            # The first published version of a never-snapshotted server is still an
+            # authoritative edit (issue #889): bump past generation 0 and stamp the
+            # API_EDIT_PUBLISHER sentinel so the same staleness reasoning applies.
+            self._bump_marker(
+                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+            )
         except BaseException:
             _rmtree(staging)
             raise
@@ -1128,6 +1158,10 @@ class FsStorage(Storage):
         self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
         target.unlink()
         _fsync_dir(target.parent)
+        # Authoritative edit -> bump the generation (issue #889).
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     async def delete_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1146,6 +1180,10 @@ class FsStorage(Storage):
         # be a storage-amplification bomb on a large subtree.
         shutil.rmtree(target)
         _fsync_dir(target.parent)
+        # Authoritative edit -> bump the generation (issue #889).
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     async def make_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1164,6 +1202,14 @@ class FsStorage(Storage):
         target = self._safe_target(current, rel_path)
         target.mkdir(parents=True, exist_ok=True)
         _fsync_dir(target.parent)
+        # Authoritative edit -> bump the generation (issue #889). An empty directory
+        # arguably adds no world content, but bumping uniformly across every
+        # authoritative ``current/`` mutation keeps the staleness invariant simple
+        # (consistency over a per-op carve-out): the hydrate-skip / clobber reasoning
+        # never has to special-case which edit "really" changed the world.
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     def _atomic_write(self, target: Path, data: bytes) -> None:
         """temp-sibling + fsync + atomic rename (Section 4.4)."""

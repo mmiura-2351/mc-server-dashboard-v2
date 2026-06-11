@@ -348,6 +348,13 @@ var openFile = os.Open
 // Production always uses os.ReadDir.
 var readDir = os.ReadDir
 
+// entryInfo resolves a DirEntry's FileInfo for walkInto. os.DirEntry.Info() lazily
+// lstats the entry, so it returns ENOENT when the entry vanishes between the ReadDir
+// walk and this call — the same race family as openFile/readDir (#820/#853/#854).
+// Indirected through a package var so a test can inject ENOENT for a specific entry
+// without racing real filesystem timings. Production always uses entry.Info().
+var entryInfo = func(entry os.DirEntry) (os.FileInfo, error) { return entry.Info() }
+
 // fsyncTree fsyncs every directory in the tree rooted at dir (post-order, so a
 // child dir is durable before its parent's entry for it). File contents are already
 // fsynced as written (writeFile); this makes the directory entries durable so a
@@ -571,8 +578,20 @@ func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
 		}
 		rel = filepath.ToSlash(rel)
 
-		info, err := entry.Info()
+		info, err := entryInfo(entry)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// The entry vanished between this directory's ReadDir and the lazy
+				// lstat behind Info() (e.g. log rotation, plugin temp cleanup) — the
+				// remaining member of the #820/#853/#854 vanish-race family. Skip it
+				// with a Warn rather than failing the whole snapshot: by the same
+				// argument as those, a world's region files cannot vanish under quiesce
+				// (Minecraft never unlinks them mid-write), and a partial-loss of region
+				// files is caught downstream by the API missing-region gate (#854).
+				log.Warn("snapshot: entry vanished between walk and stat; skipping",
+					"path", rel)
+				continue
+			}
 			return err
 		}
 		// Skip symlinks and other special files: a legitimate working set is plain

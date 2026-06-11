@@ -47,10 +47,25 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=_NAMING_CONVENTION)
 
 
-def create_engine(url: str) -> AsyncEngine:
-    """Create the application's async engine for ``url`` (e.g. asyncpg DSN)."""
+def create_engine(
+    url: str,
+    *,
+    pool_size: int | None = None,
+    max_overflow: int | None = None,
+) -> AsyncEngine:
+    """Create the application's async engine for ``url`` (e.g. asyncpg DSN).
 
-    return create_async_engine(url, pool_pre_ping=True)
+    ``pool_size`` and ``max_overflow`` are forwarded to SQLAlchemy's
+    ``create_async_engine`` when supplied; when omitted SQLAlchemy's own
+    defaults (5 / 10) apply (issue #884).
+    """
+
+    kwargs: dict[str, object] = {"pool_pre_ping": True}
+    if pool_size is not None:
+        kwargs["pool_size"] = pool_size
+    if max_overflow is not None:
+        kwargs["max_overflow"] = max_overflow
+    return create_async_engine(url, **kwargs)
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

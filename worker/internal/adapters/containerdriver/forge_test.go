@@ -30,6 +30,12 @@ type forgeFakeDocker struct {
 	removed []string
 	// logBodies maps a container id to the multiplexed log stream Logs returns.
 	logBodies map[string]string
+	// waitGates, when non-nil for a given id, drives Wait for that container
+	// result-by-result instead of the default exit-channel; each Wait call pops
+	// one waitResult, so a test can script a transport error before a real exit.
+	waitGates map[string]chan waitResult
+	// inspectGate, when non-nil, scripts Inspect calls result-by-result.
+	inspectGate chan inspectStep
 }
 
 func newForgeFakeDocker() *forgeFakeDocker {
@@ -38,6 +44,7 @@ func newForgeFakeDocker() *forgeFakeDocker {
 		codes:     map[string]int64{},
 		errs:      map[string]error{},
 		logBodies: map[string]string{},
+		waitGates: map[string]chan waitResult{},
 	}
 }
 
@@ -65,8 +72,13 @@ func (f *forgeFakeDocker) Kill(_ context.Context, id string) error {
 
 func (f *forgeFakeDocker) Wait(_ context.Context, id string) (int64, error) {
 	f.mu.Lock()
+	gate := f.waitGates[id]
 	ch := f.exited[id]
 	f.mu.Unlock()
+	if gate != nil {
+		r := <-gate
+		return r.code, r.err
+	}
 	if ch != nil {
 		<-ch
 	}
@@ -83,6 +95,13 @@ func (f *forgeFakeDocker) Remove(_ context.Context, id string) error {
 }
 
 func (f *forgeFakeDocker) Inspect(_ context.Context, _ string) (ContainerInfo, error) {
+	f.mu.Lock()
+	gate := f.inspectGate
+	f.mu.Unlock()
+	if gate != nil {
+		step := <-gate
+		return step.info, step.err
+	}
 	return ContainerInfo{}, errNotFound
 }
 
@@ -455,6 +474,84 @@ func TestForgeContainerStopWinsLatchBeforeLaunch(t *testing.T) {
 	if !docker.wasRemoved("mcsd-s1") {
 		t.Fatal("the created-but-unstarted launch container must be removed on abort")
 	}
+}
+
+// A Wait TRANSPORT error on the install container while the container is GONE
+// (404) must emit crashed (issue #881). Without the re-inspect treatment, the
+// transport error is reported directly as crashed with the transport-error
+// message; with it, the re-inspect confirms gone → crashed with the correct
+// "no args file" detail (the install produced no argsfile so the re-plan after
+// Wait would crash anyway). This test verifies the install path runs through
+// the same re-inspect loop as supervise rather than short-circuiting to a crash
+// on the raw transport error.
+func TestInstallWaitTransportErrorContainerGoneEmitsCrashed(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	docker.waitGates[installID] = make(chan waitResult)
+	// Inspect: first call → errNotFound (container gone after blip).
+	docker.inspectGate = make(chan inspectStep, 1)
+	docker.inspectGate <- inspectStep{err: errNotFound}
+	// Shrink the probe bound to keep the deadline path fast.
+	prevDeadline, prevInterval := waitTransportProbeDeadline, waitTransportProbeInterval
+	waitTransportProbeDeadline, waitTransportProbeInterval = 30*time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		waitTransportProbeDeadline, waitTransportProbeInterval = prevDeadline, prevInterval
+	})
+	d := forgeDriver(docker)
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Deliver a transport error on the install Wait. The re-inspect returns
+	// errNotFound → the container is gone → superviseInstall should report crashed.
+	docker.waitGates[installID] <- waitResult{err: errors.New("containerdriver: POST /wait: EOF")}
+
+	drainTo(t, inst.Events(), execution.StateCrashed)
+	if inst.Status() != execution.StateCrashed {
+		t.Fatalf("Status = %v, want crashed after install container gone", inst.Status())
+	}
+}
+
+// A Wait TRANSPORT error on the install container while the container is STILL
+// RUNNING means the daemon blipped but the install is ongoing: superviseInstall
+// must re-attach a waiter and continue, not crash prematurely (issue #881).
+func TestInstallWaitTransportErrorContainerRunningContinuesSupervising(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	docker.waitGates[installID] = make(chan waitResult)
+	// Inspect: first call → Running (install still going).
+	docker.inspectGate = make(chan inspectStep, 1)
+	docker.inspectGate <- inspectStep{info: ContainerInfo{ID: installID, Running: true}}
+	prevDeadline, prevInterval := waitTransportProbeDeadline, waitTransportProbeInterval
+	waitTransportProbeDeadline, waitTransportProbeInterval = 100*time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		waitTransportProbeDeadline, waitTransportProbeInterval = prevDeadline, prevInterval
+	})
+	d := forgeDriver(docker)
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Transport error: re-inspect finds Running → re-attach. Second push lands only
+	// after the re-attached Wait reads it, proving supervision continued.
+	docker.waitGates[installID] <- waitResult{err: errors.New("containerdriver: POST /wait: connection reset")}
+
+	// Now the install exits successfully and produces the args file.
+	writeArgsfile(t, dir)
+	docker.waitGates[installID] <- waitResult{code: 0}
+
+	drainTo(t, inst.Events(), execution.StateRunning)
+	if inst.Status() != execution.StateRunning {
+		t.Fatalf("Status = %v, want running after install re-attach and clean exit", inst.Status())
+	}
+	docker.exit("mcsd-s1", 0, nil)
+	drainClosed(inst.Events())
 }
 
 func hasArg(args []string, want string) bool {

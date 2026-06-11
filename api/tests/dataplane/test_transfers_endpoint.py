@@ -26,6 +26,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
+    RelPath,
     ServerId,
 )
 
@@ -419,6 +420,52 @@ def test_snapshot_in_flight_stale_publish_refused_after_restore(
     assert _read_tar(asyncio.run(_read())) == {"k": b"g1"}
 
 
+def test_snapshot_in_flight_stale_publish_refused_after_edit(tmp_path: Path) -> None:
+    # Issue #889 edit-clobber window (the issue's direction 2): a worker published the
+    # current generation, then an authoritative API file edit mutated ``current/`` in
+    # place. The SAME worker's final snapshot is still in flight, declaring its OLD base
+    # generation — and crucially the worker WAS the last publisher, so before the fix
+    # the guard (base == current, same publisher) would PASS and clobber the edit. The
+    # edit now bumps the generation AND stamps the API_EDIT_PUBLISHER sentinel, so the
+    # in-flight snapshot sees base < current published by a DIFFERENT publisher and the
+    # guard refuses it (409 stale_generation) — the edit survives.
+    import asyncio
+
+    worker = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    # The worker published, and is the recorded publisher; its scratch is at this gen.
+    asyncio.run(_publish(storage, community, server, {"k": b"snap"}, publisher=worker))
+    base = asyncio.run(storage.current_generation(c, s))
+
+    # An authoritative API edit mutates current/ in place and bumps the generation.
+    asyncio.run(storage.write_file(c, s, RelPath("k"), b"edited"))
+
+    # The worker's in-flight final snapshot declares its base (pre-edit gen) and own id.
+    body = _tar_bytes({"k": b"in-flight"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(base),
+                "X-Worker-Id": worker,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
+
+    # The edited data survives the refused publish (not clobbered).
+    async def _read() -> bytes:
+        return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
+
+    assert _read_tar(asyncio.run(_read())) == {"k": b"edited"}
+
+
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
     import asyncio
 
@@ -634,6 +681,13 @@ def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
     payload = resp.json()
     assert payload["reason"] == "working_set_incomplete"
     assert payload["affected_count"] == 1
+    # The recovery (STORAGE.md) needs the LOST NAMES: a bounded per-directory list
+    # of the missing region files must be surfaced so the operator can delete them
+    # from ``current/`` and re-publish. Here the loss is small, so nothing truncated.
+    assert payload["directories"] == [
+        {"directory": "world/region", "missing": ["r.0.1.mca"]}
+    ]
+    assert payload["truncated"] is False
 
     async def _read() -> bytes:
         return b"".join(
@@ -650,6 +704,84 @@ def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
         "world/region/r.0.0.mca": healthy_mca,
         "world/region/r.0.1.mca": healthy_mca,
     }
+
+
+def test_snapshot_partial_region_loss_report_is_bounded_and_truncated(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    healthy_mca = bytes(2 * 4096)  # a structurally valid empty region.
+
+    # Publish many region dirs, each with more region files than the per-directory
+    # name cap, so a drop of all-but-one from every dir exceeds BOTH caps and the
+    # surfaced list must be bounded and flagged truncated.
+    dir_count = transfers._MISSING_REGION_DIR_CAP + 5
+    names_per_dir = transfers._MISSING_REGION_NAME_CAP + 5
+    prior: dict[str, bytes] = {}
+    for d in range(dir_count):
+        for n in range(names_per_dir):
+            prior[f"world/dim{d:03d}/region/r.{n}.0.mca"] = healthy_mca
+    asyncio.run(_publish(storage, community, server, prior))
+
+    # Re-publish keeping only the FIRST region file of each dir: every dir is a
+    # partial loss (some-but-not-all gone).
+    kept = {f"world/dim{d:03d}/region/r.0.0.mca": healthy_mca for d in range(dir_count)}
+    body = _tar_bytes(kept)
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    payload = resp.json()
+    assert payload["reason"] == "working_set_incomplete"
+    assert payload["affected_count"] == dir_count
+    # The body must be BOUNDED: at most the dir cap, each at most the name cap.
+    assert len(payload["directories"]) == transfers._MISSING_REGION_DIR_CAP
+    for entry in payload["directories"]:
+        assert len(entry["missing"]) <= transfers._MISSING_REGION_NAME_CAP
+    # Both caps fired, so the list is flagged partial.
+    assert payload["truncated"] is True
+
+
+def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    healthy_mca = bytes(2 * 4096)
+
+    # Publish exactly the cap counts so no cap fires (strict > in the builder).
+    dir_count = transfers._MISSING_REGION_DIR_CAP  # 20
+    names_per_dir = transfers._MISSING_REGION_NAME_CAP  # 50
+    prior: dict[str, bytes] = {}
+    for d in range(dir_count):
+        for n in range(names_per_dir):
+            prior[f"world/dim{d:03d}/region/r.{n}.0.mca"] = healthy_mca
+    asyncio.run(_publish(storage, community, server, prior))
+
+    # Keep only the first region file of each dir: exactly cap dirs, each with
+    # exactly (names_per_dir - 1) missing names — at the cap, not over.
+    kept = {f"world/dim{d:03d}/region/r.0.0.mca": healthy_mca for d in range(dir_count)}
+    body = _tar_bytes(kept)
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    payload = resp.json()
+    assert payload["reason"] == "working_set_incomplete"
+    # Exactly at cap: all dirs are surfaced and truncated must be False.
+    assert len(payload["directories"]) == dir_count
+    assert payload["truncated"] is False
 
 
 def test_snapshot_requires_content_length(tmp_path: Path) -> None:
