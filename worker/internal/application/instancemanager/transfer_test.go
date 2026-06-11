@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -37,18 +38,40 @@ type fakeTransfer struct {
 	// snapshotWorkerIDs records, per Snapshot call, the worker id the manager
 	// declared (issue #847 bug 3).
 	snapshotWorkerIDs []string
+	// blockUntilCtxDone, when set, makes Hydrate/Snapshot block until the passed
+	// context is cancelled and then return ctx.Err(), modeling a stalled transfer
+	// the per-transfer deadline (issue #874) must abort. gotCtxErr captures the
+	// error the blocked transfer observed so a test can assert it was the deadline.
+	blockUntilCtxDone bool
+	gotCtxErr         error
 }
 
-func (f *fakeTransfer) Hydrate(_ context.Context, _, _, workingDir string) (uint64, error) {
+func (f *fakeTransfer) Hydrate(ctx context.Context, _, _, workingDir string) (uint64, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.hydrated = append(f.hydrated, workingDir)
+	block := f.blockUntilCtxDone
+	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		f.mu.Lock()
+		f.gotCtxErr = ctx.Err()
+		f.mu.Unlock()
+		return 0, ctx.Err()
+	}
 	return f.gen, f.err
 }
 
-func (f *fakeTransfer) Snapshot(_ context.Context, _, _, workingDir string, baseGeneration uint64, workerID string) (uint64, error) {
+func (f *fakeTransfer) Snapshot(ctx context.Context, _, _, workingDir string, baseGeneration uint64, workerID string) (uint64, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	if f.blockUntilCtxDone {
+		f.snapshots = append(f.snapshots, workingDir)
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		f.gotCtxErr = ctx.Err()
+		f.mu.Unlock()
+		return 0, ctx.Err()
+	}
 	f.snapshots = append(f.snapshots, workingDir)
 	f.snapshotHadWorkingSet = append(f.snapshotHadWorkingSet, hasWorkingSet(workingDir))
 	f.snapshotBaseGenerations = append(f.snapshotBaseGenerations, baseGeneration)
@@ -288,5 +311,77 @@ func TestSnapshotTriggerRunningServerSaveOffFailureIsNonFatalAndSkipsSaveOn(t *t
 	}
 	if containsLine(ctrl.lines, "save-on") {
 		t.Fatalf("rcon lines = %v, want no save-on when save-off never succeeded", ctrl.lines)
+	}
+}
+
+// A snapshot upload that exceeds the per-transfer deadline (issue #874) is
+// aborted Worker-side: SetTransferDeadline bounds the transfer's context, so a
+// stalled upload returns a deadline error rather than hanging the lane forever
+// (the unbounded-upload case #869 recovers from API-side).
+func TestSnapshotTriggerUploadExceedingDeadlineAborts(t *testing.T) {
+	tr := &fakeTransfer{blockUntilCtxDone: true}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	m.SetTransferDeadline(20 * time.Millisecond)
+
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger over deadline = %+v, want transfer-failed", res)
+	}
+	tr.mu.Lock()
+	gotErr := tr.gotCtxErr
+	tr.mu.Unlock()
+	if !errors.Is(gotErr, context.DeadlineExceeded) {
+		t.Fatalf("transfer ctx err = %v, want context.DeadlineExceeded", gotErr)
+	}
+}
+
+// A hydrate download is bounded symmetrically (issue #874): the same
+// per-transfer deadline aborts a stalled download.
+func TestHydrateTriggerDownloadExceedingDeadlineAborts(t *testing.T) {
+	tr := &fakeTransfer{blockUntilCtxDone: true}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	m.SetTransferDeadline(20 * time.Millisecond)
+
+	res := m.Handle(context.Background(), hydrateCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("HydrateTrigger over deadline = %+v, want transfer-failed", res)
+	}
+	tr.mu.Lock()
+	gotErr := tr.gotCtxErr
+	tr.mu.Unlock()
+	if !errors.Is(gotErr, context.DeadlineExceeded) {
+		t.Fatalf("transfer ctx err = %v, want context.DeadlineExceeded", gotErr)
+	}
+}
+
+// With no transfer deadline set (an older API that omits the RegisterAck field,
+// or before the first ack), a transfer runs unbounded — the prior behavior. The
+// blocked transfer only returns when the request context itself is cancelled.
+func TestSnapshotTriggerWithoutDeadlineRunsUnbounded(t *testing.T) {
+	tr := &fakeTransfer{blockUntilCtxDone: true}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	// No SetTransferDeadline call: the bound is 0 (unbounded).
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan session.CommandResult, 1)
+	go func() { done <- m.Handle(ctx, snapshotCmd()) }()
+
+	// The transfer must still be blocked (no deadline fired); cancelling the
+	// request context is the only thing that releases it.
+	select {
+	case res := <-done:
+		t.Fatalf("snapshot returned %+v before the request context was cancelled; deadline must be unbounded", res)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	res := <-done
+	if res.Success {
+		t.Fatalf("snapshot = %+v, want failure after request cancel", res)
+	}
+	tr.mu.Lock()
+	gotErr := tr.gotCtxErr
+	tr.mu.Unlock()
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Fatalf("transfer ctx err = %v, want context.Canceled (request cancel, not a deadline)", gotErr)
 	}
 }

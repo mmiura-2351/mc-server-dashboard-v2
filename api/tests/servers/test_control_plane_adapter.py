@@ -16,6 +16,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     Command,
     CommandResult,
     CommandResultCode,
+    CommandTimedOutError,
     EditFileCommand,
     HydrateCommand,
     LaunchMode,
@@ -23,6 +24,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ReadFileCommand,
     SnapshotCommand,
     StartServerCommand,
+    WorkerNotConnectedError,
 )
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     ControlPlane as FleetControlPlane,
@@ -193,6 +195,60 @@ async def test_snapshot_builds_snapshot_url() -> None:
         f"https://api.example/api/data-plane/communities/{community}"
         f"/servers/{server}/snapshot"
     )
+
+
+class _RaisingFleetControlPlane(FleetControlPlane):
+    """A fleet control plane whose dispatch always raises a given exception, so
+    the adapter's error -> WorkerUnavailableError mapping can be tested directly."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def dispatch(
+        self,
+        *,
+        worker_id: FleetWorkerId,
+        server_id: str,
+        command: Command,
+        timeout_override: float | None = None,
+    ) -> CommandResult:
+        raise self._exc
+
+
+async def test_timeout_maps_to_worker_unavailable_with_upload_may_be_live() -> None:
+    # A CommandTimedOutError means the worker session is healthy and the transfer
+    # is still uploading (only the API future was abandoned): the final-stop
+    # snapshot must HOLD the assignment, so the flag is True (#847/#874). A direct
+    # adapter assertion guards the mapping at servers/adapters/control_plane.py:425,
+    # which lifecycle tests only hand-mimic — a regression dropping the flag would
+    # otherwise pass the suite.
+    fleet = _RaisingFleetControlPlane(CommandTimedOutError("dispatch timed out"))
+    adapter = _adapter(fleet)
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await adapter.snapshot(
+            worker_id=WorkerId(uuid.uuid4()),
+            community_id=CommunityId(uuid.uuid4()),
+            server_id=ServerId(uuid.uuid4()),
+        )
+    assert excinfo.value.upload_may_be_live is True
+
+
+async def test_disconnect_maps_to_worker_unavailable_without_upload_may_be_live() -> (
+    None
+):
+    # A WorkerNotConnectedError means the worker is gone and the upload died with
+    # its context, so the assignment is released as before: the flag is False.
+    fleet = _RaisingFleetControlPlane(WorkerNotConnectedError("worker gone"))
+    adapter = _adapter(fleet)
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await adapter.snapshot(
+            worker_id=WorkerId(uuid.uuid4()),
+            community_id=CommunityId(uuid.uuid4()),
+            server_id=ServerId(uuid.uuid4()),
+        )
+    assert excinfo.value.upload_may_be_live is False
 
 
 async def test_read_file_dispatches_and_carries_bytes() -> None:

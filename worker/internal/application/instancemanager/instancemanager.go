@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -96,6 +97,14 @@ type Manager struct {
 
 	clock           session.Clock
 	metricsInterval time.Duration
+
+	// transferDeadlineNanos bounds a single data-plane transfer (snapshot upload /
+	// hydrate download) Worker-side (issue #874). The session pushes it from the
+	// RegisterAck after registration (SetTransferDeadline); the hydrate/snapshot
+	// handlers apply it as a per-transfer context deadline. It is read on lane
+	// goroutines and written on the session goroutine, so it is atomic. 0 (an
+	// older API, or before the first ack) leaves the transfer unbounded as before.
+	transferDeadlineNanos atomic.Int64
 
 	mu        sync.Mutex
 	instances map[string]execution.Instance
@@ -204,6 +213,31 @@ func (m *Manager) WithTransfer(t Transfer) *Manager {
 	return m
 }
 
+// SetTransferDeadline records the per-transfer bound the API advertised in
+// RegisterAck (session.TransferDeadlineSetter, issue #874). The hydrate/snapshot
+// handlers apply it as a context deadline so an upload/download cannot outlive
+// the API's budget indefinitely (#869). A non-positive value clears the bound,
+// leaving transfers unbounded as before.
+func (m *Manager) SetTransferDeadline(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	m.transferDeadlineNanos.Store(int64(d))
+}
+
+// transferContext derives the context a data-plane transfer runs under: the
+// request ctx bounded by the configured transfer deadline (issue #874) when one
+// is set, else the request ctx unchanged. The per-request deadline is the clean
+// mechanism — it bounds one transfer without capping the http.Client's streaming
+// reads globally. The returned cancel is always non-nil and must be called.
+func (m *Manager) transferContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	d := time.Duration(m.transferDeadlineNanos.Load())
+	if d <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, d)
+}
+
 // WithWorkerID sets this Worker's own id, stamped on a snapshot publish so the
 // API's publish-time generation guard can distinguish a same-Worker re-publish
 // from a different-Worker stale publish (issue #847 bug 3).
@@ -283,7 +317,11 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	defer m.release(cmd.ServerID)
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
-	gen, err := m.transfer.Hydrate(ctx, cmd.TransferURL, cmd.TransferToken, workingDir)
+	// Bound the download with the per-transfer deadline (issue #874) so a stalled
+	// hydrate cannot hang the lane indefinitely.
+	transferCtx, cancel := m.transferContext(ctx)
+	defer cancel()
+	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: hydrate: %v", err))
@@ -412,7 +450,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
 	// hydrated set) leaves the guard to compare against the store's current value.
 	baseGeneration := readGeneration(workingDir)
-	gen, err := m.transfer.Snapshot(ctx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
+	// Bound the upload with the per-transfer deadline (issue #874): without it the
+	// upload has no deadline at all and could outlive the API's snapshot_timeout
+	// indefinitely (#869). The bound is the API budget + a margin (the ack value),
+	// so the API-side timeout fires first and this is the cleanup backstop.
+	transferCtx, cancel := m.transferContext(ctx)
+	defer cancel()
+	gen, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: snapshot: %v", err))

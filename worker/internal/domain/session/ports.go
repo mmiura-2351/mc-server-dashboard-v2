@@ -37,7 +37,14 @@ type HeldServer struct {
 type RegisterAck struct {
 	Accepted          bool
 	HeartbeatInterval time.Duration
-	RejectionReason   string
+	// TransferDeadline bounds a single data-plane transfer (snapshot upload /
+	// hydrate download) Worker-side (issue #874). The API derives it from its
+	// hydrate/snapshot budgets plus a margin, so it is always >= the API budget:
+	// the API-side timeout fires first and this is the cleanup backstop that
+	// closes the unbounded-upload case (#869). A non-positive value (an older
+	// API that does not set the field) leaves the transfer unbounded as before.
+	TransferDeadline time.Duration
+	RejectionReason  string
 }
 
 // Command is an inbound API command, reduced to the fields the session and its
@@ -286,6 +293,17 @@ type CommandHandler interface {
 	// Metrics streams periodic runtime samples for all running servers. The
 	// session forwards each as a Metrics event (FR-MON-3).
 	Metrics() <-chan MetricsEvent
+}
+
+// TransferDeadlineSetter is an optional CommandHandler capability: the session
+// pushes the RegisterAck's data-plane transfer bound onto the handler after
+// registration so it can apply a per-transfer deadline (issue #874). It is a
+// separate interface because the bound arrives from the ack, not on each
+// command; a handler that does not implement it simply runs transfers unbounded.
+type TransferDeadlineSetter interface {
+	// SetTransferDeadline records the bound for one data-plane transfer (snapshot
+	// upload / hydrate download). A non-positive value leaves transfers unbounded.
+	SetTransferDeadline(d time.Duration)
 }
 
 // Transport is the Port over a single live control-plane stream. One Transport

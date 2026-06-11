@@ -270,6 +270,11 @@ type fakeHandler struct {
 	events  chan StatusEvent
 	logs    chan LogEvent
 	metrics chan MetricsEvent
+	// transferDeadline records the value the session pushed via the optional
+	// TransferDeadlineSetter after registration (issue #874); deadlineSet flags
+	// that the setter was called at all.
+	transferDeadline time.Duration
+	deadlineSet      bool
 }
 
 func newFakeHandler(result CommandResult) *fakeHandler {
@@ -293,6 +298,19 @@ func (h *fakeHandler) Handle(_ context.Context, cmd Command) CommandResult {
 func (h *fakeHandler) Events() <-chan StatusEvent   { return h.events }
 func (h *fakeHandler) Logs() <-chan LogEvent        { return h.logs }
 func (h *fakeHandler) Metrics() <-chan MetricsEvent { return h.metrics }
+
+func (h *fakeHandler) SetTransferDeadline(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.transferDeadline = d
+	h.deadlineSet = true
+}
+
+func (h *fakeHandler) transferDeadlineCopy() (time.Duration, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.transferDeadline, h.deadlineSet
+}
 
 func (h *fakeHandler) handledCopy() []Command {
 	h.mu.Lock()

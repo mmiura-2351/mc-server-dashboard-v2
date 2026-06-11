@@ -941,8 +941,17 @@ type RegisterAck struct {
 	// rejection_reason explains a refusal (e.g. bad credential, duplicate id);
 	// empty when accepted is true.
 	RejectionReason string `protobuf:"bytes,3,opt,name=rejection_reason,json=rejectionReason,proto3" json:"rejection_reason,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// transfer_deadline bounds a single data-plane transfer (the snapshot upload
+	// and the hydrate download) Worker-side. The API derives it from its own
+	// hydrate/snapshot budgets plus a small margin, so it is always >= the API
+	// budget: the API-side timeout fires first and this Worker bound is the
+	// cleanup backstop that structurally closes the unbounded-upload case (an
+	// upload outliving snapshot_timeout_seconds indefinitely, #874/#869). The
+	// Worker applies it as a per-transfer context deadline; a non-positive or
+	// unset value (an older API) leaves the transfer unbounded as before.
+	TransferDeadline *durationpb.Duration `protobuf:"bytes,4,opt,name=transfer_deadline,json=transferDeadline,proto3" json:"transfer_deadline,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RegisterAck) Reset() {
@@ -994,6 +1003,13 @@ func (x *RegisterAck) GetRejectionReason() string {
 		return x.RejectionReason
 	}
 	return ""
+}
+
+func (x *RegisterAck) GetTransferDeadline() *durationpb.Duration {
+	if x != nil {
+		return x.TransferDeadline
+	}
+	return nil
 }
 
 // ApiCommand is one instruction the Worker must act on and answer with a
@@ -2431,11 +2447,12 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\tresources\x18\x03 \x01(\v2#.mcsd.controlplane.v1.HostResourcesR\tresources\"O\n" +
 	"\rHostResources\x12\x1b\n" +
 	"\tcpu_cores\x18\x01 \x01(\rR\bcpuCores\x12!\n" +
-	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\"\x9e\x01\n" +
+	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\"\xe6\x01\n" +
 	"\vRegisterAck\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12H\n" +
 	"\x12heartbeat_interval\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x11heartbeatInterval\x12)\n" +
-	"\x10rejection_reason\x18\x03 \x01(\tR\x0frejectionReason\"\x9c\x05\n" +
+	"\x10rejection_reason\x18\x03 \x01(\tR\x0frejectionReason\x12F\n" +
+	"\x11transfer_deadline\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\x10transferDeadline\"\x9c\x05\n" +
 	"\n" +
 	"ApiCommand\x12\x1d\n" +
 	"\n" +
@@ -2624,35 +2641,36 @@ var file_mcsd_controlplane_v1_control_plane_proto_depIdxs = []int32{
 	0,  // 9: mcsd.controlplane.v1.WorkerCapabilities.drivers:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
 	11, // 10: mcsd.controlplane.v1.WorkerCapabilities.resources:type_name -> mcsd.controlplane.v1.HostResources
 	33, // 11: mcsd.controlplane.v1.RegisterAck.heartbeat_interval:type_name -> google.protobuf.Duration
-	14, // 12: mcsd.controlplane.v1.ApiCommand.start:type_name -> mcsd.controlplane.v1.StartServer
-	15, // 13: mcsd.controlplane.v1.ApiCommand.stop:type_name -> mcsd.controlplane.v1.StopServer
-	16, // 14: mcsd.controlplane.v1.ApiCommand.restart:type_name -> mcsd.controlplane.v1.RestartServer
-	17, // 15: mcsd.controlplane.v1.ApiCommand.server_command:type_name -> mcsd.controlplane.v1.ServerCommand
-	18, // 16: mcsd.controlplane.v1.ApiCommand.hydrate:type_name -> mcsd.controlplane.v1.HydrateTrigger
-	19, // 17: mcsd.controlplane.v1.ApiCommand.snapshot:type_name -> mcsd.controlplane.v1.SnapshotTrigger
-	20, // 18: mcsd.controlplane.v1.ApiCommand.read_file:type_name -> mcsd.controlplane.v1.ReadFile
-	21, // 19: mcsd.controlplane.v1.ApiCommand.edit_file:type_name -> mcsd.controlplane.v1.EditFile
-	22, // 20: mcsd.controlplane.v1.ApiCommand.list_files:type_name -> mcsd.controlplane.v1.ListFiles
-	0,  // 21: mcsd.controlplane.v1.StartServer.driver:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
-	1,  // 22: mcsd.controlplane.v1.StartServer.launch_mode:type_name -> mcsd.controlplane.v1.LaunchMode
-	26, // 23: mcsd.controlplane.v1.CommandResult.error:type_name -> mcsd.controlplane.v1.CommandError
-	24, // 24: mcsd.controlplane.v1.CommandResult.file_listing:type_name -> mcsd.controlplane.v1.FileListing
-	25, // 25: mcsd.controlplane.v1.FileListing.entries:type_name -> mcsd.controlplane.v1.FileEntry
-	3,  // 26: mcsd.controlplane.v1.CommandError.code:type_name -> mcsd.controlplane.v1.CommandErrorCode
-	2,  // 27: mcsd.controlplane.v1.CommandError.file_access_reason:type_name -> mcsd.controlplane.v1.FileAccessReason
-	28, // 28: mcsd.controlplane.v1.Event.status_change:type_name -> mcsd.controlplane.v1.StatusChange
-	29, // 29: mcsd.controlplane.v1.Event.log_line:type_name -> mcsd.controlplane.v1.LogLine
-	30, // 30: mcsd.controlplane.v1.Event.metrics:type_name -> mcsd.controlplane.v1.Metrics
-	31, // 31: mcsd.controlplane.v1.Event.heartbeat:type_name -> mcsd.controlplane.v1.Heartbeat
-	4,  // 32: mcsd.controlplane.v1.StatusChange.state:type_name -> mcsd.controlplane.v1.ServerState
-	5,  // 33: mcsd.controlplane.v1.LogLine.stream:type_name -> mcsd.controlplane.v1.LogStream
-	6,  // 34: mcsd.controlplane.v1.WorkerService.Session:input_type -> mcsd.controlplane.v1.WorkerMessage
-	7,  // 35: mcsd.controlplane.v1.WorkerService.Session:output_type -> mcsd.controlplane.v1.ApiMessage
-	35, // [35:36] is the sub-list for method output_type
-	34, // [34:35] is the sub-list for method input_type
-	34, // [34:34] is the sub-list for extension type_name
-	34, // [34:34] is the sub-list for extension extendee
-	0,  // [0:34] is the sub-list for field type_name
+	33, // 12: mcsd.controlplane.v1.RegisterAck.transfer_deadline:type_name -> google.protobuf.Duration
+	14, // 13: mcsd.controlplane.v1.ApiCommand.start:type_name -> mcsd.controlplane.v1.StartServer
+	15, // 14: mcsd.controlplane.v1.ApiCommand.stop:type_name -> mcsd.controlplane.v1.StopServer
+	16, // 15: mcsd.controlplane.v1.ApiCommand.restart:type_name -> mcsd.controlplane.v1.RestartServer
+	17, // 16: mcsd.controlplane.v1.ApiCommand.server_command:type_name -> mcsd.controlplane.v1.ServerCommand
+	18, // 17: mcsd.controlplane.v1.ApiCommand.hydrate:type_name -> mcsd.controlplane.v1.HydrateTrigger
+	19, // 18: mcsd.controlplane.v1.ApiCommand.snapshot:type_name -> mcsd.controlplane.v1.SnapshotTrigger
+	20, // 19: mcsd.controlplane.v1.ApiCommand.read_file:type_name -> mcsd.controlplane.v1.ReadFile
+	21, // 20: mcsd.controlplane.v1.ApiCommand.edit_file:type_name -> mcsd.controlplane.v1.EditFile
+	22, // 21: mcsd.controlplane.v1.ApiCommand.list_files:type_name -> mcsd.controlplane.v1.ListFiles
+	0,  // 22: mcsd.controlplane.v1.StartServer.driver:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
+	1,  // 23: mcsd.controlplane.v1.StartServer.launch_mode:type_name -> mcsd.controlplane.v1.LaunchMode
+	26, // 24: mcsd.controlplane.v1.CommandResult.error:type_name -> mcsd.controlplane.v1.CommandError
+	24, // 25: mcsd.controlplane.v1.CommandResult.file_listing:type_name -> mcsd.controlplane.v1.FileListing
+	25, // 26: mcsd.controlplane.v1.FileListing.entries:type_name -> mcsd.controlplane.v1.FileEntry
+	3,  // 27: mcsd.controlplane.v1.CommandError.code:type_name -> mcsd.controlplane.v1.CommandErrorCode
+	2,  // 28: mcsd.controlplane.v1.CommandError.file_access_reason:type_name -> mcsd.controlplane.v1.FileAccessReason
+	28, // 29: mcsd.controlplane.v1.Event.status_change:type_name -> mcsd.controlplane.v1.StatusChange
+	29, // 30: mcsd.controlplane.v1.Event.log_line:type_name -> mcsd.controlplane.v1.LogLine
+	30, // 31: mcsd.controlplane.v1.Event.metrics:type_name -> mcsd.controlplane.v1.Metrics
+	31, // 32: mcsd.controlplane.v1.Event.heartbeat:type_name -> mcsd.controlplane.v1.Heartbeat
+	4,  // 33: mcsd.controlplane.v1.StatusChange.state:type_name -> mcsd.controlplane.v1.ServerState
+	5,  // 34: mcsd.controlplane.v1.LogLine.stream:type_name -> mcsd.controlplane.v1.LogStream
+	6,  // 35: mcsd.controlplane.v1.WorkerService.Session:input_type -> mcsd.controlplane.v1.WorkerMessage
+	7,  // 36: mcsd.controlplane.v1.WorkerService.Session:output_type -> mcsd.controlplane.v1.ApiMessage
+	36, // [36:37] is the sub-list for method output_type
+	35, // [35:36] is the sub-list for method input_type
+	35, // [35:35] is the sub-list for extension type_name
+	35, // [35:35] is the sub-list for extension extendee
+	0,  // [0:35] is the sub-list for field type_name
 }
 
 func init() { file_mcsd_controlplane_v1_control_plane_proto_init() }

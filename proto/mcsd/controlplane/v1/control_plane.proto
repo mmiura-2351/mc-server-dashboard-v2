@@ -165,6 +165,16 @@ message RegisterAck {
   // rejection_reason explains a refusal (e.g. bad credential, duplicate id);
   // empty when accepted is true.
   string rejection_reason = 3;
+
+  // transfer_deadline bounds a single data-plane transfer (the snapshot upload
+  // and the hydrate download) Worker-side. The API derives it from its own
+  // hydrate/snapshot budgets plus a small margin, so it is always >= the API
+  // budget: the API-side timeout fires first and this Worker bound is the
+  // cleanup backstop that structurally closes the unbounded-upload case (an
+  // upload outliving snapshot_timeout_seconds indefinitely, #874/#869). The
+  // Worker applies it as a per-transfer context deadline; a non-positive or
+  // unset value (an older API) leaves the transfer unbounded as before.
+  google.protobuf.Duration transfer_deadline = 4;
 }
 
 // ---------------------------------------------------------------------------

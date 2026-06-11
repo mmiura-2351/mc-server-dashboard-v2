@@ -47,6 +47,7 @@ from tests.fleet.fakes import (
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _TIMEOUT = dt.timedelta(seconds=30)
+_TRANSFER_DEADLINE = dt.timedelta(seconds=660)
 _CREDENTIAL = "shared-worker-secret"
 # The API persists assigned_worker_id as a UUID column, so a Worker must
 # register with a UUID-format id (CONFIGURATION.md Section 6.1, issue #99).
@@ -106,6 +107,7 @@ class _Harness:
             clock=self.clock,
             worker_credential=_CREDENTIAL,
             heartbeat_timeout=_TIMEOUT,
+            transfer_deadline=_TRANSFER_DEADLINE,
             control_plane=self.control_plane,
             state_sink=self.state_sink,
             real_time_events=self.real_time_events,
@@ -224,6 +226,8 @@ async def test_register_returns_ack(harness: _Harness) -> None:
     assert response.WhichOneof("payload") == "register_ack"
     assert response.register_ack.accepted is True
     assert response.register_ack.heartbeat_interval.ToTimedelta() == _TIMEOUT / 3
+    # The ack advertises the Worker-side per-transfer deadline (issue #874).
+    assert response.register_ack.transfer_deadline.ToTimedelta() == _TRANSFER_DEADLINE
     assert response.correlation_id == "reg-1"
     snapshots = harness.registry.list_workers()
     assert len(snapshots) == 1
@@ -571,6 +575,7 @@ async def test_cancelled_session_cancels_pending_outbound_get() -> None:
         clock=FakeClock(_T0),
         worker_credential=_CREDENTIAL,
         heartbeat_timeout=_TIMEOUT,
+        transfer_deadline=_TRANSFER_DEADLINE,
         control_plane=control_plane,
         state_sink=FakeServerStateSink(),
         real_time_events=RecordingRealTimeEvents(),
@@ -676,6 +681,7 @@ async def test_rebuild_keeps_a_confirm_that_lands_during_the_tally_read() -> Non
         clock=FakeClock(_T0),
         worker_credential=_CREDENTIAL,
         heartbeat_timeout=_TIMEOUT,
+        transfer_deadline=_TRANSFER_DEADLINE,
         control_plane=ControlPlaneState(),
         state_sink=_ConfirmDuringReadSink(),
         real_time_events=RecordingRealTimeEvents(),

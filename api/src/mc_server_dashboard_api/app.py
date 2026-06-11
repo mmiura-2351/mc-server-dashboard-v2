@@ -156,6 +156,13 @@ from mc_server_dashboard_api.webui import mount_webui
 # Optional TOML config file location, overridable per deployment.
 _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
 
+# Margin added to the larger API transfer budget to form the Worker-side
+# transfer deadline advertised in RegisterAck (issue #874). It keeps the Worker
+# bound strictly above the API budget so the API-side dispatch timeout always
+# fires first and the Worker bound stays a cleanup backstop, never the primary
+# deadline that could kill a transfer the API still considers in flight.
+_TRANSFER_DEADLINE_MARGIN_SECONDS = 60
+
 
 def _resolve_config_file() -> Path | None:
     raw = os.environ.get(_CONFIG_FILE_ENV)
@@ -373,6 +380,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(settings.log.level, settings.log.format)
 
     heartbeat_timeout = dt.timedelta(seconds=settings.control.heartbeat_timeout_seconds)
+    # Worker-side data-plane transfer bound advertised in RegisterAck (issue #874):
+    # the larger of the two API transfer budgets plus a margin, so it is always
+    # >= the API budget. The API-side dispatch timeout (hydrate/snapshot_timeout)
+    # fires first; this Worker bound is the cleanup backstop that structurally
+    # closes the unbounded-upload case (#869). Deriving it API-side keeps the
+    # Worker on one source — no operator coordination across the two processes.
+    transfer_deadline = dt.timedelta(
+        seconds=max(
+            settings.control.hydrate_timeout_seconds,
+            settings.control.snapshot_timeout_seconds,
+        )
+        + _TRANSFER_DEADLINE_MARGIN_SECONDS
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -457,6 +477,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 clock=FleetSystemClock(),
                 worker_credential=settings.control.worker_credential,
                 heartbeat_timeout=heartbeat_timeout,
+                transfer_deadline=transfer_deadline,
                 control_plane=control_plane_state,
                 state_sink=state_sink,
                 real_time_events=real_time_events,

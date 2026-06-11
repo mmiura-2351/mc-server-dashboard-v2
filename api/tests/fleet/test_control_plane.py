@@ -58,6 +58,7 @@ from tests.fleet.fakes import (
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _TIMEOUT = dt.timedelta(seconds=30)
+_TRANSFER_DEADLINE = dt.timedelta(seconds=660)
 _CREDENTIAL = "shared-worker-secret"
 # Registers through the real gRPC servicer, which requires a UUID worker id
 # (issue #99); the fleet WorkerId value object itself stays free-form.
@@ -93,6 +94,7 @@ class _Harness:
             clock=FakeClock(_T0),
             worker_credential=_CREDENTIAL,
             heartbeat_timeout=_TIMEOUT,
+            transfer_deadline=_TRANSFER_DEADLINE,
             control_plane=self.state,
             state_sink=FakeServerStateSink(),
             real_time_events=RecordingRealTimeEvents(),
