@@ -415,6 +415,22 @@ idempotent: the startup sweep reclaims any `snapshots/<snapshot-id>/` not
 targeted by `current` and any leftover `incoming/` staging dir, and re-running
 `abort_snapshot` or the sweep is always safe.
 
+The sweep also reclaims the **spool temp files** a crash leaves at a backup
+write site — the fs adapter's `.backup.*.tmp` (create / upload) and
+`.final.*.tmp` (prune) siblings — and, on the object backend, the **in-progress
+multipart upload parts** a crash mid-`put_backup` (or mid-snapshot-member upload)
+leaves behind. Multipart parts never list as objects, so the prefix scan cannot
+see them; the object sweep lists them via `ListMultipartUploads` and aborts them
+via `AbortMultipartUpload`. Both reclaim paths apply an **mtime / `Initiated` age
+threshold** (1 h): a spool or upload younger than the threshold may belong to a
+live write still in flight, so it is left alone — mirroring the `incoming/`
+lease-guard discipline (#183) and keeping the sweep safe even if it ever runs
+periodically rather than only at startup (Section 8.5). If the object store does not
+support `ListMultipartUploads` (SeaweedFS support varies by build), the sweep
+logs a WARN advising an `AbortIncompleteMultipartUpload` bucket lifecycle rule
+and continues the rest of the sweep — orphan-part hygiene degrades to the
+lifecycle rule rather than failing recovery.
+
 ### 4.4 Single-file writes
 
 `write_file` (Section 3.4) also publishes atomically, by the same principle at
@@ -789,7 +805,9 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
 
 - **Orphan-sweep scheduling** (Section 4.3): the recovery sweep is specified;
   *when* it runs (startup, periodic) is an operational detail for the
-  implementation epic (#8).
+  implementation epic (#8). The spool / multipart reclaim paths now apply a 1 h
+  age threshold (Section 4.3, #903), so making the sweep periodic or manual no
+  longer risks eating a live write's temp.
 - **Continuous delta sync** (FR-DATA-5) is explicitly deferred; the streaming
   Port shape leaves room for it.
 - **WebUI surfacing of `working_set_incomplete`** (tracked: #900). The 422 the

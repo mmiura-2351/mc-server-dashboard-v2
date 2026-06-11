@@ -20,8 +20,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
+    MultipartUploadsUnsupportedError,
     S3Client,
     S3ClientFactory,
+    S3MultipartUpload,
     S3Object,
 )
 from mc_server_dashboard_api.storage.domain.errors import NotFoundError
@@ -43,6 +45,13 @@ class FakeS3Store:
         # safety window (#293). Set on every write; defaulted to "now" on read for
         # any key a test seeded directly into ``objects``.
         self.mtimes: dict[str, dt.datetime] = {}
+        # In-progress multipart uploads keyed by upload id, each a
+        # (key, initiated) pair — the orphan-part sweep input (issue #903). Tests
+        # seed leftovers here; ``abort_multipart_upload`` removes them. When
+        # ``list_multipart_uploads_unsupported`` is set the stub raises
+        # MultipartUploadsUnsupportedError to model a backend without the operation.
+        self.multipart_uploads: dict[str, tuple[str, dt.datetime]] = {}
+        self.list_multipart_uploads_unsupported = False
 
 
 class FakeS3Client:
@@ -109,6 +118,20 @@ class FakeS3Client:
             for key, data in sorted(self._store.objects.items())
             if key.startswith(prefix)
         ]
+
+    async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
+        if self._store.list_multipart_uploads_unsupported:
+            raise MultipartUploadsUnsupportedError("stub: operation unsupported")
+        return [
+            S3MultipartUpload(key=key, upload_id=upload_id, initiated=initiated)
+            for upload_id, (key, initiated) in sorted(
+                self._store.multipart_uploads.items()
+            )
+            if key.startswith(prefix)
+        ]
+
+    async def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        self._store.multipart_uploads.pop(upload_id, None)
 
 
 def fake_s3_factory(store: FakeS3Store) -> S3ClientFactory:
