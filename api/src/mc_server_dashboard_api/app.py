@@ -546,9 +546,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
                 snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
             )
+            # Build a fresh StartServer/StopServer (each with its own UnitOfWork)
+            # per reconcile action so concurrent actions never share a session
+            # (#871). The control plane, clock, and JAR seams are stateless and
+            # reused across the per-action use cases.
             reconciler = RunReconcilerTick(
                 uow=ServersUnitOfWork(create_session_factory(engine)),
-                start_server=StartServer(
+                make_start_server=lambda: StartServer(
                     uow=ServersUnitOfWork(create_session_factory(engine)),
                     control_plane=reconciler_control_plane,
                     clock=ServersSystemClock(),
@@ -561,7 +565,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                     store_generation=StorageGenerationReader(storage=storage),
                 ),
-                stop_server=StopServer(
+                make_stop_server=lambda: StopServer(
                     uow=ServersUnitOfWork(create_session_factory(engine)),
                     control_plane=reconciler_control_plane,
                     clock=ServersSystemClock(),

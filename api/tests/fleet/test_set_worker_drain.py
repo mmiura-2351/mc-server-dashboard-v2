@@ -298,14 +298,14 @@ async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:
     clock = ServersFakeClock(now)
     reconciler = RunReconcilerTick(
         uow=uow,
-        start_server=StartServer(
+        make_start_server=lambda: StartServer(
             uow=uow,
             control_plane=cp,
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
             store_generation=FakeStoreGenerationReader(),
         ),
-        stop_server=StopServer(uow=uow, control_plane=cp, clock=clock),
+        make_stop_server=lambda: StopServer(uow=uow, control_plane=cp, clock=clock),
         control_plane=cp,
         clock=clock,
         grace_seconds=60,

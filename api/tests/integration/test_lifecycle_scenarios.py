@@ -195,8 +195,8 @@ async def _reconciler_tick(
     factory = create_session_factory(engine)
     await RunReconcilerTick(
         uow=ServersUnitOfWork(factory),
-        start_server=_start_server_use_case(engine, control_plane, clock),
-        stop_server=_stop_server_use_case(engine, control_plane, clock),
+        make_start_server=lambda: _start_server_use_case(engine, control_plane, clock),
+        make_stop_server=lambda: _stop_server_use_case(engine, control_plane, clock),
         control_plane=control_plane,
         clock=clock,
         grace_seconds=0,
