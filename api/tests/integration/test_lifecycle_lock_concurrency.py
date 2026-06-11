@@ -259,6 +259,7 @@ async def test_held_lock_connection_is_not_idle_in_transaction(
                 text(
                     "SELECT count(*) FROM pg_stat_activity "
                     "WHERE state = 'idle in transaction'"
+                    " AND datname = current_database()"
                 )
             )
     # The probe connection itself runs in a transaction, but a plain SELECT leaves it

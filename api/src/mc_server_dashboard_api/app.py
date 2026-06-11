@@ -565,10 +565,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         )
                     ),
                     store_generation=StorageGenerationReader(storage=storage),
-                    # Carry the real per-server lock so the reconciler's own start
-                    # serializes against an at-rest-gated op the same way the HTTP
-                    # start does (issue #876): a reconciler tick must not flip
-                    # desired=running into the middle of a restore/delete either.
+                    # Carry the real per-server lock as insurance for future locked
+                    # reconciler paths (issue #876): a tick that eventually acquires
+                    # the lock will contend correctly against HTTP-path holders.
                     lifecycle_lock=PgLifecycleLock(engine=engine),
                 ),
                 make_stop_server=lambda: StopServer(

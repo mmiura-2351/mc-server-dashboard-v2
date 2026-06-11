@@ -229,8 +229,7 @@ still consume one extra connection each for as long as they run. Size the SQLAlc
 pool with that headroom in mind: budget roughly two connections per *concurrent*
 gated operation you expect (the op's own work plus its lock connection), not one,
 so a burst of concurrent restores/deletes does not starve ordinary request traffic.
-The pool is the SQLAlchemy engine default unless tuned via the `database.url`
-driver/pool query parameters.
+The pool uses fixed defaults: 5 connections (`pool_size`) with 10 overflow slots (`max_overflow`); each held lock and each bounded waiter pins one connection for its duration. A configuration knob for pool sizing is tracked in a follow-up issue (#884).
 
 ### 5.3 Authentication: tokens and password hashing
 
