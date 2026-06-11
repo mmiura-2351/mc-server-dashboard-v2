@@ -26,6 +26,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
+    RelPath,
     ServerId,
 )
 
@@ -417,6 +418,52 @@ def test_snapshot_in_flight_stale_publish_refused_after_restore(
         return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
 
     assert _read_tar(asyncio.run(_read())) == {"k": b"g1"}
+
+
+def test_snapshot_in_flight_stale_publish_refused_after_edit(tmp_path: Path) -> None:
+    # Issue #889 edit-clobber window (the issue's direction 2): a worker published the
+    # current generation, then an authoritative API file edit mutated ``current/`` in
+    # place. The SAME worker's final snapshot is still in flight, declaring its OLD base
+    # generation — and crucially the worker WAS the last publisher, so before the fix
+    # the guard (base == current, same publisher) would PASS and clobber the edit. The
+    # edit now bumps the generation AND stamps the API_EDIT_PUBLISHER sentinel, so the
+    # in-flight snapshot sees base < current published by a DIFFERENT publisher and the
+    # guard refuses it (409 stale_generation) — the edit survives.
+    import asyncio
+
+    worker = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    # The worker published, and is the recorded publisher; its scratch is at this gen.
+    asyncio.run(_publish(storage, community, server, {"k": b"snap"}, publisher=worker))
+    base = asyncio.run(storage.current_generation(c, s))
+
+    # An authoritative API edit mutates current/ in place and bumps the generation.
+    asyncio.run(storage.write_file(c, s, RelPath("k"), b"edited"))
+
+    # The worker's in-flight final snapshot declares its base (pre-edit gen) and own id.
+    body = _tar_bytes({"k": b"in-flight"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(base),
+                "X-Worker-Id": worker,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
+
+    # The edited data survives the refused publish (not clobbered).
+    async def _read() -> bytes:
+        return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
+
+    assert _read_tar(asyncio.run(_read())) == {"k": b"edited"}
 
 
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
