@@ -80,7 +80,7 @@ across servers (FR-VER-3) and contain no Community data.
 │       └── servers/
 │           └── <server-id>/
 │               ├── current -> snapshots/<snapshot-id>/  # symlink to the live snapshot; the publish pointer (Section 4)
-│               ├── generation                # combined marker (Section 3.1): line 1 the monotonic working-set generation counter (bumped on each authoritative publish: commit_snapshot + restore_backup, #873), line 2 (optional) the publishing Worker id (#847)
+│               ├── generation                # combined marker (Section 3.1): line 1 the monotonic working-set generation counter (bumped on each authoritative publish: commit_snapshot + restore_backup #873 + authoritative file edits #889), line 2 (optional) the publishing Worker id (#847)
 │               ├── snapshots/                # published working-set snapshots; current points at the live one
 │               │   └── <snapshot-id>/        # the full working directory for one published state
 │               │       ├── world/
@@ -137,8 +137,10 @@ Notes:
   a crash between two separate writes could attribute the *previous* publisher to
   the *new* generation and invert the guard, so the pair must be all-or-nothing.
   The marker is written immediately after the `current` pointer flip inside
-  every authoritative publish (`commit_snapshot` and `restore_backup`, #873) as a
-  separate sequential write; a crash in the window between the flip and the marker
+  every authoritative publish — `commit_snapshot`, `restore_backup` (#873), and
+  every authoritative file edit (`write_file` / `delete_file` / `delete_dir` /
+  `make_dir` / `rollback_file`, #889) — as a separate sequential write; a crash in
+  the window between the flip and the marker
   write leaves the generation one behind (under-states by one — the safe
   direction). After any successful publish return the pointer, generation, and
   publisher are in agreement. A publish that declared no
@@ -300,19 +302,21 @@ paths are not part of this Port.
 | `read_file(community_id, server_id, rel_path) -> bytes` | Read one file from `current/` (whole bytes) | `rel_path` is validated against traversal (Section 6). Whole-bytes by design: the small-edit / preview read, and the base64-payload `GET ?path=` route where the bytes *are* the JSON body. A large single-file **download** uses `open_file_stream` (issue #265). |
 | `open_file_stream(community_id, server_id, rel_path) -> ReadStream` | Open a chunked read stream over one file in `current/` | The per-file analogue of `open_hydrate_source` (issue #265): a large single-file download streams without buffering the whole file in RAM. Same lease contract — the live snapshot is resolved and the active-reader lease taken on the FIRST iteration, released on finish/early-close/error (Section 4.2). `NotFoundError` for a missing file or unpublished snapshot. |
 | `list_dir(community_id, server_id, rel_path) -> [entry]` | Browse a directory in `current/` | Same path validation. |
-| `write_file(community_id, server_id, rel_path, bytes)` | Edit one file in `current/`, retaining the prior version | Captures the previous content into `versions/` (Section 5) before overwriting. The per-file write is atomic (Section 4.4). |
-| `delete_file(community_id, server_id, rel_path)` | Delete one file from `current/`, retaining the prior content | Captures the content into `versions/` (Section 5) **before** removing, so a delete is reversible by rollback exactly like an edit. Missing path → `NotFoundError`. |
-| `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. |
-| `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. |
+| `write_file(community_id, server_id, rel_path, bytes)` | Edit one file in `current/`, retaining the prior version | Captures the previous content into `versions/` (Section 5) before overwriting. The per-file write is atomic (Section 4.4). Bumps the generation + stamps the `api-edit` sentinel (#889). |
+| `delete_file(community_id, server_id, rel_path)` | Delete one file from `current/`, retaining the prior content | Captures the content into `versions/` (Section 5) **before** removing, so a delete is reversible by rollback exactly like an edit. Missing path → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
+| `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
+| `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. Bumps the generation + stamps the `api-edit` sentinel (#889), uniformly with the other edits even though no content lands on object backends. |
 
 **Empty-directory limitation (`make_dir`).** fs / remote-fs materialize a real
 empty directory, which rides the hydrate tar as a directory member (the tar is
 built recursively, so empty dirs survive a snapshot round-trip). **Object storage
 has no real directories** — a directory exists only as the shared key-prefix of
 its files (Section 7.3), so an *empty* directory cannot be represented and
-`make_dir` is a no-op there; the directory becomes observable once a file is
-written under it. This is documented honestly rather than papered over with a
-marker object that would pollute listings.
+`make_dir` writes no directory object there; the directory becomes observable once
+a file is written under it. This is documented honestly rather than papered over
+with a marker object that would pollute listings. On both backends `make_dir` still
+bumps the generation marker (#889, see Section 4.4), so the store generation stays
+in lockstep across adapters.
 
 ### 3.5 File version retention / rollback
 
@@ -322,7 +326,7 @@ Serve versioned edits (FR-FILE-3). See Section 5 for the retention scheme.
 |---|---|---|
 | `list_file_versions(community_id, server_id, rel_path) -> [VersionId]` | List retained prior versions of a file | Ordered newest-first. Version metadata is indexed in the DB (#15). |
 | `read_file_version(community_id, server_id, rel_path, VersionId) -> bytes` | Read a specific retained version | For preview/diff before rollback. |
-| `rollback_file(community_id, server_id, rel_path, VersionId)` | Restore a file to a retained version | Implemented as a `write_file` of the old content, so the pre-rollback content is itself retained (rollback is reversible). |
+| `rollback_file(community_id, server_id, rel_path, VersionId)` | Restore a file to a retained version | Implemented as a `write_file` of the old content, so the pre-rollback content is itself retained (rollback is reversible) and the generation bump + `api-edit` sentinel ride that delegated write (#889). |
 
 ---
 
@@ -420,6 +424,19 @@ This keeps a concurrent `read_file` from ever seeing a torn file. Capturing the
 prior version into `versions/` (Section 5) happens **before** the overwrite, so a
 crash mid-write leaves both the old `current/` content and the retained version
 consistent.
+
+Like a `commit_snapshot` or `restore_backup`, an authoritative file edit replaces
+the published world, so **every authoritative `current/` mutation bumps the
+working-set generation** (`write_file`, `delete_file`, `delete_dir`, `make_dir`,
+`rollback_file`, #889) and stamps the **`api-edit` sentinel** as the publisher
+(Section 3.1). Otherwise a same-Worker scratch with `held == store` would skip the
+post-edit hydrate (#767) on the next start and boot the PRE-edit world, and that
+scratch's in-flight stale snapshot — the same Worker, `base == current` — would
+pass the publish-time guard (Section 8) and clobber the edit; the sentinel makes it
+a different-publisher publish whose base now lags, so the guard refuses it. The bump
+is uniform across all five ops for a simple invariant: even `make_dir` (which adds
+no `current/` content on `fs`, and is a content no-op on object backends) bumps, so
+the staleness reasoning never special-cases which edit "really" changed the world.
 
 A single-file `write_file` and a whole-working-set publish/restore are never
 issued concurrently for the same server: they are serialized at the application

@@ -74,6 +74,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     SnapshotHandleError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
+    API_EDIT_PUBLISHER,
     RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
@@ -1112,6 +1113,12 @@ class ObjectStorage(Storage):
                 self._pointer_key(community_id, server_id),
                 json.dumps({"snapshot": snapshot_prefix}).encode(),
             )
+            # Bump the generation on this authoritative edit (issue #889): an
+            # in-place write replaces the published world just like a snapshot/restore,
+            # so it advances the store generation and stamps the API_EDIT_PUBLISHER
+            # sentinel — otherwise a same-worker scratch with held == store skips the
+            # post-edit hydrate (#767) and its stale snapshot clobbers the edit.
+            await self._bump_generation(client, server_prefix, API_EDIT_PUBLISHER)
 
     async def _publish_initial(
         self,
@@ -1135,6 +1142,14 @@ class ObjectStorage(Storage):
             await client.put_object(incoming + sub, data)
             staged = await client.list_objects(incoming)
             await self._publish(client, community_id, server_id, incoming, staged)
+            # The first published version of a never-snapshotted server is still an
+            # authoritative edit (issue #889): bump past generation 0 and stamp the
+            # API_EDIT_PUBLISHER sentinel so the same staleness reasoning applies.
+            await self._bump_generation(
+                client,
+                self._server_prefix(community_id, server_id),
+                API_EDIT_PUBLISHER,
+            )
         except BaseException:
             await _delete_prefix(client, incoming)
             raise
@@ -1163,6 +1178,12 @@ class ObjectStorage(Storage):
                 self._pointer_key(community_id, server_id),
                 json.dumps({"snapshot": snapshot_prefix}).encode(),
             )
+            # Authoritative edit -> bump the generation (issue #889).
+            await self._bump_generation(
+                client,
+                self._server_prefix(community_id, server_id),
+                API_EDIT_PUBLISHER,
+            )
 
     async def delete_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1185,16 +1206,33 @@ class ObjectStorage(Storage):
                 self._pointer_key(community_id, server_id),
                 json.dumps({"snapshot": snapshot_prefix}).encode(),
             )
+            # Authoritative edit -> bump the generation (issue #889).
+            await self._bump_generation(
+                client,
+                self._server_prefix(community_id, server_id),
+                API_EDIT_PUBLISHER,
+            )
 
     async def make_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
         # Object storage has no real directories — a directory exists only as the
         # shared key-prefix of its files (Section 7.3), so an empty directory
-        # cannot be represented and make_dir is a no-op (the documented limitation,
-        # issue #259). Validate the path so a traversal-unsafe input is still
-        # rejected at the seam rather than silently accepted.
+        # cannot be represented and make_dir does NOT materialize anything (the
+        # documented limitation, issue #259). Validate the path so a traversal-unsafe
+        # input is still rejected at the seam rather than silently accepted.
         self._safe_subkey(rel_path)
+        # Still bump the generation (issue #889): make_dir is an authoritative
+        # ``current/`` mutation in the Port contract, so it advances the generation
+        # uniformly with the fs backend even though no content lands here. Bumping a
+        # no-op edit only forces a (same-world) re-hydrate — harmless — and keeps the
+        # store generation in lockstep across adapters so the #767 staleness invariant
+        # never has to special-case the object backend. Requires a published snapshot,
+        # matching the fs backend (which raises NotFoundError without one).
+        async with self._client_factory() as client:
+            server_prefix = self._server_prefix(community_id, server_id)
+            await self._live_snapshot_prefix(client, community_id, server_id)
+            await self._bump_generation(client, server_prefix, API_EDIT_PUBLISHER)
 
     # --- file version retention / rollback (Section 3.5, Section 5) ---------
 

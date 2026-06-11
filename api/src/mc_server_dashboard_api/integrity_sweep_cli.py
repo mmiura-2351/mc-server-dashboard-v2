@@ -52,7 +52,11 @@ _LOG = logging.getLogger(__name__)
 
 async def run(*, server_id: ServerId | None) -> SweepSummary:
     settings = load_settings(_resolve_config_file())
-    engine = create_engine(settings.database.url)
+    engine = create_engine(
+        settings.database.url,
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+    )
     try:
         session_factory = create_session_factory(engine)
         storage = _build_storage(settings)
