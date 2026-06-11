@@ -453,9 +453,11 @@ silently-holed world. There are two legitimate causes and one corruption cause:
 - **Intentional removal of specific regions.** If the operator genuinely wants
   `current/` to no longer carry those regions, delete the listed names from
   `current/` itself via the at-rest file API (`delete_file` /
-  `DELETE …?path=…`, Section 3.4) with the server **stopped**. The retained
-  scratch then republishes cleanly: the staged set and the (now-trimmed)
-  `current/` agree, so the partial-loss comparison passes.
+  `DELETE …?path=…`, Section 3.4) with the server **stopped**. On the next
+  start the Worker re-hydrates from the reconciled `current/` (the generation
+  bump from any authoritative edit — `api-edit` sentinel — makes `held < store`,
+  forcing a fresh hydrate) and subsequent snapshots publish cleanly against the
+  trimmed world.
 - **Corruption (a crash truncated/dropped regions during save).** This is the
   signature the gate exists to catch. Recover the lost regions — restore a backup
   (Section 3.3, which bypasses this gate by design — a backup is a complete set)
@@ -464,8 +466,11 @@ silently-holed world. There are two legitimate causes and one corruption cause:
 
 The recovery procedure is therefore: **stop the server → reconcile `current/`
 (delete the listed names at-rest for an intended removal, or restore a backup for
-corruption) → the retained scratch republishes clean** (or the next Worker
-snapshot publishes against the reconciled `current/`).
+corruption) → the next start re-hydrates the reconciled `current/`** (a
+`restore_backup` — and any authoritative file-API edit — bumps the working-set
+generation, so the Worker always sees `held < store` on the next start and
+re-hydrates rather than reusing a stale scratch; see Section 3.3 `restore_backup`
+row). Subsequent snapshots then publish cleanly against the reconciled world.
 
 ---
 
@@ -770,7 +775,7 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
   implementation epic (#8).
 - **Continuous delta sync** (FR-DATA-5) is explicitly deferred; the streaming
   Port shape leaves room for it.
-- **WebUI surfacing of `working_set_incomplete`** (#887, follow-up). The 422 the
+- **WebUI surfacing of `working_set_incomplete`** (tracked: #900). The 422 the
   missing-region gate returns is today a transient response to the *Worker's*
   snapshot `POST` (Section 4.5); the WebUI never makes that call and no
   control-plane route exposes a server-level "last snapshot was refused as

@@ -118,7 +118,7 @@ _BEARER_PREFIX = "Bearer "
 
 
 def _bounded_missing_regions(
-    report: MissingRegionsError,
+    exc: MissingRegionsError,
 ) -> tuple[list[dict[str, object]], bool]:
     """Build a BOUNDED per-directory list of lost region names for the 422/log.
 
@@ -132,7 +132,7 @@ def _bounded_missing_regions(
     """
 
     truncated = False
-    findings = report.report.partial_loss
+    findings = exc.report.partial_loss
     if len(findings) > _MISSING_REGION_DIR_CAP:
         truncated = True
     directories: list[dict[str, object]] = []
