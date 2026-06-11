@@ -325,14 +325,202 @@ async def test_list_is_community_scoped_and_newest_first() -> None:
     backups.seed(older)
     backups.seed(newer)
     uow = FakeUnitOfWork(servers=repo, backups=backups)
-    listed = await ListBackups(uow=uow)(community_id=_COMMUNITY, server_id=server.id)
+    listed = await ListBackups(uow=uow, backup_store=FakeBackupArchiveStore())(
+        community_id=_COMMUNITY, server_id=server.id
+    )
     assert [b.id for b in listed] == [newer.id, older.id]
 
 
 async def test_list_unknown_server_is_not_found() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(ServerNotFoundError):
-        await ListBackups(uow=uow)(community_id=_COMMUNITY, server_id=ServerId.new())
+        await ListBackups(uow=uow, backup_store=FakeBackupArchiveStore())(
+            community_id=_COMMUNITY, server_id=ServerId.new()
+        )
+
+
+def _seed_null_size_row(
+    backups: FakeBackupRepository,
+    archive: FakeBackupArchiveStore,
+    server_id: ServerId,
+    *,
+    storage_ref: str,
+    archive_bytes: bytes | None,
+) -> Backup:
+    """Seed a legacy NULL-size backup row, optionally with an existing archive.
+
+    ``archive_bytes is None`` models a row whose archive is gone (no backfill
+    possible); otherwise the archive exists with that body so ``size`` resolves.
+    """
+
+    backup = Backup(
+        id=BackupId.new(),
+        server_id=server_id,
+        storage_ref=storage_ref,
+        size_bytes=None,
+        source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
+        created_by=None,
+        created_at=_NOW,
+    )
+    backups.seed(backup)
+    if archive_bytes is not None:
+        archive.archives.add(storage_ref)
+        archive.bytes_by_ref[storage_ref] = archive_bytes
+    return backup
+
+
+async def test_list_backfills_null_size_when_archive_exists() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    backup = _seed_null_size_row(
+        backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 42
+    )
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    listed = await ListBackups(uow=uow, backup_store=archive)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+
+    # The returned row carries the computed size, and it is persisted to the row.
+    assert listed[0].size_bytes == 42
+    persisted = await uow.backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.size_bytes == 42
+    # The backfill committed the write inside the open uow (the fake makes
+    # update_size visible regardless, so only the commit count proves the durability).
+    assert uow.commits == 1
+
+
+async def test_list_leaves_null_size_when_archive_missing() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    backup = _seed_null_size_row(
+        backups, archive, server.id, storage_ref="gone", archive_bytes=None
+    )
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    listed = await ListBackups(uow=uow, backup_store=archive)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+
+    # The archive is gone: the listing still succeeds and the row stays unknown.
+    assert listed[0].size_bytes is None
+    persisted = await uow.backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.size_bytes is None
+    # Nothing was backfilled, so the read did not commit.
+    assert uow.commits == 0
+
+
+async def test_list_does_not_recall_store_for_backfilled_rows() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    _seed_null_size_row(
+        backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 7
+    )
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+    list_backups = ListBackups(uow=uow, backup_store=archive)
+
+    await list_backups(community_id=_COMMUNITY, server_id=server.id)
+    # First listing backfilled the row; the second must not call size again.
+    await list_backups(community_id=_COMMUNITY, server_id=server.id)
+    assert archive.size_calls == ["legacy"]
+
+
+async def test_server_statistics_backfills_null_size_into_total() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    _seed_backup(
+        backups, archive, server.id, storage_ref="a", size_bytes=10, created_at=_NOW
+    )
+    _seed_null_size_row(
+        backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 5
+    )
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    stats = await ServerBackupStatistics(uow=uow, backup_store=archive)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+    # The legacy row's size was backfilled, so it joins the total and is no
+    # longer counted as unknown.
+    assert stats.total_bytes == 15
+    assert stats.unknown_size_count == 0
+
+
+async def test_list_survives_store_failure_and_leaves_row_null(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A non-404 store probe failure (object-store outage, connection error, fs
+    # OSError) must not fail the listing (these were pure DB reads before #661):
+    # the row stays NULL, is excluded from the total, and the failure is WARN
+    # logged so the degraded backfill is diagnosable.
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    backup = _seed_null_size_row(
+        backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 9
+    )
+    archive.size_error = RuntimeError("object store unavailable")
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    with caplog.at_level(logging.WARNING):
+        listed = await ListBackups(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+
+    # The listing succeeded, the row stays unknown, and nothing was committed.
+    assert listed[0].size_bytes is None
+    persisted = await uow.backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.size_bytes is None
+    assert uow.commits == 0
+
+    record = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    message = record.getMessage()
+    assert str(backup.id.value) in message
+    assert "object store unavailable" in message
+
+
+async def test_server_statistics_survives_store_failure() -> None:
+    # The statistics endpoint shares the same best-effort backfill: a store
+    # failure on a legacy NULL row keeps the listing alive, the failed row stays
+    # unknown and out of the total, while a sized row is still aggregated.
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    _seed_backup(
+        backups, archive, server.id, storage_ref="a", size_bytes=10, created_at=_NOW
+    )
+    _seed_null_size_row(
+        backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 5
+    )
+    archive.size_error = RuntimeError("object store unavailable")
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    stats = await ServerBackupStatistics(uow=uow, backup_store=archive)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+
+    assert stats.total_bytes == 10
+    assert stats.unknown_size_count == 1
+    assert uow.commits == 0
 
 
 async def test_restore_requires_stopped_server() -> None:
@@ -859,13 +1047,23 @@ async def test_server_statistics_aggregates_count_bytes_and_bounds() -> None:
     _seed_backup(
         backups, archive, server.id, storage_ref="b", size_bytes=20, created_at=_NOW
     )
-    # A legacy NULL-size row: excluded from total_bytes, counted as unknown.
-    _seed_backup(
-        backups, archive, server.id, storage_ref="c", size_bytes=None, created_at=_NOW
+    # A legacy NULL-size row whose archive is gone: stays unknown (no backfill
+    # possible), so it is excluded from total_bytes and counted as unknown.
+    backups.seed(
+        Backup(
+            id=BackupId.new(),
+            server_id=server.id,
+            storage_ref="c",
+            size_bytes=None,
+            source=BackupSource.MANUAL,
+            health=BackupHealth.HEALTHY,
+            created_by=None,
+            created_at=_NOW,
+        )
     )
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
-    stats = await ServerBackupStatistics(uow=uow)(
+    stats = await ServerBackupStatistics(uow=uow, backup_store=archive)(
         community_id=_COMMUNITY, server_id=server.id
     )
     assert stats.count == 3
@@ -880,9 +1078,8 @@ async def test_server_statistics_empty_is_zero() -> None:
     repo = FakeServerRepository()
     repo.seed(server)
     uow = FakeUnitOfWork(servers=repo)
-    stats = await ServerBackupStatistics(uow=uow)(
-        community_id=_COMMUNITY, server_id=server.id
-    )
+    statistics = ServerBackupStatistics(uow=uow, backup_store=FakeBackupArchiveStore())
+    stats = await statistics(community_id=_COMMUNITY, server_id=server.id)
     assert stats.count == 0
     assert stats.total_bytes == 0
     assert stats.unknown_size_count == 0
@@ -892,7 +1089,7 @@ async def test_server_statistics_empty_is_zero() -> None:
 async def test_server_statistics_unknown_server_is_not_found() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(ServerNotFoundError):
-        await ServerBackupStatistics(uow=uow)(
+        await ServerBackupStatistics(uow=uow, backup_store=FakeBackupArchiveStore())(
             community_id=_COMMUNITY, server_id=ServerId.new()
         )
 
