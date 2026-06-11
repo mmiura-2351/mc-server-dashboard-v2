@@ -509,6 +509,81 @@ def test_rebuild_keeps_tally_row_whose_decrement_preceded_the_snapshot() -> None
     assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
 
 
+def test_rebuild_does_not_eat_fresh_reservation_for_tombstoned_server() -> None:
+    # Regression for the reservation-drop loop bug (#877): when a tombstoned id is
+    # still in the raw `assignments` (the tally was read before the decrement), the
+    # loop iterated `assignments` instead of `filtered_assignments` and popped the
+    # fresh reservation that a re-start placed in the window.  After the fix, the
+    # reservation survives so the subsequent increment_assignment counts correctly.
+    #
+    # Interleaving:
+    #   1. server-a running + confirmed;
+    #   2. rebuild snapshots epoch → tally read → assignments = {server-a: 512};
+    #   3. stop fires: decrement_assignment (tombstone ≥ epoch);
+    #   4. user re-starts: reserve(server-a, 512) [lifecycle awaits DB commit];
+    #   5. set_assignment({server-a: 512}, epoch) lands;
+    #   6. increment_assignment(server-a) — must count (was in reserved, not in
+    #      filtered_assignments); expected load=1 / mem=512.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    # Step 1: server-a running and confirmed.
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    # Step 2: rebuild snapshots the epoch (tally read is pending).
+    snapshot_epoch = registry.assignment_epoch(WorkerId("worker-1"))
+
+    # Step 3: stop fires in the window.
+    registry.decrement_assignment(WorkerId("worker-1"), "server-a")
+
+    # Step 4: user re-starts; fresh reservation placed while lifecycle awaits DB.
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+
+    # Step 5: stale tally (server-a was running at snapshot time) arrives.
+    registry.set_assignment(WorkerId("worker-1"), {"server-a": 512}, snapshot_epoch)
+
+    # Step 6: start lifecycle DB commit confirms; increment must find the reservation.
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    # The re-started server must be counted — not in neither committed nor reserved.
+    assert registry.list_workers()[0].assigned_count == 1
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
+
+
+def test_rebuild_keeps_row_when_decrement_then_reconfirm_both_in_window() -> None:
+    # KEEP-case: decrement fires in the window, then the same server is re-confirmed
+    # (re-started) also in the window before set_assignment.  The re-confirm must win
+    # because `preserved` (confirmed_seq ≥ epoch) is merged last and overrides the
+    # tombstone filter.  Pins the merge order at registry.py:226 and the fact that
+    # decrement_assignment pops _confirmed_seq so the re-confirm re-stamps it.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    # Commit and confirm server-a.
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    # Rebuild snapshots the epoch.
+    snapshot_epoch = registry.assignment_epoch(WorkerId("worker-1"))
+
+    # Decrement fires in the window (tombstone ≥ epoch, pops _confirmed_seq).
+    registry.decrement_assignment(WorkerId("worker-1"), "server-a")
+
+    # Re-start: reserve + increment (re-confirm) both in the window.
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    # Stale tally arrives (server-a appeared running at snapshot time).
+    registry.set_assignment(WorkerId("worker-1"), {"server-a": 512}, snapshot_epoch)
+
+    # Re-confirm seq ≥ epoch → preserved wins over tombstone; row must be KEPT.
+    assert registry.list_workers()[0].assigned_count == 1
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
+
+
 # --- per-id lookup (#322) --------------------------------------------------
 
 

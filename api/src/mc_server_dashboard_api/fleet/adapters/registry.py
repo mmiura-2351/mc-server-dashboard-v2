@@ -232,7 +232,7 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # increment_assignment becomes a no-op (no double-count); keep reservations
         # not yet in the tally (their commit is not yet visible) so their later
         # confirm still counts (#778).
-        for committed_id in assignments:
+        for committed_id in filtered_assignments:
             self._reserved[worker_id].pop(committed_id, None)
 
     def candidates_for_placement(self) -> list[PlacementCandidate]:
