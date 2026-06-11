@@ -89,8 +89,9 @@ func awaitEnter(t *testing.T, c <-chan struct{}) {
 }
 
 // A duplicate StartServer re-issued while the original is mid-driver.Start (the
-// reconnect-redelivery window, issue #780) is rejected with INVALID_STATE and the
-// driver is started exactly once — never two instances for one server.
+// reconnect-redelivery window, issue #780) is rejected with BUSY (issue #824, the
+// reservation race is distinct from a settled "already running") and the driver
+// is started exactly once — never two instances for one server.
 func TestConcurrentDuplicateStartStartsDriverOnce(t *testing.T) {
 	d := newGatedDriver()
 	m := newManager(t, d, nil)
@@ -102,8 +103,8 @@ func TestConcurrentDuplicateStartStartsDriverOnce(t *testing.T) {
 	awaitEnter(t, d.entered)
 
 	dup := m.Handle(context.Background(), startCmd())
-	if dup.Success || dup.ErrorCode != session.CommandErrorInvalidState {
-		t.Fatalf("duplicate start = %+v, want INVALID_STATE failure", dup)
+	if dup.Success || dup.ErrorCode != session.CommandErrorBusy {
+		t.Fatalf("duplicate start = %+v, want BUSY failure", dup)
 	}
 
 	close(d.release)
@@ -185,10 +186,11 @@ func (d *gatedStopDriver) Start(_ context.Context, spec execution.InstanceSpec) 
 }
 
 // A StopServer re-sent while a DETACHED stop is still confirming termination — the
-// reconnect-redelivery window of issue #780 — must be rejected with INVALID_STATE,
-// never SERVER_NOT_FOUND: the latter makes the API unassign while the old process is
-// still alive, after which a re-placed start's hydrate clobbers the live working set.
-func TestResentStopDuringDetachedStopRejectedInvalidState(t *testing.T) {
+// reconnect-redelivery window of issue #780 — must be rejected with BUSY (issue
+// #824), never SERVER_NOT_FOUND: the latter makes the API unassign while the old
+// process is still alive, after which a re-placed start's hydrate clobbers the live
+// working set.
+func TestResentStopDuringDetachedStopRejectedBusy(t *testing.T) {
 	d := &gatedStopDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
 
@@ -211,8 +213,8 @@ func TestResentStopDuringDetachedStopRejectedInvalidState(t *testing.T) {
 	if dup.ErrorCode == session.CommandErrorServerNotFound {
 		t.Fatal("re-sent stop returned SERVER_NOT_FOUND: the API would unassign over a still-live process (issue #780)")
 	}
-	if dup.ErrorCode != session.CommandErrorInvalidState {
-		t.Fatalf("re-sent stop = %+v, want INVALID_STATE", dup)
+	if dup.ErrorCode != session.CommandErrorBusy {
+		t.Fatalf("re-sent stop = %+v, want BUSY", dup)
 	}
 
 	// Let the detached stop confirm; it must still succeed and release the id.
@@ -230,7 +232,7 @@ func TestResentStopDuringDetachedStopRejectedInvalidState(t *testing.T) {
 }
 
 // A duplicate HydrateTrigger re-issued while the original is mid-transfer is
-// rejected with INVALID_STATE and the transfer runs exactly once, so the two do
+// rejected with BUSY (issue #824) and the transfer runs exactly once, so the two do
 // not write the same working set concurrently (issue #780).
 func TestConcurrentDuplicateHydrateRunsOnce(t *testing.T) {
 	tr := newGatedTransfer()
@@ -246,8 +248,8 @@ func TestConcurrentDuplicateHydrateRunsOnce(t *testing.T) {
 	awaitEnter(t, tr.entered)
 
 	dup := m.Handle(context.Background(), hydrateCmd)
-	if dup.Success || dup.ErrorCode != session.CommandErrorInvalidState {
-		t.Fatalf("duplicate hydrate = %+v, want INVALID_STATE failure", dup)
+	if dup.Success || dup.ErrorCode != session.CommandErrorBusy {
+		t.Fatalf("duplicate hydrate = %+v, want BUSY failure", dup)
 	}
 
 	close(tr.release)
@@ -312,12 +314,12 @@ func (d *gatedOrphanDriver) Start(_ context.Context, spec execution.InstanceSpec
 }
 
 // A StopServer re-sent while an orphan-RETRY stop is still confirming termination
-// must be rejected with INVALID_STATE, not walk into the orphan branch and take the
-// same orphan a second time (issue #829 item 1). If it did, both stops' deferred
+// must be rejected with BUSY (issue #824), not walk into the orphan branch and take
+// the same orphan a second time (issue #829 item 1). If it did, both stops' deferred
 // release would fire and the first to return would steal the still-running stop's
 // reservation — worst case leaving an unreserved id. takeStoppableReserve must
 // honor the reservation before the orphan branch.
-func TestResentStopDuringOrphanRetryRejectedInvalidState(t *testing.T) {
+func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 	d := &gatedOrphanDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
 
@@ -337,7 +339,7 @@ func TestResentStopDuringOrphanRetryRejectedInvalidState(t *testing.T) {
 	awaitEnter(t, d.inst.stopEntered)
 
 	// A re-sent stop arriving while the retry is in flight must be rejected with
-	// INVALID_STATE (the reservation is honored before the orphan branch), never
+	// BUSY (the reservation is honored before the orphan branch), never
 	// SERVER_NOT_FOUND, and must not Stop the orphan a third time. Run it off the
 	// test goroutine with a deadline: with the bug it would walk the orphan branch
 	// and BLOCK inside inst.Stop, so a clean timeout failure beats a 10-minute hang.
@@ -354,8 +356,8 @@ func TestResentStopDuringOrphanRetryRejectedInvalidState(t *testing.T) {
 	if dup.Success {
 		t.Fatalf("re-sent stop during orphan retry = %+v, want failure", dup)
 	}
-	if dup.ErrorCode != session.CommandErrorInvalidState {
-		t.Fatalf("re-sent stop = %+v, want INVALID_STATE (issue #829)", dup)
+	if dup.ErrorCode != session.CommandErrorBusy {
+		t.Fatalf("re-sent stop = %+v, want BUSY (issue #829)", dup)
 	}
 
 	// Let the retry confirm termination; it must still succeed.

@@ -360,6 +360,8 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_PORT_CONFLICT
 	case session.CommandErrorImageMissing:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING
+	case session.CommandErrorBusy:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_BUSY
 	default:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
 	}

@@ -230,6 +230,13 @@ func TestMapErrorCodeImageMissing(t *testing.T) {
 	}
 }
 
+func TestMapErrorCodeBusy(t *testing.T) {
+	got := mapErrorCode(session.CommandErrorBusy)
+	if got != controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_BUSY {
+		t.Fatalf("mapErrorCode = %v, want BUSY", got)
+	}
+}
+
 // mapFileAccessReason translates each domain reason onto the wire enum so the
 // API can surface an honest problem reason instead of a blanket invalid_path
 // (issue #548).

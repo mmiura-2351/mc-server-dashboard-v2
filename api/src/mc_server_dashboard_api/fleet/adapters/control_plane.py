@@ -76,6 +76,7 @@ _CODE_FROM_PROTO: dict[int, CommandResultCode] = {
     pb.COMMAND_ERROR_CODE_INTERNAL: CommandResultCode.INTERNAL,
     pb.COMMAND_ERROR_CODE_PORT_CONFLICT: CommandResultCode.PORT_CONFLICT,
     pb.COMMAND_ERROR_CODE_IMAGE_MISSING: CommandResultCode.IMAGE_MISSING,
+    pb.COMMAND_ERROR_CODE_BUSY: CommandResultCode.BUSY,
 }
 
 # Map the wire file-access reason onto the domain reason (issue #548). An

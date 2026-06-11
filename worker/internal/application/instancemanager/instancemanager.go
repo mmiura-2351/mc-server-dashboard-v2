@@ -110,8 +110,10 @@ type Manager struct {
 	// (issue #780). It is claimed under mu and held across the long operation, then
 	// released (or, on a successful start, handed off to the registered instance
 	// under the same mu so the id is never unclaimed). A command arriving while the
-	// id is reserved is rejected with INVALID_STATE — the same family as "already
-	// running". Which commands reserve, and over which window:
+	// id is reserved is rejected with BUSY (issue #824) — distinct from the settled
+	// "already running" INVALID_STATE, since the in-flight command's outcome is not
+	// yet known, so the API retries rather than converging on it. Which commands
+	// reserve, and over which window:
 	//   - StartServer: before driver.Start, until the instance is registered, so a
 	//     re-issued duplicate cannot pass the running check and launch a second
 	//     process while the original is still mid-driver.Start (the primary window).
@@ -120,7 +122,7 @@ type Manager struct {
 	//   - StopServer / RestartServer: across the eviction -> stop-confirmed window
 	//     (and a restart's relaunch). takeStoppableReserve / takeRunningReserve evict
 	//     the instance AND reserve under one mu, so the id stays claimed while the
-	//     detached stop confirms termination — a re-sent stop then gets INVALID_STATE,
+	//     detached stop confirms termination — a re-sent stop then gets BUSY (#824),
 	//     not SERVER_NOT_FOUND, and the API keeps the assignment instead of unassigning
 	//     over a still-live process.
 	//   - SnapshotTrigger: only the STOPPED-id path (the set is at rest and the API
@@ -258,9 +260,8 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	// reservation also subsumes the running / failed-stop-orphan preconditions —
 	// hydrating either would replace the working set out from under a live process
 	// (issue #251) — and is always released on return.
-	if ok, _ := m.reserve(cmd.ServerID); !ok {
-		return fail(cmd.CommandID, session.CommandErrorInvalidState,
-			"instancemanager: cannot hydrate (server running, has a failed-stop orphan, or a lifecycle command is in flight)")
+	if ok, code, msg := m.reserve(cmd.ServerID); !ok {
+		return fail(cmd.CommandID, code, msg)
 	}
 	defer m.release(cmd.ServerID)
 
@@ -363,9 +364,8 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// rejects with INVALID_STATE. Running-id snapshots stay reservation-free: a
 		// running instance already blocks reserve(), and the save-off bracket above is
 		// their quiesce. Released on every return below.
-		if ok, _ := m.reserve(cmd.ServerID); !ok {
-			return fail(cmd.CommandID, session.CommandErrorInvalidState,
-				"instancemanager: cannot snapshot (a lifecycle command is in flight for this server)")
+		if ok, code, msg := m.reserve(cmd.ServerID); !ok {
+			return fail(cmd.CommandID, code, msg)
 		}
 		defer m.release(cmd.ServerID)
 	}
@@ -491,8 +491,8 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 	// proceed. It is not released on success: the registered instance then holds the
 	// id (a duplicate sees the running instance), so releasing the reservation only
 	// after registration keeps the id continuously claimed across the handoff.
-	if ok, msg := m.reserve(cmd.ServerID); !ok {
-		return fail(cmd.CommandID, session.CommandErrorInvalidState, msg)
+	if ok, code, msg := m.reserve(cmd.ServerID); !ok {
+		return fail(cmd.CommandID, code, msg)
 	}
 	return m.launchReserved(ctx, cmd, driver, launchMode)
 }
@@ -573,10 +573,10 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 		// on the reconnected stream must NOT get SERVER_NOT_FOUND here: that makes the
 		// API converge observed=stopped and unassign while the old process is still
 		// alive and writing, after which a re-placed start's HydrateTrigger would clobber
-		// the live working set. Returning INVALID_STATE makes the API's redispatch_stop
+		// the live working set. Returning BUSY (issue #824) makes the API's redispatch_stop
 		// keep the assignment and retry on a later tick (lifecycle.py), converging safely
 		// once the detached stop finishes (the id then becomes genuinely SERVER_NOT_FOUND).
-		return fail(cmd.CommandID, session.CommandErrorInvalidState,
+		return fail(cmd.CommandID, session.CommandErrorBusy,
 			"instancemanager: a lifecycle command is already in flight for this server")
 	}
 	// The id is now reserved across the eviction -> stop-confirmed window so the
@@ -773,7 +773,7 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 		// stop or a start/hydrate mid-operation (INVALID_STATE, issue #780).
 		_, _, outcome := m.takeRunningReserve(cmd.ServerID)
 		if outcome == takeInFlight {
-			return fail(cmd.CommandID, session.CommandErrorInvalidState,
+			return fail(cmd.CommandID, session.CommandErrorBusy,
 				"instancemanager: a lifecycle command is already in flight for this server")
 		}
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
@@ -798,9 +798,9 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	case takeInFlight:
 		// A lifecycle command (e.g. a detached stop from a dropped stream, or a start/
 		// hydrate mid-operation) is already reserved in flight for this id (issue #780).
-		// Rejecting with INVALID_STATE rather than SERVER_NOT_FOUND keeps the API from
+		// Rejecting with BUSY (issue #824) rather than SERVER_NOT_FOUND keeps the API from
 		// unassigning a server whose process may still be alive.
-		return fail(cmd.CommandID, session.CommandErrorInvalidState,
+		return fail(cmd.CommandID, session.CommandErrorBusy,
 			"instancemanager: a lifecycle command is already in flight for this server")
 	}
 	// The id is reserved from here across the stop and the relaunch; it is handed off
@@ -1256,29 +1256,32 @@ func (m *Manager) driverFor(serverID string) string {
 // #780). It atomically rejects — under the same mu held for the running/orphan
 // checks, so there is no check-then-act gap — when the id is already running, has
 // a failed-stop orphan pending, or already carries a reservation, and otherwise
-// marks it reserved. ok reports whether the claim was taken; on a rejection, msg
-// is the precondition message the caller fails with under INVALID_STATE (the same
-// family as "already running"). It must be paired with release on every exit
-// path.
-func (m *Manager) reserve(serverID string) (ok bool, msg string) {
+// marks it reserved. ok reports whether the claim was taken; on a rejection, code
+// classifies the failure (CommandErrorInvalidState for the settled running/orphan
+// states, CommandErrorBusy for the unsettled reservation race, issue #824) and
+// msg is the precondition message the caller fails with. It must be paired with
+// release on every exit path.
+func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCode, msg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, running := m.instances[serverID]; running {
-		return false, "instancemanager: server already running"
+		return false, session.CommandErrorInvalidState, "instancemanager: server already running"
 	}
 	if _, orphaned := m.orphans[serverID]; orphaned {
 		// A prior stop could not confirm termination: the process/container may
 		// still be lingering. Starting/hydrating now would double-instance over it;
 		// the reconciler must retry the stop first (issue #251).
-		return false, "instancemanager: server has a failed-stop orphan pending termination"
+		return false, session.CommandErrorInvalidState, "instancemanager: server has a failed-stop orphan pending termination"
 	}
 	if m.reserved[serverID] {
 		// A re-issued duplicate arriving while the original is still in flight after
-		// a stream reconnect (issue #780): reject it rather than overlap the original.
-		return false, "instancemanager: a lifecycle command is already in flight for this server"
+		// a stream reconnect (issue #780): reject it as BUSY rather than overlap the
+		// original. The original's outcome is unknown, so the API must NOT converge
+		// observed=running on this — it keeps the assignment and retries (issue #824).
+		return false, session.CommandErrorBusy, "instancemanager: a lifecycle command is already in flight for this server"
 	}
 	m.reserved[serverID] = true
-	return true, ""
+	return true, 0, ""
 }
 
 // release drops serverID's in-flight reservation so a later command (a retry

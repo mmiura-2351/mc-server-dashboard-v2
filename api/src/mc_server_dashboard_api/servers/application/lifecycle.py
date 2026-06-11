@@ -267,6 +267,20 @@ class StartServer:
         failure = _dispatch_failure(
             server_id=server_id, kind="StartServer", outcome=outcome
         )
+        if dispatch.attempted and outcome.status is CommandStatus.BUSY:
+            # The Worker refused the START with BUSY: another mutating lifecycle
+            # command for this id is already in flight and its outcome is UNKNOWN
+            # (issue #824). Unlike INVALID_STATE (a settled "already running"), we
+            # MUST NOT converge observed=running here — the raced original may still
+            # FAIL and leave the server down. So neither record-running nor
+            # compensate: KEEP desired=running + the assignment, and raise so the
+            # caller sees a retryable conflict. A later reconcile tick takes the
+            # redispatch_start path to the SAME Worker once the in-flight command
+            # settles (a genuine success then emits a StatusChange; a failure leaves
+            # the row diverged for the next retry). Gate on ``dispatch.attempted`` so
+            # a PRE-dispatch BUSY — a hydrate refused for the same race — still
+            # compensates below: that one never reached the start.
+            raise failure
         await self._compensate(community_id, server_id, worker_id, original=failure)
         raise failure
 
@@ -473,6 +487,18 @@ class StartServer:
                 server.observed_state = ObservedState.RUNNING
                 server.observed_at = observed_at
             return server
+        if outcome.status is CommandStatus.BUSY:
+            # A BUSY start means another mutating lifecycle command for this id is
+            # already in flight on the Worker and its outcome is UNKNOWN (issue
+            # #824) — NOT the settled "already running" INVALID_STATE above. So we
+            # must NOT record observed=running: if the raced original later FAILS,
+            # the server is down and a speculative observed=running would stick
+            # (the reconciler never re-selects it). Raise instead, changing no row;
+            # the assignment and running intent stand, so a later reconcile tick
+            # retries the redispatch once the in-flight command settles.
+            raise _dispatch_failure(
+                server_id=server_id, kind="StartServer", outcome=outcome
+            )
         raise _dispatch_failure(
             server_id=server_id, kind="StartServer", outcome=outcome
         )

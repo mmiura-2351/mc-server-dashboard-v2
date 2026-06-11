@@ -155,6 +155,12 @@ const (
 	// classifies it from the docker create error; the raw daemon text stays in
 	// Worker logs.
 	CommandErrorImageMissing
+	// CommandErrorBusy marks a command refused because another mutating lifecycle
+	// command is already in flight for the id (the reservation race, issue #824).
+	// Distinct from CommandErrorInvalidState: the in-flight command's outcome is
+	// not yet known, so the API must keep its assignment/intent and retry on a
+	// later tick rather than converge an observed state.
+	CommandErrorBusy
 )
 
 // String renders the error code as a stable name for logs (issue #194).
@@ -176,6 +182,8 @@ func (c CommandErrorCode) String() string {
 		return "port_conflict"
 	case CommandErrorImageMissing:
 		return "image_missing"
+	case CommandErrorBusy:
+		return "busy"
 	default:
 		return fmt.Sprintf("CommandErrorCode(%d)", int(c))
 	}

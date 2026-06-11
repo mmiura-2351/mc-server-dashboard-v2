@@ -605,6 +605,85 @@ async def test_start_invalid_state_outcome_keeps_assignment_as_running() -> None
     assert cp.decremented == []
 
 
+async def test_start_busy_outcome_keeps_assignment_without_converging() -> None:
+    # BUSY returned to __call__ post-dispatch (issue #824): another lifecycle
+    # command for this id is already in flight on the Worker and its outcome is
+    # UNKNOWN -- distinct from INVALID_STATE (already running). So __call__ must
+    # NOT converge observed=running (the raced original may still FAIL and leave the
+    # server down), and must NOT compensate (a same-Worker redispatch is required to
+    # honor the start once the in-flight command settles). It raises a retryable
+    # conflict while KEEPING desired=running + the assignment, with no decrement.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(status=CommandStatus.BUSY, message="in flight")
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The start was sent (post-dispatch BUSY), and NO compensation followed.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate", "start"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    # No speculative convergence: observed is NOT recorded as running.
+    assert stored.observed_state is not ObservedState.RUNNING
+    # The load increment stands; nothing is decremented (assignment kept for retry).
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == []
+
+
+async def test_start_pre_dispatch_busy_compensates() -> None:
+    # A BUSY on the HYDRATE (the same reservation race, before the start is sent):
+    # the start never reached the Worker, so __call__ must compensate normally
+    # (desired->stopped + unassign + decrement), exactly as a pre-dispatch
+    # INVALID_STATE does. The post-dispatch keep-assignment arm is gated on
+    # ``dispatch.attempted`` so this pre-dispatch case falls through to compensation.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "hydrate": CommandOutcome(status=CommandStatus.BUSY, message="in flight")
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # Only hydrate was dispatched; start was never reached, so the intent reverts.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate"]
+    reverted = uow.servers.by_id[ServerId(server_id)]
+    assert reverted.desired_state is DesiredState.STOPPED
+    assert reverted.assigned_worker_id is None
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == [WorkerId(worker)]
+
+
 async def test_start_failure_logs_warning_with_server_and_kind(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -2054,6 +2133,40 @@ async def test_redispatch_start_invalid_state_returned_entity_honest_when_droppe
     assert stored.observed_state is ObservedState.UNKNOWN
     # The returned entity must agree with the row, not the optimistic mutation.
     assert result.observed_state is ObservedState.UNKNOWN
+
+
+async def test_redispatch_start_busy_does_not_record_observed_running() -> None:
+    # BUSY (issue #824): the Worker refused the start because another lifecycle
+    # command is already in flight for this id and its outcome is UNKNOWN -- unlike
+    # INVALID_STATE (already-running), this is NOT positive evidence the instance is
+    # live. So redispatch_start must NOT record observed=running (the bug: a raced
+    # original that later FAILS would leave a speculative observed=running stuck on a
+    # down server). It raises instead, writing no row, so the assignment + running
+    # intent stand and a later tick retries once the in-flight command settles.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.BUSY, message="in flight")
+    )
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    stored = uow.servers.by_id[ServerId(server_id)]
+    # No convergence write: observed stays UNKNOWN, not RUNNING.
+    assert stored.observed_state is ObservedState.UNKNOWN
+    # Intent and assignment are untouched for the next reconcile tick's retry.
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
 
 
 async def test_redispatch_start_failure_keeps_running_intent() -> None:
