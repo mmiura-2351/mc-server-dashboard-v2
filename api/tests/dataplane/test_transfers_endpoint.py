@@ -681,6 +681,13 @@ def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
     payload = resp.json()
     assert payload["reason"] == "working_set_incomplete"
     assert payload["affected_count"] == 1
+    # The recovery (STORAGE.md) needs the LOST NAMES: a bounded per-directory list
+    # of the missing region files must be surfaced so the operator can delete them
+    # from ``current/`` and re-publish. Here the loss is small, so nothing truncated.
+    assert payload["directories"] == [
+        {"directory": "world/region", "missing": ["r.0.1.mca"]}
+    ]
+    assert payload["truncated"] is False
 
     async def _read() -> bytes:
         return b"".join(
@@ -697,6 +704,84 @@ def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
         "world/region/r.0.0.mca": healthy_mca,
         "world/region/r.0.1.mca": healthy_mca,
     }
+
+
+def test_snapshot_partial_region_loss_report_is_bounded_and_truncated(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    healthy_mca = bytes(2 * 4096)  # a structurally valid empty region.
+
+    # Publish many region dirs, each with more region files than the per-directory
+    # name cap, so a drop of all-but-one from every dir exceeds BOTH caps and the
+    # surfaced list must be bounded and flagged truncated.
+    dir_count = transfers._MISSING_REGION_DIR_CAP + 5
+    names_per_dir = transfers._MISSING_REGION_NAME_CAP + 5
+    prior: dict[str, bytes] = {}
+    for d in range(dir_count):
+        for n in range(names_per_dir):
+            prior[f"world/dim{d:03d}/region/r.{n}.0.mca"] = healthy_mca
+    asyncio.run(_publish(storage, community, server, prior))
+
+    # Re-publish keeping only the FIRST region file of each dir: every dir is a
+    # partial loss (some-but-not-all gone).
+    kept = {f"world/dim{d:03d}/region/r.0.0.mca": healthy_mca for d in range(dir_count)}
+    body = _tar_bytes(kept)
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    payload = resp.json()
+    assert payload["reason"] == "working_set_incomplete"
+    assert payload["affected_count"] == dir_count
+    # The body must be BOUNDED: at most the dir cap, each at most the name cap.
+    assert len(payload["directories"]) == transfers._MISSING_REGION_DIR_CAP
+    for entry in payload["directories"]:
+        assert len(entry["missing"]) <= transfers._MISSING_REGION_NAME_CAP
+    # Both caps fired, so the list is flagged partial.
+    assert payload["truncated"] is True
+
+
+def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    healthy_mca = bytes(2 * 4096)
+
+    # Publish exactly the cap counts so no cap fires (strict > in the builder).
+    dir_count = transfers._MISSING_REGION_DIR_CAP  # 20
+    names_per_dir = transfers._MISSING_REGION_NAME_CAP  # 50
+    prior: dict[str, bytes] = {}
+    for d in range(dir_count):
+        for n in range(names_per_dir):
+            prior[f"world/dim{d:03d}/region/r.{n}.0.mca"] = healthy_mca
+    asyncio.run(_publish(storage, community, server, prior))
+
+    # Keep only the first region file of each dir: exactly cap dirs, each with
+    # exactly (names_per_dir - 1) missing names — at the cap, not over.
+    kept = {f"world/dim{d:03d}/region/r.0.0.mca": healthy_mca for d in range(dir_count)}
+    body = _tar_bytes(kept)
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    payload = resp.json()
+    assert payload["reason"] == "working_set_incomplete"
+    # Exactly at cap: all dirs are surfaced and truncated must be False.
+    assert len(payload["directories"]) == dir_count
+    assert payload["truncated"] is False
 
 
 def test_snapshot_requires_content_length(tmp_path: Path) -> None:
