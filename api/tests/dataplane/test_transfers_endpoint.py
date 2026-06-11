@@ -466,6 +466,68 @@ def test_snapshot_in_flight_stale_publish_refused_after_edit(tmp_path: Path) -> 
     assert _read_tar(asyncio.run(_read())) == {"k": b"edited"}
 
 
+def test_snapshot_refused_when_edit_lands_during_upload_window(
+    tmp_path: Path,
+) -> None:
+    # Issue #899: the pre-stream guard PASSES (the worker declares the store's current
+    # base), but an at-rest edit lands DURING the upload window — after the guard read
+    # current and before commit. The commit-time expected-base re-check catches the
+    # advance and refuses (409 stale_generation, the same contract as the pre-stream
+    # refusal); the staging is discarded and the just-edited current survives.
+    import asyncio
+
+    worker = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    asyncio.run(_publish(storage, community, server, {"k": b"snap"}, publisher=worker))
+    base = asyncio.run(storage.current_generation(c, s))
+
+    # Simulate the at-rest edit landing in the upload window by hooking the guard's
+    # current_generation read: the FIRST call (the guard) returns the base, then
+    # mutates current/ in place so the store advances past it before the commit's
+    # re-check. The commit re-reads the now-advanced generation and refuses.
+    real_current_generation = storage.current_generation
+    edited = False
+
+    async def _hooked_current_generation(
+        community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        nonlocal edited
+        value = await real_current_generation(community_id, server_id)
+        if not edited:
+            edited = True
+            await storage.write_file(c, s, RelPath("k"), b"edited-mid-upload")
+        return value
+
+    storage.current_generation = _hooked_current_generation  # type: ignore[method-assign]
+
+    body = _tar_bytes({"k": b"in-flight"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                # The worker declares the CURRENT base — the pre-stream guard passes.
+                "X-Working-Set-Base-Generation": str(base),
+                "X-Worker-Id": worker,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
+
+    storage.current_generation = real_current_generation  # type: ignore[method-assign]
+
+    # The edit that landed in the window survives; the stale worker upload is discarded.
+    async def _read() -> bytes:
+        return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
+
+    assert _read_tar(asyncio.run(_read())) == {"k": b"edited-mid-upload"}
+
+
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
     import asyncio
 

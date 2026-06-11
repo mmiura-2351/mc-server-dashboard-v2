@@ -22,6 +22,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
+    StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
@@ -158,6 +159,88 @@ async def test_refused_commit_does_not_bump_generation(
     with pytest.raises(IntegrityCheckError):
         await harness.storage.commit_snapshot(handle)
     assert await harness.storage.current_generation(community, server) == 1
+
+
+async def test_commit_with_matching_expected_base_publishes(
+    harness: StorageHarness,
+) -> None:
+    # Issue #899 commit-time stale guard: when the store has NOT advanced during the
+    # upload window (current still equals the base the pre-stream guard validated),
+    # the commit publishes normally and bumps the generation.
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})
+    base = await harness.storage.current_generation(community, server)
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"v2"}))
+    generation = await harness.storage.commit_snapshot(handle, expected_base=base)
+    assert generation == base + 1
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"v2"}
+
+
+async def test_commit_refused_when_edit_advanced_during_upload(
+    harness: StorageHarness,
+) -> None:
+    # Issue #899: an at-rest edit lands AFTER the pre-stream guard passed (here,
+    # after begin/write_snapshot but before commit — the upload window). The commit's
+    # expected-base re-check sees current advanced past the base and refuses with
+    # StaleGenerationError; the staging is discarded (the handle is consumed, no
+    # leak), the generation does NOT bump again, and the just-edited current survives.
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})
+    base = await harness.storage.current_generation(community, server)
+
+    # The worker's upload is staged at the base the guard validated...
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"worker"}))
+    # ...then an at-rest edit advances the store during the upload window.
+    await harness.storage.write_file(community, server, RelPath("f"), b"edited-at-rest")
+    advanced = await harness.storage.current_generation(community, server)
+    assert advanced == base + 1
+
+    with pytest.raises(StaleGenerationError) as exc:
+        await harness.storage.commit_snapshot(handle, expected_base=base)
+    assert exc.value.expected_base == base
+    assert exc.value.current == advanced
+
+    # No further bump, and the edit's content — not the stale worker upload — is live.
+    assert await harness.storage.current_generation(community, server) == advanced
+    assert (
+        await harness.storage.read_file(community, server, RelPath("f"))
+        == b"edited-at-rest"
+    )
+
+    # The consumed handle cannot be reused, and a fresh transfer publishes cleanly,
+    # proving the refusal left no leaked staging that blocks future commits.
+    with pytest.raises(SnapshotHandleError):
+        await harness.storage.commit_snapshot(handle, expected_base=advanced)
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"rebased"}))
+    assert (
+        await harness.storage.commit_snapshot(handle, expected_base=advanced)
+        == advanced + 1
+    )
+
+
+async def test_commit_without_expected_base_skips_recheck(
+    harness: StorageHarness,
+) -> None:
+    # Issue #899: a publish that declares no base (older Worker / never hydrated)
+    # passes expected_base=None, which skips the commit-time re-check entirely —
+    # backward-compatible with the pre-stream guard's permissive posture. Even if the
+    # store advanced, the commit publishes (last flip wins, the prior behaviour).
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"worker"}))
+    await harness.storage.write_file(community, server, RelPath("f"), b"edit")
+
+    generation = await harness.storage.commit_snapshot(handle)
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"worker"}
+    assert await harness.storage.current_generation(community, server) == generation
 
 
 async def test_hydrate_streams_incrementally_not_buffered(

@@ -153,7 +153,11 @@ class WorkingSetStore(abc.ABC):
 
     @abc.abstractmethod
     async def commit_snapshot(
-        self, handle: SnapshotHandle, *, publisher: str | None = None
+        self,
+        handle: SnapshotHandle,
+        *,
+        publisher: str | None = None,
+        expected_base: int | None = None,
     ) -> int:
         """Atomically publish the staged snapshot, returning the new generation.
 
@@ -184,6 +188,19 @@ class WorkingSetStore(abc.ABC):
         does not declare its id, or an older Worker) records no publisher, so the
         guard cannot prove a foreign publisher and stays permissive — the structural
         #847 fix already prevents the genuine stale cross-worker publish.
+
+        ``expected_base`` closes the upload-window clobber the pre-stream guard
+        cannot (issue #899). The data-plane publish guard evaluates the
+        base-generation claim ONCE, before the (multi-minute) upload stream; an
+        at-rest edit or a backup restore can advance the store AFTER the guard
+        passed. ``expected_base`` is the authoritative generation the guard observed
+        (what ``current`` was at guard time); the commit re-reads the generation
+        under the same per-server serialization the bump uses and raises
+        :class:`~.errors.StaleGenerationError` when it advanced past
+        ``expected_base`` — the staging is discarded and ``current`` keeps the newer
+        copy (no bump), so the Worker re-bases on its next start. ``None`` (a Worker
+        that never hydrated, or an older Worker that sends no base) skips the
+        re-check, matching the pre-stream guard's backward-compatible posture.
         """
 
     @abc.abstractmethod

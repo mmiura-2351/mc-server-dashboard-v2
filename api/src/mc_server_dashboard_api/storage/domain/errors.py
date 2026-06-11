@@ -72,6 +72,34 @@ class SnapshotHandleError(StorageError):
     """
 
 
+class StaleGenerationError(StorageError):
+    """The store advanced past the publisher's base during the upload window (#899).
+
+    The data-plane publish guard evaluates the base-generation claim ONCE, before
+    the (multi-minute) upload stream. ``commit_snapshot`` re-checks it: if the
+    authoritative generation advanced past the base the guard validated against
+    (an at-rest edit or a backup restore landed AFTER the guard passed), publishing
+    the just-uploaded staging would silently clobber that newer authoritative copy
+    with stale progression. The commit refuses fail-closed — the staging is
+    discarded and ``current`` keeps the newer copy — so the Worker re-bases on its
+    next start (the same convergence as the pre-stream refusal). The re-check runs
+    under the same per-server serialization the generation bump uses, so an edit
+    cannot interleave between the re-check and the pointer flip.
+
+    Carries the ``expected_base`` the guard validated against and the ``current``
+    the re-check observed, so the edge can surface the same machine-readable
+    ``409 stale_generation`` contract the pre-stream guard uses.
+    """
+
+    def __init__(self, expected_base: int, current: int) -> None:
+        self.expected_base = expected_base
+        self.current = current
+        super().__init__(
+            f"working-set generation advanced during upload: base {expected_base}, "
+            f"store now at {current}"
+        )
+
+
 class IntegrityCheckError(StorageError):
     """A working set failed the structural ``.mca`` integrity gate (issue #739).
 

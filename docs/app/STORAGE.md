@@ -136,13 +136,24 @@ Notes:
   temp-sibling + atomic rename on `fs`, a single object `PUT` on object backends):
   a crash between two separate writes could attribute the *previous* publisher to
   the *new* generation and invert the guard, so the pair must be all-or-nothing.
-  The marker is written immediately after the `current` pointer flip inside
-  every authoritative publish — `commit_snapshot`, `restore_backup` (#873), and
-  every authoritative file edit (`write_file` / `delete_file` / `delete_dir` /
-  `make_dir` / `rollback_file`, #889) — as a separate sequential write; a crash in
-  the window between the flip and the marker
-  write leaves the generation one behind (under-states by one — the safe
-  direction). After any successful publish return the pointer, generation, and
+  The marker is written immediately after the `current` pointer flip inside a
+  **pointer-flip publish** — `commit_snapshot` and `restore_backup` (#873) — as a
+  separate sequential write; a crash in the window between the flip and the marker
+  write leaves the generation one behind (under-states by one — the safe direction:
+  `current` already names the new world the producing Worker also holds in scratch,
+  so a hydrate-skip cannot serve a *stale* world, and the failed call's retry
+  republishes and bumps the marker into agreement). An **in-place authoritative
+  file edit** (`write_file` / `delete_file` / `delete_dir` / `make_dir` /
+  `rollback_file`, #889) instead mutates `current/` itself rather than flipping a
+  fresh pointer, so its mutate→bump crash window is **not** the safe direction: a
+  crash after the mutation but before the bump leaves the edited world live at the
+  OLD generation, and a same-Worker scratch with `held == store` would then skip the
+  post-edit hydrate (#767) and boot the PRE-edit world — re-opening #889's staleness
+  for that edit until the next bump. To keep that window crash-recoverable rather
+  than racy against a concurrent publish, the edit's mutate+bump — and a
+  `commit_snapshot`'s stale re-check + flip + bump (#899) — run under a per-server
+  lock so a concurrent publish/edit cannot interleave between the two steps. After
+  any successful publish/edit return the pointer, generation, and
   publisher are in agreement. A publish that declared no
   Worker id omits line 2 (no publisher claim, so the guard stays permissive). A
   server with no published snapshot has no `generation` marker; reading it in that
@@ -223,7 +234,7 @@ authoritative-side stream and the atomic-publish handshake.
 | `open_hydrate_source(community_id, server_id) -> ReadStream` | Open a read stream over the current authoritative working set | The data plane reads from this to feed a Worker on start/relocation (hydrate). Reads `current/`. |
 | `begin_snapshot(community_id, server_id) -> SnapshotHandle` | Start an incoming snapshot transfer | Allocates an isolated `incoming/<transfer-id>/` staging area. |
 | `write_snapshot(handle, WriteStream)` | Stream the Worker's working set into staging | Writes only into staging, never `current/`. May be called incrementally. |
-| `commit_snapshot(handle, *, publisher=None) -> int` | Atomically publish the staged snapshot as the new authoritative copy; return the new generation | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. Bumps and returns the working-set generation counter (the new integer the Worker records as the generation its scratch is at) and records `publisher` (the producing Worker's id, issue #847) alongside it in one atomic marker, read back via `current_publisher`. A `None` publisher records no id (the guard stays permissive). Refuses with `IncompleteTransferError` if the transfer was not signalled complete. Refuses with `IntegrityCheckError` if the staged set contains corrupt `.mca` region files (issue #739). Refuses with `MissingRegionsError` if the staged set dropped some-but-not-all `.mca` files of a still-live dimension (the partial-loss corruption signature, issue #854) — a full-dimension delete (ALL regions of a dir gone) is allowed, only a partial loss is refused; the error carries the per-directory lost names (recovery in Section 4.5). Refused publishes do NOT bump the generation. |
+| `commit_snapshot(handle, *, publisher=None, expected_base=None) -> int` | Atomically publish the staged snapshot as the new authoritative copy; return the new generation | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. Bumps and returns the working-set generation counter (the new integer the Worker records as the generation its scratch is at) and records `publisher` (the producing Worker's id, issue #847) alongside it in one atomic marker, read back via `current_publisher`. A `None` publisher records no id (the guard stays permissive). `expected_base` is the commit-time stale re-check (issue #899): the generation the data-plane publish guard validated against before the upload stream (what `current` was at guard time). The commit re-reads the generation under the per-server publish/edit lock (Section 2 generation marker) and refuses with `StaleGenerationError` when it advanced past `expected_base` — an at-rest edit or restore that landed DURING the (multi-minute) upload window — so the just-bumped `current` is not clobbered; `None` skips the re-check (no base claim). Refuses with `IncompleteTransferError` if the transfer was not signalled complete. Refuses with `IntegrityCheckError` if the staged set contains corrupt `.mca` region files (issue #739). Refuses with `MissingRegionsError` if the staged set dropped some-but-not-all `.mca` files of a still-live dimension (the partial-loss corruption signature, issue #854) — a full-dimension delete (ALL regions of a dir gone) is allowed, only a partial loss is refused; the error carries the per-directory lost names (recovery in Section 4.5). Refused publishes do NOT bump the generation; the staging is discarded. |
 | `abort_snapshot(handle)` | Discard an incomplete/failed transfer | Deletes the staging area; `current/` is untouched. Also the cleanup path for crash recovery (Section 4.3). |
 | `current_generation(community_id, server_id) -> int` | Return the current authoritative working-set generation | The counter `commit_snapshot` bumps, read back so the hydrate data plane can stamp the generation it serves (Section 8). Returns 0 when no snapshot has been published. |
 | `current_publisher(community_id, server_id) -> str \| None` | Return the Worker id that published `current` | Read back from the combined `generation` marker (issue #847) so the publish-time generation guard (Section 8) can allow a same-Worker re-publish (lost-response self-heal) while refusing a different-Worker stale publish (A→B→A). `None` when no snapshot has been published, or the last publish declared no id (an older Worker) — in which case the guard cannot prove a foreign publisher and stays permissive. |
@@ -305,7 +316,7 @@ paths are not part of this Port.
 | `write_file(community_id, server_id, rel_path, bytes)` | Edit one file in `current/`, retaining the prior version | Captures the previous content into `versions/` (Section 5) before overwriting. The per-file write is atomic (Section 4.4). Bumps the generation + stamps the `api-edit` sentinel (#889). |
 | `delete_file(community_id, server_id, rel_path)` | Delete one file from `current/`, retaining the prior content | Captures the content into `versions/` (Section 5) **before** removing, so a delete is reversible by rollback exactly like an edit. Missing path → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
 | `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
-| `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. Bumps the generation + stamps the `api-edit` sentinel (#889), uniformly with the other edits even though no content lands on object backends. |
+| `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. **Requires a published snapshot** — a never-snapshotted server has no live `current/` to create the directory under, so `make_dir` raises `NotFoundError` (behaviour aligned across both adapters in #896, including object which previously bumped the generation with no snapshot). Bumps the generation + stamps the `api-edit` sentinel (#889), uniformly with the other edits even though no content lands on object backends. |
 
 **Empty-directory limitation (`make_dir`).** fs / remote-fs materialize a real
 empty directory, which rides the hydrate tar as a directory member (the tar is

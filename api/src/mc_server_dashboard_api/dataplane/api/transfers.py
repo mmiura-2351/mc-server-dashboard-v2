@@ -57,6 +57,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
     MissingRegionsError,
     NotFoundError,
+    StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -325,6 +326,17 @@ async def publish_snapshot(
     already prevents the genuine stale cross-worker publish from arising. The guard is
     defense-in-depth on the data plane, where the only prior protection was the
     Worker-side per-stream ctx cancel.
+
+    The pre-stream guard runs ONCE, before the (multi-minute) upload stream, so an
+    at-rest edit (issue #889) or a backup restore (issue #873) can land AFTER it
+    passes and the commit would silently clobber that just-bumped ``current`` (issue
+    #899). To close the upload window, the base the guard validated against — the
+    store's ``current`` at guard time — is threaded into ``commit_snapshot`` as
+    ``expected_base``; the commit re-reads the generation under the same per-server
+    serialization the bump uses and refuses (409 ``stale_generation``, the same
+    contract as the pre-stream refusal) when it advanced past that base. The staging
+    is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
+    start — the same convergence as the pre-stream refusal.
     """
 
     if content_length is None:
@@ -333,8 +345,16 @@ async def publish_snapshot(
         raise problem(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large")
 
     scope = (CommunityId(community_id), ServerId(server_id))
+    # The generation the pre-stream guard validates against (issue #899): what the
+    # store's ``current`` was at guard time. It is threaded into ``commit_snapshot``
+    # as ``expected_base`` so the commit re-checks it AFTER the upload stream — an
+    # at-rest edit or restore that advanced the store during the (multi-minute)
+    # upload window is then caught at publish time, not just here. None when no base
+    # claim is declared (older Worker / never hydrated), which skips both checks.
+    expected_base: int | None = None
     if base_generation is not None:
         current = await storage.current_generation(*scope)
+        expected_base = current
         if base_generation < current:
             # The publisher's working set was hydrated from generation
             # ``base_generation`` but the store has since moved to ``current``. Refuse
@@ -378,7 +398,9 @@ async def publish_snapshot(
             # prior snapshot intact.
             await storage.abort_snapshot(handle)
             raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch")
-        generation = await storage.commit_snapshot(handle, publisher=publisher)
+        generation = await storage.commit_snapshot(
+            handle, publisher=publisher, expected_base=expected_base
+        )
         # Stamp the new authoritative generation on the response (issue #763): the
         # Worker records the header as the generation its scratch is now at (the
         # source of this published snapshot). The reconciler reads the authoritative
@@ -399,6 +421,30 @@ async def publish_snapshot(
         # mid-stream rather than spooling the whole over-long body first.
         await storage.abort_snapshot(handle)
         raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch") from None
+    except StaleGenerationError as exc:
+        # The store advanced past the base the pre-stream guard validated against
+        # DURING the upload window (issue #899): an at-rest edit or a backup restore
+        # landed after the guard passed, so committing the just-uploaded staging would
+        # clobber that newer authoritative copy with stale progression. commit_snapshot
+        # already discarded the staging (the prior ``current`` keeps the newer copy, no
+        # bump), exactly as the pre-stream guard leaves it untouched. Surface the SAME
+        # 409 stale_generation contract the pre-stream refusal uses so the Worker
+        # re-bases on its next start, and log the refusal in the same shape.
+        _logger.warning(
+            "snapshot publish refused: working-set generation advanced during upload "
+            "for server %s (guard base %d, store now at %d)",
+            server_id,
+            exc.expected_base,
+            exc.current,
+        )
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            "stale_generation",
+            extensions={
+                "base_generation": exc.expected_base,
+                "current": exc.current,
+            },
+        ) from None
     except IncompleteTransferError:
         # The body cleared the length gate but staged zero files: an empty working
         # set is not a publishable snapshot (STORAGE.md Section 4.1). A worker
