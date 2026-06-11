@@ -11,7 +11,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
+    from mc_server_dashboard_api.storage.integrity.region import (
+        MissingRegionReport,
+        WorkingSetReport,
+    )
 
 
 class StorageError(Exception):
@@ -88,4 +91,29 @@ class IntegrityCheckError(StorageError):
         corrupt = len(report.corrupt)
         super().__init__(
             f"working set failed integrity check: {corrupt} corrupt region file(s)"
+        )
+
+
+class MissingRegionsError(StorageError):
+    """A publish would drop SOME-but-not-ALL region files of a live dimension (#854).
+
+    The structural ``.mca`` gates (#739/#749) validate only files that EXIST, so a
+    vanished region file is structurally valid absence: it publishes/restores fine
+    and Minecraft silently regenerates the chunks. This gate compares the staged
+    region-file set against the prior ``current/`` set per region-bearing directory
+    and refuses fail-closed when a directory that still has regions LOST some of
+    them (the partial-loss corruption signature). A directory whose regions are ALL
+    gone is a legitimate full-dimension/world delete and is allowed — so deleting a
+    dimension is the documented override path for an intentional shrink; only a
+    partial loss is refused, leaving ``current`` untouched (last-known-good, #703).
+
+    Carries the structured :class:`~...integrity.region.MissingRegionReport` so a
+    caller can surface *which* directories lost *which* region files.
+    """
+
+    def __init__(self, report: MissingRegionReport) -> None:
+        self.report = report
+        affected = len(report.partial_loss)
+        super().__init__(
+            f"working set is incomplete: {affected} dimension(s) lost region files"
         )

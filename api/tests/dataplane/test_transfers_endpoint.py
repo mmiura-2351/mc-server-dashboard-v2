@@ -551,6 +551,56 @@ def test_snapshot_corrupt_region_is_refused_with_machine_readable_reason(
     assert _read_tar(published) == {"keep.txt": b"prior"}
 
 
+def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    healthy_mca = bytes(2 * 4096)  # a structurally valid empty region.
+    asyncio.run(
+        _publish(
+            storage,
+            community,
+            server,
+            {
+                "world/region/r.0.0.mca": healthy_mca,
+                "world/region/r.0.1.mca": healthy_mca,
+            },
+        )
+    )
+
+    # A byte-complete, structurally-clean upload that DROPS a region file from a
+    # dimension that still exists (issue #854): the missing-region gate must refuse
+    # the publish with 422 ``working_set_incomplete`` and leave the prior snapshot.
+    body = _tar_bytes({"world/region/r.0.0.mca": healthy_mca})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    payload = resp.json()
+    assert payload["reason"] == "working_set_incomplete"
+    assert payload["affected_count"] == 1
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    published = asyncio.run(_read())
+    assert _read_tar(published) == {
+        "world/region/r.0.0.mca": healthy_mca,
+        "world/region/r.0.1.mca": healthy_mca,
+    }
+
+
 def test_snapshot_requires_content_length(tmp_path: Path) -> None:
     client, _ = _setup(tmp_path)
     community, server = _scope()

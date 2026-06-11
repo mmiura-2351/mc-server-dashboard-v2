@@ -26,6 +26,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
+    MissingRegionsError,
     NotFoundError,
     PathTraversalError,
 )
@@ -38,6 +39,7 @@ from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 from tests.storage.helpers import (
     corrupt_region_bytes,
     drain,
+    healthy_region_bytes,
     new_scope,
     read_tar,
     stream_of,
@@ -464,6 +466,63 @@ async def test_create_backup_refuses_corrupt_live_snapshot() -> None:
         await storage.create_backup_from_current(community, server)
     # Fail-closed: no ``.tar.gz`` backup object was uploaded.
     assert not any(k.startswith(backups_prefix) for k in store.objects)
+
+
+async def test_commit_refuses_partial_region_loss_and_keeps_prior() -> None:
+    """The missing-region gate (issue #854) on the object backend: a publish that
+    DROPS some-but-not-all of a live dimension's region objects is refused with
+    :class:`MissingRegionsError`, the pointer is not flipped, and staging is cleaned.
+    """
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(
+        storage,
+        community,
+        server,
+        {
+            "world/region/r.0.0.mca": healthy_region_bytes(),
+            "world/region/r.0.1.mca": healthy_region_bytes(),
+        },
+    )
+    pointer_key = _server_prefix(community, server) + _POINTER
+    before = json.loads(store.objects[pointer_key])["snapshot"]
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(
+        handle, tar_stream({"world/region/r.0.0.mca": healthy_region_bytes()})
+    )
+    with pytest.raises(MissingRegionsError) as excinfo:
+        await storage.commit_snapshot(handle)
+
+    assert len(excinfo.value.report.partial_loss) == 1
+    # Pointer unchanged; no leftover incoming/ staging objects.
+    assert json.loads(store.objects[pointer_key])["snapshot"] == before
+    incoming = _server_prefix(community, server) + "incoming/"
+    assert not any(k.startswith(incoming) for k in store.objects)
+
+
+async def test_commit_allows_full_dimension_delete() -> None:
+    """A publish that removes a WHOLE dimension's region objects (legitimate delete)
+    is allowed on the object backend (issue #854)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(
+        storage,
+        community,
+        server,
+        {
+            "world/region/r.0.0.mca": healthy_region_bytes(),
+            "world/DIM-1/region/r.0.0.mca": healthy_region_bytes(),
+        },
+    )
+
+    after = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await _publish(storage, community, server, after)
+
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == after
 
 
 async def test_prune_uploads_final_targz_and_drops_working_set_objects() -> None:

@@ -48,6 +48,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     IncompleteTransferError,
     IntegrityCheckError,
+    MissingRegionsError,
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
@@ -71,6 +72,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     WorkingSetReport,
+    check_missing_regions,
     check_working_set,
 )
 
@@ -379,6 +381,24 @@ class FsStorage(Storage):
             self._release_staging(staging)
             fs_handle.consumed = True
             raise IntegrityCheckError(report)
+        # Missing-region gate (issue #854): the structural check above only validates
+        # files that EXIST — a region file that vanished is structurally valid absence
+        # and would publish silently. Compare the staged region-file set against the
+        # prior ``current/`` set per region-bearing directory and refuse when a
+        # dimension that still has regions lost SOME of them (partial-loss corruption
+        # signature). A full-dimension delete (all regions gone) is allowed. First
+        # publish (no ``current``) has no prior set, so nothing is flagged.
+        try:
+            prior = self._current_dir(fs_handle.community_id, fs_handle.server_id)
+        except NotFoundError:
+            prior = None
+        if prior is not None:
+            missing = await asyncio.to_thread(check_missing_regions, staging, prior)
+            if not missing.complete:
+                await asyncio.to_thread(_rmtree, staging)
+                self._release_staging(staging)
+                fs_handle.consumed = True
+                raise MissingRegionsError(missing)
         generation = await asyncio.to_thread(
             self._publish_and_bump,
             fs_handle.community_id,

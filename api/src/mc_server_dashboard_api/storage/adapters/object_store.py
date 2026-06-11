@@ -68,6 +68,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     IncompleteTransferError,
     IntegrityCheckError,
+    MissingRegionsError,
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
@@ -93,6 +94,7 @@ from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
     WorkingSetReport,
     check_region_bytes,
+    compare_region_name_sets,
 )
 
 # Egress chunk size for hydrate / JAR streaming (one tar member-chunk at a time).
@@ -535,6 +537,7 @@ class ObjectStorage(Storage):
         if h.consumed:
             raise SnapshotHandleError("snapshot handle already committed or aborted")
         incoming = self._incoming_prefix(h.community_id, h.server_id, h.transfer_id)
+        server_prefix = self._server_prefix(h.community_id, h.server_id)
         async with self._client_factory() as client:
             staged = await client.list_objects(incoming)
             if not staged:
@@ -556,13 +559,31 @@ class ObjectStorage(Storage):
                 self._release_staging(incoming)
                 h.consumed = True
                 raise IntegrityCheckError(report)
+            # Missing-region gate (issue #854): the structural check above only sees
+            # objects that EXIST — a vanished region object would publish silently and
+            # MC would regenerate the chunks. Compare the staged region-object names
+            # against the prior snapshot's per region-bearing directory and refuse when
+            # a dimension that still has regions lost SOME of them (partial loss). A
+            # full-dimension delete (all regions gone) is allowed; first publish (no
+            # pointer) has no prior set, so nothing is flagged. Name-only — no bodies.
+            prior_prefix = await self._read_pointer(client, server_prefix)
+            if prior_prefix is not None:
+                prior_objs = await client.list_objects(prior_prefix)
+                missing = compare_region_name_sets(
+                    _region_names_by_dir(incoming, staged),
+                    _region_names_by_dir(prior_prefix, prior_objs),
+                )
+                if not missing.complete:
+                    await _delete_prefix(client, incoming)
+                    self._release_staging(incoming)
+                    h.consumed = True
+                    raise MissingRegionsError(missing)
             await self._publish(client, h.community_id, h.server_id, incoming, staged)
             # Bump the working-set generation now that the pointer references the new
             # snapshot (issue #763) and record the publishing Worker (issue #847) in
             # ONE atomic marker. Only a snapshot publish bumps it (not a restore or
             # authoritative file edit, which target a stopped server whose Worker holds
             # no scratch, so the reconciler hydrates regardless).
-            server_prefix = self._server_prefix(h.community_id, h.server_id)
             generation = await self._bump_generation(client, server_prefix, publisher)
         # Publish reclaimed the staging prefix; release its active-staging lease so
         # a later sweep is not blocked by a now-dead handle (issue #160).
@@ -1301,6 +1322,23 @@ def _group_by_server(objs: list[S3Object]) -> dict[str, list[str]]:
         server_prefix = "/".join(parts[:4]) + "/"
         groups.setdefault(server_prefix, []).append(obj.key)
     return groups
+
+
+def _region_names_by_dir(prefix: str, objs: list[S3Object]) -> dict[Path, set[str]]:
+    """Group the ``.mca`` objects under ``prefix`` by their region-bearing directory.
+
+    Mirrors the fs adapter's :func:`_region_sets_by_dir` for the object backend
+    (issue #854): each ``*.mca`` key relative to ``prefix`` is bucketed by its
+    parent path, yielding the same dir -> name-set shape
+    :func:`compare_region_name_sets` diffs. Non-``.mca`` keys are ignored.
+    """
+    by_dir: dict[Path, set[str]] = {}
+    for obj in objs:
+        if not obj.key.endswith(".mca"):
+            continue
+        rel = PurePosixPath(obj.key[len(prefix) :])
+        by_dir.setdefault(Path(rel.parent), set()).add(rel.name)
+    return by_dir
 
 
 async def _read_all(client: S3Client, key: str) -> bytes:

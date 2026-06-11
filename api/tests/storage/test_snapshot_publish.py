@@ -18,7 +18,10 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
-from mc_server_dashboard_api.storage.domain.errors import IntegrityCheckError
+from mc_server_dashboard_api.storage.domain.errors import (
+    IntegrityCheckError,
+    MissingRegionsError,
+)
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
     CommunityId,
@@ -240,6 +243,79 @@ async def test_commit_publishes_a_healthy_region_unchanged(tmp_path: Path) -> No
 
     blob = await drain(storage.open_hydrate_source(community, server))
     assert read_tar(blob) == files
+
+
+async def test_commit_refuses_partial_region_loss_and_keeps_prior(
+    tmp_path: Path,
+) -> None:
+    """The missing-region gate (issue #854): a publish that DROPS some-but-not-all of
+    a live dimension's region files is refused.
+
+    Every other gate validates only files that exist, so a vanished region is
+    structurally valid absence. A staged set that lost a region a dimension still
+    populates is the corruption signature: refuse with :class:`MissingRegionsError`
+    (carrying the report), keep the prior ``current``, and clean staging (#703).
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(
+        storage,
+        community,
+        server,
+        {
+            "world/region/r.0.0.mca": healthy_region_bytes(),
+            "world/region/r.0.1.mca": healthy_region_bytes(),
+        },
+    )
+    good_live = snapshot_dir(tmp_path, community, server)
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(
+        handle, tar_stream({"world/region/r.0.0.mca": healthy_region_bytes()})
+    )
+    with pytest.raises(MissingRegionsError) as excinfo:
+        await storage.commit_snapshot(handle)
+
+    report = excinfo.value.report
+    assert len(report.partial_loss) == 1
+    assert report.partial_loss[0].directory == Path("world/region")
+    assert report.partial_loss[0].lost == ("r.0.1.mca",)
+
+    # current still resolves to the prior snapshot; staging was cleaned.
+    assert snapshot_dir(tmp_path, community, server) == good_live
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {
+        "world/region/r.0.0.mca": healthy_region_bytes(),
+        "world/region/r.0.1.mca": healthy_region_bytes(),
+    }
+    incoming = good_live.parent.parent / "incoming"
+    assert not incoming.exists() or not any(incoming.iterdir())
+
+
+async def test_commit_allows_full_dimension_delete(tmp_path: Path) -> None:
+    """A publish that removes a WHOLE dimension's regions (legitimate delete) is
+    allowed — only a partial loss is the corruption signature (issue #854)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(
+        storage,
+        community,
+        server,
+        {
+            "world/region/r.0.0.mca": healthy_region_bytes(),
+            "world/DIM-1/region/r.0.0.mca": healthy_region_bytes(),
+            "world/DIM-1/region/r.0.1.mca": healthy_region_bytes(),
+        },
+    )
+
+    # The Nether (DIM-1) is deleted entirely; the overworld is unchanged.
+    after = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await _publish(storage, community, server, after)
+
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == after
 
 
 async def _put_backup(

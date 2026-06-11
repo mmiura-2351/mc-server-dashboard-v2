@@ -16,6 +16,7 @@ import pytest
 
 from mc_server_dashboard_api.storage.integrity.region import (
     ReasonCode,
+    check_missing_regions,
     check_region_bytes,
     check_region_file,
     check_working_set,
@@ -226,3 +227,84 @@ def test_check_region_bytes_matches_check_region_file(tmp_path: Path) -> None:
     finding = check_region_bytes("r.mca", image)
     assert finding is not None
     assert finding.reason is check_region_file(path)
+
+
+# --- missing-region detection (partial loss vs. full delete, issue #854) -----
+
+
+def _seed(root: Path, names: list[str]) -> Path:
+    for name in names:
+        _write(root / name, _build_region())
+    return root
+
+
+def test_missing_regions_clean_when_sets_match(tmp_path: Path) -> None:
+    layout = ["region/r.0.0.mca", "region/r.0.1.mca", "DIM-1/region/r.0.0.mca"]
+    new = _seed(tmp_path / "new", layout)
+    ref = _seed(tmp_path / "ref", layout)
+
+    report = check_missing_regions(new, ref)
+
+    assert report.complete is True
+    assert report.partial_loss == []
+
+
+def test_missing_regions_clean_when_set_grows(tmp_path: Path) -> None:
+    # Adding regions (new chunks generated) is never a loss.
+    new = _seed(tmp_path / "new", ["region/r.0.0.mca", "region/r.0.1.mca"])
+    ref = _seed(tmp_path / "ref", ["region/r.0.0.mca"])
+
+    assert check_missing_regions(new, ref).complete is True
+
+
+def test_missing_regions_clean_on_first_publish(tmp_path: Path) -> None:
+    # No prior current/ to compare against -> nothing flagged.
+    new = _seed(tmp_path / "new", ["region/r.0.0.mca"])
+    ref = tmp_path / "ref"  # never created.
+
+    assert check_missing_regions(new, ref).complete is True
+
+
+def test_missing_regions_flags_partial_loss_in_a_dimension(tmp_path: Path) -> None:
+    # The same dimension still has regions but lost one — the corruption signature.
+    new = _seed(tmp_path / "new", ["region/r.0.0.mca"])
+    ref = _seed(tmp_path / "ref", ["region/r.0.0.mca", "region/r.0.1.mca"])
+
+    report = check_missing_regions(new, ref)
+
+    assert report.complete is False
+    assert len(report.partial_loss) == 1
+    finding = report.partial_loss[0]
+    assert finding.directory == Path("region")
+    assert finding.lost == ("r.0.1.mca",)
+
+
+def test_missing_regions_allows_full_dimension_delete(tmp_path: Path) -> None:
+    # A whole dimension's regions are gone (legitimate delete) — not flagged, while
+    # a partial loss in another dimension still IS.
+    new = _seed(tmp_path / "new", ["region/r.0.0.mca"])
+    ref = _seed(
+        tmp_path / "ref",
+        ["region/r.0.0.mca", "DIM-1/region/r.0.0.mca", "DIM-1/region/r.0.1.mca"],
+    )
+
+    report = check_missing_regions(new, ref)
+
+    assert report.complete is True
+
+
+def test_missing_regions_full_delete_and_partial_loss_together(tmp_path: Path) -> None:
+    new = _seed(tmp_path / "new", ["region/r.0.0.mca"])
+    ref = _seed(
+        tmp_path / "ref",
+        [
+            "region/r.0.0.mca",
+            "region/r.0.1.mca",  # partial loss in region/.
+            "DIM1/region/r.0.0.mca",  # full delete of DIM1 -> allowed.
+        ],
+    )
+
+    report = check_missing_regions(new, ref)
+
+    assert report.complete is False
+    assert [f.directory for f in report.partial_loss] == [Path("region")]
