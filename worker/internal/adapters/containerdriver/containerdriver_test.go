@@ -35,6 +35,11 @@ type fakeDocker struct {
 	inspectInfo  ContainerInfo
 	inspectErr   error
 	inspectSteps []inspectStep
+	// inspectBlocksUntilCtxDone models a wedged daemon for Inspect: the call
+	// blocks until its context is cancelled and then returns the context error.
+	// It drives the probe-Inspect-bounded test (issue #881): without a context
+	// deadline on the Inspect call the probe would hang past the probe deadline.
+	inspectBlocksUntilCtxDone bool
 
 	stopCalled bool
 	stopNoExit bool
@@ -139,17 +144,25 @@ func (f *fakeDocker) Create(_ context.Context, spec CreateSpec) (string, error) 
 	return "container-1", nil
 }
 
-func (f *fakeDocker) Inspect(_ context.Context, _ string) (ContainerInfo, error) {
+func (f *fakeDocker) Inspect(ctx context.Context, _ string) (ContainerInfo, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.inspectSteps) > 0 {
-		step := f.inspectSteps[0]
-		if len(f.inspectSteps) > 1 {
-			f.inspectSteps = f.inspectSteps[1:]
+	block := f.inspectBlocksUntilCtxDone
+	if !block {
+		if len(f.inspectSteps) > 0 {
+			step := f.inspectSteps[0]
+			if len(f.inspectSteps) > 1 {
+				f.inspectSteps = f.inspectSteps[1:]
+			}
+			f.mu.Unlock()
+			return step.info, step.err
 		}
-		return step.info, step.err
+		info, err := f.inspectInfo, f.inspectErr
+		f.mu.Unlock()
+		return info, err
 	}
-	return f.inspectInfo, f.inspectErr
+	f.mu.Unlock()
+	<-ctx.Done()
+	return ContainerInfo{}, ctx.Err()
 }
 
 func (f *fakeDocker) Start(_ context.Context, _ string) error {
@@ -696,6 +709,75 @@ func TestWaitTransportErrorDaemonUnreachableEmitsNothing(t *testing.T) {
 	if inst.Status() != execution.StateCrashed {
 		t.Fatalf("Status = %v, want crashed only after the real exit", inst.Status())
 	}
+}
+
+// The probe's Inspect call must be bounded by the probe deadline context so a
+// wedged-but-connected daemon cannot hang a single Inspect call past the 30s
+// probe bound (issue #881). The fake's inspectBlocksUntilCtxDone models a daemon
+// that never returns from Inspect; once the context deadline fires the call must
+// unblock and supervise must proceed (re-attach) rather than hanging forever.
+func TestProbeInspectBoundedByProbeDeadline(t *testing.T) {
+	docker := newFakeDocker()
+	docker.waitGate = make(chan waitResult)
+	// Inspect blocks until its ctx is done — wedged daemon.
+	docker.inspectBlocksUntilCtxDone = true
+	// Shrink the probe deadline so the test finishes fast.
+	prevDeadline, prevInterval := waitTransportProbeDeadline, waitTransportProbeInterval
+	waitTransportProbeDeadline, waitTransportProbeInterval = 30*time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		waitTransportProbeDeadline, waitTransportProbeInterval = prevDeadline, prevInterval
+	})
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// Deliver a transport error. The probe calls Inspect, which blocks; the probe
+	// deadline context must cancel the Inspect call before waitTransportProbeDeadline
+	// elapses for the test to finish. Without the context deadline on Inspect, the
+	// goroutine hangs and the second gate push (re-attached waiter) is never consumed.
+	docker.waitGate <- waitResult{err: errors.New("containerdriver: POST /wait: EOF")}
+
+	// The second push blocks until the re-attached waiter reads it, proving that
+	// the probe returned (context cancelled) and supervise re-attached rather than
+	// blocking forever on the wedged Inspect.
+	docker.waitGate <- waitResult{code: 1}
+
+	drainTo(t, inst.Events(), execution.StateCrashed)
+}
+
+// After a Wait transport error + re-inspect, supervise throttles re-attach with
+// a sleep so there is no tight hot-spin against the daemon socket even if
+// multiple transport errors arrive back-to-back (issue #881). The re-attach must
+// still work correctly: a real exit after the throttled re-attach emits crashed.
+func TestSuperviseReAttachThrottledAfterTransportError(t *testing.T) {
+	docker := newFakeDocker()
+	docker.waitGate = make(chan waitResult)
+	docker.inspectInfo = ContainerInfo{ID: "container-1", Running: true}
+	// Shrink the sleep interval so the test runs fast.
+	prevDeadline, prevInterval := waitTransportProbeDeadline, waitTransportProbeInterval
+	waitTransportProbeDeadline, waitTransportProbeInterval = 100*time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		waitTransportProbeDeadline, waitTransportProbeInterval = prevDeadline, prevInterval
+	})
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// Transport error → re-inspect finds container running → sleep → re-attach.
+	// Second push lands only after the re-attached Wait reads it, so the sequence
+	// ran to completion without getting stuck.
+	docker.waitGate <- waitResult{err: errors.New("containerdriver: POST /wait: connection reset")}
+	docker.waitGate <- waitResult{code: 0}
+
+	drainTo(t, inst.Events(), execution.StateCrashed)
 }
 
 // Start wires the working-dir bind mount, the deterministic name/labels, and the

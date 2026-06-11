@@ -723,7 +723,17 @@ func (i *instance) awaitReady() {
 // (mcsd-<id>-install) means the launch create never contends with it.
 func (i *instance) superviseInstall(installID string) {
 	i.captureInstallOutput(installID)
-	_, waitErr := i.docker.Wait(context.Background(), installID)
+
+	// Re-attach on transport errors the same way supervise does: a daemon blip
+	// does not mean the install container died (issue #881).
+	var waitErr error
+	for {
+		_, waitErr = i.docker.Wait(context.Background(), installID)
+		if waitErr == nil || !isTransportError(waitErr) || i.exitedAfterTransportError(installID) {
+			break
+		}
+		time.Sleep(waitTransportProbeInterval)
+	}
 
 	i.mu.Lock()
 	stopping := i.stopping
@@ -1150,6 +1160,9 @@ func (i *instance) supervise() {
 		if waitErr == nil || !isTransportError(waitErr) || i.exitedAfterTransportError(id) {
 			break
 		}
+		// Throttle re-attach so back-to-back transport errors do not hot-spin
+		// against the daemon socket (issue #881).
+		time.Sleep(waitTransportProbeInterval)
 	}
 
 	i.mu.Lock()
@@ -1211,11 +1224,15 @@ func isTransportError(err error) bool {
 // still running or the daemon stays unreachable past the deadline (supervise
 // should re-attach a waiter and keep supervising, emitting nothing). errNotFound
 // (a 404) means the container is gone; any other inspect error is treated as the
-// daemon still being unreachable and is retried until the deadline.
+// daemon still being unreachable and is retried until the deadline. Each Inspect
+// call carries a context derived from the probe deadline so a wedged-but-
+// connected daemon cannot hold a single Inspect call past the bound (issue #881).
 func (i *instance) exitedAfterTransportError(id string) bool {
 	deadline := time.Now().Add(waitTransportProbeDeadline)
 	for {
-		info, err := i.docker.Inspect(context.Background(), id)
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		info, err := i.docker.Inspect(ctx, id)
+		cancel()
 		switch {
 		case errors.Is(err, errNotFound):
 			return true

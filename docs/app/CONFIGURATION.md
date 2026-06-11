@@ -207,6 +207,8 @@ makes the snapshot bound binding — hence the `max(...)`, which enforces both.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `database.url` | *required* | secret | Connection string for the persistence adapter (may embed credentials). Model owned by DATABASE.md (#15). |
+| `database.pool_size` | `5` | | Number of permanent connections SQLAlchemy keeps open. Must be positive. Mirrors SQLAlchemy's own default so existing deployments see no change until tuned. |
+| `database.max_overflow` | `10` | | Maximum extra connections SQLAlchemy opens above `pool_size` under burst load, returned to the pool when idle. Must be non-negative; `0` disables overflow. Mirrors SQLAlchemy's own default. |
 | `storage.backend` | `fs` | | Selector for the `Storage` Port (Section 4): `fs` / `remote-fs` / `object`. |
 | `storage.fs.root` | `./data` | | Root directory for the `fs` and `remote-fs` backends. For `fs` this is a local path; for `remote-fs` point it at the POSIX mount path (the `fs` adapter is reused over the mount — STORAGE.md Section 7.2). |
 | `storage.version_retention` | `10` | | Maximum per-file prior versions retained for rollback; the oldest beyond this count are pruned (STORAGE.md Section 5). Must be non-negative; `0` retains no prior versions. |
@@ -219,19 +221,23 @@ Only the keys for the selected `storage.backend` are read; the rest are ignored
 (Section 4). The authoritative per-backend key list and the atomic-snapshot
 publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md (#17).
 
-**Connection-pool sizing and the lifecycle lock (#827/#876).** Every at-rest-gated
+**Connection-pool sizing and the lifecycle lock (#827/#876/#884).** Every at-rest-gated
 operation (restore, delete, the file mutations, update, create-backup) and every
 `StartServer` flip holds a *per-server* advisory lock on a **dedicated** pool
 connection for the operation's duration — a long gated op (a minutes-long
 restore/delete pack) thus pins one connection on top of the connection its own
 unit-of-work uses. The lock's acquire is *bounded*: a waiter that cannot take the
 lock within a few seconds gives up with a `409 server_busy` rather than block (and
-pin a slot) indefinitely, so contention cannot deadlock the pool — but the *holders*
-still consume one extra connection each for as long as they run. Size the SQLAlchemy
-pool with that headroom in mind: budget roughly two connections per *concurrent*
-gated operation you expect (the op's own work plus its lock connection), not one,
-so a burst of concurrent restores/deletes does not starve ordinary request traffic.
-The pool uses fixed defaults: 5 connections (`pool_size`) with 10 overflow slots (`max_overflow`); each held lock and each bounded waiter pins one connection for its duration. A configuration knob for pool sizing is tracked in a follow-up issue (#884).
+pin a slot) indefinitely, so contention cannot deadlock the pool — but both the
+*holder* and each *bounded waiter* each pin one dedicated connection for their
+duration. Size the pool with that headroom in mind:
+
+- Each **held** LifecycleLock pins **one** connection for the duration of the
+  gated operation (the lock acquire + the op itself).
+- Each **bounded waiter** (~5 s timeout) pins **one** connection while it waits.
+- Normal request traffic uses additional connections concurrently.
+
+A reasonable sizing formula: `pool_size + max_overflow ≥ (expected concurrent gated ops) + (expected peak waiters) + (normal concurrent request traffic)`. The shipped defaults (`pool_size=5`, `max_overflow=10`) give a ceiling of 15, adequate for a deployment with a handful of simultaneous gated operations. Raise `pool_size` (permanent connections) first; `max_overflow` adds burst headroom at the cost of connection churn.
 
 ### 5.3 Authentication: tokens and password hashing
 
