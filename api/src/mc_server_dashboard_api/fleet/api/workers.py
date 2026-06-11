@@ -14,7 +14,7 @@ since the fleet is cross-community infrastructure, not community-scoped:
 
   Convergence is ASYNCHRONOUS: ``PUT`` returns immediately with the count it
   *marked*, not stopped. The stops (and snapshots) happen only after the
-  reconciler's grace window (120s default) plus a tick, and only while the Worker
+  reconciler's grace window (660s default) plus a tick, and only while the Worker
   stays connected — an operator MUST keep the Worker up until the stops converge,
   since shutting the host down first defers every stop and snapshot until
   reconnect (which never happens in a decommission). Confirm convergence PER

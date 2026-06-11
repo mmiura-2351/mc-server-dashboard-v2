@@ -248,7 +248,7 @@ class ReconcilerSettings(_Section):
     """
 
     interval_seconds: int = Field(default=60, gt=0)
-    grace_seconds: int = Field(default=120, gt=0)
+    grace_seconds: int = Field(default=660, gt=0)
     backoff_base_seconds: int = Field(default=30, gt=0)
     backoff_max_seconds: int = Field(default=3600, gt=0)
 

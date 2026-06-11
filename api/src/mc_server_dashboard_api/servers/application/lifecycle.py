@@ -32,9 +32,11 @@ demonstrably never reached the Worker (placement, jar provisioning, a failed
 hydrate, or a pre-dispatch ``WorkerUnavailableError``) AND a post-dispatch explicit
 refusal that definitively did not start (``PORT_CONFLICT``, ``IMAGE_MISSING``,
 ``DRIVER_UNAVAILABLE``, ``INTERNAL``). Only a timeout/lost-response AFTER the start
-was sent (the command MAY have been applied), and an ``INVALID_STATE`` outcome (the
-Worker refusing because an instance is already live there), do NOT compensate — see
-the assignment-stickiness note below.
+was sent (the command MAY have been applied), a post-dispatch ``BUSY`` outcome (the
+Worker refusing because another mutating command is already in flight — outcome
+unknown), and an ``INVALID_STATE`` outcome (the Worker refusing because an instance
+is already live there), do NOT compensate — see the assignment-stickiness note
+below.
 
 Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
 ``StartServer`` first drives the Worker to pull the authoritative working set from

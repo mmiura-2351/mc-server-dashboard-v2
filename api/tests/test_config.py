@@ -328,7 +328,7 @@ def test_reconciler_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)
     assert settings.reconciler.interval_seconds == 60
-    assert settings.reconciler.grace_seconds == 120
+    assert settings.reconciler.grace_seconds == 660
     assert settings.reconciler.backoff_base_seconds == 30
     assert settings.reconciler.backoff_max_seconds == 3600
 
