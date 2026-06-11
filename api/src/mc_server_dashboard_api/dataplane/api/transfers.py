@@ -345,16 +345,19 @@ async def publish_snapshot(
         raise problem(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large")
 
     scope = (CommunityId(community_id), ServerId(server_id))
-    # The generation the pre-stream guard validates against (issue #899): what the
-    # store's ``current`` was at guard time. It is threaded into ``commit_snapshot``
-    # as ``expected_base`` so the commit re-checks it AFTER the upload stream — an
-    # at-rest edit or restore that advanced the store during the (multi-minute)
-    # upload window is then caught at publish time, not just here. None when no base
-    # claim is declared (older Worker / never hydrated), which skips both checks.
-    expected_base: int | None = None
+    # Read the store's ``current`` once here (guard time) and ALWAYS thread it into
+    # ``commit_snapshot`` as ``expected_base`` (issue #899/#920): the commit re-checks
+    # it AFTER the upload stream, so an at-rest edit (issue #889) or backup restore
+    # (issue #873) that advances the store during the (multi-minute) upload window is
+    # caught at publish time. This re-check is derived purely server-side, so it
+    # applies even to a publish that declares no base generation (older Worker / never
+    # hydrated) — previously that path skipped the re-check and left the clobber window
+    # open (#920 review). The port still accepts ``expected_base=None`` for callers
+    # genuinely outside this upload guard (e.g. an initial publish / restore performed
+    # by storage internals, which read ``current`` under the same lock themselves).
+    current = await storage.current_generation(*scope)
+    expected_base: int | None = current
     if base_generation is not None:
-        current = await storage.current_generation(*scope)
-        expected_base = current
         if base_generation < current:
             # The publisher's working set was hydrated from generation
             # ``base_generation`` but the store has since moved to ``current``. Refuse
@@ -430,6 +433,11 @@ async def publish_snapshot(
         # bump), exactly as the pre-stream guard leaves it untouched. Surface the SAME
         # 409 stale_generation contract the pre-stream refusal uses so the Worker
         # re-bases on its next start, and log the refusal in the same shape.
+        # NOTE: unlike the pre-stream refusal (whose ``base_generation`` is the
+        # Worker's DECLARED base), here ``base_generation`` carries the guard-time
+        # ``current`` (= ``expected_base``) the commit re-checked against. Same field,
+        # subtly different semantics: there is no worker-declared base on the no-base
+        # path, and the value the Worker needs to re-base on is ``current`` anyway.
         _logger.warning(
             "snapshot publish refused: working-set generation advanced during upload "
             "for server %s (guard base %d, store now at %d)",

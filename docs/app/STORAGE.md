@@ -152,8 +152,17 @@ Notes:
   for that edit until the next bump. To keep that window crash-recoverable rather
   than racy against a concurrent publish, the edit's mutate+bump — and a
   `commit_snapshot`'s stale re-check + flip + bump (#899) — run under a per-server
-  lock so a concurrent publish/edit cannot interleave between the two steps. After
-  any successful publish/edit return the pointer, generation, and
+  lock so a concurrent publish/edit cannot interleave between the two steps. An edit
+  resolves its read-set (the live pointer / `current` symlink) **inside** that lock
+  (#920): resolving it outside would let it write back a snapshot the commit has
+  already flipped away and reclaimed, losing the world. The lock covers only the
+  re-check + pointer flip + bump (and the gates that must be atomic with the flip);
+  a publish's bulk staging→snapshot copy runs **before** the lock and the superseded
+  snapshot's reclaim runs **after** it, so a multi-minute copy never blocks edits.
+  The post-lock reclaim is safe because an edit can no longer observe the pre-flip
+  snapshot once it re-reads the pointer under the lock. The lock is **in-process
+  only** (one uvicorn process today); a multi-process deployment would need a shared
+  lock. After any successful publish/edit return the pointer, generation, and
   publisher are in agreement. A publish that declared no
   Worker id omits line 2 (no publisher claim, so the guard stays permissive). A
   server with no published snapshot has no `generation` marker; reading it in that

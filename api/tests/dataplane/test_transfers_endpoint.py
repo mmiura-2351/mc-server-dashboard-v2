@@ -528,6 +528,63 @@ def test_snapshot_refused_when_edit_lands_during_upload_window(
     assert _read_tar(asyncio.run(_read())) == {"k": b"edited-mid-upload"}
 
 
+def test_snapshot_refused_when_edit_lands_during_upload_window_without_base_header(
+    tmp_path: Path,
+) -> None:
+    # Issue #920 finding 2: a publish that declares NO base generation (older worker /
+    # never hydrated) must STILL get the commit-time re-check — the expected base is
+    # derived server-side from the guard's reading regardless of the header, so the
+    # upload-window clobber is closed on this route too. Previously the no-base path
+    # passed expected_base=None and skipped the re-check, leaving the window open.
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    asyncio.run(_publish(storage, community, server, {"k": b"snap"}))
+    base = asyncio.run(storage.current_generation(c, s))
+
+    # Same upload-window hook as the declared-base test: the guard's current_generation
+    # read returns the base, then mutates current/ in place so the store advances before
+    # the commit's re-check.
+    real_current_generation = storage.current_generation
+    edited = False
+
+    async def _hooked_current_generation(
+        community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        nonlocal edited
+        value = await real_current_generation(community_id, server_id)
+        if not edited:
+            edited = True
+            await storage.write_file(c, s, RelPath("k"), b"edited-mid-upload")
+        return value
+
+    storage.current_generation = _hooked_current_generation  # type: ignore[method-assign]
+
+    body = _tar_bytes({"k": b"in-flight"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            # No X-Working-Set-Base-Generation header: the no-base-claim route.
+            content=body,
+            headers=_auth(),
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
+    # The 409 carries the guard-time current (= expected_base) as base_generation.
+    assert resp.json()["base_generation"] == base
+
+    storage.current_generation = real_current_generation  # type: ignore[method-assign]
+
+    # The edit that landed in the window survives; the stale worker upload is discarded.
+    async def _read() -> bytes:
+        return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
+
+    assert _read_tar(asyncio.run(_read())) == {"k": b"edited-mid-upload"}
+
+
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
     import asyncio
 
