@@ -73,6 +73,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     SnapshotHandleError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
+    RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
     JarPoolEntry,
@@ -559,9 +560,9 @@ class ObjectStorage(Storage):
             await self._publish(client, h.community_id, h.server_id, incoming, staged)
             # Bump the working-set generation now that the pointer references the new
             # snapshot (issue #763) and record the publishing Worker (issue #847) in
-            # ONE atomic marker. Only a snapshot publish bumps it (not a restore or
-            # authoritative file edit, which target a stopped server whose Worker holds
-            # no scratch, so the reconciler hydrates regardless).
+            # ONE atomic marker. Every authoritative publish that replaces ``current/``
+            # bumps it — a snapshot commit here and a backup restore (issue #873) —
+            # so a same-worker scratch never wrongly skips the post-publish hydrate.
             server_prefix = self._server_prefix(h.community_id, h.server_id)
             generation = await self._bump_generation(client, server_prefix, publisher)
         # Publish reclaimed the staging prefix; release its active-staging lease so
@@ -888,6 +889,18 @@ class ObjectStorage(Storage):
                         raise IntegrityCheckError(report)
                     await self._publish(
                         client, community_id, server_id, incoming, staged
+                    )
+                    # Bump the generation on this authoritative publish (issue #873),
+                    # mirroring the fs adapter: a restore replaces ``current/`` like a
+                    # snapshot commit, so it MUST advance the store generation or a
+                    # same-worker scratch with held == store skips the hydrate (#767)
+                    # on the next start and boots the PRE-restore world. The sentinel
+                    # publisher (RESTORE_PUBLISHER) makes the publish-time guard refuse
+                    # an in-flight stale snapshot from a real Worker (different
+                    # publisher), closing the restore-clobber window (#873).
+                    server_prefix = self._server_prefix(community_id, server_id)
+                    await self._bump_generation(
+                        client, server_prefix, RESTORE_PUBLISHER
                     )
                     return report
                 except BaseException:

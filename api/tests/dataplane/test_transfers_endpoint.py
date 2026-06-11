@@ -368,6 +368,57 @@ def test_snapshot_stale_base_from_same_publisher_self_heals(tmp_path: Path) -> N
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"republished"}
 
 
+def test_snapshot_in_flight_stale_publish_refused_after_restore(
+    tmp_path: Path,
+) -> None:
+    # Issue #873 restore-clobber window: a worker published the current generation,
+    # then an API restore replaced ``current/`` (bumping the generation and stamping
+    # the RESTORE_PUBLISHER sentinel). A final snapshot from that worker is still in
+    # flight, declaring its OLD base generation. Because the restore bumped the
+    # generation AND recorded a DIFFERENT publisher (the sentinel), the publish guard
+    # refuses (409 stale_generation) — the just-restored data is NOT clobbered.
+    import asyncio
+
+    from mc_server_dashboard_api.storage.domain.value_objects import BackupKey
+
+    worker = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    # The worker published gen1, captured as a backup we will restore later.
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker))
+    key: BackupKey = asyncio.run(storage.create_backup_from_current(c, s))
+    # The worker advanced to gen2 (its scratch is now at gen2).
+    asyncio.run(_publish(storage, community, server, {"k": b"g2"}, publisher=worker))
+    base = asyncio.run(storage.current_generation(c, s))
+
+    # An API restore of the gen1 backup replaces current/ and bumps the generation.
+    asyncio.run(storage.restore_backup(c, s, key))
+
+    # The worker's in-flight final snapshot declares its base (gen2) and own id.
+    body = _tar_bytes({"k": b"in-flight"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(base),
+                "X-Worker-Id": worker,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
+
+    # The restored data survives the refused publish (not clobbered).
+    async def _read() -> bytes:
+        return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
+
+    assert _read_tar(asyncio.run(_read())) == {"k": b"g1"}
+
+
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
     import asyncio
 
