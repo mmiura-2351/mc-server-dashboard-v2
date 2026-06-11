@@ -292,9 +292,21 @@ class ControlPlane(abc.ABC):
 
     @abc.abstractmethod
     async def snapshot(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
     ) -> CommandOutcome:
-        """Trigger a working-set snapshot and await it (FR-DATA-4, FR-DATA-7)."""
+        """Trigger a working-set snapshot and await it (FR-DATA-4, FR-DATA-7).
+
+        ``final`` marks the stop-flow final snapshot (issue #891): only it holds the
+        stop at (stopped, stopped, assigned), so only its dispatch timeout may
+        promote a late-result record that clears the held assignment. Periodic and
+        on-demand snapshots leave ``final=False`` so a stale late result of theirs
+        can never clear a subsequent final-snapshot hold.
+        """
 
     @abc.abstractmethod
     async def read_file(

@@ -470,6 +470,7 @@ async def test_stop_cancelled_mid_snapshot_holds_then_reconciler_clears(
             worker_id: WorkerId,
             community_id: CommunityCommunityId,  # type: ignore[override]
             server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             # The client disconnects: the request task is cancelled at this await.
             raise asyncio.CancelledError
