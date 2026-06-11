@@ -325,6 +325,18 @@ the variables at the in-container paths.
 Pull the new revision and rebuild; `migrate` re-runs `alembic upgrade head`
 before the new `api` starts, so the schema is brought current automatically:
 
+### Deploy-order rule: API before (or with) worker when new CommandErrorCodes are added
+
+`compose.yaml` brings `api` up before `worker`, so the default `docker compose
+up -d --build` already applies the correct order. However, if you update
+containers individually, always update `api` first (or together with `worker`).
+An old API receiving a `CommandErrorCode` it does not recognise falls back to
+`INTERNAL` and its compensation logic may orphan a live instance — the #866 BUSY
+precedent: an old API that had no BUSY handling treated it as INTERNAL and
+unassigned the server, stranding the running instance. Updating `api` first (or
+atomically via `docker compose up`) ensures the API's handler for any new code
+is in place before the worker starts emitting it.
+
 ```sh
 git pull
 ./scripts/deploy_preflight.sh && docker compose up -d --build
