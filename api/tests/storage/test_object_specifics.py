@@ -59,10 +59,37 @@ async def _publish(
     community: CommunityId,
     server: ServerId,
     files: dict[str, bytes],
+    *,
+    publisher: str | None = None,
 ) -> None:
     handle = await storage.begin_snapshot(community, server)
     await storage.write_snapshot(handle, tar_stream(files))
-    await storage.commit_snapshot(handle)
+    await storage.commit_snapshot(handle, publisher=publisher)
+
+
+async def test_generation_and_publisher_share_one_atomic_marker_object() -> None:
+    # Issue #847: the generation and the publishing Worker id live in ONE marker
+    # object, not two. A crash between two separate PUTs could attribute the PREVIOUS
+    # publisher to the NEW generation and invert the publish-time guard; one object
+    # written by a single atomic PUT keeps the pair all-or-nothing.
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+
+    await _publish(storage, community, server, {"f": b"v1"}, publisher="w-a")
+
+    generation_key = _server_prefix(community, server) + _GENERATION
+    # Exactly one marker object, named ``generation`` — no separate ``publisher``.
+    assert generation_key in store.objects
+    assert (_server_prefix(community, server) + "publisher") not in store.objects
+    # The single marker holds BOTH the generation (line 1) and the publisher (line 2).
+    assert store.objects[generation_key].decode().splitlines() == ["1", "w-a"]
+    assert await storage.current_generation(community, server) == 1
+    assert await storage.current_publisher(community, server) == "w-a"
+
+    # A publish with no declared id writes the generation alone (no publisher line).
+    await _publish(storage, community, server, {"f": b"v2"})
+    assert store.objects[generation_key].decode().splitlines() == ["2"]
+    assert await storage.current_publisher(community, server) is None
 
 
 async def test_pointer_object_names_the_live_snapshot_prefix() -> None:

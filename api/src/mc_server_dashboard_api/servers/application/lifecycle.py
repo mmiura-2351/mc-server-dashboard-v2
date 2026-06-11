@@ -850,10 +850,24 @@ class StopServer:
 
         The unassign cannot wait on the later StatusChange(stopped) event: a start
         blocked on ``require_unassigned`` must be unblocked the moment the snapshot
-        settles (issue #206). On snapshot FAILURE the assignment is STILL cleared:
-        the data stays in the Worker's retained scratch (#845) and the next
-        same-worker start reuses it. A cross-worker placement of such a failed-final
-        server keeps the #845-documented exposure (logged loud by ``_final_snapshot``).
+        settles (issue #206). On snapshot FAILURE (``WorkerUnavailableError`` — the
+        worker is gone, nothing is uploading) the assignment is STILL cleared: the
+        data stays in the Worker's retained scratch (#845) and the next same-worker
+        start reuses it. A cross-worker placement of such a failed-final server keeps
+        the #845-documented exposure (logged loud by ``_final_snapshot``).
+
+        On CANCELLATION (a client disconnect cancels the HTTP-request task at the
+        snapshot await) the clear is deliberately SKIPPED — the dispatched snapshot
+        keeps uploading worker-side (abandoning the pending future signals nothing to
+        the worker, and the proto has no command-cancel), so holding the assignment is
+        CORRECT: clearing it here would release the row while the upload is still in
+        flight, letting a racing start re-place on a DIFFERENT worker and reopening the
+        very stop->re-place race this method exists to close (issue #847 bug 2). The
+        ``CancelledError`` propagates past the clear, leaving the row at
+        (stopped, stopped, assigned); the reconciler's stale-stop arm
+        (``clear_stale_assignment``) then recovers it once the grace window lapses —
+        grace-bounded, and grace exceeds the snapshot budget so the upload has settled
+        by the time the arm fires.
         """
 
         observed_at = self.clock.now()
@@ -866,36 +880,31 @@ class StopServer:
             )
             await self.uow.commit()
         # Keep the return honest (issue #292): mutate the entity only when the write
-        # landed; if the #216 guard dropped it, a same-instant/fresher write already
-        # won, so leave the observed fields and the assignment as-read AND do not run
-        # the deferred unassign below (that fresher write owns convergence).
+        # landed; if the #216 guard dropped it, leave the observed fields as-read.
         if applied:
             server.observed_state = ObservedState.STOPPED
             server.observed_at = observed_at
-        # Final snapshot AFTER the process has exited (the confirmed stop returns
-        # only once the Worker reports the process gone) and BEFORE the unassign, so
-        # the captured working set is quiescent (FR-DATA-4, FR-DATA-7).
+        # Final snapshot AFTER the process has exited (the confirmed stop returns only
+        # once the Worker reports the process gone) and BEFORE the unassign, so the
+        # captured working set is quiescent (FR-DATA-4, FR-DATA-7).
         #
-        # The deferred clear runs in a ``finally`` so it is NOT skipped when the HTTP
-        # request task is cancelled at the snapshot await — a client disconnect
-        # cancels the task there, and without this the row would wedge at
-        # (stopped, stopped, assigned) until the reconciler's stale-stop arm lapses
-        # the grace window (issue #847 bug 2). The clear itself is ``asyncio.shield``ed
-        # so the outer cancellation does not abort the DB write mid-commit; the
-        # CancelledError still propagates after the clear settles. A clear after a
-        # cancelled/incomplete snapshot carries the same documented exposure as the
-        # failure path (a cross-worker re-placement loses the never-published final).
-        try:
-            await self._final_snapshot(
-                worker_id=worker_id, community_id=community_id, server_id=server_id
-            )
-        finally:
-            # Skip the clear only when the observed write was dropped by the #216
-            # guard (a fresher write already won and owns convergence).
-            if applied:
-                await asyncio.shield(
-                    self._clear_held_assignment(server, worker_id, server_id)
-                )
+        # ``_final_snapshot`` returns normally on both success and a genuine snapshot
+        # failure (``WorkerUnavailableError`` is caught and logged inside it), so the
+        # clear below runs for both — the worker is either done uploading (success) or
+        # gone (failure), and in both cases releasing the assignment is correct. A
+        # cancellation, by contrast, propagates OUT of ``_final_snapshot`` and skips
+        # the clear (see docstring): the upload is still live, so the row must stay
+        # held for the stale-stop arm to recover. The clear is independently
+        # CAS-guarded (``clear_assignment_after_final_snapshot`` matches only a still
+        # desired=stopped row still assigned to this worker), so it is run regardless
+        # of ``applied``: even if the #216 guard dropped the observed write, post-#847
+        # no other path unassigns (the sink no longer does), so running the clear
+        # cannot clobber a fresher write and removes the wedge the old ``applied``
+        # gate left for the full grace window.
+        await self._final_snapshot(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+        await asyncio.shield(self._clear_held_assignment(server, worker_id, server_id))
 
     async def _clear_held_assignment(
         self, server: Server, worker_id: WorkerId, server_id: ServerId

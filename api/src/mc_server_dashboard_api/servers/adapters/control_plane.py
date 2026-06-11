@@ -161,6 +161,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         data_plane_base_url: str | None = None,
         worker_credential: str | None = None,
         hydrate_timeout_seconds: float | None = None,
+        snapshot_timeout_seconds: float | None = None,
     ) -> None:
         self._registry = registry
         self._control_plane = control_plane
@@ -173,6 +174,13 @@ class FleetControlPlaneAdapter(ControlPlane):
         # large-world working-set pull does not time out the start under the
         # general command deadline (issue #822). ``None`` keeps the default.
         self._hydrate_timeout_seconds = hydrate_timeout_seconds
+        # The final snapshot a graceful stop captures gets its own (longer) command
+        # budget for the same reason (issue #847): the stop holds the assignment
+        # until the snapshot settles, so the dispatch must span a full working-set
+        # upload — under the general command deadline it would time out and release
+        # the assignment mid-upload, reopening the stop->re-place race. ``None``
+        # keeps the default.
+        self._snapshot_timeout_seconds = snapshot_timeout_seconds
 
     async def place(
         self,
@@ -327,6 +335,7 @@ class FleetControlPlaneAdapter(ControlPlane):
             worker_id,
             server_id,
             SnapshotCommand(transfer_url=url, transfer_token=self._token()),
+            timeout_override=self._snapshot_timeout_seconds,
         )
 
     async def read_file(

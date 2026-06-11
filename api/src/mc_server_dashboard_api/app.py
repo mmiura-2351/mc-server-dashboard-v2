@@ -291,6 +291,17 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
     operators may knowingly accept it. The stock ``grace_seconds=660`` exceeds the
     stock floor (600 + 30), so no warning fires by default. Operators who lower
     ``grace_seconds`` below the floor are warned.
+
+    The stop-side final-snapshot budget (``snapshot_timeout_seconds``, issue #847)
+    does NOT raise this floor. That budget bounds the SECOND dispatch of a stop (the
+    held final snapshot), recovered by the reconciler's stale-stop arm, not the
+    duplicate-start orphan path this floor protects — whose round-trip is the FIRST
+    dispatch of a start (hydrate-then-start). The stale-stop arm has its own implicit
+    safety constraint, ``grace_seconds > snapshot_timeout_seconds`` (so the arm never
+    clears a still-healthy snapshot hold), but with the stock values that bound (660 >
+    600) is dominated by the duplicate-start floor (660 > 630), so the binding floor
+    is unchanged. Operators who raise ``snapshot_timeout_seconds`` above
+    ``hydrate_timeout_seconds`` would make the snapshot bound binding instead.
     """
 
     floor = (
@@ -528,6 +539,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 data_plane_base_url=settings.server.public_base_url,
                 worker_credential=settings.control.worker_credential,
                 hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
+                snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
             )
             reconciler = RunReconcilerTick(
                 uow=ServersUnitOfWork(create_session_factory(engine)),

@@ -134,6 +134,29 @@ async def test_hydrate_carries_the_hydrate_timeout_override() -> None:
     assert fleet.last_timeout_override == 600
 
 
+async def test_snapshot_carries_the_snapshot_timeout_override() -> None:
+    # The stop's final snapshot dispatches with the longer snapshot budget so a
+    # large-world upload does not time out under the general command deadline and
+    # release the held assignment mid-upload, reopening the stop->re-place race
+    # (#847). Mirrors the hydrate budget (#822/#868).
+    fleet = _CapturingFleetControlPlane()
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]  # unused by snapshot
+        control_plane=fleet,
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+        snapshot_timeout_seconds=600,
+    )
+
+    await adapter.snapshot(
+        worker_id=WorkerId(uuid.uuid4()),
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+    )
+
+    assert fleet.last_timeout_override == 600
+
+
 async def test_non_hydrate_commands_use_the_default_timeout() -> None:
     # Only the hydrate dispatch overrides the deadline; every other command stays
     # on the default command timeout (override is None).

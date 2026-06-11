@@ -42,10 +42,48 @@ async def _publish(
     community: CommunityId,
     server: ServerId,
     files: dict[str, bytes],
+    *,
+    publisher: str | None = None,
 ) -> None:
     handle = await storage.begin_snapshot(community, server)
     await storage.write_snapshot(handle, tar_stream(files))
-    await storage.commit_snapshot(handle)
+    await storage.commit_snapshot(handle, publisher=publisher)
+
+
+async def test_generation_and_publisher_share_one_atomic_marker(
+    tmp_path: Path,
+) -> None:
+    # Issue #847: the generation and the publishing Worker id are written as ONE
+    # atomic marker, not two separate files. A crash between two separate writes could
+    # leave the PREVIOUS publisher attributed to the NEW generation, which would invert
+    # the publish-time guard. Asserting a single ``generation`` marker (no separate
+    # ``publisher`` file) holding BOTH proves the pair can never diverge: the temp +
+    # atomic rename makes (generation, publisher) all-or-nothing.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+
+    await _publish(
+        storage, community, server, {"server.properties": b"a=b"}, publisher="worker-a"
+    )
+
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    # Exactly one marker file, named ``generation`` — no separate ``publisher`` file.
+    assert (server_root / "generation").is_file()
+    assert not (server_root / "publisher").exists()
+    # The single marker holds BOTH the generation (line 1) and the publisher (line 2).
+    lines = (server_root / "generation").read_text().splitlines()
+    assert lines == ["1", "worker-a"]
+    # And the Port reads both back consistently.
+    assert await storage.current_generation(community, server) == 1
+    assert await storage.current_publisher(community, server) == "worker-a"
+
+    # A publish with no declared id writes the generation alone (no publisher line),
+    # so the guard stays permissive — still a single marker, never a stale id.
+    await _publish(storage, community, server, {"server.properties": b"c=d"})
+    assert (server_root / "generation").read_text().splitlines() == ["2"]
+    assert await storage.current_publisher(community, server) is None
 
 
 async def test_commit_publishes_current_symlink_to_a_snapshot(tmp_path: Path) -> None:

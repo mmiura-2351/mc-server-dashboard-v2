@@ -20,6 +20,7 @@ DB-gated (TESTING.md Section 5): run only when ``MCD_TEST_DATABASE_URL`` is set
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 import uuid
@@ -423,6 +424,80 @@ async def test_lost_stop_outcome_then_worker_reports_stopped_then_reconciler_cle
 
     # The reconciler's stale-stop arm recovers the wedge: (stopped, stopped,
     # assigned) past grace -> clear the assignment (no command dispatched).
+    await _reconciler_tick(engine, FakeControlPlane(), clock)
+    recovered = await _load(engine, server_id)
+    assert recovered is not None
+    assert recovered.assigned_worker_id is None
+
+    # The next start re-places against the now-unassigned row.
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+async def test_stop_cancelled_mid_snapshot_holds_then_reconciler_clears(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop whose final snapshot is CANCELLED (client disconnect) ->
+    assignment HELD (the upload is still live) -> worker's StatusChange(stopped)
+    via the REAL sink keeps it held -> reconciler's stale-stop arm clears it ->
+    start succeeds (issue #847 bug 2, cancel path).
+
+    A client disconnect cancels the HTTP-request task at the snapshot await. The
+    dispatched snapshot keeps uploading worker-side (the proto has no command-cancel),
+    so the stop MUST keep the assignment rather than release the row mid-upload and
+    let a racing start re-place elsewhere. The deliberate, grace-bounded recovery is
+    the reconciler's stale-stop arm — proven here through the real sink + a real tick.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+
+    class _SnapshotCancelled(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityCommunityId,  # type: ignore[override]
+            server_id: ServerId,
+        ) -> CommandOutcome:
+            # The client disconnects: the request task is cancelled at this await.
+            raise asyncio.CancelledError
+
+    # The stop confirms (process gone), then the final snapshot await is cancelled.
+    with pytest.raises(asyncio.CancelledError):
+        await _stop_server_use_case(
+            engine, _SnapshotCancelled(place_to=WorkerId(worker)), clock
+        )(community_id=community, server_id=server_id)
+
+    # The assignment is HELD: observed=stopped is committed before the snapshot, but
+    # the deferred clear is deliberately SKIPPED on cancellation (the upload is live).
+    after_stop = await _load(engine, server_id)
+    assert after_stop is not None
+    assert after_stop.desired_state is DesiredState.STOPPED
+    assert after_stop.observed_state is ObservedState.STOPPED
+    assert after_stop.assigned_worker_id == WorkerId(worker)
+
+    # The owning worker's terminal StatusChange(stopped) arrives via the real sink;
+    # it must KEEP the assignment (the sink no longer unassigns, bug 1).
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+    )
+    converged = await _load(engine, server_id)
+    assert converged is not None
+    assert converged.assigned_worker_id == WorkerId(worker)
+
+    # The reconciler's stale-stop arm recovers the wedge once grace lapses.
     await _reconciler_tick(engine, FakeControlPlane(), clock)
     recovered = await _load(engine, server_id)
     assert recovered is not None

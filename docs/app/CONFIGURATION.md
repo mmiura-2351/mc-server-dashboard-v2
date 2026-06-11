@@ -159,6 +159,7 @@ marks keys with no default.
 | `control.heartbeat_timeout_seconds` | `30` | | Liveness window: a Worker missing heartbeats past this is marked disconnected (REQUIREMENTS.md FR-WRK-2). Must be positive. |
 | `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). Must be positive. See the reconciler grace floor below.³ |
 | `control.hydrate_timeout_seconds` | `600` | | Separate, longer deadline for the **hydrate** phase of a start (issue #822): pulling a large world's working set routinely outlasts `command_timeout_seconds`, so the hydrate trigger gets its own budget instead of forcing the global command timeout up (which governs every other command and widens the duplicate-start window). Only the start's hydrate dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. See the reconciler grace floor below.³ |
+| `control.snapshot_timeout_seconds` | `600` | | Separate, longer deadline for the **final snapshot** a graceful stop captures (issue #847). The stop holds the server's assignment until this snapshot settles (closing the stop→re-place generation race), so the dispatch must span a full working-set upload (minutes for a large world); under `command_timeout_seconds` it would time out and release the assignment mid-upload, reopening the race. Only the stop's final-snapshot dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. Does **not** raise the reconciler grace floor below (it bounds the stop-side second dispatch, recovered by the stale-stop arm, not the duplicate-start first dispatch), but the stale-stop arm has its own implicit constraint `grace_seconds > snapshot_timeout_seconds` — dominated by the floor at stock values.³ |
 
 ² `control.tls.cert_file` and `control.tls.key_file` are required **together,
 unless** `control.tls.insecure=true`. With neither the cert/key pair nor
@@ -182,6 +183,17 @@ re-places it elsewhere and starts a **second** live instance. `create_app` logs 
 (`grace_seconds=660`) already exceeds the stock floor (600 + 30), so no warning
 fires out of the box; lower `grace_seconds` (or raise the timeouts) only when
 adjusting the reconciler for non-default budgets.
+
+The stop-side `control.snapshot_timeout_seconds` (issue #847) does **not** raise
+this floor. That budget bounds the stop's held final snapshot — recovered by the
+reconciler's stale-stop arm, not the duplicate-start orphan path the floor
+protects (whose round-trip is the start's hydrate-then-start first dispatch). The
+stale-stop arm carries its own implicit safety constraint
+`grace_seconds > control.snapshot_timeout_seconds` (so the arm never clears a
+still-healthy snapshot hold), but at stock values that bound (660 > 600) is
+dominated by the duplicate-start floor (660 > 630), so the binding floor is
+unchanged. Raising `snapshot_timeout_seconds` above `hydrate_timeout_seconds`
+would make the snapshot bound binding instead.
 
 > **Upgrade impact (existing dev setups).** This is a behavior change: a dev
 > process with `control.enabled=true` that previously bound plaintext now fails
