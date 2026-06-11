@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -160,6 +161,81 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 		return "", err
 	}
 	return resp.ID, nil
+}
+
+// ImagePull pulls the image ref from its registry via POST /images/create,
+// draining the progress stream to completion (issue #904). The Engine returns a
+// 200 immediately and then streams newline-delimited JSON progress objects; the
+// pull is only complete when the stream ends, and a failure (offline host, denied
+// or unknown image) surfaces as an "error"/"errorDetail" object in the stream
+// rather than a non-2xx status — so a successful HTTP response is not a successful
+// pull. The stream is drained and scanned for that error; the daemon message is
+// kept for the diagnostic the driver attaches to ErrImageMissing.
+func (c *EngineClient) ImagePull(ctx context.Context, image string) error {
+	name, tag := splitImageTag(image)
+	q := url.Values{"fromImage": {name}}
+	if tag != "" {
+		q.Set("tag", tag)
+	}
+	u := "http://docker/" + apiVersion + "/images/create?" + q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return fmt.Errorf("containerdriver: build image pull request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("containerdriver: POST image pull: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return statusError{method: http.MethodPost, path: "/images/create", code: resp.StatusCode, message: string(bytes.TrimSpace(msg))}
+	}
+	return drainPullStream(resp.Body)
+}
+
+// drainPullStream reads the /images/create progress stream to completion,
+// returning the in-stream error if the pull failed mid-stream (issue #904). The
+// stream is a sequence of JSON objects; an object carrying an "error" (or the
+// "errorDetail.message") field is the daemon reporting the pull failed. Draining
+// to EOF is what makes the pull synchronous: the image is on the host only once
+// the stream ends without an error.
+func drainPullStream(r io.Reader) error {
+	dec := json.NewDecoder(r)
+	for {
+		var msg struct {
+			Error       string `json:"error"`
+			ErrorDetail struct {
+				Message string `json:"message"`
+			} `json:"errorDetail"`
+		}
+		if err := dec.Decode(&msg); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("containerdriver: decode image pull stream: %w", err)
+		}
+		if msg.Error != "" || msg.ErrorDetail.Message != "" {
+			detail := msg.Error
+			if detail == "" {
+				detail = msg.ErrorDetail.Message
+			}
+			return fmt.Errorf("containerdriver: image pull failed: %s", detail)
+		}
+	}
+}
+
+// splitImageTag splits an image ref into its name and tag, defaulting the tag to
+// "latest" when none is given. It splits on the LAST colon only when that colon
+// is not part of a registry host:port (which always precedes a "/"), so
+// "host:5000/img" stays untagged (→ latest) while "img:1.21" and
+// "host:5000/img:1.21" split correctly.
+func splitImageTag(image string) (name, tag string) {
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon < 0 || strings.Contains(image[lastColon:], "/") {
+		return image, "latest"
+	}
+	return image[:lastColon], image[lastColon+1:]
 }
 
 // Inspect returns the labels and running state of the named container, used to

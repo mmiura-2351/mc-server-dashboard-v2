@@ -58,6 +58,8 @@ func (f *forgeFakeDocker) Create(_ context.Context, spec CreateSpec) (string, er
 	return id, nil
 }
 
+func (f *forgeFakeDocker) ImagePull(_ context.Context, _ string) error { return nil }
+
 func (f *forgeFakeDocker) Start(_ context.Context, _ string) error { return nil }
 
 func (f *forgeFakeDocker) Stop(_ context.Context, id string, _ time.Duration) error {
