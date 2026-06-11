@@ -4,10 +4,19 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
+
+// displacedPrefix is the dot-prefixed name prefix datatransfer uses for a displaced
+// old working set kept aside for recovery (issue #906/#910). It is a sibling of the
+// server-id scratch dirs and must be skipped by ScanHeldServers: it is not a held
+// server, and scanning it would trigger a per-boot header fsck of a world-sized tree
+// and emit a confusing server_id=.displaced-<id> corrupt warning. The constant is
+// duplicated rather than imported to keep this application package off the adapter.
+const displacedPrefix = ".displaced-"
 
 // ScanHeldServers returns the working sets this Worker already holds in its
 // persistent local scratch (issue #763): the immediate subdirectories of
@@ -49,6 +58,12 @@ func ScanHeldServers(scratchDir string, log *slog.Logger) []session.HeldServer {
 	var held []session.HeldServer
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			continue
+		}
+		// A .displaced-<id> sibling is a recovery copy a hydrate kept aside (issue
+		// #906/#910), not a held server: skip it so it is never reported (and never
+		// header-fsck'd per boot under a server_id=.displaced-<id> warning).
+		if strings.HasPrefix(entry.Name(), displacedPrefix) {
 			continue
 		}
 		workingDir := filepath.Join(scratchDir, entry.Name())

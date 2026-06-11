@@ -253,21 +253,51 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // generation marker is intentionally NOT carried across the swap: the caller
 // rewrites it fresh from the served generation after Hydrate returns (issue #763).
 //
-// The temp and trash dirs are dot-prefixed siblings in destDir's parent (the
-// scratch root). ScanHeldServers (scratchscan.go) reports every scratch subdir as
-// a held server, but the API only consults that list for ids it assigned, so a
+// The temp dir is a dot-prefixed sibling in destDir's parent (the scratch root).
+// ScanHeldServers (scratchscan.go) skips the .displaced-<id> sibling and never
+// reports a .hydrate-* temp leftover as a held server it assigned, so a
 // crash-leftover .hydrate-* sibling is never matched; a stale one is also reclaimed
 // by the next hydrate's leftover sweep below (if the id is re-placed here) and by
 // the post-final-snapshot scratch GC, which sweeps this id's .hydrate-<id>-* siblings
 // alongside removing scratchDir/<id> once the stopped-id final snapshot publishes
 // (issue #766/#841/#842, instancemanager.removeScratch).
 //
-// Crash safety: the temp tree is built fully before any rename. The swap then does
-// (1) rename destDir -> trash, (2) rename temp -> destDir, (3) remove trash. A
-// crash between (1) and (2) leaves destDir absent but BOTH the trash (old) and temp
-// (new) copies on disk, so no data is lost; the next start re-hydrates regardless
-// (the missing destDir reports as "holding nothing") and the leftover sweep clears
-// the orphans. A crash after (2) leaves a stale trash dir, swept next time.
+// Displaced-tree retention (issue #906): the old working set this hydrate replaces
+// is NOT deleted — it is renamed aside to the per-server .displaced-<id> sibling.
+// When the final stop snapshot definitively failed (e.g. refused by an integrity
+// gate, #905), #845 retained the scratch precisely so the only copy of the world
+// survives; deleting it here on the next start's hydrate would destroy that copy.
+// Moving it aside keeps it recoverable by an operator after such an incident. The
+// displaced tree is dot-prefixed so it is never mistaken for a live scratch:
+// ScanHeldServers skips the .displaced-<id> prefix (scratchscan.go) so it is never
+// reported as a held server. At most one displaced tree exists
+// per server — a new hydrate removes the prior one first (it predates the store state
+// the newer tree was displaced by). It is GC'd on the next SUCCESSFUL snapshot for
+// this id, the moment the store provably supersedes it (instancemanager.sweepDisplaced,
+// mirroring the #845 GC-on-success pattern).
+//
+// Crash safety (displace-first swap): the temp tree is built fully before any
+// rename. When a live destDir is present, the swap then does, in order, (1) RemoveAll
+// any prior .displaced-<id> (it predates the store state the new displacement is
+// against, so it is the older recovery copy and superseded), (2) rename the live
+// destDir DIRECTLY to .displaced-<id> as the "aside" step — there is no intermediate
+// trash name, so the recovery copy is never parked under a .hydrate-<id>-* name the
+// NEXT hydrate's sweepHydrateLeftovers would delete — and (3) rename temp -> destDir.
+// On a (3) failure the old copy is renamed back from .displaced-<id> to destDir so the
+// failure loses nothing. A crash between (2) and (3) leaves destDir absent but BOTH the
+// old copy (at .displaced-<id>) and the new copy (at the temp dir) on disk: no data is
+// lost, the next start re-hydrates (the missing destDir reports as "holding nothing"),
+// the temp leftover is swept, and the .displaced-<id> tree — which no hydrate-time
+// sweep touches — stays recoverable until the next SUCCESSFUL snapshot GCs it
+// (instancemanager.sweepDisplaced). Invariant: from the moment destDir is renamed
+// aside, the old world always exists under a name no sweep deletes before the store
+// provably supersedes it.
+//
+// Crucially, step (1)'s RemoveAll of the prior .displaced-<id> runs ONLY when a live
+// destDir exists to take its place. If destDir is ABSENT (this very crash window from
+// a prior interrupted hydrate), the existing .displaced-<id> is the ONLY copy of the
+// world; this hydrate has nothing to displace and leaves it untouched, so re-running
+// the interrupted hydrate never destroys the recovery copy.
 func unpackAndSwap(r io.Reader, destDir string) error {
 	parent := filepath.Dir(destDir)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
@@ -300,37 +330,67 @@ func unpackAndSwap(r io.Reader, destDir string) error {
 		return err
 	}
 
-	trashDir := tmpDir + ".trash"
+	// Displace-first swap (issue #906/#910): move the old working set ASIDE to its
+	// recovery name BEFORE swapping the new tree in, so the old world is never parked
+	// under an intermediate trash name a later sweep would delete. The displaced tree
+	// is the only copy of the world whenever the final stop snapshot definitively
+	// failed and #845 retained the scratch for recovery; it is GC'd only on the next
+	// SUCCESSFUL snapshot (instancemanager.sweepDisplaced).
+	displaced := displacedDir(destDir)
 	swapped := false
-	if err := os.Rename(destDir, trashDir); err != nil {
-		if !os.IsNotExist(err) {
+	if _, err := os.Lstat(destDir); err == nil {
+		// A live working set is present to displace. Drop any prior displaced tree
+		// first so at most one is kept per server: it predates the store state THIS
+		// displacement is against (the older recovery copy), so replacing it is correct.
+		// destDir is still live here, so no data is at risk in this window.
+		//
+		// The prior displaced tree is removed ONLY when a live destDir exists to take
+		// its place: if destDir is absent (a crash interrupted a prior hydrate between
+		// the displace-aside and the swap-in), the existing .displaced-<id> is the ONLY
+		// copy of the world and must NOT be removed — this hydrate has nothing to
+		// displace, so it leaves the recovery copy intact (issue #910).
+		_ = os.RemoveAll(displaced)
+		if err := os.Rename(destDir, displaced); err != nil {
 			return err
 		}
-		// No prior working set to displace; the destDir slot is free.
-	} else {
 		swapped = true
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	if err := swapRename(tmpDir, destDir); err != nil {
 		if swapped {
-			// Restore the old working set so the failure does not lose both copies.
-			_ = os.Rename(trashDir, destDir)
+			// Restore the old working set so the failure does not lose both copies. If
+			// this restore itself fails the old copy still survives under .displaced-<id>
+			// (a name no hydrate-time sweep deletes), so the only copy is never lost.
+			_ = os.Rename(displaced, destDir)
 		}
 		return err
 	}
-	// fsync the scratch root so the swap renames themselves are durable: the marker
+	// fsync the scratch root so BOTH swap renames (the displace-aside and the swap-in)
+	// are durable: a power loss must not roll the displace rename back, and the marker
 	// the caller writes next (writeGeneration, also fsynced) can then never become
 	// durable before the destDir tree it describes (issue #787).
 	if err := fsyncDir(parent); err != nil {
 		return err
 	}
-	if swapped {
-		_ = os.RemoveAll(trashDir)
-	}
 	return nil
 }
 
+// displacedDir is the per-server path the swap moves a displaced old working set to
+// (issue #906): a dot-prefixed sibling of destDir so it cannot collide with a
+// server-id scratch dir and is never matched to an assigned id by the API. One per
+// server (no random suffix), so a new hydrate's RemoveAll keeps exactly one.
+func displacedDir(destDir string) string {
+	return filepath.Join(filepath.Dir(destDir), displacedPrefix+filepath.Base(destDir))
+}
+
+// displacedPrefix is the dot-prefixed name prefix for a displaced old working set
+// (issue #906), kept aside by a hydrate and GC'd on the next successful snapshot for
+// the server (instancemanager.sweepDisplaced).
+const displacedPrefix = ".displaced-"
+
 // swapRename is the final temp->destDir swap rename, indirected through a package
-// var so a test can force it to fail and exercise the trash-restore path (the swap
+// var so a test can force it to fail and exercise the displaced-restore path (the swap
 // renames within one parent dir are symmetric, so there is no static-perms way to
 // fail only this one). Production always uses os.Rename.
 var swapRename = os.Rename
