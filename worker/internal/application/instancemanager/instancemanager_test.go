@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -83,15 +84,30 @@ func (i *fakeInstance) wasStopped() (stopped, graceful bool) {
 // #694). failOnCancelled makes Execute return the context error when ctx is
 // already cancelled, so a test can prove the deferred save-on ran on a live,
 // detached context rather than the request's dead one.
+//
+// failLines maps a specific command line to the error Execute returns for it, so a
+// test can fail one step of the quiesce bracket (e.g. save-all) while others
+// succeed (#907 partial-quiesce path). When poison is set, fakeControl models the
+// real rcon client: the FIRST Execute error marks the connection broken, and every
+// subsequent Execute returns rcon.ErrConnBroken until the client is redialed — the
+// data-loss interaction the poisoned-restore fix addresses.
 type fakeControl struct {
 	reply           string
 	err             error
 	lines           []string
 	seq             *[]string
 	failOnCancelled bool
+	failLines       map[string]error
+	poison          bool
+	broken          bool
 }
 
 func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) {
+	if c.poison && c.broken {
+		// A prior Execute error poisoned the connection: every reuse fails fast,
+		// exactly as rcon.Client does, so the quiesce restore must redial.
+		return "", rcon.ErrConnBroken
+	}
 	if c.failOnCancelled {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -101,7 +117,19 @@ func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) 
 	if c.seq != nil {
 		*c.seq = append(*c.seq, line)
 	}
-	return c.reply, c.err
+	if err, ok := c.failLines[line]; ok {
+		if c.poison {
+			c.broken = true
+		}
+		return "", err
+	}
+	if c.err != nil {
+		if c.poison {
+			c.broken = true
+		}
+		return "", c.err
+	}
+	return c.reply, nil
 }
 
 func (c *fakeControl) Close() error { return nil }
@@ -109,8 +137,13 @@ func (c *fakeControl) Close() error { return nil }
 func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.ServerControl) *Manager {
 	t.Helper()
 	scratch := t.TempDir()
-	return New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
 		func(context.Context, string, string) (execution.ServerControl, error) { return ctrl, nil })
+	// Drop the quiesce settle-wait poll interval to zero by default so a running-id
+	// snapshot test does not pay the real 2s poll (#907); tests that exercise the
+	// settle-wait itself override it explicitly.
+	m.settlePollInterval = 0
+	return m
 }
 
 func startCmd() session.Command {

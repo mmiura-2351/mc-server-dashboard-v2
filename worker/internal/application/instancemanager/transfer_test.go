@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -196,10 +198,13 @@ func TestSnapshotTriggerTransferFailureIsCoded(t *testing.T) {
 }
 
 // A running-server snapshot brackets the working-dir copy with save-off →
-// save-all → save-on (#694): save-off disables auto-save so a region file cannot
-// be captured torn mid-copy, save-all (never the blocking "save-all flush", whose
-// synchronous main-thread flush can trip the server watchdog, #693) refreshes the
-// on-disk copy, and save-on re-enables auto-save afterwards.
+// save-all → settle-wait → save-on (#694/#907): save-off disables auto-save so a
+// region file cannot be captured torn mid-copy, a plain non-blocking save-all
+// drives the world to disk (NOT the blocking "save-all flush", which parked the MC
+// main thread and tripped the watchdog into crashing survival-main in production —
+// issue #693), the settle-wait then blocks until the async save's region files stop
+// changing so the fsck does not race in-flight writes (the #907 false positive),
+// and save-on re-enables auto-save afterwards.
 func TestSnapshotTriggerRunningServerBracketsCopyWithSaveOffOn(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
@@ -290,11 +295,14 @@ func TestSnapshotTriggerRunningServerSaveOnRunsWhenContextCancelled(t *testing.T
 	}
 }
 
-// The save-off toggle is best-effort: when it fails the snapshot proceeds without
-// the bracket (the consistency benefit is forfeited for this run) and no save-on
-// is issued — auto-save was never disabled, so re-enabling it would be wrong
-// (#694). The snapshot still succeeds (FR-DATA-5).
-func TestSnapshotTriggerRunningServerSaveOffFailureIsNonFatalAndSkipsSaveOn(t *testing.T) {
+// When save-off fails the running world is NOT quiesced, so the periodic snapshot
+// is refused fail-closed (quiesce_unavailable, #907) rather than packing the live
+// world — that unquiesced pack is exactly what produced the 35/35 torn-read false
+// positives. No upload happens, and no save-on is issued (auto-save was never
+// disabled, so re-enabling it would be wrong). save-all is also NOT attempted after
+// a failed save-off: the real rcon client has already poisoned its connection, so
+// it would be a guaranteed ErrConnBroken. The next tick retries.
+func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *testing.T) {
 	ctrl := &fakeControl{err: errors.New("rcon: read length: EOF")}
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
@@ -303,14 +311,123 @@ func TestSnapshotTriggerRunningServerSaveOffFailureIsNonFatalAndSkipsSaveOn(t *t
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	res := m.Handle(context.Background(), snapshotCmd())
-	if !res.Success {
-		t.Fatalf("SnapshotTrigger result = %+v, want success despite save-off failure", res)
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger result = %+v, want transfer-failed (quiesce_unavailable)", res)
 	}
-	if len(tr.snapshots) != 1 {
-		t.Fatalf("snapshots = %v, want one despite save-off failure", tr.snapshots)
+	if !strings.Contains(res.ErrorMessage, "quiesce_unavailable") {
+		t.Fatalf("error message = %q, want it to name quiesce_unavailable", res.ErrorMessage)
+	}
+	if len(tr.snapshots) != 0 {
+		t.Fatalf("unquiesced world must not be packed; snapshots = %v", tr.snapshots)
+	}
+	if containsLine(ctrl.lines, "save-all") {
+		t.Fatalf("rcon lines = %v, want no save-all attempted after save-off failed", ctrl.lines)
 	}
 	if containsLine(ctrl.lines, "save-on") {
 		t.Fatalf("rcon lines = %v, want no save-on when save-off never succeeded", ctrl.lines)
+	}
+}
+
+// newManagerWithControls builds a Manager whose openControl hands out the given
+// clients in order (the first dial returns ctrls[0], the next ctrls[1], ...), and
+// the last for any further dial. It models the quiesce restore redialing a fresh
+// RCON connection after the quiesce client's connection was poisoned (#907/#919).
+func newManagerWithControls(t *testing.T, d execution.ExecutionDriver, ctrls ...*fakeControl) *Manager {
+	t.Helper()
+	scratch := t.TempDir()
+	var i int
+	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			c := ctrls[i]
+			if i < len(ctrls)-1 {
+				i++
+			}
+			return c, nil
+		})
+	m.settlePollInterval = 0
+	m.fsckRetryDelay = 0
+	return m
+}
+
+// When save-off succeeds but save-all fails on a running server, the world is NOT
+// quiesced, so the periodic snapshot is refused quiesce_unavailable (#907) — the
+// partial-quiesce path bug 2 lives on. The failed save-all poisons the quiesce RCON
+// connection (the real client marks it broken on any Execute error), so a save-on on
+// the SAME client returns ErrConnBroken instantly and auto-save would be left OFF.
+// The restore must therefore redial a fresh connection and re-issue save-on — the
+// #694 guarantee that save-on is delivered on every exit path. No upload happens.
+func TestSnapshotTriggerRunningServerSaveAllFailureRefusesButRestoresSaveOnViaRedial(t *testing.T) {
+	// The quiesce client: save-off succeeds, save-all fails and poisons the
+	// connection, so its later save-on returns ErrConnBroken.
+	quiesce := &fakeControl{reply: "ok", poison: true, failLines: map[string]error{
+		"save-all": errors.New("rcon: read length: EOF"),
+	}}
+	// The redial client: a fresh connection on which save-on succeeds.
+	fresh := &fakeControl{reply: "ok"}
+	tr := &fakeTransfer{}
+	m := newManagerWithControls(t, &fakeDriver{}, quiesce, fresh).WithTransfer(tr)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger result = %+v, want transfer-failed (quiesce_unavailable)", res)
+	}
+	if !strings.Contains(res.ErrorMessage, "quiesce_unavailable") {
+		t.Fatalf("error message = %q, want it to name quiesce_unavailable", res.ErrorMessage)
+	}
+	if len(tr.snapshots) != 0 {
+		t.Fatalf("unquiesced world must not be packed; snapshots = %v", tr.snapshots)
+	}
+	// save-off and save-all were attempted on the quiesce client; its poisoned
+	// save-on is not recorded (ErrConnBroken short-circuits before append).
+	if !containsLine(quiesce.lines, "save-off") || !containsLine(quiesce.lines, "save-all") {
+		t.Fatalf("quiesce rcon lines = %v, want save-off and save-all", quiesce.lines)
+	}
+	// save-on was delivered on the redialed fresh connection: auto-save is restored
+	// despite the poisoned quiesce connection (#694).
+	if !containsLine(fresh.lines, "save-on") {
+		t.Fatalf("redial rcon lines = %v, want save-on (restore must survive a poisoned connection)", fresh.lines)
+	}
+}
+
+// When the async save never settles (the working set's region files keep changing
+// past the settle budget), the running snapshot is refused quiesce_unavailable
+// (#907) rather than packing a world still being written, and the deferred restore
+// still runs save-on so auto-save is re-enabled. The next tick retries.
+func TestSnapshotTriggerRunningServerSettleTimeoutRefusesAndRestores(t *testing.T) {
+	ctrl := &fakeControl{reply: "ok"}
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	m.settleBudget = 30 * time.Millisecond
+	m.settlePollInterval = 1 * time.Millisecond
+	// Inject a scanner whose region state changes on EVERY scan (the size strictly
+	// grows), so no two consecutive scans ever match and the settle-wait is forced to
+	// hit its budget. Deterministic — no filesystem race.
+	var calls int
+	m.scanRegion = func(string) (regionState, error) {
+		calls++
+		return regionState{"r.0.0.mca": {modTime: time.Unix(0, 0), size: int64(calls)}}, nil
+	}
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger result = %+v, want transfer-failed (settle timeout)", res)
+	}
+	if !strings.Contains(res.ErrorMessage, "quiesce_unavailable") {
+		t.Fatalf("error message = %q, want it to name quiesce_unavailable", res.ErrorMessage)
+	}
+	if len(tr.snapshots) != 0 {
+		t.Fatalf("unsettled world must not be packed; snapshots = %v", tr.snapshots)
+	}
+	// The restore still re-enabled auto-save despite the refusal (save-off succeeded).
+	if !containsLine(ctrl.lines, "save-on") {
+		t.Fatalf("rcon lines = %v, want save-on after a settle-timeout refusal", ctrl.lines)
 	}
 }
 
