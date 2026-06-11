@@ -283,6 +283,14 @@ class FsStorage(Storage):
                 # leftover has no in-process handle, so it is not skipped.
                 if not self._is_staging_active(staging):
                     _rmtree(staging)
+        # Sweep stale ``.backup.*.tmp`` spools left by a crash mid-pack in
+        # create_backup_from_current or mid-upload in put_backup (issue #859). These
+        # mirror the ``.final.*.tmp`` sweep _prune_to_final_snapshot does at its own
+        # write site; centralising backup tmp hygiene here covers both write paths.
+        backups = server_root / "backups"
+        if backups.is_dir():
+            for stale in backups.glob(".backup.*.tmp"):
+                stale.unlink(missing_ok=True)
 
     def _live_snapshot_name(self, server_root: Path) -> str | None:
         link = server_root / "current"
@@ -946,7 +954,8 @@ class FsStorage(Storage):
         # Store the uploaded archive bytes verbatim under a fresh key (the caller
         # already validated the archive). Stage to a temp file in backups/, then
         # atomically rename to <key>.tar.gz so a partial upload never appears as a
-        # listable backup (issue #281).
+        # listable backup (issue #281). fsync the directory after the rename so the
+        # rename itself is durable (issue #859) — mirrors create_backup_from_current.
         backups = self._server_root(community_id, server_id) / "backups"
         await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
         key = BackupKey(uuid.uuid4().hex)
@@ -966,6 +975,7 @@ class FsStorage(Storage):
         except BaseException:
             await asyncio.to_thread(tmp.unlink, missing_ok=True)
             raise
+        await asyncio.to_thread(_fsync_dir, backups)
         return key
 
     async def backup_size(

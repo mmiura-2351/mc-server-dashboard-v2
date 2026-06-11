@@ -13,6 +13,7 @@ sweep is a no-op (recovery is idempotent).
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -339,4 +340,92 @@ async def test_create_backup_fsyncs_archive_before_rename(
     # rename publishes the listable name; the directory fsync makes that rename durable
     # AFTER it.
     assert "fsync-file" in events and events.index("fsync-file") < rename_at
-    assert events.index("fsync-dir") > rename_at
+    assert "fsync-dir" in events and events.index("fsync-dir") > rename_at
+
+
+async def test_put_backup_fsyncs_dir_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Durability gap (issue #859): put_backup fsynced the archive data and renamed it
+    # into place but never fsynced backups/ — a power cut after the rename but before
+    # the directory flush could lose the rename (the listable backup entry disappears
+    # after recovery). Assert the ordering: the archive data (file) fsync precedes the
+    # rename, and the directory fsync follows it.
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(NEW))
+    await storage.commit_snapshot(handle)
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if str(dst).endswith(".tar.gz"):
+            events.append("rename-archive")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    # Produce a minimal backup archive to upload.
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        data = b"payload"
+        info = tarfile.TarInfo(name="world/level.dat")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    archive_bytes = buf.getvalue()
+
+    async def _stream() -> AsyncIterator[bytes]:
+        yield archive_bytes
+
+    key = await storage.put_backup(community, server, _stream())
+
+    server_root = _prune_server_root(tmp_path, community, server)
+    archive = server_root / "backups" / f"{key.value}.tar.gz"
+    assert archive.is_file()
+
+    assert "rename-archive" in events
+    rename_at = events.index("rename-archive")
+    # The archive data (file) fsync precedes the rename; the backups/ dir fsync
+    # follows it — both required for a durable, listable backup (issue #859).
+    assert "fsync-file" in events and events.index("fsync-file") < rename_at
+    assert "fsync-dir" in events and events.index("fsync-dir") > rename_at
+
+
+async def test_sweep_removes_stale_backup_tmp(tmp_path: Path) -> None:
+    # Spool hygiene (issue #859): a crash mid-pack (create_backup_from_current) or
+    # mid-upload (put_backup) leaks a ``.backup.*.tmp`` in backups/ forever because
+    # sweep() did not cover it. After the fix, sweep() removes it.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(NEW))
+    await storage.commit_snapshot(handle)
+
+    # Simulate a leaked spool left by a crash mid-pack.
+    server_root = _prune_server_root(tmp_path, community, server)
+    backups_dir = server_root / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    stale_tmp = backups_dir / ".backup.deadbeef.tmp"
+    stale_tmp.write_bytes(b"partial")
+    assert stale_tmp.exists()
+
+    storage.sweep()
+
+    assert not stale_tmp.exists()
+    # No real backup was removed.
+    assert not list(backups_dir.glob("*.tar.gz"))
