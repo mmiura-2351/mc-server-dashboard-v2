@@ -92,6 +92,7 @@ func TestSnapshotTriggerCorruptRunningServerRefusesAndRestoresSaveOn(t *testing.
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 	m.fsckRetryDelay = 0
+	m.settlePollInterval = 0
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -121,6 +122,10 @@ func TestSnapshotTriggerRunningServerFsckRetriesPastTransientCorruption(t *testi
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 	m.fsckRetryDelay = 50 * time.Millisecond
+	// The settle-wait sees the seeded torn region as already static (the rewrite
+	// happens later, during the fsck backoff), so it settles immediately and the
+	// fsck retry — not the settle-wait — is what absorbs the transient corruption.
+	m.settlePollInterval = 0
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -143,6 +148,53 @@ func TestSnapshotTriggerRunningServerFsckRetriesPastTransientCorruption(t *testi
 	}
 	if len(tr.snapshots) != 1 {
 		t.Fatalf("snapshots = %v, want one once a retry reads the set clean", tr.snapshots)
+	}
+}
+
+// The quiesce settle-wait blocks until the async save's region files stop changing
+// before the fsck/copy runs (#907): a file still being written between scans delays
+// the snapshot, and only once two consecutive scans observe an identical
+// (mtime, size) does the snapshot proceed. Here a writer rewrites the region for a
+// short burst after save-all, then stops; the settle-wait waits out the burst and
+// the snapshot then publishes.
+func TestSnapshotTriggerRunningServerSettlesThenProceeds(t *testing.T) {
+	ctrl := &fakeControl{reply: "ok"}
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	m.settlePollInterval = 0
+	m.settleBudget = 5 * time.Second
+	m.fsckRetryDelay = 0
+	// The on-disk working set is a healthy, static region; the fsck after the settle
+	// reads it clean. The injected scanner reports the region state CHANGING for the
+	// first few scans (size growing, the async save still draining), then stable — so
+	// the settle-wait must wait out the changes and proceed only once two consecutive
+	// scans match. Deterministic — no filesystem race.
+	seedWorkingSet(t, m, "s1", healthyRegion())
+	var calls int
+	m.scanRegion = func(string) (regionState, error) {
+		calls++
+		size := int64(calls)
+		if calls >= 4 {
+			size = 4 // stable from the 4th scan on: scans 4 and 5 match -> settled.
+		}
+		return regionState{"r.0.0.mca": {modTime: time.Unix(0, 0), size: size}}, nil
+	}
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	res := m.Handle(context.Background(), snapshotCmd())
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success once the region settles", res)
+	}
+	if len(tr.snapshots) != 1 {
+		t.Fatalf("snapshots = %v, want one once the working set settles", tr.snapshots)
+	}
+	// The settle-wait must have polled past the changing scans before proceeding, not
+	// proceeded on the first scan: at least the prime scan + the scans up to stability.
+	if calls < 5 {
+		t.Fatalf("scanRegion called %d times, want >=5 (settle-wait waited out the changes)", calls)
 	}
 }
 
