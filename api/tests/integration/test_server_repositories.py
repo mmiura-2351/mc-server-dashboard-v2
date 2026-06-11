@@ -161,7 +161,7 @@ async def test_duplicate_name_in_community_conflicts(engine: AsyncEngine) -> Non
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     with pytest.raises(ServerNameAlreadyExistsError):
@@ -171,7 +171,7 @@ async def test_duplicate_name_in_community_conflicts(engine: AsyncEngine) -> Non
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="host_process",
+            execution_backend="container",
             config={},
         )
 
@@ -196,7 +196,7 @@ async def test_delete_sweeps_resource_grants(engine: AsyncEngine) -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
 
@@ -253,7 +253,7 @@ async def test_server_id_isolation_across_communities(engine: AsyncEngine) -> No
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     # Reading the A server scoped to a different (random) community id misses, so
@@ -305,7 +305,7 @@ async def test_list_ids_missing_game_port_finds_only_legacy_rows(
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     legacy_id = await _insert_legacy_server(engine, community_id, "legacy")
@@ -351,7 +351,7 @@ async def test_update_game_port_persists_to_row(engine: AsyncEngine) -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
 
@@ -393,7 +393,7 @@ async def test_update_game_port_rejects_taken_against_real_db(
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="host_process",
+        execution_backend="container",
         config={},
     )
     # Another server already holds 25570 in the DB; the pre-read catches it.

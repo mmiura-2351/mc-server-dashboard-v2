@@ -20,7 +20,7 @@ window.MOCK = {
     },
     {
       id: "s-2", name: "creative-build", server_type: "vanilla", mc_version: "1.21.6",
-      execution_backend: "host_process", game_port: 25566,
+      execution_backend: "container", game_port: 25566,
       desired_state: "running", observed_state: "starting",
       observed_at: "2026-06-06T10:01:44Z", assigned_worker_id: "worker-a",
       players: 0, cpu: 71, mem_gb: 1.8,
@@ -34,7 +34,7 @@ window.MOCK = {
     },
     {
       id: "s-4", name: "minigames", server_type: "fabric", mc_version: "1.21.4",
-      execution_backend: "host_process", game_port: 25571,
+      execution_backend: "container", game_port: 25571,
       desired_state: "stopped", observed_state: "stopped",
       observed_at: "2026-06-05T22:40:00Z", assigned_worker_id: null,
       players: 0, cpu: 0, mem_gb: 0,
@@ -130,11 +130,11 @@ window.MOCK = {
   ],
 
   workers: [
-    { id: "worker-a", version: "0.9.2", status: "online", drivers: ["host-process", "container"],
+    { id: "worker-a", version: "0.9.2", status: "online", drivers: ["container"],
       assigned: 2, max: 8, cpu_cores: 16, memory: "64 GiB", heartbeat: "2s ago", draining: false },
     { id: "worker-b", version: "0.9.2", status: "online", drivers: ["container"],
       assigned: 1, max: 4, cpu_cores: 8, memory: "32 GiB", heartbeat: "4s ago", draining: true },
-    { id: "worker-c", version: "0.9.1", status: "offline", drivers: ["host-process"],
+    { id: "worker-c", version: "0.9.1", status: "offline", drivers: ["container"],
       assigned: 0, max: 4, cpu_cores: 8, memory: "16 GiB", heartbeat: "3h ago", draining: false },
   ],
 

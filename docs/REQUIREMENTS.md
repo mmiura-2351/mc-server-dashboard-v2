@@ -85,8 +85,8 @@ with the API surface it consumes.
 - Community management and membership (many-to-many users ↔ Communities).
 - Authentication, and authorization via custom roles + per-resource grants.
 - Minecraft server lifecycle (create, configure, start, stop, restart, delete).
-- Two execution backends behind a driver abstraction: **host process** and
-  **container (Docker)**.
+- One execution backend behind a driver abstraction: **container (Docker)**.
+  (The host-process driver was removed in issue #781.)
 - Worker registration, liveness, and server assignment.
 - Pluggable authoritative storage (fs / remote-fs / object) on the API side.
 - Runtime data staging between authoritative storage and stateless Workers.
