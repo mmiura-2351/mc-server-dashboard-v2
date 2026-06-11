@@ -49,6 +49,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import logging
 import tarfile
 import tempfile
 import threading
@@ -123,6 +124,13 @@ _POINTER = "current.json"
 # between two separate writes could attribute the previous publisher to the new
 # generation and invert the guard.
 _GENERATION = "generation"
+# Age threshold below which an in-progress multipart upload is left alone by the
+# sweep (issue #903): only uploads initiated more than this long ago are aborted,
+# so a live ``put_backup``/``upload_multipart`` is never aborted out from under
+# itself. Mirrors the fs adapter's spool-sweep age guard.
+_MULTIPART_SWEEP_MIN_AGE_S = 3600
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -136,6 +144,31 @@ class S3Object:
     key: str
     size: int
     last_modified: dt.datetime
+
+
+@dataclass(frozen=True)
+class S3MultipartUpload:
+    """One in-progress multipart upload from a ListMultipartUploads scan (issue #903).
+
+    ``initiated`` is the S3 ``Initiated`` timestamp (timezone-aware UTC); the sweep
+    reads it to abort only uploads older than its age threshold, so a live upload is
+    never aborted out from under ``put_backup``/``upload_multipart``.
+    """
+
+    key: str
+    upload_id: str
+    initiated: dt.datetime
+
+
+class MultipartUploadsUnsupportedError(Exception):
+    """The store does not support ListMultipartUploads (issue #903).
+
+    Raised by :meth:`S3Client.list_multipart_uploads` when the backend rejects the
+    operation (e.g. a SeaweedFS build without it). The sweep catches this, logs a
+    WARN advising the ``AbortIncompleteMultipartUpload`` bucket lifecycle rule, and
+    continues — orphan-part hygiene degrades to the lifecycle rule rather than
+    failing the whole sweep.
+    """
 
 
 class S3Client(Protocol):
@@ -173,6 +206,18 @@ class S3Client(Protocol):
 
     async def list_objects(self, prefix: str) -> list[S3Object]:
         """List every object whose key starts with ``prefix`` (a prefix scan)."""
+        ...
+
+    async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
+        """List in-progress multipart uploads whose key starts with ``prefix``.
+
+        Raises :class:`MultipartUploadsUnsupportedError` if the backend rejects the
+        operation (issue #903).
+        """
+        ...
+
+    async def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        """Abort one in-progress multipart upload, discarding its parts. Idempotent."""
         ...
 
 
@@ -431,12 +476,50 @@ class ObjectStorage(Storage):
         still active, so a sweep scheduled concurrently with an in-flight stage
         leaves its staging objects intact. A crash leftover has no in-process handle
         by definition, so a fresh process's sweep still reclaims it.
+
+        Orphan multipart uploads (issue #903): a hard crash mid-``put_backup`` (or
+        mid-snapshot-member upload) leaves in-progress multipart upload parts that
+        never complete and are never listed as objects, so the prefix sweep above
+        cannot see them. They are reclaimed separately by ``_sweep_multipart`` via
+        ListMultipartUploads + AbortMultipartUpload, with an age threshold so a live
+        upload is never aborted. If the backend does not support ListMultipartUploads
+        the sweep degrades to a WARN advising the ``AbortIncompleteMultipartUpload``
+        bucket lifecycle rule and continues the rest of the sweep.
         """
 
         async with self._client_factory() as client:
             objs = await client.list_objects("communities/")
             for server_prefix, keys in _group_by_server(objs).items():
                 await self._sweep_server(client, server_prefix, keys)
+            await self._sweep_multipart(client)
+
+    async def _sweep_multipart(self, client: S3Client) -> None:
+        """Abort orphan in-progress multipart uploads older than the age threshold.
+
+        A crash mid-``put_backup`` (or mid-snapshot-member upload) leaves multipart
+        parts that the object-listing sweep cannot see (issue #903). List the
+        in-progress uploads under this adapter's key prefixes and abort only those
+        initiated more than ``_MULTIPART_SWEEP_MIN_AGE_S`` ago, so a live upload is
+        never aborted. A backend that does not support ListMultipartUploads degrades
+        to a WARN advising the ``AbortIncompleteMultipartUpload`` bucket lifecycle
+        rule, leaving the rest of the sweep intact.
+        """
+
+        try:
+            uploads = await client.list_multipart_uploads("communities/")
+        except MultipartUploadsUnsupportedError:
+            _LOG.warning(
+                "object store does not support ListMultipartUploads; orphan "
+                "multipart upload parts will not be aborted by the sweep — configure "
+                "an AbortIncompleteMultipartUpload bucket lifecycle rule instead "
+                "(issue #903)"
+            )
+            return
+        now = dt.datetime.now(dt.UTC)
+        for upload in uploads:
+            age = (now - upload.initiated).total_seconds()
+            if age >= _MULTIPART_SWEEP_MIN_AGE_S:
+                await client.abort_multipart_upload(upload.key, upload.upload_id)
 
     async def _sweep_server(
         self, client: S3Client, server_prefix: str, keys: list[str]

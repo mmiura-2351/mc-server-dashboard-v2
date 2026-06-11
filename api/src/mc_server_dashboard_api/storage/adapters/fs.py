@@ -81,6 +81,12 @@ from mc_server_dashboard_api.storage.integrity.region import (
 # Read/stream chunk size for hydrate / JAR egress.
 _CHUNK = 1024 * 1024
 _DEFAULT_VERSION_RETENTION = 10
+# Age threshold below which a spool temp file is left alone by the sweep (issue
+# #903). The ``.backup.*.tmp`` / ``.final.*.tmp`` spools are safe to reclaim today
+# only because ``sweep()`` runs once at startup before request handling; an mtime
+# guard keeps them safe if ``sweep()`` ever runs periodically/manually alongside a
+# live write, mirroring the ``incoming/`` lease-guard discipline (issue #183).
+_SPOOL_SWEEP_MIN_AGE_S = 3600
 
 # Decompressed-size cap for restore extraction. The compressed archive body is
 # bounded on the way in, but a gzip member can expand ~1000x; the cumulative
@@ -287,10 +293,13 @@ class FsStorage(Storage):
         # create_backup_from_current or mid-upload in put_backup (issue #859). These
         # mirror the ``.final.*.tmp`` sweep _prune_to_final_snapshot does at its own
         # write site; centralising backup tmp hygiene here covers both write paths.
+        # An mtime age threshold skips a spool a live write may still be filling
+        # (issue #903), so the sweep stays safe if it ever runs outside startup.
         backups = server_root / "backups"
         if backups.is_dir():
             for stale in backups.glob(".backup.*.tmp"):
-                stale.unlink(missing_ok=True)
+                if _is_stale_spool(stale):
+                    stale.unlink(missing_ok=True)
 
     def _live_snapshot_name(self, server_root: Path) -> str | None:
         link = server_root / "current"
@@ -866,9 +875,12 @@ class FsStorage(Storage):
         # Sweep any ``.final.*.tmp`` left by an earlier crash mid-pack (the
         # BaseException cleanup never ran), mirroring the tmp hygiene the publish
         # path applies to its staging dirs. Keeps a crash-loop from leaking spools.
+        # An mtime age threshold skips a spool a live prune may still be filling
+        # (issue #903), so the sweep stays safe if it ever runs outside startup.
         if server_root.is_dir():
             for stale in server_root.glob(".final.*.tmp"):
-                stale.unlink(missing_ok=True)
+                if _is_stale_spool(stale):
+                    stale.unlink(missing_ok=True)
         try:
             current = self._current_dir(community_id, server_id)
         except NotFoundError:
@@ -1361,6 +1373,21 @@ def _as_fs_handle(handle: SnapshotHandle) -> _FsSnapshotHandle:
     if not isinstance(handle, _FsSnapshotHandle):
         raise SnapshotHandleError("handle was not issued by this adapter")
     return handle
+
+
+def _is_stale_spool(path: Path) -> bool:
+    """True if a spool temp file is older than the sweep age threshold (issue #903).
+
+    A spool whose mtime is within ``_SPOOL_SWEEP_MIN_AGE_S`` of now may belong to a
+    live write still filling it, so the sweep leaves it alone; an older one is a
+    crash leftover and is safe to reclaim. A spool that vanished between the glob and
+    the stat is treated as already gone (not stale-to-remove)."""
+
+    try:
+        age = time.time() - path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    return age >= _SPOOL_SWEEP_MIN_AGE_S
 
 
 def _new_version_id() -> str:
