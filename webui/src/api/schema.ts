@@ -1123,6 +1123,17 @@ export interface paths {
          *     body) or one that over-runs the cap is aborted as soon as the counted bytes
          *     cross the boundary, so a misdeclared length cannot spool the whole body to disk
          *     before the mismatch is caught.
+         *
+         *     A publish-time generation guard (issue #847) refuses, BEFORE staging, a publish
+         *     whose declared base generation (the store generation this Worker hydrated from)
+         *     no longer matches the store's current generation: the set it holds was hydrated
+         *     from a now-superseded store state, so committing it would clobber a newer
+         *     authoritative copy with stale progression. An absent base-generation header (a
+         *     Worker that never hydrated, or an older Worker) skips the guard — the publish
+         *     proceeds as before. This dovetails with #847's primary fix (the API holds the
+         *     assignment across the final snapshot, so a stale cross-worker publish cannot
+         *     arise in the first place); the guard is defense-in-depth on the data plane,
+         *     where the only prior protection was the Worker-side per-stream ctx cancel.
          */
         post: operations["publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post"];
         delete?: never;
@@ -4640,6 +4651,7 @@ export interface operations {
             query?: never;
             header?: {
                 "content-length"?: number | null;
+                "X-Working-Set-Base-Generation"?: number | null;
                 authorization?: string | null;
             };
             path: {

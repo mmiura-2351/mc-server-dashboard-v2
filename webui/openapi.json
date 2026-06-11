@@ -6009,7 +6009,7 @@
     },
     "/api/data-plane/communities/{community_id}/servers/{server_id}/snapshot": {
       "post": {
-        "description": "Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).\n\nThe \"proven complete\" gate: a missing Content-Length is 411, an oversized one\nis 413, a streamed-byte count that does not match Content-Length is 400, and a\nbody that stages zero files (an empty working set) is 400 ``empty_snapshot`` \u2014\nin every reject path the staged transfer is aborted, so ``current/`` keeps the\nprior authoritative copy (FR-DATA-6, STORAGE.md Section 4.1).\n\nThe cap and the declared length are both enforced *during* streaming, not only\nagainst the header: an under-declaring client (small Content-Length, longer\nbody) or one that over-runs the cap is aborted as soon as the counted bytes\ncross the boundary, so a misdeclared length cannot spool the whole body to disk\nbefore the mismatch is caught.",
+        "description": "Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).\n\nThe \"proven complete\" gate: a missing Content-Length is 411, an oversized one\nis 413, a streamed-byte count that does not match Content-Length is 400, and a\nbody that stages zero files (an empty working set) is 400 ``empty_snapshot`` \u2014\nin every reject path the staged transfer is aborted, so ``current/`` keeps the\nprior authoritative copy (FR-DATA-6, STORAGE.md Section 4.1).\n\nThe cap and the declared length are both enforced *during* streaming, not only\nagainst the header: an under-declaring client (small Content-Length, longer\nbody) or one that over-runs the cap is aborted as soon as the counted bytes\ncross the boundary, so a misdeclared length cannot spool the whole body to disk\nbefore the mismatch is caught.\n\nA publish-time generation guard (issue #847) refuses, BEFORE staging, a publish\nwhose declared base generation (the store generation this Worker hydrated from)\nno longer matches the store's current generation: the set it holds was hydrated\nfrom a now-superseded store state, so committing it would clobber a newer\nauthoritative copy with stale progression. An absent base-generation header (a\nWorker that never hydrated, or an older Worker) skips the guard \u2014 the publish\nproceeds as before. This dovetails with #847's primary fix (the API holds the\nassignment across the final snapshot, so a stale cross-worker publish cannot\narise in the first place); the guard is defense-in-depth on the data plane,\nwhere the only prior protection was the Worker-side per-stream ctx cancel.",
         "operationId": "publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post",
         "parameters": [
           {
@@ -6046,6 +6046,22 @@
                 }
               ],
               "title": "Content-Length"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Working-Set-Base-Generation",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Working-Set-Base-Generation"
             }
           },
           {

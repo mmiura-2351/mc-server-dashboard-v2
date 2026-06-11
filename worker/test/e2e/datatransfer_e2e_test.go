@@ -72,9 +72,10 @@ func TestSnapshotThenHydrateRoundTrip(t *testing.T) {
 	}
 	writeTree(t, src, want)
 
-	// Act 1: snapshot (pack + upload + publish). A clean publish is 204.
+	// Act 1: snapshot (pack + upload + publish). A clean publish is 204. Base
+	// generation 0 (never hydrated) skips the publish-time guard (#847).
 	snapshotURL := scopeURL(base, community, server, "snapshot")
-	if _, err := client.Snapshot(ctx, snapshotURL, credential, src); err != nil {
+	if _, err := client.Snapshot(ctx, snapshotURL, credential, src, 0); err != nil {
 		t.Fatalf("Snapshot against real API: %v", err)
 	}
 

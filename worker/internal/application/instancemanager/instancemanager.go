@@ -50,10 +50,12 @@ type Transfer interface {
 	// API served (the value of its response header, issue #763); 0 when the header
 	// is absent (a server with no published snapshot, or an older API).
 	Hydrate(ctx context.Context, url, token, workingDir string) (uint64, error)
-	// Snapshot packs workingDir and uploads it to url. It returns the NEW
+	// Snapshot packs workingDir and uploads it to url, declaring baseGeneration as
+	// the store generation this working set was hydrated from (issue #847): the API
+	// refuses the publish if the store has since advanced past it. It returns the NEW
 	// authoritative store generation the publish produced (the value of the API's
 	// response header, issue #763); 0 when the header is absent (an older API).
-	Snapshot(ctx context.Context, url, token, workingDir string) (uint64, error)
+	Snapshot(ctx context.Context, url, token, workingDir string, baseGeneration uint64) (uint64, error)
 }
 
 // systemClock is the default wall-clock used for the metrics ticker when
@@ -391,7 +393,11 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 				len(report.Corrupt), report.Scanned, filepath.Base(first.Path), first.Reason))
 	}
 
-	gen, err := m.transfer.Snapshot(ctx, cmd.TransferURL, cmd.TransferToken, workingDir)
+	// Declare the store generation this set was hydrated from (issue #847) so the API
+	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
+	// hydrated set) leaves the guard to compare against the store's current value.
+	baseGeneration := readGeneration(workingDir)
+	gen, err := m.transfer.Snapshot(ctx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: snapshot: %v", err))

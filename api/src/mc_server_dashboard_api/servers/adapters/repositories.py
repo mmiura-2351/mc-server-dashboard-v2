@@ -212,6 +212,26 @@ class SqlAlchemyServerRepository(ServerRepository):
         # already landed) the caller must not optimistically mutate the entity.
         return cast("CursorResult[Any]", result).rowcount == 1
 
+    async def clear_assignment_after_final_snapshot(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        # Guarded so the late unassign only clears OUR held assignment (issue #847):
+        # match only a still desired=stopped row still assigned to worker_id. A start
+        # cannot have re-placed during the snapshot window (its require_unassigned CAS
+        # saw the held assignment), so the guard normally matches; it makes the clear
+        # a no-op rather than a clobber if the row moved by any other path.
+        stmt = (
+            update(ServerModel)
+            .where(
+                ServerModel.id == server_id.value,
+                ServerModel.desired_state == DesiredState.STOPPED.value,
+                ServerModel.assigned_worker_id == worker_id.value,
+            )
+            .values(assigned_worker_id=None)
+        )
+        result = await self._session.execute(stmt)
+        return cast("CursorResult[Any]", result).rowcount == 1
+
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:

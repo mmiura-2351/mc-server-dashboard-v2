@@ -817,39 +817,79 @@ class StopServer:
                 server_id=server_id, kind="StopServer", outcome=outcome
             )
         # The graceful stop returned only once the Worker reported the process
-        # gone, so record observed=stopped and clear the assignment in one
-        # transaction (issue #206). The unassign cannot wait on the later
-        # StatusChange(stopped) event: a start blocked on require_unassigned must
-        # be unblocked the moment the stop confirms. Recording observed=stopped
-        # here is safe — a subsequent late StatusChange(stopped) from the
-        # now-unassigned Worker is dropped by the sink's ownership guard
-        # (server_state_sink.py:85, "dropping status report from non-owning
-        # worker"), which is the acceptable outcome since this write already
-        # converged the cache.
+        # gone, so converge observed=stopped, take the final snapshot, THEN clear
+        # the assignment (issue #847). Recording observed=stopped here is safe — a
+        # subsequent late StatusChange(stopped) from the still-assigned Worker is
+        # dropped by the sink's ownership guard (server_state_sink.py:85), which is
+        # the acceptable outcome since this write already converged the cache.
+        await self._record_stopped_then_final_snapshot(
+            server=server,
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+        )
+        return server
+
+    async def _record_stopped_then_final_snapshot(
+        self,
+        *,
+        server: Server,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> None:
+        """Converge observed=stopped, snapshot, then DELAY the unassign (issue #847).
+
+        Shared by ``__call__`` and ``redispatch_stop`` so BOTH confirmed-stop call
+        sites take the identical sequence. The ordering closes the stop→re-place
+        generation race: the unassign is held until the final snapshot SETTLES, so a
+        start that races the in-flight snapshot finds the assignment still set and
+        its ``require_unassigned`` compare-and-set 409s — it cannot re-place the
+        server on a DIFFERENT worker whose hydrate would pull store generation N
+        while the final (would-be N+1) snapshot is still uploading.
+
+        The unassign cannot wait on the later StatusChange(stopped) event: a start
+        blocked on ``require_unassigned`` must be unblocked the moment the snapshot
+        settles (issue #206). On snapshot FAILURE the assignment is STILL cleared:
+        the data stays in the Worker's retained scratch (#845) and the next
+        same-worker start reuses it. A cross-worker placement of such a failed-final
+        server keeps the #845-documented exposure (logged loud by ``_final_snapshot``).
+        """
+
         observed_at = self.clock.now()
         async with self.uow:
             applied = await self.uow.servers.record_observed_state(
                 server_id,
                 observed_state=ObservedState.STOPPED,
                 observed_at=observed_at,
-                unassign=True,
+                unassign=False,
             )
             await self.uow.commit()
-        # Keep the return honest (issue #292): mutate the entity only when the
-        # write landed; if the #216 guard dropped it, a same-instant/fresher write
-        # already won and dropped the unassign atomically, so leave the observed
-        # fields and assignment as-read.
+        # Keep the return honest (issue #292): mutate the entity only when the write
+        # landed; if the #216 guard dropped it, a same-instant/fresher write already
+        # won, so leave the observed fields and the assignment as-read AND do not run
+        # the deferred unassign below (that fresher write owns convergence).
         if applied:
             server.observed_state = ObservedState.STOPPED
             server.observed_at = observed_at
-            server.assigned_worker_id = None
-        # Final snapshot AFTER the process has exited (the graceful stop above
-        # only returns once the Worker reports the process gone), so the captured
-        # working set is quiescent (FR-DATA-4, FR-DATA-7).
+        # Final snapshot AFTER the process has exited (the confirmed stop returns
+        # only once the Worker reports the process gone) and BEFORE the unassign, so
+        # the captured working set is quiescent (FR-DATA-4, FR-DATA-7).
         await self._final_snapshot(
             worker_id=worker_id, community_id=community_id, server_id=server_id
         )
-        return server
+        if not applied:
+            return
+        # The snapshot has settled: now release the assignment so a later start can
+        # re-place under require_unassigned (issue #206/#847). Guarded so it only
+        # clears OUR still-held assignment.
+        async with self.uow:
+            cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
+                server_id, worker_id
+            )
+            await self.uow.commit()
+        if cleared:
+            server.assigned_worker_id = None
 
     async def _final_snapshot(
         self,
@@ -869,13 +909,13 @@ class StopServer:
         A snapshot failure is logged, not raised: the stop itself already succeeded
         and the server is down. But the failure is logged at ERROR, not warning
         (issue #841): this is the ONLY final-snapshot path for a graceful stop, and
-        the server is now stopped+unassigned, so there is no periodic-snapshot or
-        reconciler retry to recover it — a failure here means the world progressed
-        since the last periodic snapshot is permanently lost. A silent warning is
-        exactly what hid the #841 regression (a worker-side empty_snapshot 400
-        swallowed here), so it must be loud. (The Worker self-addresses no Storage;
-        the API drives the snapshot because only it knows the (community, server)
-        scope.)
+        the server is now stopped (and about to be unassigned), so there is no
+        periodic-snapshot or reconciler retry to recover it — a failure here means
+        the world progressed since the last periodic snapshot is permanently lost.
+        A silent warning is exactly what hid the #841 regression (a worker-side
+        empty_snapshot 400 swallowed here), so it must be loud. (The Worker
+        self-addresses no Storage; the API drives the snapshot because only it knows
+        the (community, server) scope.)
         """
 
         try:
@@ -937,31 +977,39 @@ class StopServer:
             raise _dispatch_failure(
                 server_id=server_id, kind="StopServer", outcome=outcome
             )
-        observed_at = self.clock.now()
-        async with self.uow:
-            applied = await self.uow.servers.record_observed_state(
-                server_id,
-                observed_state=ObservedState.STOPPED,
-                observed_at=observed_at,
-                unassign=True,
-            )
-            await self.uow.commit()
-        # Keep the return honest (issue #292): mutate the entity only when the
-        # write landed; if the #216 guard dropped it, leave the observed fields and
-        # assignment as-read rather than claim a write that did not happen.
-        if applied:
-            server.observed_state = ObservedState.STOPPED
-            server.observed_at = observed_at
-            server.assigned_worker_id = None
-        # Final snapshot, mirroring __call__ (issue #846): only on a confirmed live
-        # stop. SERVER_NOT_FOUND means no live instance remained on the Worker, so
-        # there is no working set to capture — skip it.
-        if outcome.status is not CommandStatus.SERVER_NOT_FOUND:
-            await self._final_snapshot(
-                worker_id=worker_id,
-                community_id=community_id,
-                server_id=server_id,
-            )
+        if outcome.status is CommandStatus.SERVER_NOT_FOUND:
+            # No live instance remained on the Worker, so there is no working set to
+            # capture — skip the snapshot and unassign immediately (no stop→re-place
+            # generation race to guard: nothing is uploading). This is the
+            # documented crash-window exposure — a retained scratch never snapshotted
+            # loses crash-window progression on a cross-worker re-placement (#847
+            # comment, same-worker is preserved by #767).
+            observed_at = self.clock.now()
+            async with self.uow:
+                applied = await self.uow.servers.record_observed_state(
+                    server_id,
+                    observed_state=ObservedState.STOPPED,
+                    observed_at=observed_at,
+                    unassign=True,
+                )
+                await self.uow.commit()
+            # Keep the return honest (issue #292): mutate the entity only when the
+            # write landed; if the #216 guard dropped it, leave the observed fields
+            # and assignment as-read rather than claim a write that did not happen.
+            if applied:
+                server.observed_state = ObservedState.STOPPED
+                server.observed_at = observed_at
+                server.assigned_worker_id = None
+            return server
+        # A confirmed live stop: converge observed=stopped, take the final snapshot,
+        # THEN unassign — the same deferred-unassign sequence StopServer.__call__
+        # takes (issue #847), so BOTH call sites close the stop→re-place race.
+        await self._record_stopped_then_final_snapshot(
+            server=server,
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+        )
         return server
 
 

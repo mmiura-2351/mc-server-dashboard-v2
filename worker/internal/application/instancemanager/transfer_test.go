@@ -31,6 +31,9 @@ type fakeTransfer struct {
 	// the request context being cancelled mid-transfer; Snapshot then returns
 	// context.Canceled. It proves the deferred save-on still runs (#694).
 	cancelDuringSnapshot context.CancelFunc
+	// snapshotBaseGenerations records, per Snapshot call, the base generation the
+	// manager declared (issue #847): the store generation the set was hydrated from.
+	snapshotBaseGenerations []uint64
 }
 
 func (f *fakeTransfer) Hydrate(_ context.Context, _, _, workingDir string) (uint64, error) {
@@ -40,11 +43,12 @@ func (f *fakeTransfer) Hydrate(_ context.Context, _, _, workingDir string) (uint
 	return f.gen, f.err
 }
 
-func (f *fakeTransfer) Snapshot(_ context.Context, _, _, workingDir string) (uint64, error) {
+func (f *fakeTransfer) Snapshot(_ context.Context, _, _, workingDir string, baseGeneration uint64) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapshots = append(f.snapshots, workingDir)
 	f.snapshotHadWorkingSet = append(f.snapshotHadWorkingSet, hasWorkingSet(workingDir))
+	f.snapshotBaseGenerations = append(f.snapshotBaseGenerations, baseGeneration)
 	if f.seq != nil {
 		*f.seq = append(*f.seq, "transfer")
 	}

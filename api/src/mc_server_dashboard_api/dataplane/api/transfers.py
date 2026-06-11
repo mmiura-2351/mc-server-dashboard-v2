@@ -76,6 +76,17 @@ _TAR_BLOCK = 512
 # its local scratch is at. Mirrors the constant the Worker reads (datatransfer.go).
 _GENERATION_HEADER = "X-Working-Set-Generation"
 
+# The REQUEST header a publishing Worker stamps with the store generation its
+# working set was hydrated from (issue #847). The publish-time generation guard
+# (defense-in-depth) refuses a publish whose base generation no longer matches the
+# store's current generation: the set this Worker holds was hydrated from a now-
+# superseded store state, so committing it would clobber a newer authoritative copy
+# with stale progression. Absent (a Worker that never hydrated, or an older Worker
+# not sending it) means "no claim to check" — the publish proceeds as before, so the
+# header is backward-compatible. Mirrors the constant the Worker sends
+# (datatransfer.go).
+_BASE_GENERATION_HEADER = "X-Working-Set-Base-Generation"
+
 router = APIRouter(prefix="/data-plane")
 
 _logger = logging.getLogger(__name__)
@@ -228,6 +239,9 @@ async def publish_snapshot(
     response: Response,
     storage: Annotated[Storage, Depends(get_storage)],
     content_length: Annotated[int | None, Header()] = None,
+    base_generation: Annotated[
+        int | None, Header(alias=_BASE_GENERATION_HEADER)
+    ] = None,
 ) -> None:
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
 
@@ -242,6 +256,17 @@ async def publish_snapshot(
     body) or one that over-runs the cap is aborted as soon as the counted bytes
     cross the boundary, so a misdeclared length cannot spool the whole body to disk
     before the mismatch is caught.
+
+    A publish-time generation guard (issue #847) refuses, BEFORE staging, a publish
+    whose declared base generation (the store generation this Worker hydrated from)
+    no longer matches the store's current generation: the set it holds was hydrated
+    from a now-superseded store state, so committing it would clobber a newer
+    authoritative copy with stale progression. An absent base-generation header (a
+    Worker that never hydrated, or an older Worker) skips the guard — the publish
+    proceeds as before. This dovetails with #847's primary fix (the API holds the
+    assignment across the final snapshot, so a stale cross-worker publish cannot
+    arise in the first place); the guard is defense-in-depth on the data plane,
+    where the only prior protection was the Worker-side per-stream ctx cancel.
     """
 
     if content_length is None:
@@ -250,6 +275,26 @@ async def publish_snapshot(
         raise problem(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large")
 
     scope = (CommunityId(community_id), ServerId(server_id))
+    if base_generation is not None:
+        current = await storage.current_generation(*scope)
+        if base_generation != current:
+            # The publisher's working set was hydrated from generation
+            # ``base_generation`` but the store has since moved to ``current``:
+            # refuse rather than overwrite the newer authoritative copy with this
+            # Worker's stale progression. Nothing was staged yet, so ``current/`` is
+            # untouched.
+            _logger.warning(
+                "snapshot publish refused: stale base generation for server %s "
+                "(publisher held %d, store at %d)",
+                server_id,
+                base_generation,
+                current,
+            )
+            raise problem(
+                status.HTTP_409_CONFLICT,
+                "stale_generation",
+                extensions={"base_generation": base_generation, "current": current},
+            )
     handle = await storage.begin_snapshot(*scope)
     counter = _ByteCounter(request.stream(), declared=content_length)
     try:

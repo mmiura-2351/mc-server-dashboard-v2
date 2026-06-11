@@ -230,6 +230,82 @@ def test_snapshot_publishes_atomically(tmp_path: Path) -> None:
     assert _read_tar(published) == {"world/level.dat": b"new-world"}
 
 
+def test_snapshot_matching_base_generation_publishes(tmp_path: Path) -> None:
+    # Issue #847 publish-time generation guard: a Worker that declares the store's
+    # CURRENT generation as its base is publishing on top of the latest state, so
+    # the publish is allowed.
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"gen1"}))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"gen2"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={**_auth(), "X-Working-Set-Base-Generation": str(current)},
+        )
+    assert resp.status_code == 204
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"gen2"}
+
+
+def test_snapshot_stale_base_generation_is_refused_and_not_published(
+    tmp_path: Path,
+) -> None:
+    # Issue #847 publish-time generation guard: a Worker whose declared base
+    # generation no longer matches the store's current generation hydrated from a
+    # now-superseded state. The publish is refused (409 stale_generation) BEFORE
+    # staging, so the prior authoritative copy is untouched.
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"stale"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            # Declare an OLDER base than the store currently holds.
+            headers={**_auth(), "X-Working-Set-Base-Generation": str(current - 1)},
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
+
+    # The prior authoritative copy survives the refused publish.
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"keep.txt": b"prior"}
+
+
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
     import asyncio
 

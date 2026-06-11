@@ -52,6 +52,14 @@ const generationMarkerFile = ".mcsd_generation"
 // (issue #763). An absent or unparseable header is read as generation 0.
 const generationHeader = "X-Working-Set-Generation"
 
+// baseGenerationHeader is the REQUEST header the Worker stamps on a snapshot
+// publish with the store generation its working set was hydrated from (issue
+// #847). The API's publish-time generation guard refuses the publish if the store
+// has since advanced past it, preventing a stale set from clobbering a newer
+// authoritative copy. Omitted when 0 (an unknown/never-hydrated set): the guard
+// then has no base to compare and the publish proceeds as before.
+const baseGenerationHeader = "X-Working-Set-Base-Generation"
+
 // parseGeneration reads the store generation from a response header, returning 0
 // when it is absent or unparseable (the safe direction: the API treats 0 as older
 // than any published store generation and re-hydrates).
@@ -171,7 +179,7 @@ func SweepSnapshotSpools(scratchRoot string) {
 // request body, and removed on every path (delta/streamed snapshot is deferred,
 // FR-DATA-5). A crash before that deferred remove leaks the spool; SweepSnapshotSpools
 // reclaims such leftovers at startup (issue #787).
-func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) (uint64, error) {
+func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGeneration uint64) (uint64, error) {
 	spool, err := os.CreateTemp(filepath.Dir(srcDir), snapshotSpoolPrefix+"*.tar")
 	if err != nil {
 		return 0, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
@@ -198,6 +206,13 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string) (uint6
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/x-tar")
+	// Declare the store generation this set was hydrated from (issue #847) so the
+	// API's publish-time generation guard can refuse a stale publish. Omit it for an
+	// unknown set (0) — the guard then has no base to compare and the publish
+	// proceeds as before.
+	if baseGeneration != 0 {
+		req.Header.Set(baseGenerationHeader, strconv.FormatUint(baseGeneration, 10))
+	}
 	// Set an explicit length so the API's proven-complete gate can match it.
 	req.ContentLength = size
 
