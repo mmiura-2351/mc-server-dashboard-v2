@@ -75,6 +75,11 @@ type fakeDocker struct {
 	exitCode int64
 	exitErr  error
 	exited   chan struct{}
+	// waitGate, when non-nil, drives Wait result-by-result instead of the single
+	// f.exited release: each Wait call blocks reading one waitResult from it, so a
+	// test can script a transport error on the first Wait followed by a real exit
+	// on the re-attached waiter (issue #865).
+	waitGate chan waitResult
 
 	// logBody is the multiplexed stream Logs returns; logErr forces a Logs error.
 	logBody io.Reader
@@ -87,6 +92,12 @@ type fakeDocker struct {
 // inspectStep is one scripted Inspect result for the wait-for-name-free loop.
 type inspectStep struct {
 	info ContainerInfo
+	err  error
+}
+
+// waitResult is one scripted Wait outcome delivered through waitGate.
+type waitResult struct {
+	code int64
 	err  error
 }
 
@@ -198,6 +209,13 @@ func (f *fakeDocker) killCount() int {
 }
 
 func (f *fakeDocker) Wait(_ context.Context, _ string) (int64, error) {
+	f.mu.Lock()
+	gate := f.waitGate
+	f.mu.Unlock()
+	if gate != nil {
+		r := <-gate
+		return r.code, r.err
+	}
 	<-f.exited
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -553,6 +571,130 @@ func TestStartExitDuringStartingReportsCrashed(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateCrashed)
 	if inst.Status() == execution.StateRunning {
 		t.Fatal("instance reported running after a boot crash")
+	}
+}
+
+// A Wait TRANSPORT error (daemon restart/blip) while the container is still
+// running must NOT emit crashed: supervise re-inspects, sees the container alive,
+// re-attaches a waiter, and only the eventual real exit drives the terminal
+// (issue #865). A wrongly-emitted crashed here would also latch terminal and
+// permanently suppress later running emits (issue #835), so this also guards that.
+func TestWaitTransportErrorContainerRunningContinuesSupervising(t *testing.T) {
+	docker := newFakeDocker()
+	// Unbuffered gate: each push blocks until supervise reads it, synchronising the
+	// re-attach (the second push lands only after the re-inspect re-entered Wait).
+	docker.waitGate = make(chan waitResult)
+	docker.inspectInfo = ContainerInfo{ID: "container-1", Running: true}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// First Wait: a transport error (not a statusError) — a daemon blip, not an exit.
+	docker.waitGate <- waitResult{err: errors.New("containerdriver: POST /wait: dial unix: connection refused")}
+
+	// supervise re-inspects (Running=true) and re-attaches a waiter. The second push
+	// blocks until that re-attached Wait reads it, which proves supervision continued
+	// rather than terminating on the blip. Deliver the real exit now.
+	docker.waitGate <- waitResult{code: 1}
+
+	drainTo(t, inst.Events(), execution.StateCrashed)
+	if inst.Status() != execution.StateCrashed {
+		t.Fatalf("Status = %v, want crashed after the real exit", inst.Status())
+	}
+}
+
+// A Wait TRANSPORT error while the container is actually GONE (the daemon blip
+// coincided with the container's exit) emits crashed: the re-inspect resolves a
+// 404 to gone, so the terminal is correct rather than suppressed (issue #865).
+func TestWaitTransportErrorContainerGoneEmitsCrashed(t *testing.T) {
+	docker := newFakeDocker()
+	docker.waitGate = make(chan waitResult)
+	docker.inspectErr = errNotFound
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	docker.waitGate <- waitResult{err: errors.New("containerdriver: POST /wait: EOF")}
+
+	drainTo(t, inst.Events(), execution.StateCrashed)
+}
+
+// A Wait TRANSPORT error while a Stop is in flight and the container is GONE
+// emits stopped, not crashed: the sticky stop intent still governs the terminal
+// once the re-inspect confirms the exit (issues #257/#865).
+func TestWaitTransportErrorWhileStoppingContainerGoneEmitsStopped(t *testing.T) {
+	docker := newFakeDocker()
+	docker.waitGate = make(chan waitResult)
+	docker.inspectErr = errNotFound
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// Request a stop, then wait until it has reached the daemon (which proves
+	// stopRequested is already set under the lock) before delivering the Wait
+	// transport error, so the re-inspect's terminal decision reads the stop intent.
+	go func() { _ = inst.Stop(context.Background(), false) }()
+	deadline := time.After(2 * time.Second)
+	for !docker.stopWasCalled() {
+		select {
+		case <-deadline:
+			t.Fatal("stop never reached the daemon")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	docker.waitGate <- waitResult{err: errors.New("containerdriver: POST /wait: connection reset")}
+
+	drainTo(t, inst.Events(), execution.StateStopped)
+}
+
+// When the daemon stays unreachable past the re-inspect bound, supervise emits
+// NOTHING and keeps supervising (re-attaches a waiter), leaving the manager's
+// last authoritative state standing until the next observation (issue #865). The
+// chosen behavior: no speculative terminal on a wedged daemon.
+func TestWaitTransportErrorDaemonUnreachableEmitsNothing(t *testing.T) {
+	docker := newFakeDocker()
+	docker.waitGate = make(chan waitResult)
+	// Inspect also fails with a transport error throughout, so the bounded probe
+	// never confirms a state and the deadline path is exercised.
+	docker.inspectErr = errors.New("containerdriver: GET inspect: connection refused")
+	// Shrink the probe bound to keep the deadline path fast.
+	prevDeadline, prevInterval := waitTransportProbeDeadline, waitTransportProbeInterval
+	waitTransportProbeDeadline, waitTransportProbeInterval = 30*time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		waitTransportProbeDeadline, waitTransportProbeInterval = prevDeadline, prevInterval
+	})
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// Deliver the Wait transport error: supervise probes inspect until the deadline,
+	// finds the daemon unreachable, and re-attaches a waiter. The second gate read
+	// blocking until consumed proves it re-attached without emitting a terminal.
+	docker.waitGate <- waitResult{err: errors.New("containerdriver: POST /wait: connection refused")}
+	docker.waitGate <- waitResult{code: 1}
+
+	// The re-attached waiter's real exit now drives crashed; no terminal preceded it
+	// (a premature terminal would have latched and changed Status before this point).
+	drainTo(t, inst.Events(), execution.StateCrashed)
+	if inst.Status() != execution.StateCrashed {
+		t.Fatalf("Status = %v, want crashed only after the real exit", inst.Status())
 	}
 }
 

@@ -64,6 +64,11 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # it instead of letting the stale tally overwrite the +1.
         self._next_seq: int = 0
         self._confirmed_seq: dict[WorkerId, dict[str, int]] = {}
+        # Per-worker DECREMENT tombstones: server id -> sequence at which the row was
+        # decremented (#862). set_assignment uses this to detect a stop that landed
+        # AFTER the snapshot epoch so it does not resurrect the row from the stale
+        # tally (the symmetric fix to the confirm-side guard above).
+        self._decremented_seq: dict[WorkerId, dict[str, int]] = {}
         # Per-worker RESERVED-but-uncommitted placements: server id -> declared
         # memory request in MiB (0 = unset / not memory-gated), the slot held
         # atomically at placement decision time (#778). A concurrent placement sees
@@ -107,6 +112,7 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # (#778). Ensure the keys exist for a brand-new worker.
         self._committed[worker.id] = {}
         self._confirmed_seq[worker.id] = {}
+        self._decremented_seq[worker.id] = {}
         self._reserved.setdefault(worker.id, {})
         session = self._next_session
         self._next_session += 1
@@ -181,9 +187,13 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # Drop the committed row (and its memory) for ``server_id`` (#843); idempotent
         # if it is already gone (e.g. a rebuild between the desired-state flip and
         # this call already excluded it), mirroring the count's floor-at-zero.
+        # Stamp the current sequence so set_assignment can detect a decrement that
+        # lands in the rebuild's tally-read window and not resurrect the row (#862).
         if worker_id in self._committed:
             self._committed[worker_id].pop(server_id, None)
             self._confirmed_seq[worker_id].pop(server_id, None)
+            self._decremented_seq[worker_id][server_id] = self._next_seq
+            self._next_seq += 1
 
     def set_assignment(
         self, worker_id: WorkerId, assignments: Mapping[str, int], snapshot_epoch: int
@@ -200,7 +210,20 @@ class InMemoryWorkerRegistry(WorkerRegistry):
             for server_id, memory_mb in self._committed[worker_id].items()
             if self._confirmed_seq[worker_id].get(server_id, -1) >= snapshot_epoch
         }
-        self._committed[worker_id] = {**dict(assignments), **preserved}
+        # Exclude any tally row that was decremented AFTER the snapshot epoch (#862):
+        # the stop fired in the tally-read window so the tally is stale — do not
+        # resurrect the row by merging it from assignments.
+        tombstoned = {
+            server_id
+            for server_id, seq in self._decremented_seq[worker_id].items()
+            if seq >= snapshot_epoch
+        }
+        filtered_assignments = {
+            server_id: memory_mb
+            for server_id, memory_mb in assignments.items()
+            if server_id not in tombstoned
+        }
+        self._committed[worker_id] = {**filtered_assignments, **preserved}
         self._confirmed_seq[worker_id] = {
             server_id: self._confirmed_seq[worker_id].get(server_id, -1)
             for server_id in self._committed[worker_id]
@@ -209,7 +232,7 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # increment_assignment becomes a no-op (no double-count); keep reservations
         # not yet in the tally (their commit is not yet visible) so their later
         # confirm still counts (#778).
-        for committed_id in assignments:
+        for committed_id in filtered_assignments:
             self._reserved[worker_id].pop(committed_id, None)
 
     def candidates_for_placement(self) -> list[PlacementCandidate]:
