@@ -10,6 +10,7 @@ orphan-prefix sweep (lease-aware, keyed off the live pointer).
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 
 import pytest
@@ -616,3 +617,74 @@ async def test_prune_pointer_invalidated_before_prefix_gc() -> None:
     assert (prefix + "final.tar.gz") in store.objects
     assert (prefix + _POINTER) not in store.objects
     assert not any(k.startswith(prefix + "snapshots/") for k in store.objects)
+
+
+async def test_sweep_aborts_old_orphan_multipart_upload() -> None:
+    # Orphan multipart parts (issue #903): a hard crash mid-put_backup leaves an
+    # in-progress multipart upload whose parts never complete and never list as
+    # objects, so the prefix sweep cannot see them. The sweep aborts one initiated
+    # more than the age threshold ago via ListMultipartUploads + AbortMultipartUpload.
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    backups = _server_prefix(community, server) + "backups/orphan.tar.gz"
+    store.multipart_uploads["upload-old"] = (
+        backups,
+        dt.datetime.now(dt.UTC) - dt.timedelta(hours=2),
+    )
+
+    await storage.sweep()
+
+    assert "upload-old" not in store.multipart_uploads, (
+        "an orphan multipart upload older than the threshold must be aborted"
+    )
+
+
+async def test_sweep_spares_young_multipart_upload() -> None:
+    # Age threshold (issue #903): an upload initiated within the threshold may be a
+    # live put_backup/snapshot member upload in progress, so the sweep must NOT abort
+    # it — mirroring the fs spool-sweep age guard.
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    backups = _server_prefix(community, server) + "backups/inflight.tar.gz"
+    store.multipart_uploads["upload-young"] = (
+        backups,
+        dt.datetime.now(dt.UTC) - dt.timedelta(minutes=1),
+    )
+
+    await storage.sweep()
+
+    assert "upload-young" in store.multipart_uploads, (
+        "a live multipart upload within the age threshold must survive the sweep"
+    )
+
+
+async def test_sweep_degrades_to_warn_when_list_multipart_unsupported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Graceful degradation (issue #903): a backend without ListMultipartUploads
+    # (e.g. a SeaweedFS build that lacks it) must not fail the whole sweep. The
+    # multipart branch catches the unsupported-operation error, logs a WARN advising
+    # the AbortIncompleteMultipartUpload bucket lifecycle rule, and the prefix sweep
+    # still completes.
+    import logging
+
+    store = FakeS3Store()
+    seeded = ObjectStorage(fake_s3_factory(store))
+    community, server = new_scope()
+    await _publish(seeded, community, server, {"f": b"LIVE"})
+
+    # Seed a crash-leftover orphan staging object the prefix sweep should still GC,
+    # to prove the unsupported multipart path does not abort the rest of the sweep.
+    incoming = _server_prefix(community, server) + "incoming/orphan/f"
+    store.objects[incoming] = b"PARTIAL"
+    store.list_multipart_uploads_unsupported = True
+
+    storage = ObjectStorage(fake_s3_factory(store))
+    with caplog.at_level(logging.WARNING):
+        await storage.sweep()
+
+    assert any(
+        "AbortIncompleteMultipartUpload" in rec.message for rec in caplog.records
+    ), "an unsupported ListMultipartUploads must log a lifecycle-rule WARN"
+    # The rest of the sweep still ran: the orphan staging object was reclaimed.
+    assert incoming not in store.objects

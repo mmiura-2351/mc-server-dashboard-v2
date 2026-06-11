@@ -184,6 +184,8 @@ async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
     # tree GC leaves: final present + no current symlink + a leftover snapshots/
     # tree. The retried DeleteServer must finish the GC WITHOUT re-packing, so it
     # never overwrites the good final.tar.gz with a partial pack from the leftover.
+    import time
+
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     handle = await storage.begin_snapshot(community, server)
@@ -206,6 +208,12 @@ async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
     (stale / "level.dat").write_bytes(b"stale")
     leaked_tmp = server_root / ".final.deadbeef.tmp"
     leaked_tmp.write_bytes(b"junk")
+    # Age the leaked spool past the sweep threshold (issue #903) so it is reclaimed;
+    # a young one a live prune may still be filling would be spared.
+    import os
+
+    old = time.time() - 7200
+    os.utime(leaked_tmp, (old, old))
 
     # The retry takes the no-current branch: GC completes, the leaked tmp is swept,
     # final is byte-for-byte untouched (no partial re-pack), nothing republished.
@@ -409,19 +417,25 @@ async def test_put_backup_fsyncs_dir_after_rename(
 async def test_sweep_removes_stale_backup_tmp(tmp_path: Path) -> None:
     # Spool hygiene (issue #859): a crash mid-pack (create_backup_from_current) or
     # mid-upload (put_backup) leaks a ``.backup.*.tmp`` in backups/ forever because
-    # sweep() did not cover it. After the fix, sweep() removes it.
+    # sweep() did not cover it. After the fix, sweep() removes it once it is older
+    # than the age threshold (issue #903).
+    import os
+    import time
+
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     handle = await storage.begin_snapshot(community, server)
     await storage.write_snapshot(handle, tar_stream(NEW))
     await storage.commit_snapshot(handle)
 
-    # Simulate a leaked spool left by a crash mid-pack.
+    # Simulate a leaked spool left by a crash mid-pack, aged past the threshold.
     server_root = _prune_server_root(tmp_path, community, server)
     backups_dir = server_root / "backups"
     backups_dir.mkdir(parents=True, exist_ok=True)
     stale_tmp = backups_dir / ".backup.deadbeef.tmp"
     stale_tmp.write_bytes(b"partial")
+    old = time.time() - 7200
+    os.utime(stale_tmp, (old, old))
     assert stale_tmp.exists()
 
     storage.sweep()
@@ -429,3 +443,24 @@ async def test_sweep_removes_stale_backup_tmp(tmp_path: Path) -> None:
     assert not stale_tmp.exists()
     # No real backup was removed.
     assert not list(backups_dir.glob("*.tar.gz"))
+
+
+async def test_sweep_spares_young_backup_tmp(tmp_path: Path) -> None:
+    # Age threshold (issue #903): a ``.backup.*.tmp`` younger than the threshold may
+    # belong to a live write still filling it, so the sweep must leave it alone. This
+    # keeps the spool sweep safe if sweep() ever runs outside startup.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(NEW))
+    await storage.commit_snapshot(handle)
+
+    server_root = _prune_server_root(tmp_path, community, server)
+    backups_dir = server_root / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    young_tmp = backups_dir / ".backup.cafef00d.tmp"
+    young_tmp.write_bytes(b"in-flight")  # just created -> mtime is now
+
+    storage.sweep()
+
+    assert young_tmp.exists(), "a young spool a live write may be filling must survive"

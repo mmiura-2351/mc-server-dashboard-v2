@@ -23,8 +23,10 @@ import aioboto3
 from botocore.exceptions import ClientError
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
+    MultipartUploadsUnsupportedError,
     S3Client,
     S3ClientFactory,
+    S3MultipartUpload,
     S3Object,
 )
 from mc_server_dashboard_api.storage.domain.errors import NotFoundError
@@ -142,10 +144,49 @@ class _Aioboto3S3Client:
                 )
         return out
 
+    async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
+        # Paginate ListMultipartUploads so a crash-leftover orphan upload is found
+        # regardless of count (issue #903). A backend without the operation (e.g. a
+        # SeaweedFS build that lacks it) raises a ClientError the adapter degrades on,
+        # so map the unsupported-operation codes to MultipartUploadsUnsupportedError.
+        paginator = self._client.get_paginator("list_multipart_uploads")
+        out: list[S3MultipartUpload] = []
+        try:
+            async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+                for entry in page.get("Uploads", []):
+                    # ``Initiated`` is a timezone-aware datetime (UTC); the sweep's
+                    # age threshold reads it through S3MultipartUpload.
+                    out.append(
+                        S3MultipartUpload(
+                            key=entry["Key"],
+                            upload_id=entry["UploadId"],
+                            initiated=entry["Initiated"],
+                        )
+                    )
+        except ClientError as exc:
+            if _is_unsupported(exc):
+                raise MultipartUploadsUnsupportedError(
+                    "object store rejected ListMultipartUploads"
+                ) from exc
+            raise
+        return out
+
+    async def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        await self._client.abort_multipart_upload(
+            Bucket=self._bucket, Key=key, UploadId=upload_id
+        )
+
 
 def _is_not_found(exc: ClientError) -> bool:
     code = exc.response.get("Error", {}).get("Code")
     return code in ("404", "NoSuchKey", "NotFound")
+
+
+def _is_unsupported(exc: ClientError) -> bool:
+    # A store that lacks ListMultipartUploads rejects it with one of these codes
+    # (issue #903); the sweep degrades to the lifecycle-rule WARN rather than failing.
+    code = exc.response.get("Error", {}).get("Code")
+    return code in ("NotImplemented", "MethodNotAllowed", "501", "405")
 
 
 async def _iter_body(body: Any) -> AsyncIterator[bytes]:
