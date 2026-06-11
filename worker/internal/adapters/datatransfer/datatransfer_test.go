@@ -915,6 +915,90 @@ func TestSnapshotSkipsVanishedFilesAndSucceeds(t *testing.T) {
 	}
 }
 
+// TestWalkIntoVanishedDirIsSkipped verifies the directory analog of the #820/#853
+// file-vanish race (issue #854): a directory deleted between the parent's walk and
+// this read (ENOENT on ReadDir) is skipped with a Warn rather than failing the
+// whole snapshot. The kept sibling must still be archived.
+func TestWalkIntoVanishedDirIsSkipped(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kept.txt"), []byte("keep"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(root, "logs")
+	if err := os.MkdirAll(gone, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject ENOENT for the logs/ subtree only (it "rotated away" mid-pack).
+	orig := readDir
+	readDir = func(name string) ([]os.DirEntry, error) {
+		if name == gone {
+			return nil, os.ErrNotExist
+		}
+		return os.ReadDir(name)
+	}
+	defer func() { readDir = orig }()
+
+	h := &capturingHandler{}
+	log := slog.New(h)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := walkInto(tw, root, root, log); err != nil {
+		t.Fatalf("walkInto must skip a vanished directory, got error: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tw.Close: %v", err)
+	}
+
+	// kept.txt is archived; the logs/ subtree produced no member beyond its own
+	// (already-written) dir header.
+	names := map[string]bool{}
+	tr := tar.NewReader(&buf)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar.Next: %v", err)
+		}
+		names[hdr.Name] = true
+	}
+	if !names["kept.txt"] {
+		t.Fatal("kept.txt must be in the snapshot tar")
+	}
+
+	const wantMsg = "snapshot: directory vanished between walk and read; skipping"
+	if !h.hasMessage(wantMsg) {
+		t.Fatalf("expected log message %q, captured records: %v", wantMsg, h.records)
+	}
+}
+
+// TestWalkIntoNonENOENTDirErrorFails verifies a non-ENOENT ReadDir error (e.g. a
+// permission error) still fails the whole snapshot, never a silent skip (#854).
+func TestWalkIntoNonENOENTDirErrorFails(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := readDir
+	readDir = func(name string) ([]os.DirEntry, error) {
+		if name == sub {
+			return nil, os.ErrPermission
+		}
+		return os.ReadDir(name)
+	}
+	defer func() { readDir = orig }()
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := walkInto(tw, root, root, slog.Default()); err == nil {
+		t.Fatal("walkInto must propagate a non-ENOENT ReadDir error")
+	}
+}
+
 // When the final temp->destDir swap rename fails after the old working set was
 // already moved aside to trash, unpackAndSwap must restore the old copy so no data
 // is lost (the crash-safety restore branch, issue #772 / #806).

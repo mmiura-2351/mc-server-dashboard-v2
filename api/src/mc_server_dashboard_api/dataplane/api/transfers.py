@@ -55,6 +55,7 @@ from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
     IntegrityCheckError,
+    MissingRegionsError,
     NotFoundError,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage
@@ -384,6 +385,25 @@ async def publish_snapshot(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "working_set_corrupt",
             extensions={"corrupt_count": corrupt},
+        ) from None
+    except MissingRegionsError as exc:
+        # The byte-complete, structurally-clean body DROPPED region files from a
+        # dimension that still exists (issue #854): MC would silently regenerate the
+        # missing chunks, so the missing-region gate refused to publish and ``current``
+        # keeps the prior good snapshot. commit_snapshot already cleaned the staging
+        # area. A legitimate full-dimension delete is not flagged; this is a
+        # partial-loss corruption signature, so surface it loudly and log it.
+        affected = len(exc.report.partial_loss)
+        _logger.warning(
+            "snapshot publish refused: incomplete working set for server %s "
+            "(%d dimension(s) lost region files)",
+            server_id,
+            affected,
+        )
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "working_set_incomplete",
+            extensions={"affected_count": affected},
         ) from None
     except BaseException:
         # Any failure mid-transfer (client disconnect, extraction error) discards
