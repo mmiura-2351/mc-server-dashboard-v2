@@ -462,6 +462,53 @@ def test_rebuild_drops_a_committed_row_confirmed_before_the_snapshot() -> None:
     assert registry.committed_memory_mb(WorkerId("worker-1")) == 0
 
 
+def test_rebuild_does_not_resurrect_a_decrement_that_landed_in_the_window() -> None:
+    # #862 asymmetry: a decrement that fires BETWEEN the tally snapshot and
+    # set_assignment would be "resurrected" by the stale tally (the server was
+    # running when the tally was read, so it appears in assignments).  Without the
+    # tombstone guard the rebuild restores the row, over-counting load and committed
+    # memory until the next reconnect.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    # Commit and confirm the placement so the server is in the authoritative tally.
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+
+    # Rebuild snapshots the epoch (the tally read is about to happen).
+    snapshot_epoch = registry.assignment_epoch(WorkerId("worker-1"))
+    # Stop path fires in the await window: decrement lands after the epoch snapshot.
+    registry.decrement_assignment(WorkerId("worker-1"), "server-a")
+    # Stale tally (server-a still appeared running at snapshot time) arrives.
+    registry.set_assignment(WorkerId("worker-1"), {"server-a": 512}, snapshot_epoch)
+
+    # The decrement must survive — the row must NOT be resurrected.
+    assert registry.list_workers()[0].assigned_count == 0
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 0
+
+
+def test_rebuild_keeps_tally_row_whose_decrement_preceded_the_snapshot() -> None:
+    # Conservative direction: if the decrement happened BEFORE the snapshot epoch,
+    # the authoritative tally (which still has the row) wins — the server may be
+    # still running (or the decrement was spurious).  This is the same conservative
+    # logic as the confirm side: only in-window mutations are preserved.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.reserve(WorkerId("worker-1"), "server-a", 512)
+    registry.increment_assignment(WorkerId("worker-1"), "server-a")
+    # Decrement fires BEFORE the epoch snapshot.
+    registry.decrement_assignment(WorkerId("worker-1"), "server-a")
+
+    # Now snapshot the epoch; the tally still has server-a.
+    snapshot_epoch = registry.assignment_epoch(WorkerId("worker-1"))
+    registry.set_assignment(WorkerId("worker-1"), {"server-a": 512}, snapshot_epoch)
+
+    # Decrement was before the snapshot, so the tally row wins (server still running).
+    assert registry.list_workers()[0].assigned_count == 1
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
+
+
 # --- per-id lookup (#322) --------------------------------------------------
 
 
