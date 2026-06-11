@@ -220,7 +220,7 @@ running-server file access.
 | `RestartServer` | Stop then start in place. | none | FR-SRV-2 |
 | `ServerCommand` | Forward an RCON/console line. | `command_output` | FR-SRV-5 |
 | `HydrateTrigger` | Pull the working set from the data plane before launch; carries the transfer URL + one-time token. | none | FR-DATA-4 |
-| `SnapshotTrigger` | Push the working set back to the data plane (a running server's copy is bracketed save-off → save-all → copy → save-on so a region file is not captured torn). | none | FR-DATA-4, FR-DATA-7, Section 6.9 |
+| `SnapshotTrigger` | Push the working set back to the data plane (a running server's copy is bracketed save-off → save-all flush → copy → save-on so the world is fully on disk and a region file is not captured torn; a running snapshot that cannot quiesce — RCON down or save-off/flush failing — is refused `quiesce_unavailable` rather than packing a live world, #907). | none | FR-DATA-4, FR-DATA-7, Section 6.9 |
 | `ReadFile` | Read a path from a running server's live working set. | `file_content` | Section 6.9, Section 7.2 |
 | `EditFile` | Write a path in a running server's live working set. | none | Section 6.9, Section 7.2 |
 | `ListFiles` | List a directory in a running server's live working set (read-only). | `file_listing` | Section 6.9, Section 7.2 |

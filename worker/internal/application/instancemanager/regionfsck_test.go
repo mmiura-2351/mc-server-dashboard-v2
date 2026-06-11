@@ -2,10 +2,14 @@ package instancemanager
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -80,11 +84,14 @@ func TestSnapshotTriggerHealthyWorkingSetProceeds(t *testing.T) {
 
 // A running-server snapshot runs the pre-pack fsck inside the #694 save-off/save-on
 // bracket: on corruption it still re-enables auto-save (the deferred save-on) and
-// refuses the upload, so the server is never left with auto-save disabled.
+// refuses the upload, so the server is never left with auto-save disabled. The
+// corruption here is persistent (the seeded file never changes), so it survives the
+// #907 fsck retries and the snapshot is ultimately refused.
 func TestSnapshotTriggerCorruptRunningServerRefusesAndRestoresSaveOn(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	m.fsckRetryDelay = 0
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -101,5 +108,91 @@ func TestSnapshotTriggerCorruptRunningServerRefusesAndRestoresSaveOn(t *testing.
 	// save-off quiesced, then save-on re-enabled auto-save despite the refusal.
 	if !containsLine(ctrl.lines, "save-off") || !containsLine(ctrl.lines, "save-on") {
 		t.Fatalf("rcon lines = %v, want both save-off and save-on around the refused snapshot", ctrl.lines)
+	}
+}
+
+// A running-server periodic snapshot retries the pre-pack fsck on transient
+// corruption (#907): a region write still in flight just after the save-all flush
+// can read as torn, but that must not veto the snapshot. Here the first scan reads
+// a torn region; the file is repaired to a healthy region during the retry backoff,
+// so a later attempt is clean and the snapshot proceeds.
+func TestSnapshotTriggerRunningServerFsckRetriesPastTransientCorruption(t *testing.T) {
+	ctrl := &fakeControl{reply: "ok"}
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	m.fsckRetryDelay = 50 * time.Millisecond
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	// Seed a torn region so the first fsck attempt fails.
+	region := filepath.Join(m.scratchDir, "s1", "region", "r.0.0.mca")
+	seedWorkingSet(t, m, "s1", healthyRegion()[:3*fsckSector-10])
+
+	// Repair the region mid-backoff (after the first attempt, before a later one), as
+	// an in-flight write completing would. The 10ms lead vs the 50ms backoff gives the
+	// rewrite ample margin before the second scan.
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_ = os.WriteFile(region, healthyRegion(), 0o640)
+	}()
+
+	res := m.Handle(context.Background(), snapshotCmd())
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success after the transient corruption clears on retry", res)
+	}
+	if len(tr.snapshots) != 1 {
+		t.Fatalf("snapshots = %v, want one once a retry reads the set clean", tr.snapshots)
+	}
+}
+
+// The stopped-id (at-rest) snapshot does NOT retry the fsck (#907): the world is at
+// rest there, so a detected corruption is real signal, not a mid-write race, and is
+// refused fail-closed on the first scan with NO retry backoff.
+func TestSnapshotTriggerStoppedServerFsckNotRetried(t *testing.T) {
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	// A non-zero delay that would be observable if the at-rest path ever retried: the
+	// test would block on it. The stopped path must not wait at all.
+	m.fsckRetryDelay = time.Hour
+
+	seedWorkingSet(t, m, "s1", healthyRegion()[:3*fsckSector-10])
+
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger over at-rest corrupt set = %+v, want transfer-failed", res)
+	}
+	if len(tr.snapshots) != 0 {
+		t.Fatalf("at-rest corrupt set must not be uploaded; snapshots = %v", tr.snapshots)
+	}
+}
+
+// When RCON cannot be opened for a RUNNING server, the periodic snapshot is refused
+// with the distinct quiesce_unavailable classification (#907) rather than packing
+// the unquiesced live world (the 35/35 false-positive source). The next tick
+// retries; the post-stop final snapshot still covers a permanently-RCON-broken
+// server.
+func TestSnapshotTriggerRunningServerRconUnavailableRefusesQuiesceUnavailable(t *testing.T) {
+	tr := &fakeTransfer{}
+	scratch := t.TempDir()
+	openErr := errors.New("dial tcp 127.0.0.1:25575: connect: connection refused")
+	m := New(map[string]execution.ExecutionDriver{"host-process": &fakeDriver{}}, scratch,
+		func(context.Context, string, string) (execution.ServerControl, error) { return nil, openErr }).
+		WithTransfer(tr)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	seedWorkingSet(t, m, "s1", healthyRegion())
+
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger with RCON down = %+v, want transfer-failed (quiesce_unavailable)", res)
+	}
+	if !strings.Contains(res.ErrorMessage, "quiesce_unavailable") {
+		t.Fatalf("error message = %q, want it to name quiesce_unavailable", res.ErrorMessage)
+	}
+	if len(tr.snapshots) != 0 {
+		t.Fatalf("unquiesced world must not be packed; snapshots = %v", tr.snapshots)
 	}
 }

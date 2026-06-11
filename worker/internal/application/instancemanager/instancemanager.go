@@ -98,6 +98,14 @@ type Manager struct {
 	clock           session.Clock
 	metricsInterval time.Duration
 
+	// fsckRetryDelay is the backoff between pre-pack fsck attempts for a RUNNING
+	// server's periodic snapshot (#907). A live world's region writes can still be
+	// mid-flight just after the save-all flush, so a transient torn read must not
+	// veto the snapshot; the check is retried snapshotFsckAttempts times with this
+	// delay. It is a field (not a const) so tests can shrink it to zero; the
+	// stopped-server (at-rest, fail-closed) path does not retry. Defaulted in New.
+	fsckRetryDelay time.Duration
+
 	// transferDeadlineNanos bounds a single data-plane transfer (snapshot upload /
 	// hydrate download) Worker-side (issue #874). The session pushes it from the
 	// RegisterAck after registration (SetTransferDeadline); the hydrate/snapshot
@@ -185,6 +193,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		logger:          slog.Default(),
 		clock:           systemClock{},
 		metricsInterval: defaultMetricsInterval,
+		fsckRetryDelay:  defaultFsckRetryDelay,
 		instances:       map[string]execution.Instance{},
 		startCmds:       map[string]session.Command{},
 		orphans:         map[string]execution.Instance{},
@@ -351,29 +360,58 @@ func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) {
 // deadline so the call cannot hang the goroutine forever.
 const restoreSaveTimeout = 30 * time.Second
 
+// snapshotFsckAttempts is how many times the pre-pack region fsck is run for a
+// RUNNING server's periodic snapshot before the snapshot is refused (#907). A
+// live world can still be flushing region writes just after save-all flush, so a
+// single torn read must not veto the periodic snapshot; the first failing attempt
+// is retried (snapshotFsckAttempts-1 retries) with defaultFsckRetryDelay backoff,
+// and the snapshot proceeds as soon as one attempt is clean. The stopped-server
+// (at-rest) path uses a single fail-closed attempt — a failure there is real
+// signal, not a mid-write race.
+const snapshotFsckAttempts = 3
+
+// defaultFsckRetryDelay is the default backoff between the running-server fsck
+// attempts above. Three attempts with two ~2s gaps stay well within the snapshot
+// command budget (control.snapshot_timeout_seconds=600). Tests shrink it to zero.
+const defaultFsckRetryDelay = 2 * time.Second
+
 // handleSnapshot packs the server's working dir and uploads it. For a running
 // server it brackets the working-dir copy with RCON save-off / save-on so the
 // Minecraft server does not write to the world mid-copy and a region file cannot
 // be captured torn (#694, CONTROL_PLANE.md Section 6.9): it issues save-off to
-// disable auto-save, a non-blocking save-all to refresh the on-disk copy, runs the
-// transfer over the now-quiescent working dir, then save-on to re-enable
-// auto-save. The save-all deliberately does not flush — a synchronous main-thread
-// flush can occupy a tick past max-tick-time and trip the server watchdog,
-// crashing a running server (#693).
+// disable auto-save, a blocking save-all flush to drive the world fully to disk
+// before the fsck/copy reads it, runs the transfer over the now-quiescent working
+// dir, then save-on to re-enable auto-save. The flush is what actually quiesces
+// the on-disk state: a plain non-blocking save-all returns before the asynchronous
+// save completes, so the fsck would race the in-flight writes and read healthy
+// regions as torn — the #907 false-positive (35/35 region files reported corrupt
+// on a world that scans clean at rest).
 //
-// The bracket is best-effort: if opening RCON or the save-off toggle fails, the
-// snapshot still proceeds without the consistency guarantee (logged, not fatal).
-// But once save-off succeeds, save-on is guaranteed on every exit path — success,
-// transfer error, or a cancelled/timed-out request context — via a deferred
-// restore that runs on a detached context, so the server is never left with
-// auto-save disabled (which would risk data loss on a later crash).
+// For a RUNNING server the quiesce is now fail-closed (#907): if RCON cannot be
+// opened, or save-off / save-all flush fail, the working set is NOT actually
+// quiesced, so packing it would reproduce exactly those torn-read false positives
+// and waste a full tar+upload the API gate would reject. The periodic snapshot is
+// instead refused with a distinct quiesce_unavailable error so operators can tell
+// "could not quiesce" from "world is corrupt"; the next tick (5 min) retries. The
+// tradeoff: a server whose RCON is permanently broken never gets a PERIODIC
+// snapshot — but its FINAL post-stop snapshot (the stopped-id path below, which
+// needs no RCON) still captures the world, so this bounds the loss to progression
+// since the last good periodic snapshot, not the whole world. Once save-off
+// succeeds, save-on is guaranteed on every exit path — success, transfer error, or
+// a cancelled/timed-out request context — via a deferred restore that runs on a
+// detached context, so the server is never left with auto-save disabled.
 //
 // Once the working set is quiesced (bracketed above for a running server, at rest
 // for a stopped one), a structural region fsck runs before the transfer (#741):
 // on detected corruption the snapshot is refused with a coded error — failing fast
 // at the source instead of after a full tar+upload the API gate would reject — and
-// the deferred restore still re-enables auto-save. A fsck I/O error is best-effort
-// (logged, the transfer proceeds) so it cannot wedge the snapshot.
+// the deferred restore still re-enables auto-save. For a RUNNING server the fsck is
+// retried a small bounded number of times with backoff (#907): a region write that
+// was still in flight when the first scan ran can read as torn even after the
+// flush, and a transient mid-write read must not veto a periodic snapshot. The
+// STOPPED (at-rest) path stays single-shot fail-closed — a failure there is real
+// corruption signal, not a race. A fsck I/O error is best-effort (logged, the
+// transfer proceeds) so it cannot wedge the snapshot.
 func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) session.CommandResult {
 	if m.transfer == nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -406,8 +444,20 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// A reservation would only convert that refused-and-retried outcome into a
 		// BUSY-rejected one — same net effect, more coordination state — so it
 		// is intentionally not taken.
-		restore := m.quiesceRunning(ctx, cmd.ServerID)
+		quiesced, restore := m.quiesceRunning(ctx, cmd.ServerID)
 		defer restore()
+		if !quiesced {
+			// The world could not be quiesced (RCON down, or save-off/save-all flush
+			// failed): packing it live is what produced the #907 35/35 false positives, a
+			// wasted tar+upload the API gate rejects. Refuse this PERIODIC snapshot with a
+			// distinct classification so operators can tell "could not quiesce" from "world
+			// is corrupt"; the next tick retries. The post-stop FINAL snapshot still covers
+			// a permanently-RCON-broken server (the stopped-id path needs no RCON).
+			m.logger.Warn("snapshot refused: could not quiesce running world",
+				"server_id", cmd.ServerID, "reason", "quiesce_unavailable")
+			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+				"instancemanager: snapshot refused: quiesce_unavailable (could not quiesce running world)")
+		}
 	} else {
 		// Stopped-id snapshot: the set is at rest and the API has typically already
 		// unassigned (a graceful stop snapshots after unassign, so a user start can
@@ -431,12 +481,15 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// working set is already corrupt (e.g. a region torn by a crash-during-save,
 	// #703), so we refuse the snapshot here — clear signal, no wasted tar+upload —
 	// rather than after a full transfer the API gate (#749) would reject anyway.
-	// The set is quiesced at this point: a running server is bracketed by save-off
-	// above (#694), and a stopped one is not being written. The check itself is
-	// fail-closed on detected corruption but best-effort on a fsck I/O error — an
-	// error reading the set must not wedge the snapshot, so it is logged and the
+	// The set is quiesced at this point: a running server is bracketed by save-off +
+	// save-all flush above (#694/#907), and a stopped one is not being written. For
+	// a running server the check is retried with backoff (#907) so a region write
+	// still in flight just after the flush cannot, as a transient torn read, veto a
+	// periodic snapshot; a stopped (at-rest) set is checked once, fail-closed. The
+	// check is fail-closed on detected corruption but best-effort on a fsck I/O error
+	// — an error reading the set must not wedge the snapshot, so it is logged and the
 	// transfer proceeds (the API gate remains the correctness guarantee).
-	if report, err := regionfsck.CheckWorkingSet(workingDir); err != nil {
+	if report, err := m.checkWorkingSet(ctx, cmd.ServerID, workingDir, running); err != nil {
 		m.logger.Warn("snapshot pre-pack region fsck failed; proceeding without it",
 			"server_id", cmd.ServerID, "error", err)
 	} else if !report.Healthy() {
@@ -489,40 +542,75 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
+// checkWorkingSet runs the pre-pack region fsck. For a stopped (at-rest) set it is
+// a single fail-closed scan. For a RUNNING server it retries on detected
+// corruption up to snapshotFsckAttempts times with fsckRetryDelay backoff (#907):
+// a region write still in flight just after the save-all flush can read as torn,
+// and that transient should not veto a periodic snapshot — so the latest clean
+// attempt wins, and only a corruption that persists across every attempt refuses
+// the snapshot. A fsck I/O error is returned as-is (the caller treats it as
+// best-effort) and is not retried. The ctx is honored between attempts so a
+// cancelled/timed-out snapshot stops waiting.
+func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir string, running bool) (regionfsck.Report, error) {
+	if !running {
+		return regionfsck.CheckWorkingSet(workingDir)
+	}
+	var report regionfsck.Report
+	for attempt := 1; ; attempt++ {
+		var err error
+		report, err = regionfsck.CheckWorkingSet(workingDir)
+		if err != nil || report.Healthy() || attempt >= snapshotFsckAttempts {
+			return report, err
+		}
+		m.logger.Warn("snapshot pre-pack region fsck found corruption on a running world; retrying",
+			"server_id", serverID, "attempt", attempt, "corrupt", len(report.Corrupt), "scanned", report.Scanned)
+		select {
+		case <-ctx.Done():
+			return report, nil
+		case <-time.After(m.fsckRetryDelay):
+		}
+	}
+}
+
 // quiesceRunning brackets a running-server snapshot so the world is not written
 // during the working-dir copy (#694). It opens RCON, disables auto-save
-// (save-off), and issues a non-blocking save-all to refresh the on-disk copy, then
-// returns a restore func the caller defers. The save-all does not flush — a
-// synchronous main-thread flush can trip the server watchdog (#693).
+// (save-off), and issues a blocking save-all flush to drive the world fully to
+// disk before the fsck/copy reads it, then returns (quiesced, restore). quiesced
+// is true only when the on-disk state is actually quiesced — RCON opened AND
+// save-off AND save-all flush all succeeded; the caller refuses the periodic
+// snapshot otherwise rather than packing a live world (#907). The flush, unlike a
+// plain non-blocking save-all, returns only after the asynchronous save completes,
+// so the fsck no longer races in-flight writes (the #907 torn-read false positive).
 //
-// All steps are best-effort: an open or save-off failure is logged, not
-// propagated, and leaves the server unbracketed (auto-save was never disabled, so
-// the snapshot just forfeits the torn-read guarantee for this run). The returned
-// restore re-enables auto-save with save-on only when save-off actually
-// succeeded, and always closes the RCON connection if one was opened. It runs
+// The save-on restore is still guaranteed whenever save-off succeeded: the
+// returned restore re-enables auto-save with save-on (only when save-off actually
+// succeeded) and always closes the RCON connection if one was opened. It runs
 // save-on on a context detached from ctx (carrying restoreSaveTimeout) so a
 // cancelled or timed-out request still re-enables auto-save rather than leaving
 // the server unable to persist.
-func (m *Manager) quiesceRunning(ctx context.Context, serverID string) func() {
+func (m *Manager) quiesceRunning(ctx context.Context, serverID string) (bool, func()) {
 	ctrl, err := m.openControl(ctx, serverID, m.driverFor(serverID))
 	if err != nil {
 		m.logger.Warn("snapshot quiesce: open rcon failed", "server_id", serverID, "error", err)
-		return func() {}
+		return false, func() {}
 	}
 
 	saveOff := true
+	quiesced := true
 	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
 		// Could not disable auto-save: proceed without the bracket. Do not run
 		// save-on on exit — auto-save was never turned off.
 		m.logger.Warn("snapshot save-off failed; snapshot will not be quiesced",
 			"server_id", serverID, "error", err)
 		saveOff = false
+		quiesced = false
 	}
-	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
-		m.logger.Warn("snapshot save-all failed", "server_id", serverID, "error", err)
+	if _, err := ctrl.Execute(ctx, "save-all flush"); err != nil {
+		m.logger.Warn("snapshot save-all flush failed", "server_id", serverID, "error", err)
+		quiesced = false
 	}
 
-	return func() {
+	return quiesced, func() {
 		defer func() { _ = ctrl.Close() }()
 		if !saveOff {
 			return

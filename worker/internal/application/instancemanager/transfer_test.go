@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -196,10 +197,11 @@ func TestSnapshotTriggerTransferFailureIsCoded(t *testing.T) {
 }
 
 // A running-server snapshot brackets the working-dir copy with save-off →
-// save-all → save-on (#694): save-off disables auto-save so a region file cannot
-// be captured torn mid-copy, save-all (never the blocking "save-all flush", whose
-// synchronous main-thread flush can trip the server watchdog, #693) refreshes the
-// on-disk copy, and save-on re-enables auto-save afterwards.
+// save-all flush → save-on (#694/#907): save-off disables auto-save so a region
+// file cannot be captured torn mid-copy, save-all flush blocks until the world is
+// fully on disk (a plain non-blocking save-all returns before the async save
+// completes, so the fsck would race in-flight writes — the #907 false positive),
+// and save-on re-enables auto-save afterwards.
 func TestSnapshotTriggerRunningServerBracketsCopyWithSaveOffOn(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
@@ -211,7 +213,7 @@ func TestSnapshotTriggerRunningServerBracketsCopyWithSaveOffOn(t *testing.T) {
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("SnapshotTrigger result = %+v, want success", res)
 	}
-	want := []string{"save-off", "save-all", "save-on"}
+	want := []string{"save-off", "save-all flush", "save-on"}
 	if !equalLines(ctrl.lines, want) {
 		t.Fatalf("rcon lines = %v, want %v", ctrl.lines, want)
 	}
@@ -232,7 +234,7 @@ func TestSnapshotTriggerRunningServerSaveOffBracketsTheTransfer(t *testing.T) {
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("SnapshotTrigger result = %+v, want success", res)
 	}
-	want := []string{"save-off", "save-all", "transfer", "save-on"}
+	want := []string{"save-off", "save-all flush", "transfer", "save-on"}
 	if !equalLines(seq, want) {
 		t.Fatalf("operation order = %v, want %v", seq, want)
 	}
@@ -254,7 +256,7 @@ func TestSnapshotTriggerRunningServerSaveOnRunsOnTransferError(t *testing.T) {
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
 		t.Fatalf("SnapshotTrigger = %+v, want transfer-failed", res)
 	}
-	want := []string{"save-off", "save-all", "transfer", "save-on"}
+	want := []string{"save-off", "save-all flush", "transfer", "save-on"}
 	if !equalLines(seq, want) {
 		t.Fatalf("operation order = %v, want %v (save-on must run after a failed transfer)", seq, want)
 	}
@@ -290,11 +292,12 @@ func TestSnapshotTriggerRunningServerSaveOnRunsWhenContextCancelled(t *testing.T
 	}
 }
 
-// The save-off toggle is best-effort: when it fails the snapshot proceeds without
-// the bracket (the consistency benefit is forfeited for this run) and no save-on
-// is issued — auto-save was never disabled, so re-enabling it would be wrong
-// (#694). The snapshot still succeeds (FR-DATA-5).
-func TestSnapshotTriggerRunningServerSaveOffFailureIsNonFatalAndSkipsSaveOn(t *testing.T) {
+// When save-off fails the running world is NOT quiesced, so the periodic snapshot
+// is refused fail-closed (quiesce_unavailable, #907) rather than packing the live
+// world — that unquiesced pack is exactly what produced the 35/35 torn-read false
+// positives. No upload happens, and no save-on is issued (auto-save was never
+// disabled, so re-enabling it would be wrong). The next tick retries.
+func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *testing.T) {
 	ctrl := &fakeControl{err: errors.New("rcon: read length: EOF")}
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
@@ -303,11 +306,14 @@ func TestSnapshotTriggerRunningServerSaveOffFailureIsNonFatalAndSkipsSaveOn(t *t
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	res := m.Handle(context.Background(), snapshotCmd())
-	if !res.Success {
-		t.Fatalf("SnapshotTrigger result = %+v, want success despite save-off failure", res)
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger result = %+v, want transfer-failed (quiesce_unavailable)", res)
 	}
-	if len(tr.snapshots) != 1 {
-		t.Fatalf("snapshots = %v, want one despite save-off failure", tr.snapshots)
+	if !strings.Contains(res.ErrorMessage, "quiesce_unavailable") {
+		t.Fatalf("error message = %q, want it to name quiesce_unavailable", res.ErrorMessage)
+	}
+	if len(tr.snapshots) != 0 {
+		t.Fatalf("unquiesced world must not be packed; snapshots = %v", tr.snapshots)
 	}
 	if containsLine(ctrl.lines, "save-on") {
 		t.Fatalf("rcon lines = %v, want no save-on when save-off never succeeded", ctrl.lines)
