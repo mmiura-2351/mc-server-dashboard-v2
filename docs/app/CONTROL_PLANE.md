@@ -149,7 +149,13 @@ destructive hydrate on a same-worker restart **only when the held generation is
 fresh enough** — hydrating a live, newer set would unpack the last authoritative
 snapshot over it and roll the world back, while a *stale* held set (e.g. an
 A→B→A leftover scratch B has advanced past) must still hydrate (issue #763,
-generalizing #696, see Section 5). A Worker that reports nothing held, or an
+generalizing #696, see Section 5). Before advertising a held set's generation the
+Worker structurally fsck's its region files (issue #834): a periodic running-id
+snapshot makes the generation marker durable while the live world files are never
+fsynced by the Worker, so a power loss can leave a durable gen-N marker next to a
+torn local world. A held set whose region is torn is advertised at **generation 0**
+— treated as stale, forcing the hydrate that recovers the consistent store copy
+rather than booting the torn world. A Worker that reports nothing held, or an
 older Worker that does not set the field, hydrates as before. The
 API answers `RegisterAck`: `accepted` plus the `heartbeat_interval` it expects;
 on refusal, `accepted=false` with a `rejection_reason` and the API closes the

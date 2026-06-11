@@ -78,7 +78,7 @@ func run(ctx context.Context) error {
 	// restart only when the held generation is fresh enough (issue #763): a hydrate
 	// would unpack the last authoritative snapshot over the live, newer working set
 	// and roll the world back, while a stale held set must still hydrate.
-	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir)
+	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, logger)
 	caps := session.Capabilities{
 		WorkerID:      cfg.Worker.ID,
 		WorkerVersion: version,
