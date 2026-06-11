@@ -996,6 +996,7 @@ class StopServer:
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                final=True,
             )
             if not snapshot.success:
                 _LOG.error(

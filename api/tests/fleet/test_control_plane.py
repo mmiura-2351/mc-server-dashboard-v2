@@ -41,6 +41,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ListFilesCommand,
     ReadFileCommand,
     ServerCommandCommand,
+    SnapshotCommand,
     StartServerCommand,
     WorkerNotConnectedError,
 )
@@ -794,5 +795,85 @@ async def test_disconnect_drops_already_promoted_late_snapshot() -> None:
     state.discard_pending("cmd-1")  # timeout: promoted to _late_snapshots
     state.fail_worker_pending(owner, session, WorkerNotConnectedError(owner.value))
 
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == []
+
+
+async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() -> None:
+    # Regression for the cross-window clear (issue #891 review): a PERIODIC snapshot
+    # and a stop-flow FINAL snapshot share the SnapshotCommand type, but only the
+    # final one holds the stop at (stopped, stopped, assigned). The exact 3-step
+    # interleaving must NOT let a timed-out periodic's late result clear the hold:
+    #
+    #   1. A periodic snapshot of running server S on worker W times out. Running-id
+    #      snapshots take no worker reservation, so nothing serializes what follows.
+    #   2. The user stops S; the stop flow holds the row, then dispatches the FINAL
+    #      snapshot (final=True), which also times out and HOLDS the assignment.
+    #   3. The periodic's late TRANSFER_FAILED arrives — it must clear NOTHING (only
+    #      the final snapshot is tracked); the final's own late result clears.
+    sink = _RecordingLateSnapshotSink()
+    harness = _Harness(command_timeout=0.2)
+    harness.state = ControlPlaneState(late_snapshot_sink=sink)
+    harness.control_plane = GrpcControlPlane(harness.state, timeout_seconds=0.2)
+    try:
+        stub = await harness.start()
+        call = await _registered_call(harness, stub)
+        worker = WorkerId(_WORKER)
+
+        # Step 1: a PERIODIC snapshot (not final) of S on W times out. The worker
+        # never answers, so dispatch raises and discards its future.
+        with pytest.raises(CommandTimedOutError):
+            await harness.control_plane.dispatch(
+                worker_id=worker,
+                server_id=_SERVER,
+                command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+            )
+        periodic_cmd = (await call.read()).api_command.command_id
+
+        # Step 2: the stop flow dispatches the FINAL snapshot of S on W; it too
+        # times out and HOLDS the assignment.
+        with pytest.raises(CommandTimedOutError):
+            await harness.control_plane.dispatch(
+                worker_id=worker,
+                server_id=_SERVER,
+                command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+                snapshot_is_final=True,
+            )
+        final_cmd = (await call.read()).api_command.command_id
+
+        # Step 3a: the PERIODIC command's late result arrives. It was never tracked
+        # (only the final snapshot is), so it must clear NOTHING.
+        await harness.state.resolve(periodic_cmd, worker, _failed_transfer_result())
+        assert sink.calls == []
+
+        # Step 3b: the FINAL snapshot's own late result clears the held assignment.
+        await harness.state.resolve(final_cmd, worker, _failed_transfer_result())
+        assert sink.calls == [(_SERVER, worker.value, False)]
+
+        await call.done_writing()
+    finally:
+        await harness.stop()
+
+
+async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> None:
+    # A snapshot dispatch TIMED OUT (promoted to _late_snapshots), then the worker
+    # reconnected on a NEW session WITHOUT a clean teardown of the old one (so the
+    # session-guarded fail_worker_pending never swept it). The superseding session's
+    # open_session must drop the stale promoted record (issue #891 nit): the old
+    # upload died with its ctx, so no late result will arrive to consume it.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+    session_a = 1
+    session_b = 2
+
+    state.open_session(owner, session_a)
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")  # timeout: promoted to _late_snapshots
+
+    # The reconnect supersedes session A without a clean teardown.
+    state.open_session(owner, session_b)
+
+    # A spurious later result for the old command routes nowhere — the record is gone.
     await state.resolve("cmd-1", owner, _failed_transfer_result())
     assert sink.calls == []

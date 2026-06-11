@@ -153,8 +153,19 @@ class ControlPlaneState:
         A reconnect replaces any prior queue, so the latest session owns the
         Worker's outbound stream. ``session`` is recorded as the current owner so
         :meth:`fail_worker_pending` can ignore a stale session's teardown.
+
+        Any promoted late-snapshot records from a PRIOR session are swept here
+        (issue #891): a new session for the same worker supersedes the old one, and
+        ``fail_worker_pending`` is session-guarded, so a stale session's delayed
+        teardown skips the sweep on a fast reconnect. The old session's upload died
+        with its ctx (no late result will arrive to consume the record), so dropping
+        it on the superseding session keeps the map from accreting.
         """
 
+        for command_id in [
+            cid for cid, (wid, _) in self._late_snapshots.items() if wid == worker_id
+        ]:
+            del self._late_snapshots[command_id]
         queue: asyncio.Queue[pb.ApiMessage] = asyncio.Queue()
         self._outbound[worker_id] = queue
         self._sessions[worker_id] = session
@@ -430,17 +441,25 @@ class GrpcControlPlane(ControlPlane):
         server_id: str,
         command: Command,
         timeout_override: float | None = None,
+        snapshot_is_final: bool = False,
     ) -> CommandResult:
         queue = self._state.outbound_for(worker_id)
         if queue is None:
             raise WorkerNotConnectedError(worker_id.value)
         command_id = str(uuid.uuid4())
-        # A snapshot's server is recorded with the pending future so a timeout that
-        # discards the future still lets a late TRANSFER_FAILED / SUCCESS result be
-        # matched to the held assignment (issue #891). Only snapshots are tracked:
-        # they are the sole command whose stop wedges the row at (stopped, stopped,
-        # assigned) for the held-snapshot window.
-        snapshot_server_id = server_id if isinstance(command, SnapshotCommand) else None
+        # A FINAL snapshot's server is recorded with the pending future so a timeout
+        # that discards the future still lets a late TRANSFER_FAILED / SUCCESS result
+        # be matched to the held assignment (issue #891). Only the stop-flow final
+        # snapshot is tracked: it is the sole command whose stop wedges the row at
+        # (stopped, stopped, assigned) for the held-snapshot window. Periodic and
+        # on-demand snapshots share the command type but take no worker reservation
+        # (running-id snapshots are reservation-free), so a stale late result of
+        # theirs must NOT clear a subsequent final-snapshot hold — they are untracked.
+        snapshot_server_id = (
+            server_id
+            if snapshot_is_final and isinstance(command, SnapshotCommand)
+            else None
+        )
         future = self._state.register_pending(
             command_id, worker_id, snapshot_server_id=snapshot_server_id
         )

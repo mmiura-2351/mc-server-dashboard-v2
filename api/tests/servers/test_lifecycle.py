@@ -94,6 +94,7 @@ class _OkFleetControlPlane(FleetControlPlane):
         server_id: str,
         command: FleetCommand,
         timeout_override: float | None = None,
+        snapshot_is_final: bool = False,
     ) -> CommandResult:
         return CommandResult(code=CommandResultCode.OK)
 
@@ -1274,7 +1275,12 @@ async def test_stop_holds_assignment_until_final_snapshot_settles() -> None:
 
     class _AssertsHeldDuringSnapshot(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             # At snapshot time the row is observed=stopped but STILL assigned, so a
             # racing start's require_unassigned CAS cannot re-place it.
@@ -1282,7 +1288,10 @@ async def test_stop_holds_assignment_until_final_snapshot_settles() -> None:
             self.assignment_at_snapshot = row.assigned_worker_id
             self.observed_at_snapshot = row.observed_state
             return await super().snapshot(
-                worker_id=worker_id, community_id=community_id, server_id=server_id
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+                final=final,
             )
 
     cp = _AssertsHeldDuringSnapshot()
@@ -1319,7 +1328,12 @@ async def test_stop_start_race_cannot_replace_until_final_snapshot_settles() -> 
 
     class _StartsDuringSnapshot(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             # A user start lands mid-snapshot. It must conflict (assignment still
             # held), NOT re-place on next_worker.
@@ -1332,7 +1346,10 @@ async def test_stop_start_race_cannot_replace_until_final_snapshot_settles() -> 
                     store_generation=FakeStoreGenerationReader(),
                 )(community_id=community_id, server_id=server_id)
             return await super().snapshot(
-                worker_id=worker_id, community_id=community_id, server_id=server_id
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+                final=final,
             )
 
     cp = _StartsDuringSnapshot()
@@ -1370,7 +1387,12 @@ async def test_stop_cancelled_mid_snapshot_holds_assignment() -> None:
 
     class _SnapshotCancelled(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             self.dispatched.append(("snapshot", worker_id, server_id))
             # The client disconnects: the request task is cancelled at this await.
@@ -1414,7 +1436,12 @@ async def test_stop_final_snapshot_timeout_holds_assignment() -> None:
 
     class _SnapshotTimesOut(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             self.dispatched.append(("snapshot", worker_id, server_id))
             # Mirror the adapter's wrap of a CommandTimedOutError: a
@@ -1462,7 +1489,12 @@ async def test_stop_final_snapshot_disconnect_clears_assignment() -> None:
 
     class _SnapshotDisconnects(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             self.dispatched.append(("snapshot", worker_id, server_id))
             try:
@@ -1604,7 +1636,12 @@ async def test_stop_unassigns_even_when_final_snapshot_fails() -> None:
 
     class _SnapshotFails(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             self.dispatched.append(("snapshot", worker_id, server_id))
             return CommandOutcome(
@@ -1666,7 +1703,12 @@ async def test_stop_succeeds_even_when_final_snapshot_fails() -> None:
 
     class _SnapshotFails(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             self.dispatched.append(("snapshot", worker_id, server_id))
             return CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="boom")
@@ -1704,7 +1746,12 @@ async def test_stop_final_snapshot_failure_logs_error(
 
     class _SnapshotFails(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             self.dispatched.append(("snapshot", worker_id, server_id))
             return CommandOutcome(
@@ -2670,11 +2717,19 @@ async def test_redispatch_stop_takes_final_snapshot_on_success() -> None:
 
     class _RecordsScope(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             self.snapshot_scope = (worker_id, community_id, server_id)
             return await super().snapshot(
-                worker_id=worker_id, community_id=community_id, server_id=server_id
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+                final=final,
             )
 
     cp = _RecordsScope()
@@ -2709,12 +2764,20 @@ async def test_redispatch_stop_holds_assignment_until_final_snapshot_settles() -
 
     class _AssertsHeldDuringSnapshot(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             row = uow.servers.by_id[server_id]
             self.assignment_at_snapshot = row.assigned_worker_id
             return await super().snapshot(
-                worker_id=worker_id, community_id=community_id, server_id=server_id
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+                final=final,
             )
 
     cp = _AssertsHeldDuringSnapshot()
@@ -2750,7 +2813,12 @@ async def test_redispatch_stop_final_snapshot_failure_logs_error_and_converges(
 
     class _SnapshotFails(FakeControlPlane):
         async def snapshot(
-            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
         ) -> CommandOutcome:
             self.dispatched.append(("snapshot", worker_id, server_id))
             return CommandOutcome(

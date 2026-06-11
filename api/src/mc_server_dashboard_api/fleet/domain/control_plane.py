@@ -266,6 +266,7 @@ class ControlPlane(abc.ABC):
         server_id: str,
         command: Command,
         timeout_override: float | None = None,
+        snapshot_is_final: bool = False,
     ) -> CommandResult:
         """Send ``command`` for ``server_id`` to ``worker_id`` and await the result.
 
@@ -278,4 +279,10 @@ class ControlPlane(abc.ABC):
         this one dispatch (issue #822): the hydrate phase of a start gets a longer
         budget than the general command timeout because pulling a large working set
         routinely outlasts it. ``None`` keeps the default.
+
+        ``snapshot_is_final`` marks the stop-flow final snapshot (issue #891): only
+        a final snapshot wedges the row at (stopped, stopped, assigned), so only its
+        timeout may promote a late-result record. Periodic/on-demand snapshots share
+        the command type but take no worker reservation, so a stale late result must
+        never clear a subsequent final-snapshot hold; they leave ``False``.
         """
