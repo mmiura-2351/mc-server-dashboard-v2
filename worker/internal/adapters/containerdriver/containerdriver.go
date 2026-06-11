@@ -34,6 +34,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,14 @@ var (
 	waitTransportProbeDeadline = 30 * time.Second
 )
 
+// defaultImagePullTimeout bounds a lazy base-image pull (issue #904). A pull is
+// hundreds of MB and the EngineClient has no http.Client timeout, so the create
+// path gives the pull its own generous deadline rather than the create call's
+// short budget; a slow first pull of a large tier completes within it on a
+// healthy host, and the bound only caps a wedged/never-finishing pull. A var (not
+// a const) so tests can shrink it.
+var defaultImagePullTimeout = 10 * time.Minute
+
 // defaultGameBindIP is the host interface the game port is published on when
 // Options.GameBindIP is unset: loopback, preserving the historical behavior.
 // rconBindIP is fixed: RCON is a control channel and must not be exposed.
@@ -141,6 +150,9 @@ type Options struct {
 	// deadline so a wedged daemon cannot hang worker startup (issue #338). Zero uses
 	// defaultSweepCallMargin; tests set a short value to keep the suite fast.
 	SweepCallMargin time.Duration
+	// Logger records the lazy base-image pull (image name, duration) at INFO (issue
+	// #904). Nil uses a discard logger.
+	Logger *slog.Logger
 }
 
 // Driver is the container ExecutionDriver.
@@ -159,6 +171,10 @@ type Driver struct {
 	readinessTimeout time.Duration
 	// sweepCallMargin bounds each startup-Sweep daemon call (issue #338).
 	sweepCallMargin time.Duration
+	// imagePullTimeout bounds a lazy base-image pull (issue #904).
+	imagePullTimeout time.Duration
+	// logger records the lazy base-image pull at INFO (issue #904).
+	logger *slog.Logger
 }
 
 // New builds a container Driver. docker is the Engine seam; images resolves a
@@ -189,6 +205,10 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	if sweepCallMargin <= 0 {
 		sweepCallMargin = defaultSweepCallMargin
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &Driver{
 		docker:           docker,
 		images:           images,
@@ -201,6 +221,8 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		conflictDeadline: conflictDeadline,
 		readinessTimeout: readinessTimeout,
 		sweepCallMargin:  sweepCallMargin,
+		imagePullTimeout: defaultImagePullTimeout,
+		logger:           logger,
 	}
 }
 
@@ -387,16 +409,69 @@ func classifyStartError(err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "port is already allocated"):
+	if strings.Contains(err.Error(), "port is already allocated") {
 		return fmt.Errorf("%w: %v", execution.ErrPortConflict, err)
-	case strings.Contains(msg, "No such image"),
-		strings.Contains(msg, "pull access denied"):
+	}
+	if isImageMissing(err) {
 		return fmt.Errorf("%w: %v", execution.ErrImageMissing, err)
-	default:
+	}
+	return err
+}
+
+// isImageMissing reports whether a create error is the daemon saying the base
+// image is not present (or cannot be pulled). The detection is substring matching
+// on the free-text daemon message (see classifyStartError's FRAGILITY note); the
+// create path uses it to decide whether to attempt a lazy pull (issue #904) and
+// classifyStartError uses it to sanitize the failure.
+func isImageMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "No such image") || strings.Contains(msg, "pull access denied")
+}
+
+// createPullingOnMiss creates the container, and on an image-missing failure
+// pulls the base image once and retries the create (issue #904). The container
+// driver historically never pulled, so a fresh host's first start failed with
+// image_missing even though DEPLOYMENT.md promised the worker would pull; this
+// lazy pull-on-miss makes that promise true without the disk/bandwidth cost of
+// eager startup pulls. A pull failure (offline host, denied/unknown image) is
+// folded back into the original image-missing create error so the friendly
+// ErrImageMissing classification (issue #225) is preserved and the operator never
+// sees a raw 404 — the pull error rides along for diagnostics. The retry runs
+// Create directly (not back through this helper) so a second image-missing
+// genuinely fails rather than looping.
+func (d *Driver) createPullingOnMiss(ctx context.Context, create CreateSpec) (string, error) {
+	id, err := d.docker.Create(ctx, create)
+	if !isImageMissing(err) {
+		return id, err
+	}
+	if pullErr := d.pullImage(ctx, create.Image); pullErr != nil {
+		return "", fmt.Errorf("%w (pull failed: %v)", err, pullErr)
+	}
+	return d.docker.Create(ctx, create)
+}
+
+// pullImage pulls the base image under its own generous deadline (issue #904),
+// logging the image and duration at INFO. The pull is hundreds of MB and the
+// EngineClient has no http.Client timeout, so the create call's short context
+// would cut it off; it runs on a detached context bounded by imagePullTimeout
+// instead, so a slow first pull of a large tier is not aborted while a wedged
+// pull is still capped. The pull persists on the host regardless of the caller's
+// outcome, so even if a first pull outlasts the caller's start budget (the retry
+// Create then fails on the cancelled ctx), the image is now cached and the
+// reconciler's next start converges.
+func (d *Driver) pullImage(ctx context.Context, image string) error {
+	pullCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.imagePullTimeout)
+	defer cancel()
+	d.logger.Info("pulling base image", "image", image)
+	start := time.Now()
+	if err := d.docker.ImagePull(pullCtx, image); err != nil {
 		return err
 	}
+	d.logger.Info("pulled base image", "image", image, "duration", time.Since(start))
+	return nil
 }
 
 // createContainer creates the container, healing the create name conflict a
@@ -424,7 +499,7 @@ func classifyStartError(err error) error {
 // decline reason, so a field diagnosis does not require code reading (keeping
 // #231's observability).
 func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string, error) {
-	id, err := d.docker.Create(ctx, create)
+	id, err := d.createPullingOnMiss(ctx, create)
 	if !errors.Is(err, errNameConflict) {
 		return id, err
 	}

@@ -147,7 +147,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 				docker,
 				containerdriver.NewImageSelector(cfg.Driver.Container.Images),
 				openContainerControl,
-				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second, GameBindIP: cfg.Driver.Container.GameBindIP, Network: cfg.Driver.Container.Network},
+				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second, GameBindIP: cfg.Driver.Container.GameBindIP, Network: cfg.Driver.Container.Network, Logger: logger},
 			)
 			containerRconHost = cd.RconHost
 			// The sweep force-removes every container labelled for this Worker,

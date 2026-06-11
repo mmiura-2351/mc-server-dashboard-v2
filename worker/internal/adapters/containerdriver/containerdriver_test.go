@@ -26,6 +26,13 @@ type fakeDocker struct {
 	// container (issue #226). createCalls counts every Create call.
 	conflictsLeft int
 	createCalls   int
+	// createImageMissesLeft makes the next N Create calls fail with the daemon's
+	// "No such image" prose before a success, modelling a host that lacks the base
+	// image until the driver pulls it (issue #904). imagePulls records the images
+	// passed to ImagePull (in order); imagePullErr forces a pull failure.
+	createImageMissesLeft int
+	imagePulls            []string
+	imagePullErr          error
 
 	// inspectInfo / inspectErr are returned by Inspect when resolving a conflict.
 	// inspectSteps, when non-empty, scripts the wait-for-name-free loop: each
@@ -136,12 +143,24 @@ func (f *fakeDocker) Create(_ context.Context, spec CreateSpec) (string, error) 
 	if f.createErr != nil {
 		return "", f.createErr
 	}
+	if f.createImageMissesLeft > 0 {
+		f.createImageMissesLeft--
+		return "", errors.New(
+			"containerdriver: POST /containers/create: status 404: No such image: " + spec.Image)
+	}
 	if f.conflictsLeft > 0 {
 		f.conflictsLeft--
 		return "", errNameConflict
 	}
 	f.createSpec = spec
 	return "container-1", nil
+}
+
+func (f *fakeDocker) ImagePull(_ context.Context, image string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.imagePulls = append(f.imagePulls, image)
+	return f.imagePullErr
 }
 
 func (f *fakeDocker) Inspect(ctx context.Context, _ string) (ContainerInfo, error) {
@@ -1557,6 +1576,79 @@ func TestStartPullAccessDeniedClassifiedImageMissing(t *testing.T) {
 	_, err := d.Start(context.Background(), spec())
 	if !errors.Is(err, execution.ErrImageMissing) {
 		t.Fatalf("Start error = %v, want wrapped ErrImageMissing", err)
+	}
+}
+
+// On a fresh host the base image is absent, so the first create fails
+// image-missing; the driver pulls the configured image and retries the create
+// once, and the start then succeeds (issue #904). The pull targets the exact
+// image the create asked for.
+func TestStartImageMissingPullsAndRetries(t *testing.T) {
+	docker := newFakeDocker()
+	// The first create misses the image; the pull makes the retry succeed.
+	docker.createImageMissesLeft = 1
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	docker.mu.Lock()
+	pulls := append([]string(nil), docker.imagePulls...)
+	creates := docker.createCalls
+	docker.mu.Unlock()
+	if len(pulls) != 1 || pulls[0] != "eclipse-temurin:21-jre" {
+		t.Fatalf("imagePulls = %v, want one pull of eclipse-temurin:21-jre", pulls)
+	}
+	if creates != 2 {
+		t.Fatalf("createCalls = %d, want 2 (initial miss + retry after pull)", creates)
+	}
+}
+
+// When the pull itself fails (an offline host, a denied or unknown image) the
+// driver keeps the friendly ErrImageMissing classification so the operator sees
+// the sanitized image_missing code rather than a raw 404; the pull error rides
+// along for diagnostics (issue #904).
+func TestStartImageMissingPullFailsPreservesClassification(t *testing.T) {
+	docker := newFakeDocker()
+	docker.createImageMissesLeft = 1
+	docker.imagePullErr = errors.New("Get \"https://registry-1.docker.io/v2/\": dial tcp: lookup failed")
+	d := newTestDriver(docker, nil, nil)
+
+	_, err := d.Start(context.Background(), spec())
+	if !errors.Is(err, execution.ErrImageMissing) {
+		t.Fatalf("Start error = %v, want wrapped ErrImageMissing after a failed pull", err)
+	}
+	docker.mu.Lock()
+	pulls := len(docker.imagePulls)
+	creates := docker.createCalls
+	docker.mu.Unlock()
+	if pulls != 1 {
+		t.Fatalf("imagePulls = %d, want exactly one pull attempt", pulls)
+	}
+	if creates != 1 {
+		t.Fatalf("createCalls = %d, want 1 (no retry after the pull failed)", creates)
+	}
+}
+
+// A non-image-missing create error (e.g. a daemon-internal failure) must NOT
+// trigger a pull: the lazy pull is scoped to the image-missing class only (issue
+// #904).
+func TestStartNonImageMissingCreateErrorDoesNotPull(t *testing.T) {
+	docker := newFakeDocker()
+	docker.createErr = errors.New("containerdriver: POST /containers/create: status 500: boom")
+	d := newTestDriver(docker, nil, nil)
+
+	if _, err := d.Start(context.Background(), spec()); err == nil {
+		t.Fatal("expected Start to fail on a non-image-missing create error")
+	}
+	docker.mu.Lock()
+	pulls := len(docker.imagePulls)
+	docker.mu.Unlock()
+	if pulls != 0 {
+		t.Fatalf("imagePulls = %d, want 0 (no pull for a non-image-missing error)", pulls)
 	}
 }
 
