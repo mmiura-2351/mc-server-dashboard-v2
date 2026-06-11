@@ -390,6 +390,9 @@ async def test_list_backfills_null_size_when_archive_exists() -> None:
     persisted = await uow.backups.get_by_id(backup.id)
     assert persisted is not None
     assert persisted.size_bytes == 42
+    # The backfill committed the write inside the open uow (the fake makes
+    # update_size visible regardless, so only the commit count proves the durability).
+    assert uow.commits == 1
 
 
 async def test_list_leaves_null_size_when_archive_missing() -> None:
@@ -412,6 +415,8 @@ async def test_list_leaves_null_size_when_archive_missing() -> None:
     persisted = await uow.backups.get_by_id(backup.id)
     assert persisted is not None
     assert persisted.size_bytes is None
+    # Nothing was backfilled, so the read did not commit.
+    assert uow.commits == 0
 
 
 async def test_list_does_not_recall_store_for_backfilled_rows() -> None:
@@ -453,6 +458,69 @@ async def test_server_statistics_backfills_null_size_into_total() -> None:
     # longer counted as unknown.
     assert stats.total_bytes == 15
     assert stats.unknown_size_count == 0
+
+
+async def test_list_survives_store_failure_and_leaves_row_null(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A non-404 store probe failure (object-store outage, connection error, fs
+    # OSError) must not fail the listing (these were pure DB reads before #661):
+    # the row stays NULL, is excluded from the total, and the failure is WARN
+    # logged so the degraded backfill is diagnosable.
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    backup = _seed_null_size_row(
+        backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 9
+    )
+    archive.size_error = RuntimeError("object store unavailable")
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    with caplog.at_level(logging.WARNING):
+        listed = await ListBackups(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+
+    # The listing succeeded, the row stays unknown, and nothing was committed.
+    assert listed[0].size_bytes is None
+    persisted = await uow.backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.size_bytes is None
+    assert uow.commits == 0
+
+    record = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    message = record.getMessage()
+    assert str(backup.id.value) in message
+    assert "object store unavailable" in message
+
+
+async def test_server_statistics_survives_store_failure() -> None:
+    # The statistics endpoint shares the same best-effort backfill: a store
+    # failure on a legacy NULL row keeps the listing alive, the failed row stays
+    # unknown and out of the total, while a sized row is still aggregated.
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    _seed_backup(
+        backups, archive, server.id, storage_ref="a", size_bytes=10, created_at=_NOW
+    )
+    _seed_null_size_row(
+        backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 5
+    )
+    archive.size_error = RuntimeError("object store unavailable")
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    stats = await ServerBackupStatistics(uow=uow, backup_store=archive)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+
+    assert stats.total_bytes == 10
+    assert stats.unknown_size_count == 1
+    assert uow.commits == 0
 
 
 async def test_restore_requires_stopped_server() -> None:

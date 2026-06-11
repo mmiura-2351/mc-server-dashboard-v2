@@ -856,6 +856,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # lazy size backfill (#661) only calls per NULL row and not again once
         # the row's size is persisted.
         self.size_calls: list[str] = []
+        # When set, ``size`` raises this instead of returning a size, modelling a
+        # non-404 store failure (object-store ClientError, connection error, fs
+        # OSError) so a test can assert the backfill stays best-effort (#661).
+        self.size_error: Exception | None = None
         self._counter = 0
 
     async def create_from_current(
@@ -942,6 +946,8 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> int:
         self.size_calls.append(storage_ref)
+        if self.size_error is not None:
+            raise self.size_error
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         return len(self.bytes_by_ref[storage_ref])

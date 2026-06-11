@@ -37,6 +37,7 @@ retry.
 from __future__ import annotations
 
 import io
+import logging
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
@@ -87,6 +88,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
     ServerId,
 )
+
+_LOG = logging.getLogger(__name__)
 
 # The RCON line that flushes the live world to disk before a running-server
 # snapshot, so the archived working set is consistent (Section 6.9, FR-BAK-2).
@@ -527,15 +530,18 @@ async def _backfill_null_sizes(
     """Compute + persist ``size_bytes`` for legacy NULL rows whose archive exists.
 
     The lazy backfill on read (issue #661). Only NULL-size rows trigger a store
-    call, and the persisted value makes it one-time per row. Best-effort: if the
-    archive is gone (``BackupNotFoundError``), the row stays NULL — an honest
-    "unknown" rather than a failed listing. Runs inside the caller's open unit of
-    work; the returned rows carry any computed size so the listing/total reflect
-    it immediately. Returns ``rows`` unchanged when nothing needed backfilling.
+    call, and the persisted value makes it one-time per row. Best-effort, and the
+    listing must never fail on a storage probe: if the archive is gone
+    (``BackupNotFoundError``, the quiet expected case) or the store probe fails
+    for any other reason — a non-404 object-store error, a connection failure, an
+    fs ``OSError`` — the row is left NULL (an honest "unknown") and the remaining
+    rows are still backfilled. Unexpected failures are logged WARN so an operator
+    can see a degraded backfill during a storage outage. Runs inside the caller's
+    open unit of work; the returned ``rows`` carry any computed size so the
+    listing/total reflect it immediately.
     """
 
     changed = False
-    backfilled: list[Backup] = []
     for row in rows:
         if row.size_bytes is None:
             try:
@@ -545,15 +551,20 @@ async def _backfill_null_sizes(
                     storage_ref=row.storage_ref,
                 )
             except BackupNotFoundError:
-                backfilled.append(row)
+                continue
+            except Exception as exc:  # noqa: BLE001 - best-effort storage probe
+                _LOG.warning(
+                    "backfill of backup %s size failed; leaving it unknown: %r",
+                    row.id.value,
+                    exc,
+                )
                 continue
             await uow.backups.update_size(row.id, size_bytes)
             row.size_bytes = size_bytes
             changed = True
-        backfilled.append(row)
     if changed:
         await uow.commit()
-    return backfilled
+    return rows
 
 
 def _aggregate(rows: list[Backup]) -> BackupStatistics:
