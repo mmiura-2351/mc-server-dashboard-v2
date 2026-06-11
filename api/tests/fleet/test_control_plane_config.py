@@ -116,3 +116,17 @@ def test_create_app_does_not_warn_when_grace_above_floor(
     with caplog.at_level("WARNING"):
         create_app()
     assert not any("grace_seconds" in r.message for r in caplog.records)
+
+
+def test_stock_defaults_do_not_warn_reconciler_grace_floor(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The PR's central claim: stock config (grace=660, hydrate=600, command=30)
+    # satisfies the floor (660 > 600 + 30), so _warn_reconciler_grace_floor
+    # must not fire. Catch a future default regression without needing env overrides.
+    monkeypatch.delenv("MCD_API_RECONCILER__GRACE_SECONDS", raising=False)
+    monkeypatch.delenv("MCD_API_CONTROL__HYDRATE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("MCD_API_CONTROL__COMMAND_TIMEOUT_SECONDS", raising=False)
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert not any("grace_seconds" in r.message for r in caplog.records)

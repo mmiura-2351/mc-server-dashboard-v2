@@ -178,9 +178,10 @@ hydrate-then-start, so that round-trip is bounded by the hydrate budget plus the
 start command deadline. Below the floor, a slow start crashed/timed-out mid-flight
 can still be converging on its assigned Worker when the reconciler's orphan path
 re-places it elsewhere and starts a **second** live instance. `create_app` logs a
-`WARN` (not a hard failure) when the floor is violated. The defaults
-(`120 ≤ 600 + 30`) trip the warning, so raise `grace_seconds` (or lower the
-timeouts) when running the reconciler with a large hydrate budget.
+`WARN` (not a hard failure) when the floor is violated. The stock default
+(`grace_seconds=660`) already exceeds the stock floor (600 + 30), so no warning
+fires out of the box; lower `grace_seconds` (or raise the timeouts) only when
+adjusting the reconciler for non-default budgets.
 
 > **Upgrade impact (existing dev setups).** This is a behavior change: a dev
 > process with `control.enabled=true` that previously bound plaintext now fails

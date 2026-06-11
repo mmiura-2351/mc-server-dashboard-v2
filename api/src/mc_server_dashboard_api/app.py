@@ -288,10 +288,9 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
     can still be converging on the assigned Worker when the reconciler's orphan path
     re-places it elsewhere and starts a second live instance. This is a warning, not
     a hard failure, because the window only opens on a crash/timeout mid-start and
-    operators may knowingly accept it; with the generous default hydrate budget the
-    The stock ``grace_seconds=660`` exceeds the stock floor (600 + 30), so no
-    warning fires by default. Operators who lower ``grace_seconds`` below the floor
-    are warned.
+    operators may knowingly accept it. The stock ``grace_seconds=660`` exceeds the
+    stock floor (600 + 30), so no warning fires by default. Operators who lower
+    ``grace_seconds`` below the floor are warned.
     """
 
     floor = (
