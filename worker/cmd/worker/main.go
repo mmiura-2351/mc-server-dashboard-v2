@@ -73,11 +73,25 @@ func run(ctx context.Context) error {
 	// (issue #787): nothing else GCs them, and each leaks a world-sized file. Run
 	// before the held-server scan, which only walks directories and never sees them.
 	datatransfer.SweepSnapshotSpools(cfg.Worker.ScratchDir)
+	// Build the instance manager first: buildInstanceManager runs the container
+	// orphan sweep (cd.Sweep), which force-removes every container this Worker
+	// previously started. Orphaned containers keep writing to their bind-mounted
+	// scratch dirs, so the fsck inside ScanHeldServers must not run until the sweep
+	// has quiesced all live writers. ScanHeldServers is called below, after the
+	// manager is fully initialised. caps is not needed until NewRunner.
+	manager, err := buildInstanceManager(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
 	// Advertise the working sets already on the persistent scratch, each tagged
 	// with its generation, so the API skips the destructive hydrate on a same-worker
 	// restart only when the held generation is fresh enough (issue #763): a hydrate
 	// would unpack the last authoritative snapshot over the live, newer working set
 	// and roll the world back, while a stale held set must still hydrate.
+	// Invariant: the orphan sweep inside buildInstanceManager must complete before
+	// this call; ScanHeldServers fscks region files and regionfsck requires a
+	// quiesced working set — scanning a live world races the server's writes and
+	// can false-positive a healthy region as corrupt (issue #834).
 	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, logger)
 	caps := session.Capabilities{
 		WorkerID:      cfg.Worker.ID,
@@ -85,10 +99,6 @@ func run(ctx context.Context) error {
 		Drivers:       cfg.Worker.Drivers,
 		MaxServers:    cfg.Worker.MaxServers,
 		HeldServers:   heldServers,
-	}
-	manager, err := buildInstanceManager(ctx, cfg, logger)
-	if err != nil {
-		return err
 	}
 	manager.WithMetrics(sysClock, time.Duration(cfg.Worker.MetricsIntervalSeconds)*time.Second)
 	transferClient, err := buildTransferClient(cfg.API)

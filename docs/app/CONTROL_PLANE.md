@@ -155,7 +155,9 @@ snapshot makes the generation marker durable while the live world files are neve
 fsynced by the Worker, so a power loss can leave a durable gen-N marker next to a
 torn local world. A held set whose region is torn is advertised at **generation 0**
 — treated as stale, forcing the hydrate that recovers the consistent store copy
-rather than booting the torn world. A Worker that reports nothing held, or an
+rather than booting the torn world. The fsck requires a quiesced working set
+(regionfsck's safety contract), so the Worker's startup sequence runs the
+container orphan sweep first to stop any live writers before scanning. A Worker that reports nothing held, or an
 older Worker that does not set the field, hydrates as before. The
 API answers `RegisterAck`: `accepted` plus the `heartbeat_interval` it expects;
 on refusal, `accepted=false` with a `rejection_reason` and the API closes the
