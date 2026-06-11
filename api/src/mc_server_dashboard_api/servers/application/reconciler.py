@@ -68,12 +68,26 @@ still does not grow without bound.
 Loud structured logs accompany every action and every failure so an operator can
 see the reconciler working (NFR-OBS-1). One bad action is logged and left for a
 later tick; it never aborts the rest of the tick.
+
+Per-server actions are dispatched concurrently with a small cap (issue #871).
+Processing servers serially head-of-line blocked the whole fleet: a single
+legitimate big-world re-hydrate redispatch can hold the lifecycle path for up to
+the hydrate budget (~600s, #822/#868), and a stop-side final snapshot for as long
+again (#869), delaying every other server's convergence by that whole window.
+Each action therefore runs on its OWN unit of work (a fresh use case from a
+factory) — required for correctness, because the real ``UnitOfWork`` binds a
+single mutable session that two concurrent actions would corrupt, and a bonus for
+failure isolation: one action's rolled-back transaction can no longer poison
+another's. The fan-out is bounded by a semaphore so the reconciler cannot stampede
+the DB pool or the Worker fleet.
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.application.lifecycle import (
@@ -103,6 +117,15 @@ _NOT_RUNNING = (
     ObservedState.UNKNOWN,
 )
 
+# Cap on how many per-server actions dispatch concurrently in one tick (#871).
+# Small and constant: enough to stop one slow redispatch (a ~600s hydrate or a
+# stop-side final snapshot) head-of-line blocking the rest of the fleet, but low
+# enough that the reconciler never stampedes the DB connection pool or floods the
+# Worker fleet with simultaneous hydrate/snapshot work. Not configurable — there
+# is no operational case for tuning a background self-heal's burst width, and a
+# knob here would just be one more thing to misset.
+_MAX_CONCURRENT_ACTIONS = 4
+
 
 @dataclass
 class _Backoff:
@@ -119,8 +142,8 @@ class RunReconcilerTick:
     """
 
     uow: UnitOfWork
-    start_server: StartServer
-    stop_server: StopServer
+    make_start_server: Callable[[], StartServer]
+    make_stop_server: Callable[[], StopServer]
     control_plane: ControlPlane
     clock: Clock
     grace_seconds: int
@@ -133,8 +156,23 @@ class RunReconcilerTick:
         async with self.uow:
             candidates = await self.uow.servers.list_reconcilable()
         self._expire_stale(now)
-        for server in candidates:
-            await self._consider(server, now)
+        # Dispatch the per-server actions concurrently, capped (#871), so one slow
+        # redispatch no longer head-of-line blocks the rest of the fleet. Each
+        # candidate is distinct here (one row per server in list_reconcilable), so
+        # concurrent actions never touch the same server; the only shared state is
+        # the in-memory ``_attempts`` map, mutated only between awaits on this one
+        # event loop, so a plain dict needs no lock. return_exceptions is moot —
+        # ``_consider``/``_run`` already swallow every action error to keep the
+        # tick alive — but is set so an unforeseen escape cannot cancel the siblings.
+        semaphore = asyncio.Semaphore(_MAX_CONCURRENT_ACTIONS)
+
+        async def _bounded(server: Server) -> None:
+            async with semaphore:
+                await self._consider(server, now)
+
+        await asyncio.gather(
+            *(_bounded(server) for server in candidates), return_exceptions=True
+        )
 
     def _expire_stale(self, now: dt.datetime) -> None:
         # Time-based expiry so the map does not grow without bound, WITHOUT
@@ -255,23 +293,29 @@ class RunReconcilerTick:
         )
 
     async def _dispatch(self, server: Server, action: str) -> Server:
+        # Build a FRESH use case per action so each runs on its own unit of work
+        # (#871). The real UnitOfWork binds a single mutable session, so two
+        # concurrent actions sharing one use case would corrupt each other's
+        # session; a per-action UoW also isolates failures (one rolled-back
+        # transaction cannot poison another's).
+        #
         # Return the lifecycle's freshly-loaded entity so _run reads the post-dispatch
         # observed_state (e.g. running after an INVALID_STATE convergence), not the
         # stale list_reconcilable snapshot.
         if action == "place_and_start":
-            return await self.start_server.place_and_start(
+            return await self.make_start_server().place_and_start(
                 community_id=server.community_id, server_id=server.id
             )
         elif action == "redispatch_start":
-            return await self.start_server.redispatch_start(
+            return await self.make_start_server().redispatch_start(
                 community_id=server.community_id, server_id=server.id
             )
         elif action == "clear_stale_assignment":
-            return await self.stop_server.clear_stale_assignment(
+            return await self.make_stop_server().clear_stale_assignment(
                 community_id=server.community_id, server_id=server.id
             )
         else:  # redispatch_stop
-            return await self.stop_server.redispatch_stop(
+            return await self.make_stop_server().redispatch_stop(
                 community_id=server.community_id, server_id=server.id
             )
 

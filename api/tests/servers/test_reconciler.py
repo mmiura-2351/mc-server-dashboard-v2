@@ -10,6 +10,7 @@ reconnect rebuild owns it).
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import uuid
@@ -41,6 +42,7 @@ from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
     FakeJarProvisioner,
+    FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
 )
@@ -84,14 +86,14 @@ def _reconciler(
 ) -> RunReconcilerTick:
     return RunReconcilerTick(
         uow=uow,
-        start_server=StartServer(
+        make_start_server=lambda: StartServer(
             uow=uow,
             control_plane=cp,
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
             store_generation=FakeStoreGenerationReader(),
         ),
-        stop_server=StopServer(uow=uow, control_plane=cp, clock=clock),
+        make_stop_server=lambda: StopServer(uow=uow, control_plane=cp, clock=clock),
         control_plane=cp,
         clock=clock,
         grace_seconds=_GRACE,
@@ -642,3 +644,220 @@ async def test_invalid_state_convergence_from_crashed_does_not_back_off(
     assert server.id not in reconciler._attempts
     # No spurious crash-looping warning.
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+# --- concurrent dispatch (#871) --------------------------------------------
+
+
+class _GatedControlPlane(FakeControlPlane):
+    """Control plane whose first dispatch per server blocks on a release event.
+
+    A test sets up N servers, ticks, and waits until every server's first
+    dispatch has STARTED (``started``) before releasing them (``release``). If the
+    tick processed servers serially, only one dispatch could be in flight at a
+    time and ``started`` would never reach N — the wait would time out. Reaching N
+    in-flight dispatches is the proof the actions ran concurrently.
+    """
+
+    def __init__(self, *, expected: int) -> None:
+        super().__init__()
+        self._release = asyncio.Event()
+        self._in_flight = 0
+        self._all_started = asyncio.Event()
+        self._expected = expected
+
+    async def _record(
+        self, kind: str, worker_id: WorkerId, server_id: ServerId
+    ) -> CommandOutcome:
+        self._in_flight += 1
+        if self._in_flight >= self._expected:
+            self._all_started.set()
+        await self._release.wait()
+        return await super()._record(kind, worker_id, server_id)
+
+    async def wait_all_started(self) -> None:
+        await asyncio.wait_for(self._all_started.wait(), timeout=2.0)
+
+    def release(self) -> None:
+        self._release.set()
+
+
+def _concurrent_reconciler(
+    repo: FakeServerRepository, cp: FakeControlPlane, clock: FakeClock
+) -> RunReconcilerTick:
+    # Production gives every action its OWN UnitOfWork (#871); mirror that here by
+    # minting a fresh FakeUnitOfWork over the SHARED repository per factory call,
+    # the way each production UoW shares the one database.
+    def fresh_uow() -> FakeUnitOfWork:
+        return FakeUnitOfWork(servers=repo)
+
+    return RunReconcilerTick(
+        uow=FakeUnitOfWork(servers=repo),
+        make_start_server=lambda: StartServer(
+            uow=fresh_uow(),
+            control_plane=cp,
+            clock=clock,
+            jar_provisioner=FakeJarProvisioner(),
+            store_generation=FakeStoreGenerationReader(),
+        ),
+        make_stop_server=lambda: StopServer(
+            uow=fresh_uow(), control_plane=cp, clock=clock
+        ),
+        control_plane=cp,
+        clock=clock,
+        grace_seconds=_GRACE,
+        backoff_base_seconds=30,
+        backoff_max_seconds=3600,
+    )
+
+
+async def test_slow_actions_for_different_servers_run_concurrently() -> None:
+    # Two servers each owe a redispatch_stop; the control plane blocks every
+    # dispatch until BOTH have started. A serial tick could only ever have one
+    # dispatch in flight, so wait_all_started would time out. Reaching two
+    # in-flight dispatches proves the per-server actions ran concurrently (#871).
+    repo = FakeServerRepository()
+    for _ in range(2):
+        repo.seed(
+            _server(
+                desired=DesiredState.STOPPED,
+                observed=ObservedState.RUNNING,
+                worker=_WORKER,
+            )
+        )
+    cp = _GatedControlPlane(expected=2)
+    clock = FakeClock(_NOW)
+    reconciler = _concurrent_reconciler(repo, cp, clock)
+
+    tick = asyncio.ensure_future(reconciler.tick())
+    await cp.wait_all_started()  # both dispatches in flight at once -> concurrent
+    cp.release()
+    await asyncio.wait_for(tick, timeout=2.0)
+
+    # Each server completed its stop (+ post-stop final snapshot, #846).
+    assert sorted(k for k, _, _ in cp.dispatched) == [
+        "snapshot",
+        "snapshot",
+        "stop",
+        "stop",
+    ]
+
+
+async def test_concurrency_is_capped() -> None:
+    # With the cap at 4, a fifth simultaneous action must wait for a slot: only 4
+    # dispatches are in flight while the gate is held. Five servers, expected=5
+    # would deadlock-then-time-out at the gate, proving the cap holds.
+    repo = FakeServerRepository()
+    for _ in range(5):
+        repo.seed(
+            _server(
+                desired=DesiredState.STOPPED,
+                observed=ObservedState.RUNNING,
+                worker=_WORKER,
+            )
+        )
+    cp = _GatedControlPlane(expected=5)
+    clock = FakeClock(_NOW)
+    reconciler = _concurrent_reconciler(repo, cp, clock)
+
+    tick = asyncio.ensure_future(reconciler.tick())
+    with pytest.raises(asyncio.TimeoutError):
+        await cp.wait_all_started()  # never reaches 5 in flight: capped at 4
+    assert cp._in_flight == 4
+    cp.release()
+    await asyncio.wait_for(tick, timeout=2.0)
+
+
+async def test_failure_in_one_action_does_not_poison_others() -> None:
+    # One server's start use case is wired with a UoW that raises mid-action; the
+    # other server's action uses an independent, healthy UoW. The failure must be
+    # contained: the healthy server converges and clears its backoff, the failing
+    # server backs off — neither leaks into the other (#871 failure isolation).
+    repo = FakeServerRepository()
+    healthy = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+    )
+    poisoned = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+    )
+    repo.seed(healthy)
+    repo.seed(poisoned)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+
+    class _BoomUnitOfWork(FakeUnitOfWork):
+        async def __aenter__(self) -> "_BoomUnitOfWork":
+            raise RuntimeError("transaction poisoned")
+
+    def make_start() -> StartServer:
+        # The first factory call (poisoned server, dispatched first) gets the
+        # exploding UoW; every later call gets a healthy one.
+        uow = (
+            _BoomUnitOfWork(servers=repo) if not made else FakeUnitOfWork(servers=repo)
+        )
+        made.append(True)
+        return StartServer(
+            uow=uow,
+            control_plane=cp,
+            clock=clock,
+            jar_provisioner=FakeJarProvisioner(),
+            store_generation=FakeStoreGenerationReader(),
+        )
+
+    made: list[bool] = []
+    reconciler = RunReconcilerTick(
+        uow=FakeUnitOfWork(servers=repo),
+        make_start_server=make_start,
+        make_stop_server=lambda: StopServer(
+            uow=FakeUnitOfWork(servers=repo), control_plane=cp, clock=clock
+        ),
+        control_plane=cp,
+        clock=clock,
+        grace_seconds=_GRACE,
+        backoff_base_seconds=30,
+        backoff_max_seconds=3600,
+    )
+
+    await reconciler.tick()
+
+    # Exactly one server backed off (the poisoned one); the other did not.
+    assert len(reconciler._attempts) == 1
+    backed_off = next(iter(reconciler._attempts))
+    healed = healthy.id if backed_off == poisoned.id else poisoned.id
+    assert healed not in reconciler._attempts
+    # The healthy server actually converged (its start was dispatched).
+    assert any(sid == healed for _, _, sid in cp.dispatched)
+
+
+async def test_backoff_remains_per_server_under_concurrency() -> None:
+    # Two servers fail their actions in the same concurrent tick; each must get its
+    # OWN backoff entry at failures==1 — the in-memory map stays per-server correct
+    # despite the actions interleaving at awaits (#871).
+    repo = FakeServerRepository()
+    a = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+    )
+    b = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+    )
+    repo.seed(a)
+    repo.seed(b)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _concurrent_reconciler(repo, cp, clock)
+
+    await reconciler.tick()
+
+    assert set(reconciler._attempts) == {a.id, b.id}
+    assert reconciler._attempts[a.id].failures == 1
+    assert reconciler._attempts[b.id].failures == 1
