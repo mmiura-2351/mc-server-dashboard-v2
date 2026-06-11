@@ -95,8 +95,18 @@ def test_non_4096_aligned_is_flagged(tmp_path: Path) -> None:
     assert check_region_file(path) is ReasonCode.NOT_4096_ALIGNED
 
 
-def test_zero_size_region_is_flagged(tmp_path: Path) -> None:
+def test_zero_size_region_is_clean(tmp_path: Path) -> None:
+    # Minecraft legitimately writes 0-byte region containers (e.g. fresh poi
+    # regions with no chunks yet); an empty file is structurally sound, not a
+    # torn save (issue #905).
     path = _write(tmp_path / "r.mca", b"")
+    assert check_region_file(path) is None
+
+
+def test_short_non_zero_region_is_flagged(tmp_path: Path) -> None:
+    # A non-zero file below the two header sectors is a torn header, not an empty
+    # region (issue #905).
+    path = _write(tmp_path / "r.mca", bytes(100))
     assert check_region_file(path) is ReasonCode.NOT_4096_ALIGNED
 
 
@@ -143,6 +153,21 @@ def test_walker_on_clean_working_set_is_healthy(tmp_path: Path) -> None:
     _write(tmp_path / "region" / "r.0.0.mca", _build_region())
     _write(tmp_path / "entities" / "r.0.0.mca", _build_region())
     _write(tmp_path / "poi" / "r.0.0.mca", bytes(2 * _SECTOR))
+
+    report = check_working_set(tmp_path)
+
+    assert report.scanned == 3
+    assert report.corrupt == []
+    assert report.healthy is True
+
+
+def test_walker_counts_zero_byte_region_as_scanned_healthy(tmp_path: Path) -> None:
+    # The production reproduction (issue #905): a fully quiesced world whose only
+    # "suspect" files are 0-byte poi regions must scan clean so its stop snapshot
+    # is not refused.
+    _write(tmp_path / "region" / "r.0.0.mca", _build_region())
+    _write(tmp_path / "poi" / "r.-1.-1.mca", b"")
+    _write(tmp_path / "poi" / "r.0.-1.mca", b"")
 
     report = check_working_set(tmp_path)
 
@@ -209,6 +234,11 @@ def test_walker_finds_mca_in_dimensions_subtree(tmp_path: Path) -> None:
 
 def test_check_region_bytes_healthy_returns_none() -> None:
     assert check_region_bytes("r.0.0.mca", _build_region()) is None
+
+
+def test_check_region_bytes_empty_returns_none() -> None:
+    # A 0-byte region body is an empty container, structurally sound (issue #905).
+    assert check_region_bytes("poi/r.-1.-1.mca", b"") is None
 
 
 def test_check_region_bytes_corrupt_returns_finding_with_name() -> None:

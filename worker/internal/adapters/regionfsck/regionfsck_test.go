@@ -107,11 +107,29 @@ func TestNon4096AlignedIsFlagged(t *testing.T) {
 	}
 }
 
-func TestZeroSizeRegionIsFlagged(t *testing.T) {
+func TestZeroSizeRegionIsClean(t *testing.T) {
+	// Minecraft legitimately writes 0-byte region containers (e.g. fresh poi
+	// regions with no chunks yet); an empty file is an empty region, structurally
+	// sound, not a torn save (issue #905).
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), []byte{})
-	reason, _ := CheckRegionFile(path)
-	if reason != ReasonNotAligned {
-		t.Fatalf("reason = %v, want ReasonNotAligned", reason)
+	reason, err := CheckRegionFile(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != ReasonNone {
+		t.Fatalf("reason = %v, want ReasonNone", reason)
+	}
+}
+
+func TestShortNonZeroRegionIsFlagged(t *testing.T) {
+	// A non-zero file below the two header sectors is a torn header, not an empty
+	// region (issue #905): 100 bytes and a single full sector both stay flagged.
+	for _, size := range []int{100, testSector} {
+		path := write(t, filepath.Join(t.TempDir(), "r.mca"), make([]byte, size))
+		reason, _ := CheckRegionFile(path)
+		if reason != ReasonNotAligned {
+			t.Fatalf("size %d: reason = %v, want ReasonNotAligned", size, reason)
+		}
 	}
 }
 
@@ -180,6 +198,27 @@ func TestWalkerOnCleanWorkingSetIsHealthy(t *testing.T) {
 	write(t, filepath.Join(root, "region", "r.0.0.mca"), buildRegion(nil, 3, -1, 2))
 	write(t, filepath.Join(root, "entities", "r.0.0.mca"), buildRegion(nil, 3, -1, 2))
 	write(t, filepath.Join(root, "poi", "r.0.0.mca"), make([]byte, 2*testSector))
+
+	report, err := CheckWorkingSet(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report.Scanned != 3 {
+		t.Fatalf("scanned = %d, want 3", report.Scanned)
+	}
+	if !report.Healthy() {
+		t.Fatalf("corrupt = %v, want healthy", report.Corrupt)
+	}
+}
+
+func TestWalkerCountsZeroByteRegionAsScannedHealthy(t *testing.T) {
+	// The production reproduction (issue #905): a fully quiesced world whose only
+	// "suspect" files are 0-byte poi regions must scan clean so its stop snapshot
+	// is not refused.
+	root := t.TempDir()
+	write(t, filepath.Join(root, "region", "r.0.0.mca"), buildRegion(nil, 3, -1, 2))
+	write(t, filepath.Join(root, "poi", "r.-1.-1.mca"), []byte{})
+	write(t, filepath.Join(root, "poi", "r.0.-1.mca"), []byte{})
 
 	report, err := CheckWorkingSet(root)
 	if err != nil {
