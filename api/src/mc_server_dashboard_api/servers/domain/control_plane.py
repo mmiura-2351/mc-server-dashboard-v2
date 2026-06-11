@@ -38,7 +38,24 @@ class WorkerUnavailableError(ServerError):
     Raised by the control-plane seam when the target Worker is not connected
     (never connected, disconnected, or its command timed out). The lifecycle use
     case surfaces this so the edge can return a typed transport error.
+
+    ``upload_may_be_live`` distinguishes the two underlying causes for a data
+    transfer (snapshot/hydrate), which the lifecycle layer must treat differently
+    without importing the fleet exception types (import-linter contract):
+
+    * ``False`` (default, a worker disconnect): the worker session is gone, so
+      its ``serveCtx`` is cancelled and any in-flight transfer died worker-side —
+      nothing is still uploading.
+    * ``True`` (a command timeout): the worker session is healthy and the API
+      deadline only abandoned the pending future; the proto has no command-cancel,
+      so the worker keeps uploading to completion and may publish late. The final
+      stop snapshot must therefore HOLD the assignment (issue #847) the same way a
+      cancellation does, rather than release the row while the upload is in flight.
     """
+
+    def __init__(self, *args: object, upload_may_be_live: bool = False) -> None:
+        super().__init__(*args)
+        self.upload_may_be_live = upload_may_be_live
 
 
 class CommandStatus(enum.Enum):

@@ -1123,6 +1123,26 @@ export interface paths {
          *     body) or one that over-runs the cap is aborted as soon as the counted bytes
          *     cross the boundary, so a misdeclared length cannot spool the whole body to disk
          *     before the mismatch is caught.
+         *
+         *     A publish-time generation guard (issue #847) refuses, BEFORE staging, a publish
+         *     whose declared base generation (the store generation this Worker hydrated from)
+         *     is OLDER than the store's current generation AND whose current was published by a
+         *     DIFFERENT Worker: the set it holds was hydrated from a now-superseded state that
+         *     another Worker has already advanced past, so committing it would clobber that
+         *     newer authoritative copy with stale progression (the A->B->A stale-scratch case).
+         *
+         *     Publisher identity is what keeps the guard from wedging a lost publish-response
+         *     (issue #847 bug 3): a Worker that published generation N+1 but lost the HTTP
+         *     response keeps its local marker at base N, so its next publish declares base
+         *     N < current N+1 — but it is the SAME Worker that produced current, so the guard
+         *     ALLOWS it and the publish self-heals (advancing the store again) instead of
+         *     refusing forever. An absent base-generation header (never hydrated / older
+         *     Worker), a base at or ahead of current, or an unknown current-publisher (an older
+         *     publish that recorded no id) all skip the refusal — the guard stays permissive,
+         *     and #847's primary fix (the API holds the assignment across the final snapshot)
+         *     already prevents the genuine stale cross-worker publish from arising. The guard is
+         *     defense-in-depth on the data plane, where the only prior protection was the
+         *     Worker-side per-stream ctx cancel.
          */
         post: operations["publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post"];
         delete?: never;
@@ -4640,6 +4660,8 @@ export interface operations {
             query?: never;
             header?: {
                 "content-length"?: number | null;
+                "X-Working-Set-Base-Generation"?: number | null;
+                "X-Worker-Id"?: string | null;
                 authorization?: string | null;
             };
             path: {

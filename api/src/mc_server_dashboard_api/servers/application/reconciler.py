@@ -27,6 +27,12 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   live instance on another Worker.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
   the stop.
+- ``desired=stopped``, observed ``stopped``, still assigned -> clear the assignment
+  (issue #847 bug 2). A stop whose deferred unassign never ran (an API crash or an
+  HTTP-task cancellation mid final-snapshot) wedges here; no other path converges it
+  (``StartServer`` 409s on ``require_unassigned`` before flipping desired, and the
+  sink no longer unassigns). DB-only, so it runs even on a disconnected Worker — the
+  deliberate replacement for #217's sink-unassign, which raced the snapshot window.
 - Disconnected Worker -> skip: ``observed=unknown`` is expected while the Worker
   is gone, and the reconnect assignment rebuild owns that case (FR-WRK-4). The
   orphan path has no assigned Worker, so it is unaffected by this skip.
@@ -183,9 +189,16 @@ class RunReconcilerTick:
             ):
                 return None  # disconnected: reconnect rebuild owns it
             return "redispatch_start"
-        # desired=stopped (list_reconcilable only returns observed=running here).
+        # desired=stopped: list_reconcilable returns observed=running (stop never
+        # delivered) and observed=stopped+assigned (a stop wedged mid final-snapshot,
+        # issue #847 bug 2).
         if server.assigned_worker_id is None:
             return None
+        if server.observed_state is ObservedState.STOPPED:
+            # The wedge recovery is a DB-only assignment clear (the server is
+            # already stopped); it does not need a connected Worker, so it runs even
+            # when the holding Worker is gone — exactly the crash case it recovers.
+            return "clear_stale_assignment"
         if not self.control_plane.is_worker_connected(
             worker_id=server.assigned_worker_id
         ):
@@ -251,6 +264,10 @@ class RunReconcilerTick:
             )
         elif action == "redispatch_start":
             return await self.start_server.redispatch_start(
+                community_id=server.community_id, server_id=server.id
+            )
+        elif action == "clear_stale_assignment":
+            return await self.stop_server.clear_stale_assignment(
                 community_id=server.community_id, server_id=server.id
             )
         else:  # redispatch_stop

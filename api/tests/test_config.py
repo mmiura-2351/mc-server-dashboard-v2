@@ -246,6 +246,7 @@ def test_token_ttl_must_be_positive(
         ("control", "heartbeat_timeout_seconds", 0),
         ("control", "command_timeout_seconds", 0),
         ("control", "hydrate_timeout_seconds", 0),
+        ("control", "snapshot_timeout_seconds", 0),
         ("storage", "version_retention", -1),
         ("snapshot", "default_interval_seconds", 0),
         ("snapshot", "min_interval_seconds", 0),

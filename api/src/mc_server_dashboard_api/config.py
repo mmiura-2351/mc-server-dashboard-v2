@@ -126,6 +126,14 @@ class ControlSettings(_Section):
     # every other command, and widens the duplicate-start window — see the grace
     # invariant in app.py). A zero/negative deadline would fail every hydrate.
     hydrate_timeout_seconds: int = Field(default=600, gt=0)
+    # Separate, generous deadline for the final SNAPSHOT a graceful stop captures
+    # (issue #847): the stop holds the assignment until this snapshot settles, so the
+    # dispatch must span a full working-set upload (minutes for a large world) — under
+    # the general 30s ``command_timeout_seconds`` the dispatch would time out and the
+    # assignment would be released while the upload is still in flight, reopening the
+    # stop->re-place race the hold exists to close. Mirrors ``hydrate_timeout_seconds``
+    # (#822/#868). A zero/negative deadline would fail every final snapshot.
+    snapshot_timeout_seconds: int = Field(default=600, gt=0)
     worker_credential: str | None = None
     tls: ControlTlsSettings = Field(default_factory=ControlTlsSettings)
 

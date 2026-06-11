@@ -76,6 +76,25 @@ _TAR_BLOCK = 512
 # its local scratch is at. Mirrors the constant the Worker reads (datatransfer.go).
 _GENERATION_HEADER = "X-Working-Set-Generation"
 
+# The REQUEST header a publishing Worker stamps with the store generation its
+# working set was hydrated from (issue #847). The publish-time generation guard
+# (defense-in-depth) refuses a publish whose base generation no longer matches the
+# store's current generation: the set this Worker holds was hydrated from a now-
+# superseded store state, so committing it would clobber a newer authoritative copy
+# with stale progression. Absent (a Worker that never hydrated, or an older Worker
+# not sending it) means "no claim to check" — the publish proceeds as before, so the
+# header is backward-compatible. Mirrors the constant the Worker sends
+# (datatransfer.go).
+_BASE_GENERATION_HEADER = "X-Working-Set-Base-Generation"
+
+# The REQUEST header carrying the publishing Worker's own id (issue #847 bug 3),
+# recorded alongside the generation at commit so the guard can tell a same-Worker
+# re-publish (lost-response self-heal) from a different-Worker stale-scratch publish
+# (A->B->A). Absent means "publisher unknown" — the guard then cannot prove a foreign
+# publisher and stays permissive. Mirrors the constant the Worker sends
+# (datatransfer.go).
+_WORKER_ID_HEADER = "X-Worker-Id"
+
 router = APIRouter(prefix="/data-plane")
 
 _logger = logging.getLogger(__name__)
@@ -228,6 +247,10 @@ async def publish_snapshot(
     response: Response,
     storage: Annotated[Storage, Depends(get_storage)],
     content_length: Annotated[int | None, Header()] = None,
+    base_generation: Annotated[
+        int | None, Header(alias=_BASE_GENERATION_HEADER)
+    ] = None,
+    publisher: Annotated[str | None, Header(alias=_WORKER_ID_HEADER)] = None,
 ) -> None:
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
 
@@ -242,6 +265,26 @@ async def publish_snapshot(
     body) or one that over-runs the cap is aborted as soon as the counted bytes
     cross the boundary, so a misdeclared length cannot spool the whole body to disk
     before the mismatch is caught.
+
+    A publish-time generation guard (issue #847) refuses, BEFORE staging, a publish
+    whose declared base generation (the store generation this Worker hydrated from)
+    is OLDER than the store's current generation AND whose current was published by a
+    DIFFERENT Worker: the set it holds was hydrated from a now-superseded state that
+    another Worker has already advanced past, so committing it would clobber that
+    newer authoritative copy with stale progression (the A->B->A stale-scratch case).
+
+    Publisher identity is what keeps the guard from wedging a lost publish-response
+    (issue #847 bug 3): a Worker that published generation N+1 but lost the HTTP
+    response keeps its local marker at base N, so its next publish declares base
+    N < current N+1 — but it is the SAME Worker that produced current, so the guard
+    ALLOWS it and the publish self-heals (advancing the store again) instead of
+    refusing forever. An absent base-generation header (never hydrated / older
+    Worker), a base at or ahead of current, or an unknown current-publisher (an older
+    publish that recorded no id) all skip the refusal — the guard stays permissive,
+    and #847's primary fix (the API holds the assignment across the final snapshot)
+    already prevents the genuine stale cross-worker publish from arising. The guard is
+    defense-in-depth on the data plane, where the only prior protection was the
+    Worker-side per-stream ctx cancel.
     """
 
     if content_length is None:
@@ -250,6 +293,41 @@ async def publish_snapshot(
         raise problem(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large")
 
     scope = (CommunityId(community_id), ServerId(server_id))
+    if base_generation is not None:
+        current = await storage.current_generation(*scope)
+        if base_generation < current:
+            # The publisher's working set was hydrated from generation
+            # ``base_generation`` but the store has since moved to ``current``. Refuse
+            # ONLY when current was published by a DIFFERENT Worker — that is the
+            # A->B->A stale-scratch case where committing would clobber another
+            # Worker's newer authoritative copy. When the SAME Worker (or an unknown
+            # publisher) produced current, the lag is a lost publish-response and the
+            # publish is allowed to self-heal (issue #847 bug 3). Nothing was staged
+            # yet, so a refused ``current/`` is untouched.
+            current_publisher = await storage.current_publisher(*scope)
+            if (
+                current_publisher is not None
+                and publisher is not None
+                and current_publisher != publisher
+            ):
+                _logger.warning(
+                    "snapshot publish refused: stale base generation for server %s "
+                    "from a different worker (publisher %s held %d, store at %d "
+                    "published by %s)",
+                    server_id,
+                    publisher,
+                    base_generation,
+                    current,
+                    current_publisher,
+                )
+                raise problem(
+                    status.HTTP_409_CONFLICT,
+                    "stale_generation",
+                    extensions={
+                        "base_generation": base_generation,
+                        "current": current,
+                    },
+                )
     handle = await storage.begin_snapshot(*scope)
     counter = _ByteCounter(request.stream(), declared=content_length)
     try:
@@ -260,7 +338,7 @@ async def publish_snapshot(
             # prior snapshot intact.
             await storage.abort_snapshot(handle)
             raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch")
-        generation = await storage.commit_snapshot(handle)
+        generation = await storage.commit_snapshot(handle, publisher=publisher)
         # Stamp the new authoritative generation on the response (issue #763): the
         # Worker records the header as the generation its scratch is now at (the
         # source of this published snapshot). The reconciler reads the authoritative

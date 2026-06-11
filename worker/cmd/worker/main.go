@@ -177,7 +177,9 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 		host := resolveRconHost(driver, containerRconHost, serverID)
 		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host)
 	}
-	return instancemanager.New(drivers, wc.ScratchDir, openControl).WithLogger(logger), nil
+	return instancemanager.New(drivers, wc.ScratchDir, openControl).
+		WithLogger(logger).
+		WithWorkerID(wc.ID), nil
 }
 
 // resolveRconHost picks the RCON dial host for a server. It is empty (the host

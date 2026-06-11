@@ -20,6 +20,7 @@ DB-gated (TESTING.md Section 5): run only when ``MCD_TEST_DATABASE_URL`` is set
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 import uuid
@@ -52,6 +53,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServer,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
+from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
@@ -182,6 +184,25 @@ def _stop_server_use_case(
 
 def _sink(engine: AsyncEngine, clock: Clock) -> ServersServerStateSink:
     return ServersServerStateSink(create_session_factory(engine), clock=clock)
+
+
+async def _reconciler_tick(
+    engine: AsyncEngine, control_plane: FakeControlPlane, clock: Clock
+) -> None:
+    # grace_seconds=0 so a divergence is actionable immediately (the _AdvancingClock
+    # already moves time forward between each use case, so the wedged row is past its
+    # zero-second grace by the time the tick reads it).
+    factory = create_session_factory(engine)
+    await RunReconcilerTick(
+        uow=ServersUnitOfWork(factory),
+        start_server=_start_server_use_case(engine, control_plane, clock),
+        stop_server=_stop_server_use_case(engine, control_plane, clock),
+        control_plane=control_plane,
+        clock=clock,
+        grace_seconds=0,
+        backoff_base_seconds=30,
+        backoff_max_seconds=3600,
+    ).tick()
 
 
 async def _create_server(
@@ -347,19 +368,22 @@ async def test_crash_then_stop_then_write_eula_at_rest_then_start(
 # --- Chain 3: timeout-lost stop unassign (issue #217 + #220) ---------------
 
 
-async def test_lost_stop_outcome_then_worker_reports_stopped_then_start(
+async def test_lost_stop_outcome_then_worker_reports_stopped_then_reconciler_clears(
     engine: AsyncEngine,
 ) -> None:
     """start -> stop whose dispatch outcome is LOST (WorkerUnavailableError after
-    the intent committed) -> worker's StatusChange(stopped) arrives via the real
-    sink -> assignment cleared -> start succeeds.
+    the intent committed) -> worker's StatusChange(stopped) arrives via the REAL
+    sink (which must NOT unassign) -> reconciler's stale-stop arm clears the
+    assignment -> start succeeds.
 
-    The #217/#220 chain. When the stop dispatch times out, the in-band #209
-    unassign that rides the dispatch outcome is lost: the row lands
+    The #217 scenario reworked for #847. When the stop dispatch times out, the
+    in-band unassign that rode the dispatch outcome is lost: the row lands
     (desired=stopped, still assigned). The owning worker's later
-    StatusChange(stopped) is the authoritative "no live instance remains" signal, so
-    the sink clears the assignment in the same write -- without which the next
-    start's require_unassigned CAS would 409 forever.
+    StatusChange(stopped) used to make the sink clear the assignment in the same
+    write -- but that #217 sink-unassign raced the final-snapshot window (bug 1), so
+    the sink no longer unassigns. The deliberate recovery is now the reconciler's
+    stale-stop arm: a row wedged at (stopped, stopped, assigned) past grace has its
+    assignment cleared, after which the next start's require_unassigned CAS succeeds.
     """
 
     clock = _AdvancingClock(_NOW)
@@ -374,7 +398,7 @@ async def test_lost_stop_outcome_then_worker_reports_stopped_then_start(
 
     # The stop dispatch's outcome is LOST: the control plane raises
     # WorkerUnavailableError AFTER StopServer committed desired=stopped (and
-    # decremented load). The in-band unassign never runs.
+    # decremented load). The deferred unassign never runs.
     lost_cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"stop"})
     with pytest.raises(WorkerUnavailableError):
         await _stop_server_use_case(engine, lost_cp, clock)(
@@ -387,16 +411,97 @@ async def test_lost_stop_outcome_then_worker_reports_stopped_then_start(
     assert after_stop.desired_state is DesiredState.STOPPED
     assert after_stop.assigned_worker_id == WorkerId(worker)
 
-    # The owning worker's StatusChange(stopped) arrives via the real sink. Under
-    # desired=stopped this is the authoritative no-live-instance signal, so the sink
-    # clears the assignment in the same write (issue #217/#220).
+    # The owning worker's StatusChange(stopped) arrives via the real sink. It caches
+    # observed=stopped but must KEEP the assignment (issue #847 bug 1): unassigning
+    # here would race a live final-snapshot window in the normal stop flow.
     await _sink(engine, clock).record_observed_state(
         server_id=str(server_id.value), worker_id=str(worker), state="stopped"
     )
     converged = await _load(engine, server_id)
     assert converged is not None
     assert converged.observed_state is ObservedState.STOPPED
-    assert converged.assigned_worker_id is None
+    assert converged.assigned_worker_id == WorkerId(worker)
+
+    # The reconciler's stale-stop arm recovers the wedge: (stopped, stopped,
+    # assigned) past grace -> clear the assignment (no command dispatched).
+    await _reconciler_tick(engine, FakeControlPlane(), clock)
+    recovered = await _load(engine, server_id)
+    assert recovered is not None
+    assert recovered.assigned_worker_id is None
+
+    # The next start re-places against the now-unassigned row.
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+async def test_stop_cancelled_mid_snapshot_holds_then_reconciler_clears(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop whose final snapshot is CANCELLED (client disconnect) ->
+    assignment HELD (the upload is still live) -> worker's StatusChange(stopped)
+    via the REAL sink keeps it held -> reconciler's stale-stop arm clears it ->
+    start succeeds (issue #847 bug 2, cancel path).
+
+    A client disconnect cancels the HTTP-request task at the snapshot await. The
+    dispatched snapshot keeps uploading worker-side (the proto has no command-cancel),
+    so the stop MUST keep the assignment rather than release the row mid-upload and
+    let a racing start re-place elsewhere. The deliberate, grace-bounded recovery is
+    the reconciler's stale-stop arm — proven here through the real sink + a real tick.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+
+    class _SnapshotCancelled(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityCommunityId,  # type: ignore[override]
+            server_id: ServerId,
+        ) -> CommandOutcome:
+            # The client disconnects: the request task is cancelled at this await.
+            raise asyncio.CancelledError
+
+    # The stop confirms (process gone), then the final snapshot await is cancelled.
+    with pytest.raises(asyncio.CancelledError):
+        await _stop_server_use_case(
+            engine, _SnapshotCancelled(place_to=WorkerId(worker)), clock
+        )(community_id=community, server_id=server_id)
+
+    # The assignment is HELD: observed=stopped is committed before the snapshot, but
+    # the deferred clear is deliberately SKIPPED on cancellation (the upload is live).
+    after_stop = await _load(engine, server_id)
+    assert after_stop is not None
+    assert after_stop.desired_state is DesiredState.STOPPED
+    assert after_stop.observed_state is ObservedState.STOPPED
+    assert after_stop.assigned_worker_id == WorkerId(worker)
+
+    # The owning worker's terminal StatusChange(stopped) arrives via the real sink;
+    # it must KEEP the assignment (the sink no longer unassigns, bug 1).
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+    )
+    converged = await _load(engine, server_id)
+    assert converged is not None
+    assert converged.assigned_worker_id == WorkerId(worker)
+
+    # The reconciler's stale-stop arm recovers the wedge once grace lapses.
+    await _reconciler_tick(engine, FakeControlPlane(), clock)
+    recovered = await _load(engine, server_id)
+    assert recovered is not None
+    assert recovered.assigned_worker_id is None
 
     # The next start re-places against the now-unassigned row.
     next_worker = uuid.uuid4()

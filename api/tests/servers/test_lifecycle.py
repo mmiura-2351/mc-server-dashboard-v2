@@ -22,6 +22,8 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResult,
     CommandResultCode,
+    CommandTimedOutError,
+    WorkerNotConnectedError,
 )
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     ControlPlane as FleetControlPlane,
@@ -1250,6 +1252,270 @@ async def test_stop_then_start_succeeds() -> None:
     assert started.assigned_worker_id == WorkerId(next_worker)
 
 
+async def test_stop_holds_assignment_until_final_snapshot_settles() -> None:
+    # Issue #847: the unassign must be DELAYED until the final snapshot returns. A
+    # start that races the in-flight final snapshot would otherwise re-place the
+    # server on a DIFFERENT worker, whose hydrate pulls store generation N while the
+    # final (would-be N+1) is still uploading -- the final progression goes missing
+    # from the booted world. Holding the assignment across the snapshot keeps the
+    # require_unassigned compare-and-set failing, so no cross-worker re-placement can
+    # slip in during the snapshot window.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _AssertsHeldDuringSnapshot(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            # At snapshot time the row is observed=stopped but STILL assigned, so a
+            # racing start's require_unassigned CAS cannot re-place it.
+            row = uow.servers.by_id[server_id]
+            self.assignment_at_snapshot = row.assigned_worker_id
+            self.observed_at_snapshot = row.observed_state
+            return await super().snapshot(
+                worker_id=worker_id, community_id=community_id, server_id=server_id
+            )
+
+    cp = _AssertsHeldDuringSnapshot()
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert cp.observed_at_snapshot is ObservedState.STOPPED
+    assert cp.assignment_at_snapshot == WorkerId(worker)
+    # Once the snapshot settled, the assignment is cleared so a later start can
+    # re-place under require_unassigned.
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
+
+
+async def test_stop_start_race_cannot_replace_until_final_snapshot_settles() -> None:
+    # Issue #847: a start issued WHILE the final snapshot is in flight must not be
+    # able to re-place the server elsewhere -- the held assignment makes its
+    # require_unassigned CAS conflict. The start is only admitted once the snapshot
+    # has settled and the unassign has landed.
+    community, server_id, worker = _ids()
+    next_worker = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _StartsDuringSnapshot(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            # A user start lands mid-snapshot. It must conflict (assignment still
+            # held), NOT re-place on next_worker.
+            with pytest.raises(LifecycleTransitionConflictError):
+                await StartServer(
+                    uow=uow,
+                    control_plane=FakeControlPlane(place_to=WorkerId(next_worker)),
+                    clock=FakeClock(_NOW),
+                    jar_provisioner=FakeJarProvisioner(),
+                    store_generation=FakeStoreGenerationReader(),
+                )(community_id=community_id, server_id=server_id)
+            return await super().snapshot(
+                worker_id=worker_id, community_id=community_id, server_id=server_id
+            )
+
+    cp = _StartsDuringSnapshot()
+    await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    # The mid-snapshot start was rejected; the row is stopped+unassigned afterward.
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.assigned_worker_id is None
+
+
+async def test_stop_cancelled_mid_snapshot_holds_assignment() -> None:
+    # Issue #847 (bug 2, round-3): if the HTTP request task is cancelled WHILE the
+    # final snapshot is in flight (a client disconnect cancels the task at the
+    # snapshot await), the dispatched snapshot keeps uploading worker-side — the
+    # proto has no command-cancel and abandoning the pending future signals nothing.
+    # So the assignment must be HELD (NOT released): clearing it would free the row
+    # while the upload is live, letting a racing start re-place on a different worker
+    # and reopening the stop->re-place race. The row stays at (stopped, stopped,
+    # assigned); the reconciler's stale-stop arm recovers it once grace lapses (by
+    # which point the upload has settled, grace > snapshot budget).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotCancelled(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            # The client disconnects: the request task is cancelled at this await.
+            raise asyncio.CancelledError
+
+    cp = _SnapshotCancelled()
+    with pytest.raises(asyncio.CancelledError):
+        await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The CancelledError propagated and the assignment was deliberately HELD — the
+    # upload is still live, so the stale-stop reconciler arm (not an immediate clear)
+    # owns the grace-bounded recovery.
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_stop_final_snapshot_timeout_holds_assignment() -> None:
+    # Issue #847 (round-3): a final-snapshot dispatch TIMEOUT must HOLD the
+    # assignment, mirroring the cancel-hold path. A timeout means the worker session
+    # is healthy and the upload is still in flight (the proto has no command-cancel;
+    # the API deadline only abandoned the pending future), so clearing here would
+    # release the row while the upload is live, letting a racing start re-place on a
+    # different worker and reopening the stop->re-place race. The adapter encodes the
+    # cause as ``upload_may_be_live=True`` (set from a ``CommandTimedOutError`` cause);
+    # the row stays at (stopped, stopped, assigned) for the stale-stop arm to recover.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotTimesOut(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            # Mirror the adapter's wrap of a CommandTimedOutError: a
+            # WorkerUnavailableError flagged as upload-may-be-live, cause chained.
+            try:
+                raise CommandTimedOutError(str(worker_id.value))
+            except CommandTimedOutError as exc:
+                raise WorkerUnavailableError(
+                    str(worker_id.value), upload_may_be_live=True
+                ) from exc
+
+    cp = _SnapshotTimesOut()
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    # The timeout is caught inside _final_snapshot (the stop succeeded), but the
+    # assignment is deliberately HELD — the upload may still be live, so the
+    # stale-stop arm (not an immediate clear) owns the grace-bounded recovery.
+    assert result.observed_state is ObservedState.STOPPED
+    assert result.assigned_worker_id == WorkerId(worker)
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_stop_final_snapshot_disconnect_clears_assignment() -> None:
+    # Issue #847 (round-3): the OTHER half of the WorkerUnavailableError split. A
+    # worker DISCONNECT (``WorkerNotConnectedError`` cause, ``upload_may_be_live``
+    # False) means the worker session is gone and the upload died with its ctx —
+    # nothing is uploading, so the assignment is cleared immediately as before, so a
+    # later same-worker start reuses the retained scratch (#845).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotDisconnects(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            try:
+                raise WorkerNotConnectedError(str(worker_id.value))
+            except WorkerNotConnectedError as exc:
+                # The adapter leaves upload_may_be_live at its False default here.
+                raise WorkerUnavailableError(str(worker_id.value)) from exc
+
+    cp = _SnapshotDisconnects()
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.observed_state is ObservedState.STOPPED
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+
+
+async def test_stop_unassigns_even_when_final_snapshot_fails() -> None:
+    # Issue #847 / #845: on a FAILED final snapshot the assignment is still cleared
+    # so the next same-worker start reuses the retained scratch (#845). Cross-worker
+    # placement of a failed-final server keeps the #845-documented exposure.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotFails(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            return CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED, message="empty_snapshot"
+            )
+
+    cp = _SnapshotFails()
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.observed_state is ObservedState.STOPPED
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+
+
 async def test_stop_failed_dispatch_keeps_assignment() -> None:
     # A failed stop dispatch may have left the process alive: the assignment must
     # stick so the reconciler's redispatch_stop owns convergence (issue #206).
@@ -2291,6 +2557,46 @@ async def test_redispatch_stop_takes_final_snapshot_on_success() -> None:
     )
 
 
+async def test_redispatch_stop_holds_assignment_until_final_snapshot_settles() -> None:
+    # Issue #847: the SECOND _final_snapshot call site (redispatch_stop) must hold
+    # the assignment until the snapshot settles too, exactly like StopServer.__call__
+    # -- otherwise a reconciler-driven final stop has the same cross-worker re-place
+    # race.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _AssertsHeldDuringSnapshot(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            row = uow.servers.by_id[server_id]
+            self.assignment_at_snapshot = row.assigned_worker_id
+            return await super().snapshot(
+                worker_id=worker_id, community_id=community_id, server_id=server_id
+            )
+
+    cp = _AssertsHeldDuringSnapshot()
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).redispatch_stop(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert cp.assignment_at_snapshot == WorkerId(worker)
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
+
+
 async def test_redispatch_stop_final_snapshot_failure_logs_error_and_converges(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -2339,10 +2645,17 @@ async def test_redispatch_stop_final_snapshot_failure_logs_error_and_converges(
     assert str(server_id) in record.getMessage()
 
 
-async def test_redispatch_stop_returned_entity_honest_when_write_dropped() -> None:
-    # Honesty fix (issue #292): under a same-instant clock the #216 guard drops the
-    # observed=stopped/unassign convergence write. The returned entity must reflect
-    # the DROPPED write, not optimistically claim observed=stopped / unassigned.
+async def test_redispatch_stop_returned_entity_honest_when_observed_write_dropped() -> (
+    None
+):
+    # Honesty fix (issue #292) + improvement (issue #847 round-3): under a same-instant
+    # clock the #216 guard drops the observed=stopped convergence write, so the
+    # observed cache must NOT optimistically claim stopped. BUT the deferred assignment
+    # clear is independently CAS-guarded (``clear_assignment_after_final_snapshot``
+    # matches only a still desired=stopped row still assigned to this worker) and runs
+    # regardless of the dropped observed write: post-#847 no other path unassigns, so
+    # running it cannot clobber a fresher write and removes the wedge the old
+    # applied-gate left for the full grace window.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     seeded = _server(
@@ -2353,7 +2666,7 @@ async def test_redispatch_stop_returned_entity_honest_when_write_dropped() -> No
         worker_id=worker,
     )
     # A fresher write already stamped the row at the clock's instant; the guard drops
-    # the equal-stamped convergence write (and its unassign, atomically).
+    # the equal-stamped observed-convergence write.
     seeded.observed_at = _NOW
     uow.servers.seed(seeded)
     cp = FakeControlPlane()
@@ -2365,12 +2678,14 @@ async def test_redispatch_stop_returned_entity_honest_when_write_dropped() -> No
     )
 
     stored = uow.servers.by_id[ServerId(server_id)]
-    # The guard dropped the write, so the row keeps its observed cache and assignment.
+    # The guard dropped the observed write, so the row keeps its observed cache, and
+    # the returned entity must agree (not the optimistic mutation).
     assert stored.observed_state is ObservedState.RUNNING
-    assert stored.assigned_worker_id == WorkerId(worker)
-    # The returned entity must agree with the row, not the optimistic mutation.
     assert result.observed_state is ObservedState.RUNNING
-    assert result.assigned_worker_id == WorkerId(worker)
+    # The CAS-guarded clear still ran (desired=stopped + same worker), so the
+    # assignment is released — no grace-bounded wedge.
+    assert stored.assigned_worker_id is None
+    assert result.assigned_worker_id is None
 
 
 async def test_redispatch_stop_failure_keeps_assignment() -> None:

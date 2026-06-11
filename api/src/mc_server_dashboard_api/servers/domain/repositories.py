@@ -137,6 +137,29 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def clear_assignment_after_final_snapshot(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        """Clear ``assigned_worker_id`` after a confirmed-stop snapshot (issue #847).
+
+        The graceful/redispatch stop records ``observed=stopped`` first but DELAYS
+        the unassign until the final snapshot settles: holding the assignment across
+        the snapshot keeps a racing start's ``require_unassigned`` compare-and-set
+        failing, so an immediate start cannot re-place the server on a DIFFERENT
+        worker whose hydrate would pull store generation N while the final (would-be
+        N+1) snapshot is still uploading.
+
+        Guarded so it only clears OUR held assignment: the UPDATE matches only when
+        the row is still ``desired_state=stopped`` AND ``assigned_worker_id`` still
+        equals ``worker_id``. A start cannot have re-placed during the snapshot
+        window (its ``require_unassigned`` CAS saw the held assignment and 409'd), so
+        in practice the guard always matches; it exists to make the late clear a
+        no-op rather than a clobber if the row moved out from under us by any other
+        path. Returns ``True`` when the assignment was cleared, ``False`` when the
+        guard matched no row.
+        """
+
+    @abc.abstractmethod
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:

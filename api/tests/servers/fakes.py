@@ -363,6 +363,21 @@ class FakeServerRepository(ServerRepository):
             server.assigned_worker_id = None
         return True
 
+    async def clear_assignment_after_final_snapshot(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        # Mirror the real adapter's guard (issue #847): clear only a still
+        # desired=stopped row still assigned to worker_id.
+        server = self.by_id.get(server_id)
+        if (
+            server is None
+            or server.desired_state is not DesiredState.STOPPED
+            or server.assigned_worker_id != worker_id
+        ):
+            return False
+        server.assigned_worker_id = None
+        return True
+
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:
@@ -423,7 +438,14 @@ class FakeServerRepository(ServerRepository):
             stop_undelivered = (
                 stopped and server.observed_state is ObservedState.RUNNING
             )
-            if stale_running or orphan or stop_undelivered:
+            # Issue #847 (bug 2): a stop wedged at (stopped, stopped, assigned) when
+            # the deferred unassign never ran (crash/cancel mid final-snapshot).
+            stop_wedged = (
+                stopped
+                and server.observed_state is ObservedState.STOPPED
+                and server.assigned_worker_id is not None
+            )
+            if stale_running or orphan or stop_undelivered or stop_wedged:
                 out.append(replace(server))
         return out
 

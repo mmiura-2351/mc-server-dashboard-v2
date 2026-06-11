@@ -26,7 +26,6 @@ from mc_server_dashboard_api.servers.adapters.repositories import (
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.value_objects import (
-    DesiredState,
     ObservedState,
     ServerId,
     WorkerId,
@@ -97,22 +96,21 @@ class ServersServerStateSink(ServerStateSink):
                     },
                 )
                 return
-            # Timeout-resilient stop confirmation (issue #217). The in-band #209
-            # unassign rides the dispatch-outcome path, which is lost when the
-            # stop outcome times out (worker > control.command_timeout_seconds).
-            # The owning worker reporting stopped under desired=stopped is the
-            # authoritative "no live instance remains" signal, so clear the
-            # assignment in the same write — otherwise the row lands
-            # (stopped, stopped, assigned) and StartServer's require_unassigned
-            # CAS 409s forever (the reconciler does not select this pair). A
-            # stopped report while desired=running keeps the assignment; that
-            # divergence is the reconciler's to own.
-            unassign = (
-                observed is ObservedState.STOPPED
-                and server.desired_state is DesiredState.STOPPED
-            )
+            # The sink NEVER unassigns from a status report (issue #847). The old
+            # #217 sink-unassign (clear the assignment when the owning worker
+            # reports stopped under desired=stopped) raced the final-snapshot
+            # window: post-#847 the worker is STILL the owner while the final
+            # snapshot uploads, so its terminal StatusChange(stopped) passed the
+            # ownership guard above and released the assignment milliseconds into a
+            # snapshot that can last minutes — reopening the stop->re-place
+            # generation race the #847 hold exists to close. The stop flow now owns
+            # the unassign end-to-end: StopServer clears the assignment only AFTER
+            # the final snapshot settles, and the reconciler's stale-stop arm
+            # recovers a row left wedged at (stopped, stopped, assigned) by a
+            # crash/timeout mid-window (the deliberate replacement for #217's
+            # recovery). So this sink only caches the observed state.
             await repo.record_observed_state(
-                ServerId(parsed), observed, self._clock.now(), unassign=unassign
+                ServerId(parsed), observed, self._clock.now(), unassign=False
             )
             await session.commit()
 

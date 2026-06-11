@@ -127,7 +127,9 @@ class WorkingSetStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def commit_snapshot(self, handle: SnapshotHandle) -> int:
+    async def commit_snapshot(
+        self, handle: SnapshotHandle, *, publisher: str | None = None
+    ) -> int:
         """Atomically publish the staged snapshot, returning the new generation.
 
         Atomic publish (STORAGE.md Section 4): move staging into a fresh
@@ -148,6 +150,15 @@ class WorkingSetStore(abc.ABC):
         a DB column. The bump is part of the publish, so the
         persisted generation and ``current/`` never disagree. Refused publishes
         (integrity gate, incomplete transfer) do NOT bump.
+
+        ``publisher`` records the id of the Worker producing this snapshot alongside
+        the generation (issue #847 bug 3), read back via :meth:`current_publisher`.
+        The publish-time generation guard uses it to allow a same-Worker re-publish
+        whose base lags the store by a lost response (self-heal) while still refusing
+        a DIFFERENT Worker's stale-scratch publish (A->B->A). ``None`` (a Worker that
+        does not declare its id, or an older Worker) records no publisher, so the
+        guard cannot prove a foreign publisher and stays permissive — the structural
+        #847 fix already prevents the genuine stale cross-worker publish.
         """
 
     @abc.abstractmethod
@@ -171,6 +182,20 @@ class WorkingSetStore(abc.ABC):
         Worker records for an empty/never-hydrated working set, so the reconciler's
         ``worker-gen < store-gen`` comparison treats "nothing published" and "nothing
         held" consistently.
+        """
+
+    @abc.abstractmethod
+    async def current_publisher(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> str | None:
+        """Return the id of the Worker that published ``current`` (issue #847 bug 3).
+
+        The value :meth:`commit_snapshot` recorded for the latest successful publish,
+        read back by the publish-time generation guard so it can distinguish a
+        same-Worker re-publish (lost-response self-heal) from a different-Worker
+        stale-scratch publish (A->B->A). ``None`` when nothing is published, or when
+        the last publish recorded no publisher (an older Worker) — in which case the
+        guard cannot prove a foreign publisher and stays permissive.
         """
 
     @abc.abstractmethod

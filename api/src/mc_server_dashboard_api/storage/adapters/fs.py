@@ -347,7 +347,9 @@ class FsStorage(Storage):
         finally:
             await asyncio.to_thread(spool.unlink, missing_ok=True)
 
-    async def commit_snapshot(self, handle: SnapshotHandle) -> int:
+    async def commit_snapshot(
+        self, handle: SnapshotHandle, *, publisher: str | None = None
+    ) -> int:
         fs_handle = _as_fs_handle(handle)
         if fs_handle.consumed:
             raise SnapshotHandleError("snapshot handle already committed or aborted")
@@ -382,6 +384,7 @@ class FsStorage(Storage):
             fs_handle.community_id,
             fs_handle.server_id,
             staging,
+            publisher,
         )
         # Publish moved the staging dir into snapshots/; release its active-staging
         # lease so a later sweep is not blocked by a now-dead handle (issue #183).
@@ -390,7 +393,11 @@ class FsStorage(Storage):
         return generation
 
     def _publish_and_bump(
-        self, community_id: CommunityId, server_id: ServerId, staging: Path
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        staging: Path,
+        publisher: str | None,
     ) -> int:
         """Publish the snapshot, then bump and return the generation (issue #763).
 
@@ -400,11 +407,21 @@ class FsStorage(Storage):
         regardless). It is bumped after ``current`` points at the new snapshot, so
         the persisted generation never claims a set newer than ``current`` resolves
         to.
+
+        The generation and the ``publisher`` (the producing Worker's id, issue #847)
+        are written as ONE atomic marker: a crash between two separate writes could
+        leave the previous publisher attributed to the new generation, which would
+        make the publish-time guard wrongly allow that publisher's stale republish
+        and wrongly refuse the real producer's lost-response retry. A single
+        temp-sibling + atomic rename makes the (generation, publisher) pair
+        all-or-nothing.
         """
 
         server_root = self._server_root(community_id, server_id)
         self._publish(community_id, server_id, staging)
-        return self._bump_generation(server_root)
+        generation = self._read_generation(server_root) + 1
+        self._write_marker(server_root, generation, publisher)
+        return generation
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
         fs_handle = _as_fs_handle(handle)
@@ -464,28 +481,56 @@ class FsStorage(Storage):
             if not self._is_leased(old_snapshot):
                 _rmtree(old_snapshot)
 
-    def _generation_path(self, server_root: Path) -> Path:
+    def _marker_path(self, server_root: Path) -> Path:
+        # One marker holds BOTH the generation (line 1) and the publishing Worker id
+        # (line 2, optional) — issue #847. Writing them as a single atomic file keeps
+        # the pair consistent: a crash between two separate writes could attribute the
+        # PREVIOUS publisher to the NEW generation, which would make the publish-time
+        # guard wrongly allow that publisher's stale republish and wrongly refuse the
+        # real producer's lost-response retry.
         return server_root / "generation"
 
-    def _read_generation(self, server_root: Path) -> int:
+    def _read_marker(self, server_root: Path) -> tuple[int, str | None]:
         try:
-            return int(self._generation_path(server_root).read_text())
-        except (FileNotFoundError, ValueError):
-            # No counter yet (never published) or an unreadable one: generation 0,
-            # matching the Worker's "nothing held" default so the reconciler's
-            # worker-gen < store-gen comparison treats both consistently.
-            return 0
+            raw = self._marker_path(server_root).read_text()
+        except FileNotFoundError:
+            # No marker yet (never published): generation 0, no publisher — matching
+            # the Worker's "nothing held" default so the reconciler's worker-gen <
+            # store-gen comparison treats both consistently.
+            return 0, None
+        lines = raw.splitlines()
+        try:
+            generation = int(lines[0]) if lines else 0
+        except ValueError:
+            return 0, None
+        publisher = lines[1].strip() if len(lines) > 1 else ""
+        return generation, (publisher or None)
 
-    def _bump_generation(self, server_root: Path) -> int:
-        new_generation = self._read_generation(server_root) + 1
-        path = self._generation_path(server_root)
+    def _read_generation(self, server_root: Path) -> int:
+        return self._read_marker(server_root)[0]
+
+    def _read_publisher(self, server_root: Path) -> str | None:
+        # The Worker id recorded for the latest publish (issue #847). Absent (never
+        # published, an older Worker, or a None publisher) -> no claim, so the guard
+        # cannot prove a foreign publisher and stays permissive.
+        return self._read_marker(server_root)[1]
+
+    def _write_marker(
+        self, server_root: Path, generation: int, publisher: str | None
+    ) -> None:
+        # Generation on line 1, publisher on line 2 (omitted when None — the last
+        # publish declared no id, so a stale read can never wrongly attribute current
+        # to a foreign Worker). Temp-sibling + fsync + atomic rename makes the pair
+        # all-or-nothing.
+        body = str(generation) if publisher is None else f"{generation}\n{publisher}"
+        path = self._marker_path(server_root)
         fd, tmp_name = tempfile.mkstemp(
             dir=str(server_root), prefix=".generation.", suffix=".tmp"
         )
         tmp = Path(tmp_name)
         try:
             with os.fdopen(fd, "w") as out:
-                out.write(str(new_generation))
+                out.write(body)
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(tmp, path)
@@ -493,7 +538,6 @@ class FsStorage(Storage):
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
-        return new_generation
 
     # --- JAR store / reuse (Section 3.2) -----------------------------------
 
@@ -729,6 +773,13 @@ class FsStorage(Storage):
         server_root = self._server_root(community_id, server_id)
         return await asyncio.to_thread(self._read_generation, server_root)
 
+    async def current_publisher(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> str | None:
+        # Read the Worker id recorded for the latest publish (issue #847 bug 3).
+        server_root = self._server_root(community_id, server_id)
+        return await asyncio.to_thread(self._read_publisher, server_root)
+
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId
     ) -> WorkingSetReport:
@@ -768,7 +819,7 @@ class FsStorage(Storage):
             for sub in ("snapshots", "incoming", "versions"):
                 _rmtree(server_root / sub)
             _rmtree(server_root / "current")
-            _rmtree(self._generation_path(server_root))
+            _rmtree(self._marker_path(server_root))
             return
         # Pack to a temp sibling first, then atomically rename into place: the tree
         # is removed ONLY after a complete final.tar.gz exists, so a pack failure
@@ -806,10 +857,10 @@ class FsStorage(Storage):
         # never re-packs a half-removed snapshot tree over the good final.tar.gz (#777).
         _rmtree(server_root / "current")
         # The final archive is durable and ``current`` is gone; reclaim the unpacked
-        # working-set tree and the generation marker.
+        # working-set tree and the generation+publisher marker.
         for sub in ("snapshots", "incoming", "versions"):
             _rmtree(server_root / sub)
-        _rmtree(self._generation_path(server_root))
+        _rmtree(self._marker_path(server_root))
 
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey

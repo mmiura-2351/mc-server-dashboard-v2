@@ -211,6 +211,61 @@ async def test_stopped_intent_observed_running_redispatches_stop() -> None:
     assert cp.decremented == []  # the original stop owns the decrement
 
 
+async def test_wedged_stopped_stopped_assigned_clears_assignment(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #847 (bug 2): a stop whose final-snapshot window was interrupted by an
+    # API crash or an HTTP-task cancellation leaves the row wedged at
+    # (desired=stopped, observed=stopped, assigned) — the deferred unassign never
+    # ran. No other path converges this triple: StartServer's require_unassigned CAS
+    # 409s before flipping desired, so it never becomes reconcilable any other way,
+    # and the sink no longer unassigns (bug 1). The reconciler's stale-stop arm is
+    # the deliberate recovery: once past grace it clears the assignment (no command
+    # dispatched — the worker is already stopped) so a later start can re-place.
+    # Cross-worker re-placement loses the never-published final snapshot, so it is
+    # logged loud.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    with caplog.at_level(logging.WARNING):
+        await _reconciler(uow, cp, clock).tick()
+    # No command is dispatched: the server is already stopped, only the assignment
+    # is released.
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+    assert any(
+        "stale" in record.message.lower() or "wedge" in record.message.lower()
+        for record in caplog.records
+    )
+
+
+async def test_wedged_stopped_stopped_assigned_within_grace_is_skipped() -> None:
+    # The stale-stop recovery only fires PAST grace: a final snapshot legitimately
+    # in flight holds (stopped, stopped, assigned) for the snapshot's duration, and
+    # the grace window keeps the reconciler from yanking the assignment out from
+    # under an in-progress snapshot.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
+        updated_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
 # --- non-actionable / skipped ---------------------------------------------
 
 

@@ -108,14 +108,33 @@ def test_create_app_warns_when_grace_below_hydrate_plus_command_floor(
 def test_create_app_does_not_warn_when_grace_above_floor(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Above the floor (200 > 60 + 30), no duplicate-start warning fires.
+    # Above the floor (200 > max(60 + 30, snapshot=120)), no warning fires.
     _enable_control(monkeypatch)
     monkeypatch.setenv("MCD_API_CONTROL__HYDRATE_TIMEOUT_SECONDS", "60")
     monkeypatch.setenv("MCD_API_CONTROL__COMMAND_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("MCD_API_CONTROL__SNAPSHOT_TIMEOUT_SECONDS", "120")
     monkeypatch.setenv("MCD_API_RECONCILER__GRACE_SECONDS", "200")
     with caplog.at_level("WARNING"):
         create_app()
     assert not any("grace_seconds" in r.message for r in caplog.records)
+
+
+def test_create_app_warns_when_snapshot_timeout_exceeds_grace(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Issue #847 (round-3): the floor is max(hydrate + command, snapshot_timeout),
+    # so an operator who raises snapshot_timeout above grace is warned EVEN when
+    # hydrate + command is below grace. Without this term the stale-stop arm could
+    # clear a still-healthy final-snapshot hold mid-upload, reopening the race.
+    # Here 100 <= max(60 + 30, 200) = 200, driven by the snapshot term alone.
+    _enable_control(monkeypatch)
+    monkeypatch.setenv("MCD_API_CONTROL__HYDRATE_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("MCD_API_CONTROL__COMMAND_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("MCD_API_CONTROL__SNAPSHOT_TIMEOUT_SECONDS", "200")
+    monkeypatch.setenv("MCD_API_RECONCILER__GRACE_SECONDS", "100")
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert any("grace_seconds" in r.message for r in caplog.records)
 
 
 def test_stock_defaults_do_not_warn_reconciler_grace_floor(

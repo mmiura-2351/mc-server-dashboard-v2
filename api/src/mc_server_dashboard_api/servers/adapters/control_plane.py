@@ -161,6 +161,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         data_plane_base_url: str | None = None,
         worker_credential: str | None = None,
         hydrate_timeout_seconds: float | None = None,
+        snapshot_timeout_seconds: float | None = None,
     ) -> None:
         self._registry = registry
         self._control_plane = control_plane
@@ -173,6 +174,13 @@ class FleetControlPlaneAdapter(ControlPlane):
         # large-world working-set pull does not time out the start under the
         # general command deadline (issue #822). ``None`` keeps the default.
         self._hydrate_timeout_seconds = hydrate_timeout_seconds
+        # The final snapshot a graceful stop captures gets its own (longer) command
+        # budget for the same reason (issue #847): the stop holds the assignment
+        # until the snapshot settles, so the dispatch must span a full working-set
+        # upload — under the general command deadline it would time out and release
+        # the assignment mid-upload, reopening the stop->re-place race. ``None``
+        # keeps the default.
+        self._snapshot_timeout_seconds = snapshot_timeout_seconds
 
     async def place(
         self,
@@ -327,6 +335,7 @@ class FleetControlPlaneAdapter(ControlPlane):
             worker_id,
             server_id,
             SnapshotCommand(transfer_url=url, transfer_token=self._token()),
+            timeout_override=self._snapshot_timeout_seconds,
         )
 
     async def read_file(
@@ -405,5 +414,14 @@ class FleetControlPlaneAdapter(ControlPlane):
                 timeout_override=timeout_override,
             )
         except (WorkerNotConnectedError, CommandTimedOutError) as exc:
-            raise WorkerUnavailableError(str(worker_id.value)) from exc
+            # Thread the cause across the seam without leaking a fleet type into
+            # the servers layer (issue #847): a TIMEOUT means the worker session is
+            # healthy and the transfer is still uploading (only the API future was
+            # abandoned), so the final-stop snapshot must HOLD the assignment; a
+            # DISCONNECT means the worker is gone and the upload died with its ctx,
+            # so the assignment is released as before.
+            raise WorkerUnavailableError(
+                str(worker_id.value),
+                upload_may_be_live=isinstance(exc, CommandTimedOutError),
+            ) from exc
         return _to_outcome(result)

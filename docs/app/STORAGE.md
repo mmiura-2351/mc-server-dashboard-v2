@@ -80,7 +80,7 @@ across servers (FR-VER-3) and contain no Community data.
 │       └── servers/
 │           └── <server-id>/
 │               ├── current -> snapshots/<snapshot-id>/  # symlink to the live snapshot; the publish pointer (Section 4)
-│               ├── generation                # monotonic working-set generation counter (Section 3.1); bumped on each commit_snapshot
+│               ├── generation                # combined marker (Section 3.1): line 1 the monotonic working-set generation counter (bumped on each commit_snapshot), line 2 (optional) the publishing Worker id (#847)
 │               ├── snapshots/                # published working-set snapshots; current points at the live one
 │               │   └── <snapshot-id>/        # the full working directory for one published state
 │               │       ├── world/
@@ -126,16 +126,26 @@ Notes:
   republishes it into `current/`. The archive codec (`<archive-ext>`) is
   **adapter-internal** — callers hold only the opaque `BackupKey` and never the
   on-disk name; the M1 `fs` adapter uses gzip (`.tar.gz`), with zstd deferred.
-- `generation` is a plain-text file holding the current authoritative
-  working-set generation counter (a monotonically increasing integer, starting
-  at 1 after the first publish). It is bumped immediately after the `current`
-  pointer flip inside `commit_snapshot` as a separate sequential write; a crash
-  in the window between the two writes leaves the file one behind (under-states
-  by one — the safe direction). After any successful `commit_snapshot` return
-  the two are in agreement. A server with no published snapshot has no
-  `generation` file; reading it in that state returns 0. On object backends
-  it is a single key `generation` under the server prefix. Removed together
-  with the rest of the working-set tree by the post-delete prune (Section 2.1).
+- `generation` is a plain-text marker holding **two** values: line 1 is the
+  current authoritative working-set generation counter (a monotonically
+  increasing integer, starting at 1 after the first publish); line 2 (optional)
+  is the **publishing Worker id** — the id of the Worker that produced `current`
+  (issue #847), used by the publish-time generation guard (Section 8) to tell a
+  same-Worker re-publish (lost-response self-heal) from a different-Worker stale
+  publish (A→B→A). Both are written as **one atomic marker** (a single
+  temp-sibling + atomic rename on `fs`, a single object `PUT` on object backends):
+  a crash between two separate writes could attribute the *previous* publisher to
+  the *new* generation and invert the guard, so the pair must be all-or-nothing.
+  The marker is written immediately after the `current` pointer flip inside
+  `commit_snapshot` as a separate sequential write; a crash in the window between
+  the flip and the marker write leaves the generation one behind (under-states by
+  one — the safe direction). After any successful `commit_snapshot` return the
+  pointer, generation, and publisher are in agreement. A publish that declared no
+  Worker id omits line 2 (no publisher claim, so the guard stays permissive). A
+  server with no published snapshot has no `generation` marker; reading it in that
+  state returns generation 0 / no publisher. On object backends it is a single key
+  `generation` under the server prefix. Removed together with the rest of the
+  working-set tree by the post-delete prune (Section 2.1).
 - On object backends the tree above is a **key prefix scheme**, not real
   directories (Section 7.3); the same logical layout applies.
 
@@ -210,11 +220,12 @@ authoritative-side stream and the atomic-publish handshake.
 | `open_hydrate_source(community_id, server_id) -> ReadStream` | Open a read stream over the current authoritative working set | The data plane reads from this to feed a Worker on start/relocation (hydrate). Reads `current/`. |
 | `begin_snapshot(community_id, server_id) -> SnapshotHandle` | Start an incoming snapshot transfer | Allocates an isolated `incoming/<transfer-id>/` staging area. |
 | `write_snapshot(handle, WriteStream)` | Stream the Worker's working set into staging | Writes only into staging, never `current/`. May be called incrementally. |
-| `commit_snapshot(handle) -> int` | Atomically publish the staged snapshot as the new authoritative copy; return the new generation | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. Bumps and returns the working-set generation counter (the new integer the Worker records as the generation its scratch is at). Refuses with `IncompleteTransferError` if the transfer was not signalled complete. Refuses with `IntegrityCheckError` if the staged set contains corrupt `.mca` region files (issue #739); refused publishes do NOT bump the generation. |
+| `commit_snapshot(handle, *, publisher=None) -> int` | Atomically publish the staged snapshot as the new authoritative copy; return the new generation | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. Bumps and returns the working-set generation counter (the new integer the Worker records as the generation its scratch is at) and records `publisher` (the producing Worker's id, issue #847) alongside it in one atomic marker, read back via `current_publisher`. A `None` publisher records no id (the guard stays permissive). Refuses with `IncompleteTransferError` if the transfer was not signalled complete. Refuses with `IntegrityCheckError` if the staged set contains corrupt `.mca` region files (issue #739); refused publishes do NOT bump the generation. |
 | `abort_snapshot(handle)` | Discard an incomplete/failed transfer | Deletes the staging area; `current/` is untouched. Also the cleanup path for crash recovery (Section 4.3). |
 | `current_generation(community_id, server_id) -> int` | Return the current authoritative working-set generation | The counter `commit_snapshot` bumps, read back so the hydrate data plane can stamp the generation it serves (Section 8). Returns 0 when no snapshot has been published. |
+| `current_publisher(community_id, server_id) -> str \| None` | Return the Worker id that published `current` | Read back from the combined `generation` marker (issue #847) so the publish-time generation guard (Section 8) can allow a same-Worker re-publish (lost-response self-heal) while refusing a different-Worker stale publish (A→B→A). `None` when no snapshot has been published, or the last publish declared no id (an older Worker) — in which case the guard cannot prove a foreign publisher and stays permissive. |
 | `check_current_health(community_id, server_id) -> WorkingSetReport` | Structurally fsck the on-disk authoritative snapshot | Walk `current/` for corrupt `.mca` region files (issue #744). Read-only — never mutates `current/`. Raises `NotFoundError` if no snapshot has been published. |
-| `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1, issue #777). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, the `current` pointer, and the generation marker; leaves `backups/`. The pointer/symlink is invalidated the instant `final.tar.gz` is durable, so a crash-retry is idempotent and never re-packs over a good final. Fail-closed on a pack failure; bypasses the #764 `.mca` gate so a corrupt server stays deletable; no-op if nothing is published. |
+| `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1, issue #777). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, the `current` pointer, and the combined `generation`+publisher marker; leaves `backups/`. The pointer/symlink is invalidated the instant `final.tar.gz` is durable, so a crash-retry is idempotent and never re-packs over a good final. Fail-closed on a pack failure; bypasses the #764 `.mca` gate so a corrupt server stays deletable; no-op if nothing is published. |
 
 The hydrate/snapshot **wire transport** (how `ReadStream`/`WriteStream` bytes
 cross the API↔Worker boundary) is the data plane (epic #8). `Storage` only
@@ -573,7 +584,15 @@ whatever path the API emits:
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
 | `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present, #118). Response always carries `X-Working-Set-Generation: <n>` (the generation of the snapshot served; 0 when no snapshot has been published). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir, generation header still present); `401` |
-| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set, #739); `401` |
+| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <id>` (the publishing Worker), both read by the publish-time generation guard (#847); a never-hydrated/older Worker omits them and the guard stays permissive. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal, #847); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set, #739); `401` |
+
+**`X-Worker-Id` trust (M1).** The `X-Worker-Id` the guard reads is **not**
+authenticated within the shared-credential data plane: any Worker holding the
+transfer token can claim any id (consistent with the #779 trust model). This is
+acceptable — the guard is defense-in-depth behind #847's primary fix (the API
+holds the assignment across the final snapshot, so the genuine stale cross-worker
+publish never arises), and a spoofed id can at worst weaken (never strengthen) the
+guard for a caller already trusted to write the working set.
 
 **JAR posture (M1).** ARCHITECTURE.md Section 7.3 says the resolved server JAR
 reaches the Worker as part of hydrate. As of issue #118 (version catalog + JAR

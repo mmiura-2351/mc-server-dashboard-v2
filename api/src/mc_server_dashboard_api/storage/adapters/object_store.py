@@ -109,8 +109,15 @@ _DEFAULT_VERSION_RETENTION = 10
 _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 # The single pointer object naming the live snapshot prefix (Section 4.2).
 _POINTER = "current.json"
-# The single counter object holding the working-set generation (issue #763): the
-# value ``commit_snapshot`` bumps and the hydrate data plane stamps onto a transfer.
+# The single marker object holding the working-set generation AND the publishing
+# Worker id (issues #763, #847): line 1 is the generation ``commit_snapshot`` bumps
+# (and the hydrate data plane stamps onto a transfer), line 2 (optional) is the
+# Worker id that published ``current``. The publish-time generation guard reads the
+# publisher to allow a same-Worker re-publish (lost-response self-heal) while
+# refusing a different-Worker stale publish (A->B->A). Both live in ONE object so a
+# single atomic PUT keeps the (generation, publisher) pair consistent — a crash
+# between two separate writes could attribute the previous publisher to the new
+# generation and invert the guard.
 _GENERATION = "generation"
 
 
@@ -301,30 +308,66 @@ class ObjectStorage(Storage):
         value: str = json.loads(raw)["snapshot"]
         return value
 
-    async def _read_generation(self, client: S3Client, server_prefix: str) -> int:
-        """Return the working-set generation marker, or 0 when absent/unreadable."""
+    async def _read_marker(
+        self, client: S3Client, server_prefix: str
+    ) -> tuple[int, str | None]:
+        """Return the (generation, publisher) marker, or (0, None) when absent.
+
+        Line 1 is the generation; line 2 (optional) is the publishing Worker id.
+        An unreadable body (never published, an older single-line marker, or a
+        corrupt value) falls back to a generation of 0 / no publisher.
+        """
 
         key = server_prefix + _GENERATION
         if await client.head_object(key) is None:
-            return 0
+            return 0, None
+        raw = (await _read_all(client, key)).decode()
+        lines = raw.splitlines()
         try:
-            return int(await _read_all(client, key))
+            generation = int(lines[0]) if lines else 0
         except ValueError:
-            return 0
+            return 0, None
+        publisher = lines[1].strip() if len(lines) > 1 else ""
+        return generation, (publisher or None)
 
-    async def _bump_generation(self, client: S3Client, server_prefix: str) -> int:
-        """Bump and persist the working-set generation, returning the new value.
+    async def _read_generation(self, client: S3Client, server_prefix: str) -> int:
+        """Return the working-set generation marker, or 0 when absent/unreadable."""
 
-        A read-modify-write of the single counter object (issue #763). Snapshots for
-        one server are serialized by the scheduler (one in-flight transfer), so the
-        marker is not contended, mirroring the single-pointer flip just above which
-        is likewise not CAS-protected.
+        generation, _ = await self._read_marker(client, server_prefix)
+        return generation
+
+    async def _read_publisher(self, client: S3Client, server_prefix: str) -> str | None:
+        """Return the Worker id recorded for the latest publish (issue #847).
+
+        Absent (never published, an older Worker, or a None publisher) -> no claim,
+        so the guard cannot prove a foreign publisher and stays permissive.
+        """
+
+        _, publisher = await self._read_marker(client, server_prefix)
+        return publisher
+
+    async def _bump_generation(
+        self, client: S3Client, server_prefix: str, publisher: str | None
+    ) -> int:
+        """Bump the generation and record the publisher in ONE marker object.
+
+        A read-modify-write of the single combined marker (issues #763, #847): line 1
+        the bumped generation, line 2 the publishing Worker id (omitted when None).
+        Writing both as one atomic PUT keeps the pair consistent — a crash between two
+        separate writes could attribute the previous publisher to the new generation
+        and invert the publish-time guard. Snapshots for one server are serialized by
+        the scheduler (one in-flight transfer), so the marker is not contended,
+        mirroring the single-pointer flip just above which is likewise not
+        CAS-protected.
         """
 
         new_generation = await self._read_generation(client, server_prefix) + 1
-        await client.put_object(
-            server_prefix + _GENERATION, str(new_generation).encode()
+        body = (
+            str(new_generation)
+            if publisher is None
+            else f"{new_generation}\n{publisher}"
         )
+        await client.put_object(server_prefix + _GENERATION, body.encode())
         return new_generation
 
     async def _live_snapshot_prefix(
@@ -485,7 +528,9 @@ class ObjectStorage(Storage):
             finally:
                 await asyncio.to_thread(spool.unlink, missing_ok=True)
 
-    async def commit_snapshot(self, handle: SnapshotHandle) -> int:
+    async def commit_snapshot(
+        self, handle: SnapshotHandle, *, publisher: str | None = None
+    ) -> int:
         h = _as_object_handle(handle)
         if h.consumed:
             raise SnapshotHandleError("snapshot handle already committed or aborted")
@@ -513,11 +558,12 @@ class ObjectStorage(Storage):
                 raise IntegrityCheckError(report)
             await self._publish(client, h.community_id, h.server_id, incoming, staged)
             # Bump the working-set generation now that the pointer references the new
-            # snapshot (issue #763). Only a snapshot publish bumps it (not a restore
-            # or authoritative file edit, which target a stopped server whose Worker
-            # holds no scratch, so the reconciler hydrates regardless).
+            # snapshot (issue #763) and record the publishing Worker (issue #847) in
+            # ONE atomic marker. Only a snapshot publish bumps it (not a restore or
+            # authoritative file edit, which target a stopped server whose Worker holds
+            # no scratch, so the reconciler hydrates regardless).
             server_prefix = self._server_prefix(h.community_id, h.server_id)
-            generation = await self._bump_generation(client, server_prefix)
+            generation = await self._bump_generation(client, server_prefix, publisher)
         # Publish reclaimed the staging prefix; release its active-staging lease so
         # a later sweep is not blocked by a now-dead handle (issue #160).
         self._release_staging(incoming)
@@ -540,6 +586,14 @@ class ObjectStorage(Storage):
         server_prefix = self._server_prefix(community_id, server_id)
         async with self._client_factory() as client:
             return await self._read_generation(client, server_prefix)
+
+    async def current_publisher(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> str | None:
+        # Read the Worker id recorded for the latest publish (issue #847 bug 3).
+        server_prefix = self._server_prefix(community_id, server_id)
+        async with self._client_factory() as client:
+            return await self._read_publisher(client, server_prefix)
 
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId

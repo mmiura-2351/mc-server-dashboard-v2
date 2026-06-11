@@ -50,10 +50,14 @@ type Transfer interface {
 	// API served (the value of its response header, issue #763); 0 when the header
 	// is absent (a server with no published snapshot, or an older API).
 	Hydrate(ctx context.Context, url, token, workingDir string) (uint64, error)
-	// Snapshot packs workingDir and uploads it to url. It returns the NEW
-	// authoritative store generation the publish produced (the value of the API's
-	// response header, issue #763); 0 when the header is absent (an older API).
-	Snapshot(ctx context.Context, url, token, workingDir string) (uint64, error)
+	// Snapshot packs workingDir and uploads it to url, declaring baseGeneration as
+	// the store generation this working set was hydrated from (issue #847) and
+	// workerID as this Worker's own id (issue #847 bug 3): the API refuses the publish
+	// if the store has since advanced past baseGeneration AND current was published by
+	// a different worker. It returns the NEW authoritative store generation the publish
+	// produced (the value of the API's response header, issue #763); 0 when the header
+	// is absent (an older API).
+	Snapshot(ctx context.Context, url, token, workingDir string, baseGeneration uint64, workerID string) (uint64, error)
 }
 
 // systemClock is the default wall-clock used for the metrics ticker when
@@ -84,6 +88,11 @@ type Manager struct {
 	openControl controlFunc
 	transfer    Transfer
 	logger      *slog.Logger
+	// workerID is this Worker's own id, stamped on a snapshot publish so the API's
+	// publish-time generation guard can tell a same-Worker re-publish from a
+	// different-Worker stale publish (issue #847 bug 3). Empty until WithWorkerID is
+	// called (older wiring / tests): the guard then treats the publisher as unknown.
+	workerID string
 
 	clock           session.Clock
 	metricsInterval time.Duration
@@ -192,6 +201,14 @@ func (m *Manager) WithLogger(l *slog.Logger) *Manager {
 // SnapshotTrigger. Without it, those commands fail with a transfer error.
 func (m *Manager) WithTransfer(t Transfer) *Manager {
 	m.transfer = t
+	return m
+}
+
+// WithWorkerID sets this Worker's own id, stamped on a snapshot publish so the
+// API's publish-time generation guard can distinguish a same-Worker re-publish
+// from a different-Worker stale publish (issue #847 bug 3).
+func (m *Manager) WithWorkerID(id string) *Manager {
+	m.workerID = id
 	return m
 }
 
@@ -391,7 +408,11 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 				len(report.Corrupt), report.Scanned, filepath.Base(first.Path), first.Reason))
 	}
 
-	gen, err := m.transfer.Snapshot(ctx, cmd.TransferURL, cmd.TransferToken, workingDir)
+	// Declare the store generation this set was hydrated from (issue #847) so the API
+	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
+	// hydrated set) leaves the guard to compare against the store's current value.
+	baseGeneration := readGeneration(workingDir)
+	gen, err := m.transfer.Snapshot(ctx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: snapshot: %v", err))

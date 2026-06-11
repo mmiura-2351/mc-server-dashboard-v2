@@ -52,6 +52,51 @@ func TestSnapshotRecordsNewGeneration(t *testing.T) {
 	}
 }
 
+// TestSnapshotDeclaresHeldGenerationAsBase proves a SnapshotTrigger declares the
+// store generation the working set was hydrated from (the held marker) as the
+// publish's base generation, so the API's publish-time generation guard can refuse
+// a stale publish (issue #847).
+func TestSnapshotDeclaresHeldGenerationAsBase(t *testing.T) {
+	tr := &fakeTransfer{gen: 12}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	dir := seedScratch(t, m, "s1")
+	if err := writeGeneration(dir, 5); err != nil {
+		t.Fatal(err)
+	}
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success", res)
+	}
+	if len(tr.snapshotBaseGenerations) != 1 || tr.snapshotBaseGenerations[0] != 5 {
+		t.Fatalf("declared base generations = %v, want [5]", tr.snapshotBaseGenerations)
+	}
+}
+
+// TestSnapshotDeclaresWorkerIDAsPublisher proves a SnapshotTrigger declares this
+// Worker's own id as the publisher, so the API's publish-time generation guard can
+// tell a same-Worker re-publish (lost-response self-heal) from a different-Worker
+// stale publish (issue #847 bug 3).
+func TestSnapshotDeclaresWorkerIDAsPublisher(t *testing.T) {
+	tr := &fakeTransfer{gen: 12}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr).WithWorkerID("worker-xyz")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	seedScratch(t, m, "s1")
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success", res)
+	}
+	if len(tr.snapshotWorkerIDs) != 1 || tr.snapshotWorkerIDs[0] != "worker-xyz" {
+		t.Fatalf("declared worker ids = %v, want [worker-xyz]", tr.snapshotWorkerIDs)
+	}
+}
+
 // TestGenerationMarkerRemovedAfterFinalSnapshot proves the generation marker
 // follows the scratch lifecycle: the post-stop final snapshot GCs the scratch
 // (issue #762/#841), which drops the marker with it, so a reclaimed server reports
