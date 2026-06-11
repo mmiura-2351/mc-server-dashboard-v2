@@ -161,18 +161,29 @@ class RunReconcilerTick:
         # candidate is distinct here (one row per server in list_reconcilable), so
         # concurrent actions never touch the same server; the only shared state is
         # the in-memory ``_attempts`` map, mutated only between awaits on this one
-        # event loop, so a plain dict needs no lock. return_exceptions is moot —
-        # ``_consider``/``_run`` already swallow every action error to keep the
-        # tick alive — but is set so an unforeseen escape cannot cancel the siblings.
+        # event loop, so a plain dict needs no lock. return_exceptions=True is
+        # load-bearing: without it, the first escaped exception would cause gather to
+        # return early while sibling tasks keep running past the tick boundary. With
+        # it, tick() returns only after every action settles. Results are collected
+        # so any Exception that escapes _consider's own handling is logged rather
+        # than silently discarded (NFR-OBS-1).
         semaphore = asyncio.Semaphore(_MAX_CONCURRENT_ACTIONS)
 
         async def _bounded(server: Server) -> None:
             async with semaphore:
                 await self._consider(server, now)
 
-        await asyncio.gather(
-            *(_bounded(server) for server in candidates), return_exceptions=True
+        pairs = [(server, _bounded(server)) for server in candidates]
+        results = await asyncio.gather(
+            *(coro for _, coro in pairs), return_exceptions=True
         )
+        for server, result in zip((s for s, _ in pairs), results):
+            if isinstance(result, Exception):
+                _LOG.exception(
+                    "unhandled exception in reconciler tick for server %s",
+                    server.id.value,
+                    exc_info=result,
+                )
 
     def _expire_stale(self, now: dt.datetime) -> None:
         # Time-based expiry so the map does not grow without bound, WITHOUT

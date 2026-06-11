@@ -794,7 +794,7 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
             raise RuntimeError("transaction poisoned")
 
     def make_start() -> StartServer:
-        # The first factory call (poisoned server, dispatched first) gets the
+        # The first factory call (healthy server, seeded first) gets the
         # exploding UoW; every later call gets a healthy one.
         uow = (
             _BoomUnitOfWork(servers=repo) if not made else FakeUnitOfWork(servers=repo)
@@ -861,3 +861,49 @@ async def test_backoff_remains_per_server_under_concurrency() -> None:
     assert set(reconciler._attempts) == {a.id, b.id}
     assert reconciler._attempts[a.id].failures == 1
     assert reconciler._attempts[b.id].failures == 1
+
+
+async def test_exception_escaping_consider_is_logged_and_tick_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An exception that escapes _consider's own error handling (e.g. a bug in
+    # _within_grace or _action_for) must be logged at ERROR level (NFR-OBS-1)
+    # and must not prevent the other server's action from running.
+    repo = FakeServerRepository()
+    good = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+    )
+    bad = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+    )
+    repo.seed(good)
+    repo.seed(bad)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+
+    reconciler = _concurrent_reconciler(repo, cp, clock)
+
+    # Patch _consider to raise unconditionally for one specific server id.
+    original_consider = reconciler._consider
+
+    async def _patched_consider(server: Server, now: dt.datetime) -> None:
+        if server.id == bad.id:
+            raise RuntimeError("_consider blew up unexpectedly")
+        await original_consider(server, now)
+
+    reconciler._consider = _patched_consider  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.ERROR, logger="mc_server_dashboard_api"):
+        await reconciler.tick()
+
+    # The good server's action still ran despite the exception on the bad one.
+    assert any(sid == good.id for _, _, sid in cp.dispatched)
+    # The exception was logged.
+    assert any(
+        "unhandled exception" in record.message and record.levelno >= logging.ERROR
+        for record in caplog.records
+    )
