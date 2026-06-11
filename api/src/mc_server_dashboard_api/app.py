@@ -272,6 +272,45 @@ def _validate_control_tls(settings: Settings) -> None:
         )
 
 
+def _warn_reconciler_grace_floor(settings: Settings) -> None:
+    """Warn (not fatal) when the reconciler grace is too small to be safe (#822).
+
+    Duplicate-start safety (issue #774/#812) hinges on the reconciler not racing
+    an in-flight original dispatch: it must wait out the longest a started server's
+    FIRST dispatch round-trip can still be in flight before it re-dispatches. A
+    start's dispatch is hydrate-then-start, so that round-trip is bounded by the
+    hydrate budget plus the start command deadline. The grace floor is therefore::
+
+        grace_seconds > hydrate_timeout_seconds + command_timeout_seconds
+
+    (Pre-#822 both phases shared ``command_timeout_seconds``, giving the historical
+    ``grace > 2 × command_timeout_seconds``.) Below the floor, a slow first start
+    can still be converging on the assigned Worker when the reconciler's orphan path
+    re-places it elsewhere and starts a second live instance. This is a warning, not
+    a hard failure, because the window only opens on a crash/timeout mid-start and
+    operators may knowingly accept it; with the generous default hydrate budget the
+    stock ``grace_seconds=120`` is below the floor, so the warning fires by default
+    to nudge operators running the reconciler with large worlds to raise it.
+    """
+
+    floor = (
+        settings.control.hydrate_timeout_seconds
+        + settings.control.command_timeout_seconds
+    )
+    if settings.reconciler.grace_seconds <= floor:
+        logging.getLogger(__name__).warning(
+            "reconciler.grace_seconds (%d) <= "
+            "control.hydrate_timeout_seconds (%d) + "
+            "control.command_timeout_seconds (%d); a slow start re-dispatched by "
+            "the reconciler before its first round-trip settles can spawn a "
+            "duplicate live instance (issue #822). Raise grace_seconds above %d.",
+            settings.reconciler.grace_seconds,
+            settings.control.hydrate_timeout_seconds,
+            settings.control.command_timeout_seconds,
+            floor,
+        )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = load_settings(_resolve_config_file())
@@ -298,6 +337,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # rule (CONFIGURATION.md Section 6.1).
     if settings.control.enabled:
         _validate_control_tls(settings)
+        # Warn (not fatal) if the reconciler grace is too small to keep the
+        # duplicate-start window closed against the start's hydrate+command budget
+        # (issue #822). Only meaningful when the control plane — and thus the
+        # reconciler — is enabled.
+        _warn_reconciler_grace_floor(settings)
 
     # Bind the Storage Port to the config-selected backend now, so an unsupported
     # backend (or, by construction, a missing fs root) fails fast at boot rather
@@ -483,6 +527,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 control_plane=app.state.control_plane,
                 data_plane_base_url=settings.server.public_base_url,
                 worker_credential=settings.control.worker_credential,
+                hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
             )
             reconciler = RunReconcilerTick(
                 uow=ServersUnitOfWork(create_session_factory(engine)),

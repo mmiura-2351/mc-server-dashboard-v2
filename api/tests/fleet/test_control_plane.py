@@ -546,6 +546,41 @@ async def test_dispatch_times_out_when_unanswered() -> None:
         await harness.stop()
 
 
+async def test_timeout_override_extends_the_deadline_for_one_dispatch() -> None:
+    # A slow command (the start's hydrate phase, #822) that outlasts the tiny
+    # default deadline still resolves when dispatched with a longer override,
+    # rather than raising CommandTimedOutError.
+    harness = _Harness(command_timeout=0.1)
+    try:
+        stub = await harness.start()
+        call = await _registered_call(harness, stub)
+
+        async def slow_worker_echo() -> None:
+            msg = await call.read()
+            # Answer AFTER the default 0.1s deadline but within the override.
+            await asyncio.sleep(0.3)
+            await call.write(
+                pb.WorkerMessage(
+                    correlation_id=msg.api_command.command_id,
+                    command_result=pb.CommandResult(success=True),
+                )
+            )
+
+        echo = asyncio.ensure_future(slow_worker_echo())
+        result = await harness.control_plane.dispatch(
+            worker_id=WorkerId(_WORKER),
+            server_id=str(uuid.uuid4()),
+            command=ServerCommandCommand(line="list"),
+            timeout_override=5.0,
+        )
+        await echo
+
+        assert result.success
+        await call.done_writing()
+    finally:
+        await harness.stop()
+
+
 async def test_stale_session_teardown_does_not_fail_new_sessions_pending() -> None:
     # A worker reconnects on session B; an in-flight command is registered under
     # B. A delayed teardown of the OLD session A then fires fail_worker_pending

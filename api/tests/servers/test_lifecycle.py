@@ -86,7 +86,12 @@ class _OkFleetControlPlane(FleetControlPlane):
     """
 
     async def dispatch(
-        self, *, worker_id: FleetWorkerId, server_id: str, command: FleetCommand
+        self,
+        *,
+        worker_id: FleetWorkerId,
+        server_id: str,
+        command: FleetCommand,
+        timeout_override: float | None = None,
     ) -> CommandResult:
         return CommandResult(code=CommandResultCode.OK)
 
