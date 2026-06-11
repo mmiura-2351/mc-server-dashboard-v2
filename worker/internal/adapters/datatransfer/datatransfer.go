@@ -531,10 +531,14 @@ func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
 	// os.ReadDir already returns entries sorted by name.
 	for _, entry := range entries {
 		// Exclude the Worker-private generation marker at the scratch root so it
-		// never lands in the authoritative stored working set (issue #763). It only
-		// ever lives at the root, so the dir == root guard keeps a same-named file in
-		// a sub-tree (which would be part of the legitimate world) untouched.
-		if dir == root && entry.Name() == generationMarkerFile {
+		// never lands in the authoritative stored working set (issue #763). The match
+		// is by PREFIX, not exact name (issue #834): writeGeneration writes the marker
+		// atomically via a ".mcsd_generation-XXXX" temp sibling + rename, so a crash
+		// before the rename leaves such a temp at the root — an exact-name exclusion
+		// would let it leak into the snapshot. It only ever lives at the root, so the
+		// dir == root guard keeps a same-prefixed file in a sub-tree (which would be
+		// part of the legitimate world) untouched.
+		if dir == root && strings.HasPrefix(entry.Name(), generationMarkerFile) {
 			continue
 		}
 		full := filepath.Join(dir, entry.Name())

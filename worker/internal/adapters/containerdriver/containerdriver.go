@@ -80,6 +80,22 @@ const (
 	defaultConflictDeadline     = 10 * time.Second
 )
 
+// waitTransportProbeInterval and waitTransportProbeDeadline bound the re-inspect
+// loop supervise runs when docker.Wait returns a TRANSPORT error (a daemon
+// restart/blip) rather than a confirmed exit. A transport error does not mean the
+// container died, so supervise re-inspects the container to learn its real state
+// before deciding a terminal: it polls every interval until the deadline,
+// re-attaching a waiter if the container is still running, emitting the terminal
+// if it is gone, and emitting nothing if the daemon stays unreachable past the
+// deadline so the manager's last authoritative state stands (issue #865). The
+// bound mirrors the wedged-daemon posture of the conflict loop (issue #233) and
+// the startup Sweep (issue #338): a healthy daemon answers the first probe, so
+// this only caps the wedged case. Vars (not consts) so tests can shrink them.
+var (
+	waitTransportProbeInterval = 250 * time.Millisecond
+	waitTransportProbeDeadline = 30 * time.Second
+)
+
 // defaultGameBindIP is the host interface the game port is published on when
 // Options.GameBindIP is unset: loopback, preserving the historical behavior.
 // rconBindIP is fixed: RCON is a control channel and must not be exposed.
@@ -1113,9 +1129,28 @@ func (i *instance) waitExit(ctx context.Context, d time.Duration) bool {
 // supervise blocks on the container exit and emits the terminal state: stopped
 // when a stop was requested, crashed otherwise (FR-SRV-4). It removes the
 // container afterwards and closes the event and log streams.
+//
+// A Wait TRANSPORT error (a daemon restart/blip) is not a confirmed exit: the
+// container may still be running, so emitting a terminal here would wrongly
+// report a live server as crashed and — once the terminal latch (issue #835)
+// fires — permanently suppress the later running emit (issue #865). Instead the
+// loop re-inspects the container with a bounded poll: a still-running container
+// re-attaches a waiter and supervision continues; a gone container falls through
+// to the terminal emit; a daemon still unreachable past the bound re-attaches a
+// waiter too, emitting nothing so the manager's last authoritative state stands
+// until the next observation. A confirmed exit (clean Wait, or a non-transport
+// error such as a 404 the inspect also resolves as gone) breaks the loop
+// directly.
 func (i *instance) supervise() {
 	id := i.currentContainerID()
-	_, waitErr := i.docker.Wait(context.Background(), id)
+
+	var waitErr error
+	for {
+		_, waitErr = i.docker.Wait(context.Background(), id)
+		if waitErr == nil || !isTransportError(waitErr) || i.exitedAfterTransportError(id) {
+			break
+		}
+	}
 
 	i.mu.Lock()
 	// Mark the exit observed before recording the terminal state so the
@@ -1154,6 +1189,48 @@ func (i *instance) supervise() {
 	i.closed = true
 	close(i.events)
 	i.mu.Unlock()
+}
+
+// isTransportError reports whether err from a docker call is a transport-level
+// failure (daemon restart/blip, socket gone) rather than a daemon HTTP response.
+// A non-2xx response is carried by statusError; everything else returned from a
+// docker call is a transport failure. supervise uses this to distinguish a Wait
+// daemon blip (re-inspect) from a confirmed exit or a 404-gone (terminal).
+func isTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var status statusError
+	return !errors.As(err, &status)
+}
+
+// exitedAfterTransportError re-inspects the container after a Wait transport
+// error to learn its real state, bounding the daemon-unreachable case with a
+// poll deadline (issue #865). It returns true when the container is confirmed
+// gone or exited (supervise should emit the terminal), and false when it is
+// still running or the daemon stays unreachable past the deadline (supervise
+// should re-attach a waiter and keep supervising, emitting nothing). errNotFound
+// (a 404) means the container is gone; any other inspect error is treated as the
+// daemon still being unreachable and is retried until the deadline.
+func (i *instance) exitedAfterTransportError(id string) bool {
+	deadline := time.Now().Add(waitTransportProbeDeadline)
+	for {
+		info, err := i.docker.Inspect(context.Background(), id)
+		switch {
+		case errors.Is(err, errNotFound):
+			return true
+		case err == nil && !info.Running:
+			return true
+		case err == nil && info.Running:
+			return false
+		}
+		// Daemon still unreachable: retry until the deadline, then re-attach a
+		// waiter rather than guess a terminal.
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(waitTransportProbeInterval)
+	}
 }
 
 func (i *instance) set(s execution.ServerState) {

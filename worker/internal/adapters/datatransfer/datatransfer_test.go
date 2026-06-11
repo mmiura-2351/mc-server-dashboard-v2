@@ -367,6 +367,11 @@ func TestSnapshotExcludesGenerationMarker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(srcDir, generationMarkerFile), []byte("7"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	// A leftover marker TEMP file at the root (a crash before writeGeneration's
+	// rename, issue #834) must ALSO be excluded — the exclusion is by prefix.
+	if err := os.WriteFile(filepath.Join(srcDir, generationMarkerFile+"-123456"), []byte("temp"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(srcDir, "server.properties"), []byte("p"), 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -405,6 +410,9 @@ func TestSnapshotExcludesGenerationMarker(t *testing.T) {
 	}
 	if names[generationMarkerFile] {
 		t.Fatalf("snapshot tar must not contain the root generation marker %q", generationMarkerFile)
+	}
+	if names[generationMarkerFile+"-123456"] {
+		t.Fatalf("snapshot tar must not contain the root marker temp file %q-123456", generationMarkerFile)
 	}
 	if !names["server.properties"] {
 		t.Fatal("snapshot tar must contain server.properties")

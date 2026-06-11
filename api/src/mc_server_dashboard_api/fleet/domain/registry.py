@@ -213,10 +213,13 @@ class WorkerRegistry(abc.ABC):
         """Record that ``server_id`` has left the Worker (load--, memory--).
 
         Drops the committed row for ``server_id`` so both the count and the
-        committed-memory axis (#843) shed it together. Idempotent if the row is
-        already gone (e.g. a reconnect rebuild between the desired-state flip and
-        this call already excluded it), mirroring the prior count's floor-at-zero. A
-        call for an unknown Worker is ignored.
+        committed-memory axis (#843) shed it together. Stamps the decrement with
+        the current sequence so :meth:`set_assignment` can detect a stop that fired
+        in the rebuild's tally-read window and not resurrect the row from the stale
+        tally (#862). Idempotent if the row is already gone (e.g. a reconnect
+        rebuild between the desired-state flip and this call already excluded it),
+        mirroring the prior count's floor-at-zero. A call for an unknown Worker is
+        ignored.
         """
 
     @abc.abstractmethod
@@ -234,7 +237,10 @@ class WorkerRegistry(abc.ABC):
         ``snapshot_epoch`` is the :meth:`assignment_epoch` value the caller read
         BEFORE it read its DB tally. Any assignment confirmed at or after that epoch
         (a commit+confirm that landed in the gap between the tally read and this call)
-        is KEPT rather than overwritten by the stale tally (#844).
+        is KEPT rather than overwritten by the stale tally (#844). Symmetrically,
+        any row in the tally that was decremented at or after that epoch (a stop that
+        fired in the gap) is DROPPED rather than being resurrected by the stale tally
+        (#862).
 
         Any RESERVED placement whose server is in ``assignments`` is dropped (the
         commit landed and is now counted in the tally, so its pending
