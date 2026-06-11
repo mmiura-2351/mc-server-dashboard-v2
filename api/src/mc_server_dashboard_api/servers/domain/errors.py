@@ -173,6 +173,19 @@ class LifecycleTransitionConflictError(ServerError):
     """
 
 
+class ServerBusyError(ServerError):
+    """A gated operation could not acquire the per-server lifecycle lock in time.
+
+    The at-rest-gated use cases and ``StartServer`` serialize on a per-server
+    advisory lock (issue #827). When the lock is already held by another in-flight
+    lifecycle operation for the same server, a waiter bounds its wait (issue #876):
+    rather than block indefinitely — pinning a DB pool slot and risking process-wide
+    pool starvation — it gives up after a short window and raises this. The
+    condition is transient (the holder releases when its operation finishes), so the
+    edge maps it to 409 ``server_busy`` and the caller can retry.
+    """
+
+
 class NoEligibleWorkerError(ServerError):
     """Placement found no Worker that can host the server (FR-WRK-3).
 

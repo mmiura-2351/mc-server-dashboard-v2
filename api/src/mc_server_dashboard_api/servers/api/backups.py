@@ -71,6 +71,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     FileTooLargeError,
     InvalidBackupArchiveError,
+    ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
 )
@@ -190,6 +191,18 @@ async def create_backup(
             server_id,
         )
         raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        # A concurrent lifecycle op held the per-server lock past the acquire
+        # budget (issue #876): a transient 409 the caller retries.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.DENIED,
+            authorized,
+            community_id,
+            server_id,
+        )
+        raise _conflict("server_busy") from exc
     except WorkerUnavailableError as exc:
         await _record_failure(
             recorder,
@@ -319,6 +332,19 @@ async def restore_backup(
             target_type=ops.TARGET_BACKUP,
         )
         raise _conflict("server_not_stopped") from exc
+    except ServerBusyError as exc:
+        # A concurrent lifecycle op held the per-server lock past the acquire
+        # budget (issue #876): a transient 409 the caller retries.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.DENIED,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
+        raise _conflict("server_busy") from exc
     except BackupCorruptError as exc:
         # The backup's extracted working set is structurally corrupt and force was
         # not set (#743): the restore was refused and the backup quarantined. Like
@@ -394,6 +420,10 @@ async def delete_backup(
         raise _not_found() from exc
     except BackupNotFoundError as exc:
         raise _not_found() from exc
+    except ServerBusyError as exc:
+        # A concurrent lifecycle op held the per-server lock past the acquire
+        # budget (issue #876): a transient 409 the caller retries.
+        raise _conflict("server_busy") from exc
     await _record(recorder, ops.BACKUP_DELETE, authorized, community_id, backup_id)
 
 

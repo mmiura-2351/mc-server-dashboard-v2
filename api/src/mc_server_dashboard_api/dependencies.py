@@ -1709,6 +1709,7 @@ def get_create_backup(
             control_plane=control_plane,
         ),
         clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
