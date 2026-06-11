@@ -732,3 +732,59 @@ def test_ports_start_equal_to_end_is_accepted(
     settings = load_settings(config_file=cfg)
     assert settings.ports.range_start == 25565
     assert settings.ports.range_end == 25565
+
+
+# --- database pool sizing (issue #884) --------------------------------------
+
+
+def test_database_pool_size_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SQLAlchemy's default pool_size is 5; we mirror it so existing deployments
+    # see no behavioural change after the config key lands.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.database.pool_size == 5
+
+
+def test_database_max_overflow_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SQLAlchemy's default max_overflow is 10; we mirror it.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.database.max_overflow == 10
+
+
+def test_database_pool_size_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[database]\npool_size = 20\n")
+    settings = load_settings(config_file=cfg)
+    assert settings.database.pool_size == 20
+
+
+def test_database_max_overflow_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[database]\nmax_overflow = 0\n")
+    settings = load_settings(config_file=cfg)
+    assert settings.database.max_overflow == 0
+
+
+def test_database_pool_size_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # pool_size = 0 would leave no permanent connections; reject it.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[database]\npool_size = 0\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+def test_database_max_overflow_must_be_nonnegative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # max_overflow = 0 disables overflow (valid); -1 is meaningless.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[database]\nmax_overflow = -1\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)

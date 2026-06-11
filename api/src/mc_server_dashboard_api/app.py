@@ -396,7 +396,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_engine(settings.database.url)
+        engine = create_engine(
+            settings.database.url,
+            pool_size=settings.database.pool_size,
+            max_overflow=settings.database.max_overflow,
+        )
         app.state.engine = engine
         app.state.settings = settings
         app.state.storage = storage

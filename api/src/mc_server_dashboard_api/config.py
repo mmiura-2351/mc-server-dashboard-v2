@@ -149,6 +149,11 @@ class DatabaseSettings(_Section):
     """Persistence (CONFIGURATION.md Section 5.2). ``url`` is a secret."""
 
     url: str
+    # Connection-pool sizing (issue #884). Defaults mirror SQLAlchemy's own
+    # defaults (pool_size=5, max_overflow=10) so existing deployments see no
+    # change until an operator explicitly tunes them.
+    pool_size: int = Field(default=5, gt=0)
+    max_overflow: int = Field(default=10, ge=0)
 
 
 class StorageFsSettings(_Section):
