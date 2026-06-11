@@ -135,9 +135,16 @@ func CheckRegionFile(path string) (Reason, error) {
 	}
 	size := info.Size()
 
+	// A 0-byte file is an empty region container — Minecraft legitimately writes
+	// these (e.g. fresh poi/r.*.mca with no chunks yet) — so it is structurally
+	// sound, not a torn save (issue #905).
+	if size == 0 {
+		return ReasonNone, nil
+	}
+
 	// A valid region carries both header tables (location + timestamp), so the
-	// smallest sound file is two sectors. A non-zero size below that — or any size
-	// that is not a 4096 multiple — is a torn save.
+	// smallest sound non-empty file is two sectors. A non-zero size below that —
+	// or any size that is not a 4096 multiple — is a torn save.
 	if size < headerSectors*sectorSize || size%sectorSize != 0 {
 		return ReasonNotAligned, nil
 	}

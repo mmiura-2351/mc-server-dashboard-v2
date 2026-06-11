@@ -91,9 +91,15 @@ def _check_region(size: int, fh: BinaryIO) -> ReasonCode | None:
     the first :class:`ReasonCode` that fails; reads at most the 8 KiB header plus a
     5-byte prefix per present chunk, so it never loads the region payload.
     """
+    # A 0-byte file is an empty region container — Minecraft legitimately writes
+    # these (e.g. fresh poi/r.*.mca with no chunks yet) — so it is structurally
+    # sound, not a torn save (issue #905).
+    if size == 0:
+        return None
+
     # A valid region carries both header tables (location + timestamp), so the
-    # smallest sound file is two sectors. A non-zero size below that — or any
-    # size that is not a 4096 multiple — is a torn save.
+    # smallest sound non-empty file is two sectors. A non-zero size below that —
+    # or any size that is not a 4096 multiple — is a torn save.
     if size < _HEADER_SECTORS * _SECTOR or size % _SECTOR != 0:
         return ReasonCode.NOT_4096_ALIGNED
 
