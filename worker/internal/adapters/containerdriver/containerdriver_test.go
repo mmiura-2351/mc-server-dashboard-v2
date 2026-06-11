@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1718,5 +1719,93 @@ func TestEmitCoalescesTerminalEventOnFullBuffer(t *testing.T) {
 	}
 	if last.State != execution.StateCrashed {
 		t.Fatalf("terminal event dropped: last buffered state = %v, want %v", last.State, execution.StateCrashed)
+	}
+}
+
+// TestEmitDropsNonTerminalAfterTerminal asserts the terminal latch: once a
+// terminal state is emitted, a later non-terminal event (awaitReady's running or
+// Stop's stopping racing past supervise's stopped|crashed) is dropped so a
+// latest-wins consumer never sees a dead container flip back to running/stopping
+// (issue #835).
+func TestEmitDropsNonTerminalAfterTerminal(t *testing.T) {
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "srv-835"},
+		events: make(chan execution.StatusEvent, 8),
+	}
+
+	inst.emit(execution.StateStopped, "")
+	inst.emit(execution.StateRunning, "")  // awaitReady racing past the exit
+	inst.emit(execution.StateStopping, "") // Stop racing past the exit
+
+	got := drainStates(inst.events)
+	want := []execution.ServerState{execution.StateStopped}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("post-terminal non-terminal emit not dropped: got %v, want %v", got, want)
+	}
+}
+
+// TestEmitTerminalLatchUnderConcurrentBurst future-proofs the mu-serialized emit
+// assumption: many goroutines burst non-terminal events while one emits the
+// terminal state. The latch is read and set under i.mu, so regardless of
+// scheduling the last buffered event is the terminal one and no non-terminal
+// event is buffered after it (issue #835).
+func TestEmitTerminalLatchUnderConcurrentBurst(t *testing.T) {
+	for trial := 0; trial < 50; trial++ {
+		inst := &instance{
+			spec:   execution.InstanceSpec{ServerID: "srv-835-burst"},
+			events: make(chan execution.StatusEvent, 64),
+		}
+
+		var wg sync.WaitGroup
+		// One goroutine emits the terminal state amid the burst; the rest hammer
+		// non-terminal states before and after it.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inst.emit(execution.StateStopped, "")
+		}()
+		for g := 0; g < 8; g++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for n := 0; n < 16; n++ {
+					inst.emit(execution.StateRunning, "")
+					inst.emit(execution.StateStopping, "")
+				}
+			}()
+		}
+		wg.Wait()
+
+		got := drainStates(inst.events)
+		if len(got) == 0 {
+			t.Fatalf("trial %d: no events buffered", trial)
+		}
+		// The terminal event must appear, and nothing may follow it.
+		var seenTerminal bool
+		for idx, st := range got {
+			if isTerminal(st) {
+				seenTerminal = true
+				if idx != len(got)-1 {
+					t.Fatalf("trial %d: non-terminal event buffered after terminal: %v", trial, got)
+				}
+			}
+		}
+		if !seenTerminal {
+			t.Fatalf("trial %d: terminal event never buffered: %v", trial, got)
+		}
+	}
+}
+
+// drainStates non-blockingly drains the event channel and returns the buffered
+// states in order.
+func drainStates(ch <-chan execution.StatusEvent) []execution.ServerState {
+	var states []execution.ServerState
+	for {
+		select {
+		case ev := <-ch:
+			states = append(states, ev.State)
+		default:
+			return states
+		}
 	}
 }
