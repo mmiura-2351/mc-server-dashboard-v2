@@ -41,8 +41,12 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ListFilesCommand,
     ReadFileCommand,
     ServerCommandCommand,
+    SnapshotCommand,
     StartServerCommand,
     WorkerNotConnectedError,
+)
+from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
+    LateSnapshotResultSink,
 )
 from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, WorkerId
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
@@ -630,7 +634,7 @@ async def test_resolve_ignores_result_from_non_owning_worker() -> None:
     intruder = WorkerId("33333333-3333-3333-3333-333333333333")
 
     future = state.register_pending("cmd-1", owner)
-    state.resolve("cmd-1", intruder, pb.CommandResult(success=True))
+    await state.resolve("cmd-1", intruder, pb.CommandResult(success=True))
 
     assert not future.done()
 
@@ -643,10 +647,233 @@ async def test_resolve_accepts_result_from_owning_worker() -> None:
     intruder = WorkerId("33333333-3333-3333-3333-333333333333")
 
     future = state.register_pending("cmd-1", owner)
-    state.resolve("cmd-1", intruder, pb.CommandResult(success=False))
+    await state.resolve("cmd-1", intruder, pb.CommandResult(success=False))
     assert not future.done()
 
-    state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+    await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
 
     assert future.done()
     assert future.result().success
+
+
+class _RecordingLateSnapshotSink(LateSnapshotResultSink):
+    """Records late-snapshot clear calls for assertions (issue #891)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, bool]] = []
+
+    async def clear_held_assignment_on_late_snapshot(
+        self, *, server_id: str, worker_id: str, succeeded: bool
+    ) -> None:
+        self.calls.append((server_id, worker_id, succeeded))
+
+
+_SERVER = "44444444-4444-4444-4444-444444444444"
+
+
+def _failed_transfer_result() -> pb.CommandResult:
+    return pb.CommandResult(
+        success=False,
+        error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_TRANSFER_FAILED),
+    )
+
+
+async def test_late_failed_snapshot_clears_held_assignment() -> None:
+    # A snapshot dispatch times out (its future is discarded), then the OWNING
+    # worker reports a late TRANSFER_FAILED. The unmatched result must route to the
+    # late-snapshot sink so the held assignment clears immediately (issue #891).
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")  # dispatch timeout
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    assert sink.calls == [(_SERVER, owner.value, False)]
+
+
+async def test_late_snapshot_from_non_owning_worker_is_ignored() -> None:
+    # The late snapshot result is forged by a DIFFERENT worker than the one the
+    # snapshot was dispatched to. The #789 ownership guard drops it: the sink is
+    # never called, and the record is left so the owning worker's report still wins.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+    intruder = WorkerId("33333333-3333-3333-3333-333333333333")
+
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")
+    await state.resolve("cmd-1", intruder, _failed_transfer_result())
+    assert sink.calls == []
+
+    # The owning worker's later report still clears it.
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == [(_SERVER, owner.value, False)]
+
+
+async def test_late_successful_snapshot_clears_held_assignment() -> None:
+    # A late SUCCESS (the publish landed but the response was slow) clears too: the
+    # snapshot exists, so the held assignment is released now rather than left to
+    # the stale-stop arm. ``succeeded=True`` distinguishes it from the failed case.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")
+    await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+
+    assert sink.calls == [(_SERVER, owner.value, True)]
+
+
+async def test_unmatched_non_snapshot_result_is_dropped() -> None:
+    # An unmatched result that is NOT a timed-out snapshot (a non-snapshot command,
+    # or a snapshot that resolved on time) leaves the sink untouched — still just a
+    # dropped late/duplicate result (issue #891 leaves the historical path intact).
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    # A non-snapshot command that timed out: no late-snapshot record is kept.
+    state.register_pending("cmd-1", owner)
+    state.discard_pending("cmd-1")
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == []
+
+    # An entirely unknown command_id (never registered) is also just dropped.
+    await state.resolve("cmd-unknown", owner, pb.CommandResult(success=True))
+    assert sink.calls == []
+
+
+async def test_resolved_snapshot_leaves_no_late_record() -> None:
+    # A snapshot that resolves ON TIME drops its in-flight record, so a later
+    # duplicate result for the same command_id is not mistaken for a late snapshot.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+    assert future.done()
+
+    # A duplicate (the record is gone) is dropped, not routed to the sink.
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == []
+
+
+async def test_disconnect_drops_in_flight_snapshot_record() -> None:
+    # A worker disconnect fails its in-flight snapshot future; the in-flight record
+    # is dropped too (the upload died with the worker's ctx, #847 DISCONNECT), so a
+    # spurious late result cannot later clear via the sink.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+    session = 1
+
+    state.open_session(owner, session)
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.fail_worker_pending(owner, session, WorkerNotConnectedError(owner.value))
+    assert future.done()
+
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == []
+
+
+async def test_disconnect_drops_already_promoted_late_snapshot() -> None:
+    # A snapshot dispatch TIMED OUT (its record was promoted to _late_snapshots),
+    # then the worker disconnected before any late result arrived. The disconnect
+    # drops the promoted record so it never accretes (issue #891) — and a spurious
+    # later result for it routes nowhere.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+    session = 1
+
+    state.open_session(owner, session)
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")  # timeout: promoted to _late_snapshots
+    state.fail_worker_pending(owner, session, WorkerNotConnectedError(owner.value))
+
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == []
+
+
+async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() -> None:
+    # Regression for the cross-window clear (issue #891 review): a PERIODIC snapshot
+    # and a stop-flow FINAL snapshot share the SnapshotCommand type, but only the
+    # final one holds the stop at (stopped, stopped, assigned). The exact 3-step
+    # interleaving must NOT let a timed-out periodic's late result clear the hold:
+    #
+    #   1. A periodic snapshot of running server S on worker W times out. Running-id
+    #      snapshots take no worker reservation, so nothing serializes what follows.
+    #   2. The user stops S; the stop flow holds the row, then dispatches the FINAL
+    #      snapshot (final=True), which also times out and HOLDS the assignment.
+    #   3. The periodic's late TRANSFER_FAILED arrives — it must clear NOTHING (only
+    #      the final snapshot is tracked); the final's own late result clears.
+    sink = _RecordingLateSnapshotSink()
+    harness = _Harness(command_timeout=0.2)
+    harness.state = ControlPlaneState(late_snapshot_sink=sink)
+    harness.control_plane = GrpcControlPlane(harness.state, timeout_seconds=0.2)
+    try:
+        stub = await harness.start()
+        call = await _registered_call(harness, stub)
+        worker = WorkerId(_WORKER)
+
+        # Step 1: a PERIODIC snapshot (not final) of S on W times out. The worker
+        # never answers, so dispatch raises and discards its future.
+        with pytest.raises(CommandTimedOutError):
+            await harness.control_plane.dispatch(
+                worker_id=worker,
+                server_id=_SERVER,
+                command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+            )
+        periodic_cmd = (await call.read()).api_command.command_id
+
+        # Step 2: the stop flow dispatches the FINAL snapshot of S on W; it too
+        # times out and HOLDS the assignment.
+        with pytest.raises(CommandTimedOutError):
+            await harness.control_plane.dispatch(
+                worker_id=worker,
+                server_id=_SERVER,
+                command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+                snapshot_is_final=True,
+            )
+        final_cmd = (await call.read()).api_command.command_id
+
+        # Step 3a: the PERIODIC command's late result arrives. It was never tracked
+        # (only the final snapshot is), so it must clear NOTHING.
+        await harness.state.resolve(periodic_cmd, worker, _failed_transfer_result())
+        assert sink.calls == []
+
+        # Step 3b: the FINAL snapshot's own late result clears the held assignment.
+        await harness.state.resolve(final_cmd, worker, _failed_transfer_result())
+        assert sink.calls == [(_SERVER, worker.value, False)]
+
+        await call.done_writing()
+    finally:
+        await harness.stop()
+
+
+async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> None:
+    # A snapshot dispatch TIMED OUT (promoted to _late_snapshots), then the worker
+    # reconnected on a NEW session WITHOUT a clean teardown of the old one (so the
+    # session-guarded fail_worker_pending never swept it). The superseding session's
+    # open_session must drop the stale promoted record (issue #891 nit): the old
+    # upload died with its ctx, so no late result will arrive to consume it.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+    session_a = 1
+    session_b = 2
+
+    state.open_session(owner, session_a)
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")  # timeout: promoted to _late_snapshots
+
+    # The reconnect supersedes session A without a clean teardown.
+    state.open_session(owner, session_b)
+
+    # A spurious later result for the old command routes nowhere — the record is gone.
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == []

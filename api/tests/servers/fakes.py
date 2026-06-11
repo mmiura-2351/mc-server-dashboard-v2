@@ -780,7 +780,12 @@ class FakeControlPlane(ControlPlane):
         return await self._record("hydrate", worker_id, server_id)
 
     async def snapshot(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
     ) -> CommandOutcome:
         return await self._record("snapshot", worker_id, server_id)
 

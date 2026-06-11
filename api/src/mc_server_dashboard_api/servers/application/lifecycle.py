@@ -996,6 +996,7 @@ class StopServer:
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                final=True,
             )
             if not snapshot.success:
                 _LOG.error(
@@ -1149,6 +1150,73 @@ class StopServer:
                 worker_id.value,
             )
         return server
+
+    async def clear_assignment_after_late_snapshot(
+        self, *, server_id: ServerId, worker_id: WorkerId, succeeded: bool
+    ) -> None:
+        """Release a held assignment on a late final-snapshot result (issue #891).
+
+        The held-snapshot timeout path (``_record_stopped_then_final_snapshot``)
+        HOLDS the row at (stopped, stopped, assigned) for the stale-stop arm to
+        clear once grace lapses, because the worker may still be uploading. When the
+        worker instead reports the snapshot's outcome LATE — a ``TRANSFER_FAILED``
+        once its transfer bound aborts the upload (#874/#890), or a SUCCESS whose
+        response was slow — the upload is settled and there is no reason to wait out
+        grace: this releases the assignment minutes earlier, exactly what #874's
+        issue text anticipated.
+
+        Reuses the same guarded clear as the deferred unassign and the stale-stop
+        arm (``clear_assignment_after_final_snapshot``): it matches only a still
+        desired=stopped row still assigned to ``worker_id``. Passing the REPORTING
+        worker enforces the #789 ownership guard at the UPDATE — a forged late result
+        from a non-owning worker matches no row — and a row a racing start re-placed
+        is likewise left untouched. The load is by id only: the control-plane seam
+        carries no community scope, and the server id is authoritative.
+
+        On SUCCESS the publish landed, so this is the same release the on-time
+        success path runs; on TRANSFER_FAILED the snapshot was never published, so a
+        later cross-worker re-placement loses progression since the last periodic
+        snapshot — the documented #845/#847 exposure, logged loud (a same-worker
+        start reuses the retained scratch, #767).
+        """
+
+        async with self.uow:
+            server = await self.uow.servers.get_by_id(server_id)
+            if (
+                server is None
+                or server.desired_state is not DesiredState.STOPPED
+                or server.observed_state is not ObservedState.STOPPED
+                or server.assigned_worker_id != worker_id
+            ):
+                # The row moved since the snapshot was dispatched (a racing start
+                # re-placed it, or it is no longer the held triple): nothing to do.
+                return
+            cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
+                server_id, worker_id
+            )
+            await self.uow.commit()
+        if not cleared:
+            return
+        if succeeded:
+            _LOG.info(
+                "released worker %s for server %s on a LATE successful final "
+                "snapshot: the publish landed but its result arrived after the "
+                "dispatch timed out, so the held assignment is cleared now instead "
+                "of waiting out the stale-stop arm (#891)",
+                worker_id.value,
+                server_id.value,
+            )
+        else:
+            _LOG.warning(
+                "released worker %s for server %s on a LATE failed final snapshot "
+                "(the worker's transfer bound aborted the upload, #874/#890): the "
+                "final snapshot was never published, so a cross-worker re-placement "
+                "loses progression since the last periodic snapshot (#845/#847); a "
+                "same-worker start reuses the retained scratch (#767). Cleared now "
+                "instead of waiting out the stale-stop arm (#891)",
+                worker_id.value,
+                server_id.value,
+            )
 
 
 @dataclass(frozen=True)

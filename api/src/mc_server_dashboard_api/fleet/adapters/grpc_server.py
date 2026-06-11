@@ -400,8 +400,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # Match the result to its in-flight command by command_id, carried as
             # the enclosing message's correlation_id (CONTROL_PLANE.md Section 3).
             # The reporting worker is passed so a result forged for another
-            # worker's command is dropped, not applied (issue #789).
-            self._control_plane.resolve(
+            # worker's command is dropped, not applied (issue #789). Awaited
+            # because a late final-snapshot result drives the held-assignment clear
+            # through the late-snapshot sink (issue #891); the common match path is
+            # still synchronous dict work that returns without awaiting.
+            await self._control_plane.resolve(
                 message.correlation_id, worker_id, message.command_result
             )
             return

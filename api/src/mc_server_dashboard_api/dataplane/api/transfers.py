@@ -100,12 +100,51 @@ router = APIRouter(prefix="/data-plane")
 
 _logger = logging.getLogger(__name__)
 
+# Cap the per-directory missing-region list surfaced in the 422 extensions and log
+# line so a pathologically corrupt working set (every region of many dimensions
+# dropped) cannot produce an unbounded problem body / log line. The operator only
+# needs enough names to drive the documented recovery (delete the lost names from
+# ``current/`` via the file API, then re-publish, STORAGE.md); the truncation flag
+# tells them the list is partial so they don't trust it as exhaustive.
+_MISSING_REGION_DIR_CAP = 20
+_MISSING_REGION_NAME_CAP = 50
+
 # Reject an implausibly large snapshot body before it can exhaust the disk. A
 # generous M1 ceiling (a Minecraft working set is well under this); a real-world
 # limit can be made configurable when a deployment needs it.
 _MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024 * 1024  # 50 GiB
 
 _BEARER_PREFIX = "Bearer "
+
+
+def _bounded_missing_regions(
+    exc: MissingRegionsError,
+) -> tuple[list[dict[str, object]], bool]:
+    """Build a BOUNDED per-directory list of lost region names for the 422/log.
+
+    Returns ``(directories, truncated)`` where ``directories`` is at most
+    ``_MISSING_REGION_DIR_CAP`` entries, each ``{"directory": <posix path>,
+    "missing": [<name>, ...]}`` with the name list capped at
+    ``_MISSING_REGION_NAME_CAP``. ``truncated`` is True when either cap dropped
+    findings, so the caller can flag the list as partial. The report's findings
+    are already sorted by directory (region.compare_region_name_sets), giving a
+    stable, deterministic prefix.
+    """
+
+    truncated = False
+    findings = exc.report.partial_loss
+    if len(findings) > _MISSING_REGION_DIR_CAP:
+        truncated = True
+    directories: list[dict[str, object]] = []
+    for finding in findings[:_MISSING_REGION_DIR_CAP]:
+        names = list(finding.lost)
+        if len(names) > _MISSING_REGION_NAME_CAP:
+            truncated = True
+            names = names[:_MISSING_REGION_NAME_CAP]
+        directories.append(
+            {"directory": finding.directory.as_posix(), "missing": names}
+        )
+    return directories, truncated
 
 
 async def require_worker_credential(
@@ -392,18 +431,30 @@ async def publish_snapshot(
         # missing chunks, so the missing-region gate refused to publish and ``current``
         # keeps the prior good snapshot. commit_snapshot already cleaned the staging
         # area. A legitimate full-dimension delete is not flagged; this is a
-        # partial-loss corruption signature, so surface it loudly and log it.
+        # partial-loss corruption signature, so surface it loudly and log it. The
+        # documented recovery (STORAGE.md) requires the LOST NAMES — delete them from
+        # ``current/`` via the file API at-rest, then re-publish — so carry a bounded
+        # per-directory list in the extensions and the log line (capped so a
+        # pathologically corrupt set cannot produce an unbounded body, flagged when
+        # truncated).
         affected = len(exc.report.partial_loss)
+        directories, truncated = _bounded_missing_regions(exc)
         _logger.warning(
             "snapshot publish refused: incomplete working set for server %s "
-            "(%d dimension(s) lost region files)",
+            "(%d dimension(s) lost region files; missing=%s%s)",
             server_id,
             affected,
+            directories,
+            " [truncated]" if truncated else "",
         )
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "working_set_incomplete",
-            extensions={"affected_count": affected},
+            extensions={
+                "affected_count": affected,
+                "directories": directories,
+                "truncated": truncated,
+            },
         ) from None
     except BaseException:
         # Any failure mid-transfer (client disconnect, extraction error) discards

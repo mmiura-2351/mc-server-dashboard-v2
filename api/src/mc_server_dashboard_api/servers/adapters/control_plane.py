@@ -328,7 +328,12 @@ class FleetControlPlaneAdapter(ControlPlane):
         )
 
     async def snapshot(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
     ) -> CommandOutcome:
         url = self._snapshot_url(community_id, server_id)
         return await self._dispatch(
@@ -336,6 +341,7 @@ class FleetControlPlaneAdapter(ControlPlane):
             server_id,
             SnapshotCommand(transfer_url=url, transfer_token=self._token()),
             timeout_override=self._snapshot_timeout_seconds,
+            snapshot_is_final=final,
         )
 
     async def read_file(
@@ -405,6 +411,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         | ListFilesCommand,
         *,
         timeout_override: float | None = None,
+        snapshot_is_final: bool = False,
     ) -> CommandOutcome:
         try:
             result = await self._control_plane.dispatch(
@@ -412,6 +419,7 @@ class FleetControlPlaneAdapter(ControlPlane):
                 server_id=str(server_id.value),
                 command=command,
                 timeout_override=timeout_override,
+                snapshot_is_final=snapshot_is_final,
             )
         except (WorkerNotConnectedError, CommandTimedOutError) as exc:
             # Thread the cause across the seam without leaking a fleet type into

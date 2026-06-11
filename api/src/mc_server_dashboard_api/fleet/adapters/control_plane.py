@@ -45,6 +45,9 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     StopServerCommand,
     WorkerNotConnectedError,
 )
+from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
+    LateSnapshotResultSink,
+)
 from mc_server_dashboard_api.fleet.domain.registry import SessionToken
 from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, WorkerId
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
@@ -97,9 +100,16 @@ class ControlPlaneState:
     (to register sessions and resolve results) and :class:`GrpcControlPlane` (to
     dispatch). Mutations are synchronous, non-blocking dict operations on the one
     asyncio event loop, so no lock is needed under cooperative scheduling.
+
+    ``late_snapshot_sink`` is the optional write-back for a final-snapshot result
+    that arrives after its dispatch timed out and discarded the pending future
+    (issue #891): the held assignment is released immediately rather than waiting
+    out the reconciler grace. Left ``None`` in tests that only exercise dispatch.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, late_snapshot_sink: LateSnapshotResultSink | None = None
+    ) -> None:
         self._outbound: dict[WorkerId, asyncio.Queue[pb.ApiMessage]] = {}
         # worker -> the SessionToken that currently owns its outbound stream. A
         # reconnect replaces it, so a stale session's delayed teardown can be
@@ -110,6 +120,30 @@ class ControlPlaneState:
         # disconnect can fail exactly that worker's in-flight commands fast,
         # instead of letting them wait out the full command timeout.
         self._pending: dict[str, tuple[WorkerId, asyncio.Future[pb.CommandResult]]] = {}
+        # command_id -> (dispatched worker, server id) for an IN-FLIGHT snapshot
+        # command (issue #891). Held only while the future is pending so a timeout
+        # can promote the entry to ``_late_snapshots``; a normal resolution drops it.
+        self._snapshot_servers: dict[str, tuple[WorkerId, str]] = {}
+        # command_id -> (dispatched worker, server id) for a SNAPSHOT whose pending
+        # future was discarded on a dispatch timeout (issue #891). A late
+        # CommandResult for it arrives unmatched (the future is gone); this record
+        # lets :meth:`resolve` recognise it as a held final-snapshot result and
+        # release the assignment via ``late_snapshot_sink`` instead of dropping it.
+        # Bounded: only timed-out snapshots land here, and each entry is popped when
+        # its late result arrives (a fresh uuid4 command_id never collides).
+        self._late_snapshots: dict[str, tuple[WorkerId, str]] = {}
+        self._late_snapshot_sink = late_snapshot_sink
+
+    def set_late_snapshot_sink(self, sink: LateSnapshotResultSink) -> None:
+        """Bind the late-snapshot sink after construction (issue #891).
+
+        The wiring builds this state first (the GrpcControlPlane adapter and the
+        servers-backed sink both depend on it transitively), so the sink is injected
+        once it exists rather than passed at construction. Tests that exercise the
+        sink path can pass it via the constructor instead.
+        """
+
+        self._late_snapshot_sink = sink
 
     def open_session(
         self, worker_id: WorkerId, session: SessionToken
@@ -119,8 +153,19 @@ class ControlPlaneState:
         A reconnect replaces any prior queue, so the latest session owns the
         Worker's outbound stream. ``session`` is recorded as the current owner so
         :meth:`fail_worker_pending` can ignore a stale session's teardown.
+
+        Any promoted late-snapshot records from a PRIOR session are swept here
+        (issue #891): a new session for the same worker supersedes the old one, and
+        ``fail_worker_pending`` is session-guarded, so a stale session's delayed
+        teardown skips the sweep on a fast reconnect. The old session's upload died
+        with its ctx (no late result will arrive to consume the record), so dropping
+        it on the superseding session keeps the map from accreting.
         """
 
+        for command_id in [
+            cid for cid, (wid, _) in self._late_snapshots.items() if wid == worker_id
+        ]:
+            del self._late_snapshots[command_id]
         queue: asyncio.Queue[pb.ApiMessage] = asyncio.Queue()
         self._outbound[worker_id] = queue
         self._sessions[worker_id] = session
@@ -141,32 +186,57 @@ class ControlPlaneState:
             self._sessions.pop(worker_id, None)
 
     def register_pending(
-        self, command_id: str, worker_id: WorkerId
+        self,
+        command_id: str,
+        worker_id: WorkerId,
+        *,
+        snapshot_server_id: str | None = None,
     ) -> asyncio.Future[pb.CommandResult]:
         """Create and track a future awaiting the result for ``command_id``.
 
         ``worker_id`` is the worker the command was dispatched to, recorded so
         :meth:`fail_worker_pending` can fail it on that worker's disconnect.
+
+        ``snapshot_server_id`` is set only for a snapshot command and names the
+        target server; it is retained on a timeout so a late result can be matched
+        to the held assignment (issue #891).
         """
 
         future: asyncio.Future[pb.CommandResult] = (
             asyncio.get_running_loop().create_future()
         )
         self._pending[command_id] = (worker_id, future)
+        if snapshot_server_id is not None:
+            self._snapshot_servers[command_id] = (worker_id, snapshot_server_id)
         return future
 
     def discard_pending(self, command_id: str) -> None:
-        """Stop tracking ``command_id`` (on timeout or after resolution)."""
+        """Stop tracking ``command_id`` (on timeout or after resolution).
+
+        For a SNAPSHOT command (issue #891), retain a (worker, server) record so a
+        late ``CommandResult`` — the worker's transfer bound aborts a final-snapshot
+        upload and reports ``TRANSFER_FAILED`` after the API abandoned the future
+        (#874/#890), or a late SUCCESS — is recognised in :meth:`resolve` and used
+        to release the held assignment immediately. Non-snapshot commands carry no
+        such held state, so they are simply forgotten.
+        """
 
         self._pending.pop(command_id, None)
+        snapshot = self._snapshot_servers.pop(command_id, None)
+        if snapshot is not None:
+            self._late_snapshots[command_id] = snapshot
 
-    def resolve(
+    async def resolve(
         self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
     ) -> None:
         """Resolve the future waiting on ``command_id`` with ``result``.
 
         A result for an unknown/already-resolved command is ignored, so a late
-        or duplicate ``CommandResult`` never crashes the inbound loop.
+        or duplicate ``CommandResult`` never crashes the inbound loop — except a
+        late final-snapshot result, which :meth:`_clear_on_late_snapshot` uses to
+        release the held assignment immediately (issue #891). Async only for that
+        late-snapshot seam (the sink write is awaited like the status sink); the
+        common match path stays synchronous, non-blocking dict work.
 
         ``worker_id`` is the worker that reported the result. A result from a
         worker that does not own the command is dropped with a warning and the
@@ -178,6 +248,9 @@ class ControlPlaneState:
 
         entry = self._pending.get(command_id)
         if entry is None:
+            # No pending future: either an already-resolved/forged command, or a
+            # late final-snapshot result for a dispatch that timed out (issue #891).
+            await self._clear_on_late_snapshot(command_id, worker_id, result)
             return
         owning_worker, future = entry
         if owning_worker != worker_id:
@@ -191,8 +264,49 @@ class ControlPlaneState:
             )
             return
         del self._pending[command_id]
+        self._snapshot_servers.pop(command_id, None)
         if not future.done():
             future.set_result(result)
+
+    async def _clear_on_late_snapshot(
+        self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
+    ) -> None:
+        """Release a held assignment on a late final-snapshot result (#891).
+
+        Acts only when ``command_id`` is a snapshot whose dispatch timed out (its
+        record survives in ``_late_snapshots``); any other unmatched result is
+        dropped, as before. The #789 ownership guard: the reporting worker must be
+        the worker the snapshot was dispatched to — a report from any other worker
+        leaves the record in place and is ignored, so a forged late result cannot
+        clear the assignment. The guarded clear at the servers seam re-checks
+        ``assigned_worker_id == worker_id``, so a row a racing start re-placed is
+        left untouched (defense-in-depth). On a SUCCESS the publish already landed,
+        so the upload is done and there is no late publish for the #847 guard to
+        fight; on a TRANSFER_FAILED the upload is dead — also no late publish.
+        """
+
+        snapshot = self._late_snapshots.get(command_id)
+        if snapshot is None:
+            return
+        dispatched_worker, server_id = snapshot
+        if dispatched_worker != worker_id:
+            _LOG.warning(
+                "dropping late snapshot result from non-owning worker",
+                extra={
+                    "command_id": command_id,
+                    "reporting_worker_id": worker_id.value,
+                    "dispatched_worker_id": dispatched_worker.value,
+                },
+            )
+            return
+        del self._late_snapshots[command_id]
+        if self._late_snapshot_sink is None:
+            return
+        await self._late_snapshot_sink.clear_held_assignment_on_late_snapshot(
+            server_id=server_id,
+            worker_id=worker_id.value,
+            succeeded=result.success,
+        )
 
     def fail_worker_pending(
         self, worker_id: WorkerId, session: SessionToken, error: BaseException
@@ -216,8 +330,20 @@ class ControlPlaneState:
             cid for cid, (wid, _) in self._pending.items() if wid == worker_id
         ]:
             _, future = self._pending.pop(command_id)
+            # The worker's session is gone, so a snapshot it was running died with
+            # its ctx (no late result will arrive, issue #847 DISCONNECT) — drop the
+            # in-flight record so it is not promoted to a stale late-snapshot entry.
+            self._snapshot_servers.pop(command_id, None)
             if not future.done():
                 future.set_exception(error)
+        # Drop any already-promoted late-snapshot records for this worker too: its
+        # session ended, so no late result will arrive to consume them. Keyed by a
+        # unique command_id, a leftover entry is harmless, but clearing it here keeps
+        # the map from accreting one entry per disconnect-after-timeout (issue #891).
+        for command_id in [
+            cid for cid, (wid, _) in self._late_snapshots.items() if wid == worker_id
+        ]:
+            del self._late_snapshots[command_id]
 
     def outbound_for(self, worker_id: WorkerId) -> asyncio.Queue[pb.ApiMessage] | None:
         return self._outbound.get(worker_id)
@@ -315,12 +441,28 @@ class GrpcControlPlane(ControlPlane):
         server_id: str,
         command: Command,
         timeout_override: float | None = None,
+        snapshot_is_final: bool = False,
     ) -> CommandResult:
         queue = self._state.outbound_for(worker_id)
         if queue is None:
             raise WorkerNotConnectedError(worker_id.value)
         command_id = str(uuid.uuid4())
-        future = self._state.register_pending(command_id, worker_id)
+        # A FINAL snapshot's server is recorded with the pending future so a timeout
+        # that discards the future still lets a late TRANSFER_FAILED / SUCCESS result
+        # be matched to the held assignment (issue #891). Only the stop-flow final
+        # snapshot is tracked: it is the sole command whose stop wedges the row at
+        # (stopped, stopped, assigned) for the held-snapshot window. Periodic and
+        # on-demand snapshots share the command type but take no worker reservation
+        # (running-id snapshots are reservation-free), so a stale late result of
+        # theirs must NOT clear a subsequent final-snapshot hold — they are untracked.
+        snapshot_server_id = (
+            server_id
+            if snapshot_is_final and isinstance(command, SnapshotCommand)
+            else None
+        )
+        future = self._state.register_pending(
+            command_id, worker_id, snapshot_server_id=snapshot_server_id
+        )
         api_command = _to_api_command(command_id, server_id, command)
         await queue.put(
             pb.ApiMessage(correlation_id=command_id, api_command=api_command)
