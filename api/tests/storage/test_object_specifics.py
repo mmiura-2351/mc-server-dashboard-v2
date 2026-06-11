@@ -413,12 +413,14 @@ async def test_sweep_reclaims_crash_leftover_staging_with_no_handle() -> None:
 
 
 async def test_make_dir_is_a_noop_empty_dir_not_represented() -> None:
-    """Object storage has no real directories, so make_dir writes no object.
+    """Object storage has no real directories, so make_dir creates no dir object.
 
     An empty directory exists only as the shared key-prefix of its files
     (Section 7.3); there is nothing to create until a file lands under it. The
-    documented limitation (issue #259): make_dir is a no-op on object storage —
-    it neither errors nor leaves a marker object that would pollute listings.
+    documented limitation (issue #259): make_dir leaves no marker object that would
+    pollute listings. It DOES bump the generation marker (issue #889) so the store
+    generation stays in lockstep with the fs backend, but it writes nothing under
+    the new directory's own prefix.
     """
 
     store, storage = _store_and_storage()
@@ -427,7 +429,11 @@ async def test_make_dir_is_a_noop_empty_dir_not_represented() -> None:
 
     before = set(store.objects)
     await storage.make_dir(community, server, RelPath("plugins"))
-    assert set(store.objects) == before  # no marker object written
+    # The only new object is the bumped generation marker; nothing lands under the
+    # new directory's prefix (no placeholder that would pollute listings).
+    new_objects = set(store.objects) - before
+    assert all(key.endswith("/generation") for key in new_objects)
+    assert not any("/plugins" in key for key in store.objects)
 
     # The empty directory is not observable (a prefix scan finds no members).
     with pytest.raises(NotFoundError):

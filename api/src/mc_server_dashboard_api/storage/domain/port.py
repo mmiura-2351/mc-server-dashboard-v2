@@ -50,6 +50,22 @@ ByteStream = AsyncIterator[bytes]
 # claim this id, so the guard never wrongly refuses a same-Worker self-heal.
 RESTORE_PUBLISHER = "api-restore"
 
+# The publisher id recorded for an API-initiated authoritative file edit (issue
+# #889): ``write_file`` / ``delete_file`` / ``delete_dir`` / ``make_dir`` /
+# ``rollback_file`` mutate ``current/`` in place on a stopped server. Like a restore
+# (#873) such an edit is an authoritative publish with no producing Worker, so it
+# bumps the generation and stamps this sentinel: otherwise a same-worker scratch with
+# held == store would skip the post-edit hydrate (#767) and boot the PRE-edit world,
+# and an in-flight stale snapshot from that scratch worker would pass the publish-time
+# guard (same publisher, base == current) and clobber the edits. Stamping the sentinel
+# makes ``base < current`` published by a DIFFERENT publisher, so the guard REFUSES the
+# stale snapshot. A distinct sentinel from RESTORE_PUBLISHER (the guard treats them
+# identically — both are non-Worker ids) keeps ``current_publisher`` honest for
+# debugging: an operator can tell an edit-bumped generation from a restore-bumped one.
+# No live Worker can legitimately claim this id, so the guard never wrongly refuses a
+# same-Worker self-heal.
+API_EDIT_PUBLISHER = "api-edit"
+
 
 @dataclass(frozen=True)
 class DirEntry:
