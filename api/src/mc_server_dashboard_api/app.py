@@ -293,31 +293,36 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
     ``grace_seconds`` below the floor are warned.
 
     The stop-side final-snapshot budget (``snapshot_timeout_seconds``, issue #847)
-    does NOT raise this floor. That budget bounds the SECOND dispatch of a stop (the
-    held final snapshot), recovered by the reconciler's stale-stop arm, not the
-    duplicate-start orphan path this floor protects — whose round-trip is the FIRST
-    dispatch of a start (hydrate-then-start). The stale-stop arm has its own implicit
-    safety constraint, ``grace_seconds > snapshot_timeout_seconds`` (so the arm never
-    clears a still-healthy snapshot hold), but with the stock values that bound (660 >
-    600) is dominated by the duplicate-start floor (660 > 630), so the binding floor
-    is unchanged. Operators who raise ``snapshot_timeout_seconds`` above
-    ``hydrate_timeout_seconds`` would make the snapshot bound binding instead.
+    also bounds the floor. That budget bounds the SECOND dispatch of a stop (the
+    held final snapshot), recovered by the reconciler's stale-stop arm. The arm has
+    its own safety constraint, ``grace_seconds > snapshot_timeout_seconds`` (so the
+    arm never clears a still-healthy snapshot hold mid-upload — which would reopen
+    the #847 race the hold exists to close, now that the timeout path leans on the
+    arm). With the stock values the duplicate-start bound (630) dominates the
+    snapshot bound (600), but an operator who raises ``snapshot_timeout_seconds``
+    above ``hydrate + command`` makes the snapshot bound binding — so the floor is
+    ``max(hydrate + command, snapshot_timeout)`` to enforce both constraints.
     """
 
-    floor = (
+    floor = max(
         settings.control.hydrate_timeout_seconds
-        + settings.control.command_timeout_seconds
+        + settings.control.command_timeout_seconds,
+        settings.control.snapshot_timeout_seconds,
     )
     if settings.reconciler.grace_seconds <= floor:
         logging.getLogger(__name__).warning(
-            "reconciler.grace_seconds (%d) <= "
+            "reconciler.grace_seconds (%d) <= max("
             "control.hydrate_timeout_seconds (%d) + "
-            "control.command_timeout_seconds (%d); a slow start re-dispatched by "
+            "control.command_timeout_seconds (%d), "
+            "control.snapshot_timeout_seconds (%d)); a slow start re-dispatched by "
             "the reconciler before its first round-trip settles can spawn a "
-            "duplicate live instance (issue #822). Raise grace_seconds above %d.",
+            "duplicate live instance (issue #822), or the stale-stop arm can clear "
+            "a still-healthy final-snapshot hold mid-upload (issue #847). Raise "
+            "grace_seconds above %d.",
             settings.reconciler.grace_seconds,
             settings.control.hydrate_timeout_seconds,
             settings.control.command_timeout_seconds,
+            settings.control.snapshot_timeout_seconds,
             floor,
         )
 

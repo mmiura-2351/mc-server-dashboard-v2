@@ -22,6 +22,8 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResult,
     CommandResultCode,
+    CommandTimedOutError,
+    WorkerNotConnectedError,
 )
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     ControlPlane as FleetControlPlane,
@@ -1387,6 +1389,96 @@ async def test_stop_cancelled_mid_snapshot_holds_assignment() -> None:
     assert stored.desired_state is DesiredState.STOPPED
     assert stored.observed_state is ObservedState.STOPPED
     assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_stop_final_snapshot_timeout_holds_assignment() -> None:
+    # Issue #847 (round-3): a final-snapshot dispatch TIMEOUT must HOLD the
+    # assignment, mirroring the cancel-hold path. A timeout means the worker session
+    # is healthy and the upload is still in flight (the proto has no command-cancel;
+    # the API deadline only abandoned the pending future), so clearing here would
+    # release the row while the upload is live, letting a racing start re-place on a
+    # different worker and reopening the stop->re-place race. The adapter encodes the
+    # cause as ``upload_may_be_live=True`` (set from a ``CommandTimedOutError`` cause);
+    # the row stays at (stopped, stopped, assigned) for the stale-stop arm to recover.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotTimesOut(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            # Mirror the adapter's wrap of a CommandTimedOutError: a
+            # WorkerUnavailableError flagged as upload-may-be-live, cause chained.
+            try:
+                raise CommandTimedOutError(str(worker_id.value))
+            except CommandTimedOutError as exc:
+                raise WorkerUnavailableError(
+                    str(worker_id.value), upload_may_be_live=True
+                ) from exc
+
+    cp = _SnapshotTimesOut()
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    # The timeout is caught inside _final_snapshot (the stop succeeded), but the
+    # assignment is deliberately HELD — the upload may still be live, so the
+    # stale-stop arm (not an immediate clear) owns the grace-bounded recovery.
+    assert result.observed_state is ObservedState.STOPPED
+    assert result.assigned_worker_id == WorkerId(worker)
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_stop_final_snapshot_disconnect_clears_assignment() -> None:
+    # Issue #847 (round-3): the OTHER half of the WorkerUnavailableError split. A
+    # worker DISCONNECT (``WorkerNotConnectedError`` cause, ``upload_may_be_live``
+    # False) means the worker session is gone and the upload died with its ctx —
+    # nothing is uploading, so the assignment is cleared immediately as before, so a
+    # later same-worker start reuses the retained scratch (#845).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotDisconnects(FakeControlPlane):
+        async def snapshot(
+            self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            try:
+                raise WorkerNotConnectedError(str(worker_id.value))
+            except WorkerNotConnectedError as exc:
+                # The adapter leaves upload_may_be_live at its False default here.
+                raise WorkerUnavailableError(str(worker_id.value)) from exc
+
+    cp = _SnapshotDisconnects()
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.observed_state is ObservedState.STOPPED
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
 
 
 async def test_stop_unassigns_even_when_final_snapshot_fails() -> None:

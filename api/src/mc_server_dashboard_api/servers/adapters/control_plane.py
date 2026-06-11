@@ -414,5 +414,14 @@ class FleetControlPlaneAdapter(ControlPlane):
                 timeout_override=timeout_override,
             )
         except (WorkerNotConnectedError, CommandTimedOutError) as exc:
-            raise WorkerUnavailableError(str(worker_id.value)) from exc
+            # Thread the cause across the seam without leaking a fleet type into
+            # the servers layer (issue #847): a TIMEOUT means the worker session is
+            # healthy and the transfer is still uploading (only the API future was
+            # abandoned), so the final-stop snapshot must HOLD the assignment; a
+            # DISCONNECT means the worker is gone and the upload died with its ctx,
+            # so the assignment is released as before.
+            raise WorkerUnavailableError(
+                str(worker_id.value),
+                upload_may_be_live=isinstance(exc, CommandTimedOutError),
+            ) from exc
         return _to_outcome(result)

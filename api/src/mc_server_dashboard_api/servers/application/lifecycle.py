@@ -850,24 +850,41 @@ class StopServer:
 
         The unassign cannot wait on the later StatusChange(stopped) event: a start
         blocked on ``require_unassigned`` must be unblocked the moment the snapshot
-        settles (issue #206). On snapshot FAILURE (``WorkerUnavailableError`` — the
-        worker is gone, nothing is uploading) the assignment is STILL cleared: the
-        data stays in the Worker's retained scratch (#845) and the next same-worker
-        start reuses it. A cross-worker placement of such a failed-final server keeps
-        the #845-documented exposure (logged loud by ``_final_snapshot``).
+        settles (issue #206). The clear-vs-HOLD decision keys on whether the
+        worker's upload is still live, which splits the ``WorkerUnavailableError``
+        the dispatch may raise by its underlying cause (issue #847):
+
+        * DISCONNECT (``upload_may_be_live`` False — the worker session is gone, its
+          ``serveCtx`` cancelled the transfer worker-side, nothing is uploading): the
+          assignment is STILL cleared. The data stays in the Worker's retained
+          scratch (#845) and the next same-worker start reuses it. A cross-worker
+          placement of such a failed-final server keeps the #845-documented exposure
+          (logged loud by ``_final_snapshot``).
+        * TIMEOUT (``upload_may_be_live`` True — the worker session is healthy and
+          the API deadline only abandoned the pending future; the proto has no
+          command-cancel, so the worker uploads to completion and may publish late):
+          the clear is SKIPPED, symmetric with the cancellation case below. Clearing
+          here would release the row while the upload is still in flight, letting a
+          racing start re-place on a DIFFERENT worker and reopening the very
+          stop->re-place race this method exists to close. Holding is strictly
+          better: with ``grace_seconds > snapshot_timeout_seconds`` (enforced by the
+          app.py floor warning), an upload that finishes in the snapshot-budget..grace
+          margin lands while the row is STILL HELD (base == current, assignment
+          intact) → the late publish succeeds, then the stale-stop arm clears and the
+          next start hydrates the captured generation; the race never opens.
 
         On CANCELLATION (a client disconnect cancels the HTTP-request task at the
-        snapshot await) the clear is deliberately SKIPPED — the dispatched snapshot
-        keeps uploading worker-side (abandoning the pending future signals nothing to
-        the worker, and the proto has no command-cancel), so holding the assignment is
-        CORRECT: clearing it here would release the row while the upload is still in
-        flight, letting a racing start re-place on a DIFFERENT worker and reopening the
-        very stop->re-place race this method exists to close (issue #847 bug 2). The
-        ``CancelledError`` propagates past the clear, leaving the row at
-        (stopped, stopped, assigned); the reconciler's stale-stop arm
-        (``clear_stale_assignment``) then recovers it once the grace window lapses —
-        grace-bounded, and grace exceeds the snapshot budget so the upload has settled
-        by the time the arm fires.
+        snapshot await) the clear is likewise SKIPPED — the dispatched snapshot keeps
+        uploading worker-side (abandoning the pending future signals nothing to the
+        worker, and the proto has no command-cancel), so holding the assignment is
+        CORRECT for the same reason as the timeout case. The ``CancelledError``
+        propagates past the clear, leaving the row at (stopped, stopped, assigned).
+
+        In both held cases the reconciler's stale-stop arm (``clear_stale_assignment``)
+        recovers the row once the grace window lapses — grace-bounded. (Asymmetric
+        sub-case on disconnect: a worker that has not yet noticed the drop keeps its
+        ``serveCtx`` alive and the upload running briefly after the clear; bounded by
+        the worker's own stream/heartbeat failure detection — accepted.)
         """
 
         observed_at = self.clock.now()
@@ -888,23 +905,27 @@ class StopServer:
         # once the Worker reports the process gone) and BEFORE the unassign, so the
         # captured working set is quiescent (FR-DATA-4, FR-DATA-7).
         #
-        # ``_final_snapshot`` returns normally on both success and a genuine snapshot
-        # failure (``WorkerUnavailableError`` is caught and logged inside it), so the
-        # clear below runs for both — the worker is either done uploading (success) or
-        # gone (failure), and in both cases releasing the assignment is correct. A
-        # cancellation, by contrast, propagates OUT of ``_final_snapshot`` and skips
-        # the clear (see docstring): the upload is still live, so the row must stay
-        # held for the stale-stop arm to recover. The clear is independently
-        # CAS-guarded (``clear_assignment_after_final_snapshot`` matches only a still
-        # desired=stopped row still assigned to this worker), so it is run regardless
-        # of ``applied``: even if the #216 guard dropped the observed write, post-#847
-        # no other path unassigns (the sink no longer does), so running the clear
-        # cannot clobber a fresher write and removes the wedge the old ``applied``
-        # gate left for the full grace window.
-        await self._final_snapshot(
+        # ``_final_snapshot`` returns normally on success, on a worker DISCONNECT, and
+        # on a dispatch TIMEOUT (``WorkerUnavailableError`` is caught and logged
+        # inside it), reporting ``upload_may_be_live`` only for the timeout. The clear
+        # runs for success and disconnect — the worker is either done uploading or
+        # gone, so releasing the assignment is correct — but is SKIPPED on a timeout,
+        # because the worker is still uploading; holding the row lets the stale-stop
+        # arm recover it (issue #847), the same as the cancellation path, which
+        # propagates OUT of ``_final_snapshot`` and skips the clear too. The clear is
+        # independently CAS-guarded (``clear_assignment_after_final_snapshot`` matches
+        # only a still desired=stopped row still assigned to this worker), so it is run
+        # regardless of ``applied``: even if the #216 guard dropped the observed write,
+        # post-#847 no other path unassigns (the sink no longer does), so running the
+        # clear cannot clobber a fresher write and removes the wedge the old
+        # ``applied`` gate left for the full grace window.
+        upload_may_be_live = await self._final_snapshot(
             worker_id=worker_id, community_id=community_id, server_id=server_id
         )
-        await asyncio.shield(self._clear_held_assignment(server, worker_id, server_id))
+        if not upload_may_be_live:
+            await asyncio.shield(
+                self._clear_held_assignment(server, worker_id, server_id)
+            )
 
     async def _clear_held_assignment(
         self, server: Server, worker_id: WorkerId, server_id: ServerId
@@ -931,7 +952,7 @@ class StopServer:
         worker_id: WorkerId,
         community_id: CommunityId,
         server_id: ServerId,
-    ) -> None:
+    ) -> bool:
         """Capture the quiescent working set after a confirmed graceful stop.
 
         Shared by ``__call__`` and ``redispatch_stop`` (issue #846) so reconciler-
@@ -950,6 +971,12 @@ class StopServer:
         empty_snapshot 400 swallowed here), so it must be loud. (The Worker
         self-addresses no Storage; the API drives the snapshot because only it knows
         the (community, server) scope.)
+
+        Returns ``upload_may_be_live`` (issue #847): ``True`` only when the snapshot
+        dispatch TIMED OUT — the worker session is healthy and the transfer is still
+        uploading, so the caller must HOLD the assignment rather than release it
+        while the upload is in flight. ``False`` for success and for a worker
+        DISCONNECT (the upload died with the worker's ctx) — clearing is safe.
         """
 
         try:
@@ -966,13 +993,26 @@ class StopServer:
                     server_id.value,
                     snapshot.message or snapshot.status.value,
                 )
-        except WorkerUnavailableError:
+        except WorkerUnavailableError as exc:
+            if exc.upload_may_be_live:
+                # TIMEOUT, not disconnect: the worker is still uploading. Do NOT
+                # claim the snapshot was lost, and signal the caller to HOLD the
+                # assignment (issue #847) — an upload finishing within the grace
+                # margin still publishes successfully while the row is held.
+                _LOG.warning(
+                    "final snapshot dispatch on graceful stop TIMED OUT for "
+                    "server %s; the worker may still be uploading — holding the "
+                    "assignment for the stale-stop arm to clear once grace lapses",
+                    server_id.value,
+                )
+                return True
             _LOG.error(
                 "final snapshot on graceful stop could not reach the Worker for "
                 "server %s; the stop succeeded but the working set was NOT captured "
                 "and progression since the last periodic snapshot is lost",
                 server_id.value,
             )
+        return False
 
     async def redispatch_stop(
         self, *, community_id: CommunityId, server_id: ServerId

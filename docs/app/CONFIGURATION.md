@@ -159,7 +159,7 @@ marks keys with no default.
 | `control.heartbeat_timeout_seconds` | `30` | | Liveness window: a Worker missing heartbeats past this is marked disconnected (REQUIREMENTS.md FR-WRK-2). Must be positive. |
 | `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). Must be positive. See the reconciler grace floor below.³ |
 | `control.hydrate_timeout_seconds` | `600` | | Separate, longer deadline for the **hydrate** phase of a start (issue #822): pulling a large world's working set routinely outlasts `command_timeout_seconds`, so the hydrate trigger gets its own budget instead of forcing the global command timeout up (which governs every other command and widens the duplicate-start window). Only the start's hydrate dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. See the reconciler grace floor below.³ |
-| `control.snapshot_timeout_seconds` | `600` | | Separate, longer deadline for the **final snapshot** a graceful stop captures (issue #847). The stop holds the server's assignment until this snapshot settles (closing the stop→re-place generation race), so the dispatch must span a full working-set upload (minutes for a large world); under `command_timeout_seconds` it would time out and release the assignment mid-upload, reopening the race. Only the stop's final-snapshot dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. Does **not** raise the reconciler grace floor below (it bounds the stop-side second dispatch, recovered by the stale-stop arm, not the duplicate-start first dispatch), but the stale-stop arm has its own implicit constraint `grace_seconds > snapshot_timeout_seconds` — dominated by the floor at stock values.³ |
+| `control.snapshot_timeout_seconds` | `600` | | Separate, longer deadline for the **final snapshot** a graceful stop captures (issue #847). The stop holds the server's assignment until this snapshot settles (closing the stop→re-place generation race), so the dispatch must span a full working-set upload (minutes for a large world); under `command_timeout_seconds` it would time out and release the assignment mid-upload, reopening the race. Only the stop's final-snapshot dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. A snapshot **timeout** holds the assignment (not just a cancel), recovered by the stale-stop arm, so it co-bounds the reconciler grace floor below via `grace_seconds > snapshot_timeout_seconds` — at stock values dominated by the duplicate-start term, but binding when raised above `hydrate_timeout_seconds + command_timeout_seconds`.³ |
 
 ² `control.tls.cert_file` and `control.tls.key_file` are required **together,
 unless** `control.tls.insecure=true`. With neither the cert/key pair nor
@@ -171,8 +171,8 @@ terminate TLS at a reverse proxy and run the listener `insecure=true` behind it
 required-unless-insecure rule (Section 6.1): the Worker verifies this
 certificate against its `api.tls.ca_file`.
 
-³ **Reconciler grace floor (duplicate-start safety, issue #774/#812/#822).** Keep
-`reconciler.grace_seconds > control.hydrate_timeout_seconds + control.command_timeout_seconds`.
+³ **Reconciler grace floor (duplicate-start + stop-hold safety, issue #774/#812/#822/#847).** Keep
+`reconciler.grace_seconds > max(control.hydrate_timeout_seconds + control.command_timeout_seconds, control.snapshot_timeout_seconds)`.
 The reconciler must wait out the longest a started server's FIRST dispatch
 round-trip can still be in flight before it re-dispatches; a start's dispatch is
 hydrate-then-start, so that round-trip is bounded by the hydrate budget plus the
@@ -180,20 +180,20 @@ start command deadline. Below the floor, a slow start crashed/timed-out mid-flig
 can still be converging on its assigned Worker when the reconciler's orphan path
 re-places it elsewhere and starts a **second** live instance. `create_app` logs a
 `WARN` (not a hard failure) when the floor is violated. The stock default
-(`grace_seconds=660`) already exceeds the stock floor (600 + 30), so no warning
-fires out of the box; lower `grace_seconds` (or raise the timeouts) only when
-adjusting the reconciler for non-default budgets.
+(`grace_seconds=660`) already exceeds the stock floor (`max(600 + 30, 600) = 630`),
+so no warning fires out of the box; lower `grace_seconds` (or raise the timeouts)
+only when adjusting the reconciler for non-default budgets.
 
-The stop-side `control.snapshot_timeout_seconds` (issue #847) does **not** raise
-this floor. That budget bounds the stop's held final snapshot — recovered by the
-reconciler's stale-stop arm, not the duplicate-start orphan path the floor
-protects (whose round-trip is the start's hydrate-then-start first dispatch). The
-stale-stop arm carries its own implicit safety constraint
+The stop-side `control.snapshot_timeout_seconds` (issue #847) is the SECOND term of
+the floor. That budget bounds the stop's held final snapshot, recovered by the
+reconciler's stale-stop arm; the arm carries its own safety constraint
 `grace_seconds > control.snapshot_timeout_seconds` (so the arm never clears a
-still-healthy snapshot hold), but at stock values that bound (660 > 600) is
-dominated by the duplicate-start floor (660 > 630), so the binding floor is
-unchanged. Raising `snapshot_timeout_seconds` above `hydrate_timeout_seconds`
-would make the snapshot bound binding instead.
+still-healthy snapshot hold mid-upload — which would reopen the stop→re-place race
+the hold exists to close, now that a final-snapshot **timeout** also leans on the
+arm rather than releasing the assignment). At stock values the duplicate-start
+bound (630) dominates the snapshot bound (600), but an operator who raises
+`snapshot_timeout_seconds` above `hydrate_timeout_seconds + command_timeout_seconds`
+makes the snapshot bound binding — hence the `max(...)`, which enforces both.
 
 > **Upgrade impact (existing dev setups).** This is a behavior change: a dev
 > process with `control.enabled=true` that previously bound plaintext now fails
@@ -267,7 +267,7 @@ channel there is nothing to re-dispatch.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `reconciler.interval_seconds` | `60` | | Loop resolution: how often the reconciler scans for diverged servers. Must be positive. |
-| `reconciler.grace_seconds` | `660` | | How long a divergence must persist (measured from the last Worker report) before it is acted on, so the normal in-flight lifecycle path has time to converge first. Must be positive and `> control.hydrate_timeout_seconds + control.command_timeout_seconds` (the start round-trip budget); below the floor the reconciler can re-dispatch a first start before it settles, risking a duplicate live instance (a `WARN` fires on boot). The stock default (660) satisfies the stock floor (600 + 30). |
+| `reconciler.grace_seconds` | `660` | | How long a divergence must persist (measured from the last Worker report) before it is acted on, so the normal in-flight lifecycle path has time to converge first. Must be positive and `> max(control.hydrate_timeout_seconds + control.command_timeout_seconds, control.snapshot_timeout_seconds)` (the start round-trip budget, and the held stop-snapshot budget); below the floor the reconciler can re-dispatch a first start before it settles (risking a duplicate live instance) or clear a still-healthy final-snapshot hold mid-upload (reopening the #847 race) — a `WARN` fires on boot. The stock default (660) satisfies the stock floor (`max(600 + 30, 600) = 630`). |
 | `reconciler.backoff_base_seconds` | `30` | | Base of the per-server exponential backoff after a failed re-dispatch; the wait doubles per consecutive failure. Must be positive. |
 | `reconciler.backoff_max_seconds` | `3600` | | Cap on the per-server backoff wait. Also doubles as the slack past `next_eligible_at` that keeps crash-loop damping alive across a slow (modded) boot's `starting` window. Must be positive, `>=` `backoff_base_seconds`, and `>= 600` (a smaller slack lets a still-diverged server expire and reset its failure count, re-arming the boot-crash loop). |
 
