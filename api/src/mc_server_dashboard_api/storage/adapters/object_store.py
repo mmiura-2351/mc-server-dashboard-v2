@@ -73,6 +73,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
+    StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
@@ -276,6 +277,32 @@ class ObjectStorage(Storage):
         # alongside the reader leases.
         self._active_staging: set[str] = set()
         self._lease_lock = threading.Lock()
+        # Per-server publish/edit serialization (issue #899). Every authoritative
+        # mutation of ``current/`` and its generation marker — a snapshot commit, a
+        # backup restore, and each in-place file edit — takes the server's lock for
+        # the mutate+bump critical section, closing the upload-window clobber the
+        # pre-stream data-plane guard cannot: ``commit_snapshot`` re-reads the
+        # generation and bumps under the same lock an edit takes, so an edit cannot
+        # land between the commit's stale re-check and its pointer flip. The adapter
+        # is async on one event loop, so an ``asyncio.Lock`` (not a thread lock) is
+        # the right primitive. Locks are created lazily and never reclaimed (one per
+        # server is negligible; reclaim would re-introduce the race the lock closes).
+        # IN-PROCESS ONLY: this serializes within ONE uvicorn process (today's
+        # single-process deployment, consistent with the in-process staging leases). A
+        # future multi-process / multi-replica deployment would need a shared lock
+        # (e.g. a conditional-write/compare-and-set on the pointer) or it silently
+        # reopens this race.
+        self._server_locks: dict[str, asyncio.Lock] = {}
+
+    def _server_lock(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> asyncio.Lock:
+        prefix = self._server_prefix(community_id, server_id)
+        lock = self._server_locks.get(prefix)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._server_locks[prefix] = lock
+        return lock
 
     # --- key-prefix layout helpers (Section 2 as a key scheme) -------------
 
@@ -616,7 +643,11 @@ class ObjectStorage(Storage):
                 await asyncio.to_thread(spool.unlink, missing_ok=True)
 
     async def commit_snapshot(
-        self, handle: SnapshotHandle, *, publisher: str | None = None
+        self,
+        handle: SnapshotHandle,
+        *,
+        publisher: str | None = None,
+        expected_base: int | None = None,
     ) -> int:
         h = _as_object_handle(handle)
         if h.consumed:
@@ -644,34 +675,76 @@ class ObjectStorage(Storage):
                 self._release_staging(incoming)
                 h.consumed = True
                 raise IntegrityCheckError(report)
-            # Missing-region gate (issue #854): the structural check above only sees
-            # objects that EXIST — a vanished region object would publish silently and
-            # MC would regenerate the chunks. Compare the staged region-object names
-            # against the prior snapshot's per region-bearing directory and refuse when
-            # a dimension that still has regions lost SOME of them (partial loss). A
-            # full-dimension delete (all regions gone) is allowed; first publish (no
-            # pointer) has no prior set, so nothing is flagged. Name-only — no bodies.
-            prior_prefix = await self._read_pointer(client, server_prefix)
-            if prior_prefix is not None:
-                prior_objs = await client.list_objects(prior_prefix)
-                missing = compare_region_name_sets(
-                    _region_names_by_dir(incoming, staged),
-                    _region_names_by_dir(prior_prefix, prior_objs),
+            # Materialize the staged objects into a fresh snapshot prefix BEFORE the
+            # lock (issue #920): the copy is the publish's long pole (minutes for a
+            # big world) and touches nothing live, so it must not hold the per-server
+            # lock and block every in-place edit for that long.
+            new_prefix = await self._copy_into_snapshot(
+                client, h.community_id, h.server_id, incoming, staged
+            )
+            # Take the server lock (issue #899) for the stale re-check, the
+            # missing-region prior read, the pointer flip, and the generation bump —
+            # the same lock an in-place edit takes for its mutate+bump. Holding it
+            # across these steps closes the upload-window clobber: an at-rest edit or a
+            # backup restore cannot land between the commit's re-check and its pointer
+            # flip. The bulk copy ran before the lock and the old-prefix GC runs after
+            # it; only the atomic flip + bump (+ the gates that must be atomic with the
+            # flip) are inside.
+            async with self._server_lock(h.community_id, h.server_id):
+                if expected_base is not None:
+                    current = await self._read_generation(client, server_prefix)
+                    if current > expected_base:
+                        # The store advanced past the guard's base during the upload
+                        # window: an at-rest edit or restore landed after the
+                        # pre-stream guard passed. Discard the staging AND the copied
+                        # (never-pointed-at) snapshot prefix exactly as the other
+                        # refusal paths do (the prior ``current`` keeps the newer
+                        # copy, no bump) and raise so the edge maps it to 409
+                        # stale_generation; the Worker re-bases on next start.
+                        await _delete_prefix(client, new_prefix)
+                        await _delete_prefix(client, incoming)
+                        self._release_staging(incoming)
+                        h.consumed = True
+                        raise StaleGenerationError(expected_base, current)
+                # Missing-region gate (issue #854): the structural check above only
+                # sees objects that EXIST — a vanished region object would publish
+                # silently and MC would regenerate the chunks. Compare the staged
+                # region-object names against the prior snapshot's per region-bearing
+                # directory and refuse when a dimension that still has regions lost
+                # SOME of them (partial loss). A full-dimension delete (all regions
+                # gone) is allowed; first publish (no pointer) has no prior set, so
+                # nothing is flagged. Name-only — no bodies.
+                prior_prefix = await self._read_pointer(client, server_prefix)
+                if prior_prefix is not None:
+                    prior_objs = await client.list_objects(prior_prefix)
+                    missing = compare_region_name_sets(
+                        _region_names_by_dir(incoming, staged),
+                        _region_names_by_dir(prior_prefix, prior_objs),
+                    )
+                    if not missing.complete:
+                        await _delete_prefix(client, new_prefix)
+                        await _delete_prefix(client, incoming)
+                        self._release_staging(incoming)
+                        h.consumed = True
+                        raise MissingRegionsError(missing)
+                old_prefix = await self._flip_pointer(
+                    client, h.community_id, h.server_id, new_prefix
                 )
-                if not missing.complete:
-                    await _delete_prefix(client, incoming)
-                    self._release_staging(incoming)
-                    h.consumed = True
-                    raise MissingRegionsError(missing)
-            await self._publish(client, h.community_id, h.server_id, incoming, staged)
-            # Bump the working-set generation now that the pointer references the new
-            # snapshot (issue #763) and record the publishing Worker (issue #847) in
-            # ONE atomic marker. Every authoritative publish that replaces ``current/``
-            # bumps it — a snapshot commit here and a backup restore (issue #873) —
-            # so a same-worker scratch never wrongly skips the post-publish hydrate.
-            generation = await self._bump_generation(client, server_prefix, publisher)
-        # Publish reclaimed the staging prefix; release its active-staging lease so
-        # a later sweep is not blocked by a now-dead handle (issue #160).
+                # Bump the working-set generation now that the pointer references the
+                # new snapshot (issue #763) and record the publishing Worker (issue
+                # #847) in ONE atomic marker. Every authoritative publish that
+                # replaces ``current/`` bumps it — a snapshot commit here and a backup
+                # restore (issue #873) — so a same-worker scratch never wrongly skips
+                # the post-publish hydrate.
+                generation = await self._bump_generation(
+                    client, server_prefix, publisher
+                )
+        # Reclaim the staging prefix and the superseded snapshot prefix AFTER the lock
+        # (issue #920): no edit can observe the old prefix once the flip is published
+        # (edits re-read the pointer under the lock), so this is safe outside it.
+        await self._gc_after_flip(client, incoming, old_prefix, new_prefix)
+        # Release the staging lease so a later sweep is not blocked by a now-dead
+        # handle (issue #160).
         self._release_staging(incoming)
         h.consumed = True
         return generation
@@ -787,21 +860,20 @@ class ObjectStorage(Storage):
                 corrupt.append(finding)
         return WorkingSetReport(scanned=scanned, corrupt=corrupt)
 
-    async def _publish(
+    async def _copy_into_snapshot(
         self,
         client: S3Client,
         community_id: CommunityId,
         server_id: ServerId,
         staged_prefix: str,
         staged: list[S3Object],
-    ) -> None:
-        """The pointer-flip publish core (Section 4.2 object column).
+    ) -> str:
+        """Materialize the staged objects under a fresh ``snapshots/<id>/`` prefix.
 
-        Steps, each followed by a failure-seam boundary so a crash at any of them
-        leaves the pointer resolving to one complete snapshot (Section 4.3 object
-        column): copy staged objects under a fresh ``snapshots/<id>/`` prefix; PUT
-        the new pointer object (the atomic flip); GC the superseded prefix and the
-        staging prefix.
+        The bulk copy (minutes for a big world) touches NOTHING live -- it only
+        writes a new, not-yet-pointed-at prefix -- so it runs BEFORE the per-server
+        lock (issue #920) to keep the lock's critical section short. Returns the new
+        snapshot prefix for :meth:`_flip_pointer`.
         """
 
         self._seam.reach(PublishPhase.AFTER_STAGE)
@@ -813,6 +885,22 @@ class ObjectStorage(Storage):
             await client.copy_object(obj.key, new_prefix + rest)
 
         self._seam.reach(PublishPhase.AFTER_MOVE)
+        return new_prefix
+
+    async def _flip_pointer(
+        self,
+        client: S3Client,
+        community_id: CommunityId,
+        server_id: ServerId,
+        new_prefix: str,
+    ) -> str | None:
+        """Atomically flip the pointer onto ``new_prefix`` (the publish's atomic step).
+
+        MUST run under the per-server lock (issue #920) so the flip is atomic with
+        the commit's stale re-check and so an in-place edit -- which now re-reads the
+        pointer under the SAME lock -- observes either the pre- or post-flip prefix,
+        never a torn state. Returns the superseded prefix for the post-lock GC.
+        """
 
         server_prefix = self._server_prefix(community_id, server_id)
         old_prefix = await self._read_pointer(client, server_prefix)
@@ -824,10 +912,26 @@ class ObjectStorage(Storage):
         )
 
         self._seam.reach(PublishPhase.AFTER_FLIP)
+        return old_prefix
 
-        # Reclaim the staging prefix and, unless an active reader leases it, the
-        # superseded snapshot prefix (Section 4.2/4.3). A leased old prefix is left
-        # for the next sweep to reclaim once the reader releases.
+    async def _gc_after_flip(
+        self,
+        client: S3Client,
+        staged_prefix: str,
+        old_prefix: str | None,
+        new_prefix: str,
+    ) -> None:
+        """Reclaim the staging prefix and the superseded snapshot prefix.
+
+        Runs AFTER releasing the per-server lock (issue #920) to keep the lock's
+        critical section short. This is safe against the bug-1 fix: every in-place
+        edit now re-reads the pointer UNDER the lock, after the flip, so once the
+        flip is published no edit can still observe ``old_prefix`` -- the only
+        readers of ``old_prefix`` left are active hydrate streams, which hold a lease
+        and are skipped here exactly as before (Section 4.2/4.3). A leased old prefix
+        is left for the next sweep to reclaim once the reader releases.
+        """
+
         await _delete_prefix(client, staged_prefix)
         if (
             old_prefix is not None
@@ -992,21 +1096,35 @@ class ObjectStorage(Storage):
                     report = await self._check_staged_regions(client, incoming, staged)
                     if not report.healthy and not force:
                         raise IntegrityCheckError(report)
-                    await self._publish(
+                    # Materialize the staged objects into a fresh snapshot prefix
+                    # BEFORE the lock (issue #920): the copy touches nothing live, so
+                    # it must not hold the per-server lock and block edits for its
+                    # duration.
+                    new_prefix = await self._copy_into_snapshot(
                         client, community_id, server_id, incoming, staged
                     )
-                    # Bump the generation on this authoritative publish (issue #873),
-                    # mirroring the fs adapter: a restore replaces ``current/`` like a
-                    # snapshot commit, so it MUST advance the store generation or a
-                    # same-worker scratch with held == store skips the hydrate (#767)
-                    # on the next start and boots the PRE-restore world. The sentinel
-                    # publisher (RESTORE_PUBLISHER) makes the publish-time guard refuse
-                    # an in-flight stale snapshot from a real Worker (different
-                    # publisher), closing the restore-clobber window (#873).
-                    server_prefix = self._server_prefix(community_id, server_id)
-                    await self._bump_generation(
-                        client, server_prefix, RESTORE_PUBLISHER
-                    )
+                    # Flip + bump under the server lock (issue #899), serializing with
+                    # a concurrent snapshot commit's generation re-check so the restore
+                    # cannot interleave with the commit's pointer flip.
+                    async with self._server_lock(community_id, server_id):
+                        old_prefix = await self._flip_pointer(
+                            client, community_id, server_id, new_prefix
+                        )
+                        # Bump the generation on this authoritative publish (issue
+                        # #873), mirroring the fs adapter: a restore replaces
+                        # ``current/`` like a snapshot commit, so it MUST advance the
+                        # store generation or a same-worker scratch with held == store
+                        # skips the hydrate (#767) on the next start and boots the
+                        # PRE-restore world. The sentinel publisher (RESTORE_PUBLISHER)
+                        # makes the publish-time guard refuse an in-flight stale
+                        # snapshot from a real Worker (different publisher), closing the
+                        # restore-clobber window (#873).
+                        server_prefix = self._server_prefix(community_id, server_id)
+                        await self._bump_generation(
+                            client, server_prefix, RESTORE_PUBLISHER
+                        )
+                    # Reclaim the staging + superseded prefixes after the lock (#920).
+                    await self._gc_after_flip(client, incoming, old_prefix, new_prefix)
                     return report
                 except BaseException:
                     await _delete_prefix(client, incoming)
@@ -1164,44 +1282,56 @@ class ObjectStorage(Storage):
             raise PathTraversalError("rel_path must name a file, not the root")
         async with self._client_factory() as client:
             server_prefix = self._server_prefix(community_id, server_id)
-            snapshot_prefix = await self._read_pointer(client, server_prefix)
-            if snapshot_prefix is None:
-                # A never-snapshotted server has no live prefix to edit in place
-                # (issue #205). Initialize the first published version containing
-                # just this file through the same pointer-flip publish path a
-                # snapshot uses, so a concurrent snapshot publish (its own staging
-                # prefix + flip) cannot corrupt it (Section 4.2).
-                await self._publish_initial(client, community_id, server_id, sub, data)
-                return
-            key = snapshot_prefix + sub
-            # Refuse to overwrite a directory with file bytes (issue #542): a
-            # ``config`` write where ``config/...`` objects exist would create a
-            # file/prefix collision. The fs backend raises IsADirectoryError here;
-            # match it with the invalid-path refusal.
-            if await client.list_objects(key + "/"):
-                raise PathTraversalError(
-                    f"rel_path names a directory, not a file: {rel_path.value}"
+            # Read the live pointer and run every precondition that depends on it
+            # INSIDE the server lock (issue #899/#920): the pointed-at prefix is a
+            # concurrent commit's flip + GC target, so reading it outside the lock
+            # would let the commit flip the pointer and delete the old prefix, after
+            # which this edit would PUT under the GC'd prefix and flip the pointer
+            # BACK to it -- total world loss. This is the same lock the commit's
+            # re-check + flip + bump takes, so an edit cannot interleave with it.
+            async with self._server_lock(community_id, server_id):
+                snapshot_prefix = await self._read_pointer(client, server_prefix)
+                if snapshot_prefix is None:
+                    # A never-snapshotted server has no live prefix to edit in place
+                    # (issue #205). Initialize the first published version containing
+                    # just this file through the same pointer-flip publish path a
+                    # snapshot uses. The caller already holds the lock, so
+                    # ``_publish_initial`` does NOT re-acquire it.
+                    await self._publish_initial(
+                        client, community_id, server_id, sub, data
+                    )
+                    return
+                key = snapshot_prefix + sub
+                # Refuse to overwrite a directory with file bytes (issue #542): a
+                # ``config`` write where ``config/...`` objects exist would create a
+                # file/prefix collision. The fs backend raises IsADirectoryError here;
+                # match it with the invalid-path refusal.
+                if await client.list_objects(key + "/"):
+                    raise PathTraversalError(
+                        f"rel_path names a directory, not a file: {rel_path.value}"
+                    )
+                # Capture the prior version BEFORE overwriting (Section 4.4/5).
+                if await client.head_object(key) is not None:
+                    await self._capture_version(
+                        client, community_id, server_id, rel_path, key
+                    )
+                self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+                # PUT the new object, then re-write the pointer so the published state
+                # stays named explicitly; the pointer PUT is the atomic point
+                # (Section 4.4).
+                await client.put_object(key, data)
+                self._seam.reach(PublishPhase.AFTER_FILE_TEMP_WRITE)
+                await client.put_object(
+                    self._pointer_key(community_id, server_id),
+                    json.dumps({"snapshot": snapshot_prefix}).encode(),
                 )
-            # Capture the prior version BEFORE overwriting (Section 4.4/5).
-            if await client.head_object(key) is not None:
-                await self._capture_version(
-                    client, community_id, server_id, rel_path, key
-                )
-            self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
-            # PUT the new object, then re-write the pointer so the published state
-            # stays named explicitly; the pointer PUT is the atomic point (Section 4.4).
-            await client.put_object(key, data)
-            self._seam.reach(PublishPhase.AFTER_FILE_TEMP_WRITE)
-            await client.put_object(
-                self._pointer_key(community_id, server_id),
-                json.dumps({"snapshot": snapshot_prefix}).encode(),
-            )
-            # Bump the generation on this authoritative edit (issue #889): an
-            # in-place write replaces the published world just like a snapshot/restore,
-            # so it advances the store generation and stamps the API_EDIT_PUBLISHER
-            # sentinel — otherwise a same-worker scratch with held == store skips the
-            # post-edit hydrate (#767) and its stale snapshot clobbers the edit.
-            await self._bump_generation(client, server_prefix, API_EDIT_PUBLISHER)
+                # Bump the generation on this authoritative edit (issue #889): an
+                # in-place write replaces the published world just like a
+                # snapshot/restore, so it advances the store generation and stamps the
+                # API_EDIT_PUBLISHER sentinel — otherwise a same-worker scratch with
+                # held == store skips the post-edit hydrate (#767) and its stale
+                # snapshot clobbers the edit.
+                await self._bump_generation(client, server_prefix, API_EDIT_PUBLISHER)
 
     async def _publish_initial(
         self,
@@ -1214,9 +1344,14 @@ class ObjectStorage(Storage):
         """Publish the first version of a never-snapshotted server (issue #205).
 
         Stage just ``sub`` under a fresh ``incoming/`` prefix, then publish it
-        through :meth:`_publish` — the same pointer-flip path a snapshot commit
-        uses. The staging prefix is pinned with an active-staging lease for the
-        life of the operation so a concurrent sweep does not GC it (issue #160).
+        through the copy/flip/GC phases — the same pointer-flip path a snapshot
+        commit uses. The staging prefix is pinned with an active-staging lease for
+        the life of the operation so a concurrent sweep does not GC it (issue #160).
+
+        The CALLER (``write_file``) already holds the per-server lock (issue #920)
+        — it took the lock before the never-snapshotted pointer read that routes
+        here — so this single-file publish runs entirely under that lock and does NOT
+        re-acquire it (``asyncio.Lock`` is not reentrant).
         """
 
         incoming = self._incoming_prefix(community_id, server_id, uuid.uuid4().hex)
@@ -1224,7 +1359,12 @@ class ObjectStorage(Storage):
         try:
             await client.put_object(incoming + sub, data)
             staged = await client.list_objects(incoming)
-            await self._publish(client, community_id, server_id, incoming, staged)
+            new_prefix = await self._copy_into_snapshot(
+                client, community_id, server_id, incoming, staged
+            )
+            old_prefix = await self._flip_pointer(
+                client, community_id, server_id, new_prefix
+            )
             # The first published version of a never-snapshotted server is still an
             # authoritative edit (issue #889): bump past generation 0 and stamp the
             # API_EDIT_PUBLISHER sentinel so the same staleness reasoning applies.
@@ -1233,6 +1373,7 @@ class ObjectStorage(Storage):
                 self._server_prefix(community_id, server_id),
                 API_EDIT_PUBLISHER,
             )
+            await self._gc_after_flip(client, incoming, old_prefix, new_prefix)
         except BaseException:
             await _delete_prefix(client, incoming)
             raise
@@ -1244,29 +1385,37 @@ class ObjectStorage(Storage):
     ) -> None:
         sub = self._safe_subkey(rel_path)
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
-                client, community_id, server_id
-            )
-            key = snapshot_prefix + sub
-            if await client.head_object(key) is None:
-                raise NotFoundError(f"file not found: {rel_path.value}")
-            # Capture the content BEFORE removing it (Section 5), so a delete is
-            # reversible by rollback exactly like an overwrite is.
-            await self._capture_version(client, community_id, server_id, rel_path, key)
-            self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
-            await client.delete_object(key)
-            # Re-write the pointer so the published state stays named explicitly,
-            # mirroring write_file's post-mutation pointer rewrite (Section 4.4).
-            await client.put_object(
-                self._pointer_key(community_id, server_id),
-                json.dumps({"snapshot": snapshot_prefix}).encode(),
-            )
-            # Authoritative edit -> bump the generation (issue #889).
-            await self._bump_generation(
-                client,
-                self._server_prefix(community_id, server_id),
-                API_EDIT_PUBLISHER,
-            )
+            # Read the live pointer and check the precondition INSIDE the server lock
+            # (issue #899/#920): the pointed-at prefix is a concurrent commit's flip +
+            # GC target, so reading it outside the lock would delete from -- and bump
+            # over -- a prefix the commit then flips away and GCs. Same lock the
+            # commit's re-check + flip + bump takes.
+            async with self._server_lock(community_id, server_id):
+                snapshot_prefix = await self._live_snapshot_prefix(
+                    client, community_id, server_id
+                )
+                key = snapshot_prefix + sub
+                if await client.head_object(key) is None:
+                    raise NotFoundError(f"file not found: {rel_path.value}")
+                # Capture the content BEFORE removing it (Section 5), so a delete is
+                # reversible by rollback exactly like an overwrite is.
+                await self._capture_version(
+                    client, community_id, server_id, rel_path, key
+                )
+                self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+                await client.delete_object(key)
+                # Re-write the pointer so the published state stays named explicitly,
+                # mirroring write_file's post-mutation pointer rewrite (Section 4.4).
+                await client.put_object(
+                    self._pointer_key(community_id, server_id),
+                    json.dumps({"snapshot": snapshot_prefix}).encode(),
+                )
+                # Authoritative edit -> bump the generation (issue #889).
+                await self._bump_generation(
+                    client,
+                    self._server_prefix(community_id, server_id),
+                    API_EDIT_PUBLISHER,
+                )
 
     async def delete_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1274,27 +1423,33 @@ class ObjectStorage(Storage):
         sub = self._safe_subkey(rel_path)
         dir_suffix = sub + "/" if sub else ""
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
-                client, community_id, server_id
-            )
-            objs = await client.list_objects(snapshot_prefix + dir_suffix)
-            if not objs:
-                raise NotFoundError(f"directory not found: {rel_path.value}")
             # No per-file version capture (Port contract): whole-subtree recovery
             # is the backups' job (Section 3.3). Delete every object under the dir
             # prefix, then re-write the pointer to keep the state named explicitly.
-            for obj in objs:
-                await client.delete_object(obj.key)
-            await client.put_object(
-                self._pointer_key(community_id, server_id),
-                json.dumps({"snapshot": snapshot_prefix}).encode(),
-            )
-            # Authoritative edit -> bump the generation (issue #889).
-            await self._bump_generation(
-                client,
-                self._server_prefix(community_id, server_id),
-                API_EDIT_PUBLISHER,
-            )
+            # Read the live pointer and check the precondition INSIDE the server lock
+            # (issue #899/#920): the pointed-at prefix is a concurrent commit's flip +
+            # GC target, so reading it outside the lock would delete from -- and bump
+            # over -- a prefix the commit then flips away and GCs. Same lock the
+            # commit's re-check + flip + bump takes.
+            async with self._server_lock(community_id, server_id):
+                snapshot_prefix = await self._live_snapshot_prefix(
+                    client, community_id, server_id
+                )
+                objs = await client.list_objects(snapshot_prefix + dir_suffix)
+                if not objs:
+                    raise NotFoundError(f"directory not found: {rel_path.value}")
+                for obj in objs:
+                    await client.delete_object(obj.key)
+                await client.put_object(
+                    self._pointer_key(community_id, server_id),
+                    json.dumps({"snapshot": snapshot_prefix}).encode(),
+                )
+                # Authoritative edit -> bump the generation (issue #889).
+                await self._bump_generation(
+                    client,
+                    self._server_prefix(community_id, server_id),
+                    API_EDIT_PUBLISHER,
+                )
 
     async def make_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1314,8 +1469,11 @@ class ObjectStorage(Storage):
         # matching the fs backend (which raises NotFoundError without one).
         async with self._client_factory() as client:
             server_prefix = self._server_prefix(community_id, server_id)
-            await self._live_snapshot_prefix(client, community_id, server_id)
-            await self._bump_generation(client, server_prefix, API_EDIT_PUBLISHER)
+            # Bump under the server lock (issue #899), serializing with a concurrent
+            # snapshot commit's generation re-check.
+            async with self._server_lock(community_id, server_id):
+                await self._live_snapshot_prefix(client, community_id, server_id)
+                await self._bump_generation(client, server_prefix, API_EDIT_PUBLISHER)
 
     # --- file version retention / rollback (Section 3.5, Section 5) ---------
 

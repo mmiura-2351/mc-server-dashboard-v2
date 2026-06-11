@@ -9,12 +9,16 @@ covered in the per-adapter files.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 import pytest
 
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     IncompleteTransferError,
@@ -22,6 +26,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
+    StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
@@ -158,6 +163,175 @@ async def test_refused_commit_does_not_bump_generation(
     with pytest.raises(IntegrityCheckError):
         await harness.storage.commit_snapshot(handle)
     assert await harness.storage.current_generation(community, server) == 1
+
+
+async def test_commit_with_matching_expected_base_publishes(
+    harness: StorageHarness,
+) -> None:
+    # Issue #899 commit-time stale guard: when the store has NOT advanced during the
+    # upload window (current still equals the base the pre-stream guard validated),
+    # the commit publishes normally and bumps the generation.
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})
+    base = await harness.storage.current_generation(community, server)
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"v2"}))
+    generation = await harness.storage.commit_snapshot(handle, expected_base=base)
+    assert generation == base + 1
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"v2"}
+
+
+async def test_commit_refused_when_edit_advanced_during_upload(
+    harness: StorageHarness,
+) -> None:
+    # Issue #899: an at-rest edit lands AFTER the pre-stream guard passed (here,
+    # after begin/write_snapshot but before commit — the upload window). The commit's
+    # expected-base re-check sees current advanced past the base and refuses with
+    # StaleGenerationError; the staging is discarded (the handle is consumed, no
+    # leak), the generation does NOT bump again, and the just-edited current survives.
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})
+    base = await harness.storage.current_generation(community, server)
+
+    # The worker's upload is staged at the base the guard validated...
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"worker"}))
+    # ...then an at-rest edit advances the store during the upload window.
+    await harness.storage.write_file(community, server, RelPath("f"), b"edited-at-rest")
+    advanced = await harness.storage.current_generation(community, server)
+    assert advanced == base + 1
+
+    with pytest.raises(StaleGenerationError) as exc:
+        await harness.storage.commit_snapshot(handle, expected_base=base)
+    assert exc.value.expected_base == base
+    assert exc.value.current == advanced
+
+    # No further bump, and the edit's content — not the stale worker upload — is live.
+    assert await harness.storage.current_generation(community, server) == advanced
+    assert (
+        await harness.storage.read_file(community, server, RelPath("f"))
+        == b"edited-at-rest"
+    )
+
+    # The consumed handle cannot be reused, and a fresh transfer publishes cleanly,
+    # proving the refusal left no leaked staging that blocks future commits.
+    with pytest.raises(SnapshotHandleError):
+        await harness.storage.commit_snapshot(handle, expected_base=advanced)
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"rebased"}))
+    assert (
+        await harness.storage.commit_snapshot(handle, expected_base=advanced)
+        == advanced + 1
+    )
+
+
+async def test_commit_without_expected_base_skips_recheck(
+    harness: StorageHarness,
+) -> None:
+    # Issue #899: a publish that declares no base (older Worker / never hydrated)
+    # passes expected_base=None, which skips the commit-time re-check entirely —
+    # backward-compatible with the pre-stream guard's permissive posture. Even if the
+    # store advanced, the commit publishes (last flip wins, the prior behaviour).
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"worker"}))
+    await harness.storage.write_file(community, server, RelPath("f"), b"edit")
+
+    generation = await harness.storage.commit_snapshot(handle)
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"worker"}
+    assert await harness.storage.current_generation(community, server) == generation
+
+
+async def test_edit_racing_a_commit_through_the_lock_lands_on_the_postflip_world(
+    harness: StorageHarness,
+) -> None:
+    # Issue #920 bug 1: an in-place edit racing a snapshot commit must not capture its
+    # read-set (the live pointer / resolved snapshot dir) BEFORE the per-server lock
+    # and then write that stale read back inside it. This drives a GENUINE two-task
+    # race: a commit is paused INSIDE its critical section (lock held, pointer flipped
+    # but not yet returned to the publish path), an edit is dispatched while it is
+    # paused, then the commit is released. On the buggy code the edit had already read
+    # the pre-flip world and, after the commit flips + GCs the old prefix/tree, wrote
+    # its stale read back -- total world loss on the object adapter, silent edit loss
+    # on fs. With the read moved under the lock, the edit re-reads the POST-flip world
+    # and both files survive. This test fails on the PR's pre-fix head.
+    community, server = new_scope()
+    await harness.publish(community, server, {"a": b"A", "b": b"B"})
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    storage = harness.storage
+
+    # Pause the commit INSIDE the per-server lock but BEFORE the pointer flip, so a
+    # racing edit that captured its read-set outside the lock observes the PRE-flip
+    # world (the bug-1 trigger). The pause point is the flip itself: ``_flip_pointer``
+    # on the fixed object code, else ``_publish`` (the pre-fix object path and the fs
+    # path both flip inside ``_publish``). Both run under the lock with the flip not
+    # yet done.
+    if isinstance(storage, ObjectStorage):
+        flip_name = "_flip_pointer" if hasattr(storage, "_flip_pointer") else "_publish"
+        real_flip = getattr(storage, flip_name)
+
+        async def paused_flip(*args: object, **kwargs: object) -> object:
+            entered.set()
+            await release.wait()
+            return await real_flip(*args, **kwargs)
+
+        setattr(storage, flip_name, paused_flip)
+    else:
+        assert isinstance(storage, FsStorage)
+        loop = asyncio.get_running_loop()
+        real_publish = storage._publish
+        # ``_publish`` runs on a worker thread holding the threading.Lock and flips the
+        # symlink. Block that thread on a plain Event BEFORE the flip while signalling
+        # the event loop that the critical section is entered, so the edit thread (also
+        # lock-gated, having resolved ``current`` outside the lock on the buggy code)
+        # can race it.
+        thread_release = threading.Event()
+
+        def paused_publish(
+            community_id: CommunityId, server_id: ServerId, staging: Path
+        ) -> Path | None:
+            loop.call_soon_threadsafe(entered.set)
+            thread_release.wait()
+            return real_publish(community_id, server_id, staging)
+
+        storage._publish = paused_publish  # type: ignore[method-assign]
+
+        async def _open_release_gate() -> None:
+            await release.wait()
+            thread_release.set()
+
+        asyncio.ensure_future(_open_release_gate())
+
+    # The worker commit publishes a fresh world; it pauses inside its critical section.
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"a": b"A2", "b": b"B2"}))
+    commit_task = asyncio.ensure_future(storage.commit_snapshot(handle))
+    await entered.wait()
+
+    # Dispatch the racing edit and give it several event-loop ticks to reach as far as
+    # it can (its lock acquire on the fixed code; its pre-lock read on the buggy code).
+    edit_task = asyncio.ensure_future(
+        storage.write_file(community, server, RelPath("a"), b"EDIT")
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    release.set()
+    await asyncio.gather(commit_task, edit_task)
+
+    # The hydrated world must be COMPLETE: both members present, the edit applied to
+    # the committed (post-flip) world rather than clobbering it.
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"a": b"EDIT", "b": b"B2"}
+    # Generation bumps are sequential: publish(1) -> commit(2) -> edit(3).
+    assert await harness.storage.current_generation(community, server) == 3
 
 
 async def test_hydrate_streams_incrementally_not_buffered(

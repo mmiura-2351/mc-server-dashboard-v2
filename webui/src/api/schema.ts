@@ -1143,6 +1143,17 @@ export interface paths {
          *     already prevents the genuine stale cross-worker publish from arising. The guard is
          *     defense-in-depth on the data plane, where the only prior protection was the
          *     Worker-side per-stream ctx cancel.
+         *
+         *     The pre-stream guard runs ONCE, before the (multi-minute) upload stream, so an
+         *     at-rest edit (issue #889) or a backup restore (issue #873) can land AFTER it
+         *     passes and the commit would silently clobber that just-bumped ``current`` (issue
+         *     #899). To close the upload window, the base the guard validated against — the
+         *     store's ``current`` at guard time — is threaded into ``commit_snapshot`` as
+         *     ``expected_base``; the commit re-reads the generation under the same per-server
+         *     serialization the bump uses and refuses (409 ``stale_generation``, the same
+         *     contract as the pre-stream refusal) when it advanced past that base. The staging
+         *     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
+         *     start — the same convergence as the pre-stream refusal.
          */
         post: operations["publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post"];
         delete?: never;

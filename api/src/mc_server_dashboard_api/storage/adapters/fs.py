@@ -52,6 +52,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
+    StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
@@ -151,6 +152,33 @@ class FsStorage(Storage):
         # it. Guarded by ``_lease_lock`` alongside the reader leases.
         self._active_staging: set[Path] = set()
         self._lease_lock = threading.Lock()
+        # Per-server publish/edit serialization (issue #899). Every authoritative
+        # mutation of ``current/`` and its generation marker — a snapshot commit, a
+        # backup restore, and each in-place file edit — takes the server's lock for
+        # the mutate+bump critical section. This closes the upload-window clobber the
+        # pre-stream data-plane guard cannot: ``commit_snapshot`` re-reads the
+        # generation and bumps under the same lock an edit takes, so an edit cannot
+        # land between the commit's stale re-check and its pointer flip. Locks are
+        # created lazily and never reclaimed (one per server is negligible; reclaim
+        # would re-introduce the very race the lock closes). The bump operations run
+        # on worker threads (``asyncio.to_thread``), so this is a ``threading.Lock``.
+        # IN-PROCESS ONLY: this serializes within ONE uvicorn process (today's
+        # single-process deployment, consistent with the in-process staging leases). A
+        # future multi-process deployment would need a shared lock (e.g. an OS file
+        # lock on the server root) or it silently reopens this race.
+        self._server_locks: dict[Path, threading.Lock] = {}
+        self._server_locks_guard = threading.Lock()
+
+    def _server_lock(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> threading.Lock:
+        root = self._server_root(community_id, server_id)
+        with self._server_locks_guard:
+            lock = self._server_locks.get(root)
+            if lock is None:
+                lock = threading.Lock()
+                self._server_locks[root] = lock
+            return lock
 
     # --- layout helpers ----------------------------------------------------
 
@@ -369,7 +397,11 @@ class FsStorage(Storage):
             await asyncio.to_thread(spool.unlink, missing_ok=True)
 
     async def commit_snapshot(
-        self, handle: SnapshotHandle, *, publisher: str | None = None
+        self,
+        handle: SnapshotHandle,
+        *,
+        publisher: str | None = None,
+        expected_base: int | None = None,
     ) -> int:
         fs_handle = _as_fs_handle(handle)
         if fs_handle.consumed:
@@ -418,13 +450,25 @@ class FsStorage(Storage):
                 self._release_staging(staging)
                 fs_handle.consumed = True
                 raise MissingRegionsError(missing)
-        generation = await asyncio.to_thread(
-            self._publish_and_bump,
-            fs_handle.community_id,
-            fs_handle.server_id,
-            staging,
-            publisher,
-        )
+        try:
+            generation = await asyncio.to_thread(
+                self._publish_and_bump,
+                fs_handle.community_id,
+                fs_handle.server_id,
+                staging,
+                publisher,
+                expected_base,
+            )
+        except StaleGenerationError:
+            # The store advanced past the guard's base during the upload window
+            # (issue #899): an at-rest edit or restore landed after the pre-stream
+            # guard passed. Discard the staging exactly as the other refusal paths do
+            # (the prior ``current`` keeps the newer copy, no bump) and re-raise so the
+            # edge maps it to 409 stale_generation; the Worker re-bases on next start.
+            await asyncio.to_thread(_rmtree, staging)
+            self._release_staging(staging)
+            fs_handle.consumed = True
+            raise
         # Publish moved the staging dir into snapshots/; release its active-staging
         # lease so a later sweep is not blocked by a now-dead handle (issue #183).
         self._release_staging(staging)
@@ -437,6 +481,7 @@ class FsStorage(Storage):
         server_id: ServerId,
         staging: Path,
         publisher: str | None,
+        expected_base: int | None = None,
     ) -> int:
         """Publish the snapshot, then bump and return the generation (issue #763).
 
@@ -455,12 +500,30 @@ class FsStorage(Storage):
         and wrongly refuse the real producer's lost-response retry. A single
         temp-sibling + atomic rename makes the (generation, publisher) pair
         all-or-nothing.
+
+        ``expected_base`` is the commit-time stale re-check (issue #899): under the
+        server lock — the same lock an in-place edit takes for its bump — re-read the
+        generation and refuse if it advanced past the base the pre-stream guard
+        validated against. Holding the lock across the re-check, the pointer flip, and
+        the bump is what closes the window: an edit cannot land between the re-check
+        and the flip. ``None`` skips the re-check (no base claim).
         """
 
         server_root = self._server_root(community_id, server_id)
-        self._publish(community_id, server_id, staging)
-        generation = self._read_generation(server_root) + 1
-        self._write_marker(server_root, generation, publisher)
+        with self._server_lock(community_id, server_id):
+            if expected_base is not None:
+                current = self._read_generation(server_root)
+                if current > expected_base:
+                    raise StaleGenerationError(expected_base, current)
+            old_snapshot = self._publish(community_id, server_id, staging)
+            generation = self._read_generation(server_root) + 1
+            self._write_marker(server_root, generation, publisher)
+        # Reclaim the superseded snapshot AFTER releasing the lock (issue #920): the
+        # ``_rmtree`` can be gigabytes and must not block edits. Safe outside the lock
+        # because every edit re-resolves ``current`` UNDER the lock after the flip, so
+        # once the flip is published no edit can still be writing into the old tree.
+        if old_snapshot is not None:
+            _rmtree(old_snapshot)
         return generation
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
@@ -474,13 +537,21 @@ class FsStorage(Storage):
 
     def _publish(
         self, community_id: CommunityId, server_id: ServerId, staging: Path
-    ) -> None:
+    ) -> Path | None:
         """The atomic-publish core (Section 4.2), driven on a worker thread.
 
         Steps, each followed by a failure-seam boundary so a crash at any of them
         leaves ``current`` resolving to one complete snapshot (Section 4.3):
         move staging -> ``snapshots/<id>/``; create a temp symlink; atomically
-        replace ``current`` with it; fsync the parent dir; reclaim the old snapshot.
+        replace ``current`` with it; fsync the parent dir.
+
+        The move + symlink flip are fast metadata ops (same-filesystem rename), so
+        they run under the caller's per-server lock. The superseded snapshot's
+        ``_rmtree`` (potentially gigabytes) is NOT done here; instead the old snapshot
+        path is RETURNED so the caller reclaims it AFTER releasing the lock (issue
+        #920), keeping the lock's critical section short. Returns ``None`` when there
+        is nothing to reclaim (first publish, or the old snapshot is still leased by
+        an active hydrate reader — left for the next sweep, Section 4.2 reader safety).
         """
 
         server_root = self._server_root(community_id, server_id)
@@ -519,7 +590,8 @@ class FsStorage(Storage):
             # authoritative) and let the next sweep/publish reclaim it once the
             # reader releases (Section 4.2 reader safety).
             if not self._is_leased(old_snapshot):
-                _rmtree(old_snapshot)
+                return old_snapshot
+        return None
 
     def _marker_path(self, server_root: Path) -> Path:
         # One marker holds BOTH the generation (line 1) and the publishing Worker id
@@ -1095,37 +1167,49 @@ class FsStorage(Storage):
         # invalid path instead.
         if not rel_path.parts:
             raise PathTraversalError("rel_path must name a file, not the root")
-        # A never-snapshotted server has no live snapshot to edit in place (issue
-        # #205). Initialize the first published version containing just this file,
-        # through the same atomic-publish path a snapshot uses: stage the file into
-        # an incoming/ dir, then flip ``current`` onto it. A snapshot publishing
-        # concurrently stages into its own incoming/ dir and flips independently —
-        # last flip wins, neither corrupts the other (Section 4.2).
-        if not self._current_link(community_id, server_id).is_symlink():
-            self._publish_initial(community_id, server_id, rel_path, data)
-            return
-        current = self._current_dir(community_id, server_id)
-        target = self._safe_target(current, rel_path)
-        # Refuse to overwrite a directory with file bytes (issue #542): the atomic
-        # rename onto an existing directory raises IsADirectoryError, so reject it
-        # as an invalid path rather than crashing.
-        if target.is_dir():
-            raise PathTraversalError(
-                f"rel_path names a directory, not a file: {rel_path.value}"
+        # Resolve ``current`` and run every precondition that depends on it INSIDE
+        # the server lock (issue #899/#920): the symlink and the snapshot dir it
+        # names are a concurrent commit's mutation targets, so resolving them outside
+        # the lock would pin a snapshot dir that the commit then flips away and
+        # ``_rmtree``s -- the edit would write into the dead tree, succeed, and bump
+        # the generation, silently losing the edit. This is the same lock a snapshot
+        # commit takes for its re-check + publish + bump, so a concurrent commit
+        # cannot read a pre-edit generation and clobber this edit during its upload
+        # window.
+        with self._server_lock(community_id, server_id):
+            # A never-snapshotted server has no live snapshot to edit in place (issue
+            # #205). This check reads ``current`` and so must be under the lock too
+            # (#920): a first-snapshot commit must not flip ``current`` between the
+            # check and ``_publish_initial``'s own flip. Initialize the first
+            # published version containing just this file through the same
+            # atomic-publish path a snapshot uses: stage the file into an incoming/
+            # dir, then flip ``current`` onto it.
+            if not self._current_link(community_id, server_id).is_symlink():
+                self._publish_initial(community_id, server_id, rel_path, data)
+                return
+            current = self._current_dir(community_id, server_id)
+            target = self._safe_target(current, rel_path)
+            # Refuse to overwrite a directory with file bytes (issue #542): the atomic
+            # rename onto an existing directory raises IsADirectoryError, so reject it
+            # as an invalid path rather than crashing.
+            if target.is_dir():
+                raise PathTraversalError(
+                    f"rel_path names a directory, not a file: {rel_path.value}"
+                )
+            # Capture the prior version BEFORE overwriting (Section 4.4/5), so a crash
+            # mid-write leaves both the old content and the retained version
+            # consistent.
+            if target.is_file():
+                self._capture_version(community_id, server_id, rel_path, target)
+            self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_write(target, data)
+            # Bump the generation on this authoritative edit (issue #889): an in-place
+            # write replaces the published world just like a snapshot/restore, so it
+            # advances the store generation and stamps the API_EDIT_PUBLISHER sentinel.
+            self._bump_marker(
+                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
             )
-        # Capture the prior version BEFORE overwriting (Section 4.4/5), so a crash
-        # mid-write leaves both the old content and the retained version consistent.
-        if target.is_file():
-            self._capture_version(community_id, server_id, rel_path, target)
-        self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        self._atomic_write(target, data)
-        # Bump the generation on this authoritative edit (issue #889): an in-place
-        # write replaces the published world just like a snapshot/restore, so it
-        # advances the store generation and stamps the API_EDIT_PUBLISHER sentinel.
-        self._bump_marker(
-            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-        )
 
     def _publish_initial(
         self,
@@ -1140,6 +1224,12 @@ class FsStorage(Storage):
         through :meth:`_publish` — the same symlink-flip path a snapshot commit
         uses. The staging dir is pinned with an active-staging lease for the life
         of the operation so a concurrent sweep does not reclaim it (issue #183).
+
+        The CALLER (``_write_file``) already holds the per-server lock (issue
+        #920) -- it took the lock before the never-snapshotted check that routes
+        here, so the flip below cannot interleave with a concurrent commit's
+        re-check and the lock is NOT re-acquired here (``threading.Lock`` is not
+        reentrant).
         """
 
         staging = self._staging_dir(community_id, server_id, uuid.uuid4().hex)
@@ -1149,6 +1239,8 @@ class FsStorage(Storage):
             target = staging.joinpath(*rel_path.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             self._atomic_write(target, data)
+            # First publish of a never-snapshotted server: there is no prior snapshot
+            # to reclaim, so ``_publish`` returns ``None`` here.
             self._publish(community_id, server_id, staging)
             # The first published version of a never-snapshotted server is still an
             # authoritative edit (issue #889): bump past generation 0 and stamp the
@@ -1170,20 +1262,26 @@ class FsStorage(Storage):
     def _delete_file(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
-        current = self._current_dir(community_id, server_id)
-        target = self._safe_target(current, rel_path)
-        if not target.is_file():
-            raise NotFoundError(f"file not found: {rel_path.value}")
-        # Capture the content BEFORE removing it (Section 5), so a delete is
-        # reversible by rollback exactly like an overwrite is.
-        self._capture_version(community_id, server_id, rel_path, target)
-        self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
-        target.unlink()
-        _fsync_dir(target.parent)
-        # Authoritative edit -> bump the generation (issue #889).
-        self._bump_marker(
-            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-        )
+        # Resolve ``current`` and check the precondition INSIDE the server lock
+        # (issue #899/#920): the resolved snapshot dir is a concurrent commit's
+        # flip+``_rmtree`` target, so resolving it outside the lock would delete
+        # from -- and bump over -- a dead tree. Same lock the commit's re-check
+        # takes.
+        with self._server_lock(community_id, server_id):
+            current = self._current_dir(community_id, server_id)
+            target = self._safe_target(current, rel_path)
+            if not target.is_file():
+                raise NotFoundError(f"file not found: {rel_path.value}")
+            # Capture the content BEFORE removing it (Section 5), so a delete is
+            # reversible by rollback exactly like an overwrite is.
+            self._capture_version(community_id, server_id, rel_path, target)
+            self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+            target.unlink()
+            _fsync_dir(target.parent)
+            # Authoritative edit -> bump the generation (issue #889).
+            self._bump_marker(
+                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+            )
 
     async def delete_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1193,19 +1291,25 @@ class FsStorage(Storage):
     def _delete_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
-        current = self._current_dir(community_id, server_id)
-        target = self._safe_target(current, rel_path)
-        if not target.is_dir():
-            raise NotFoundError(f"directory not found: {rel_path.value}")
         # No per-file version capture (Port contract): whole-subtree recovery is
         # the backups' job (Section 3.3), and capturing a version per member would
         # be a storage-amplification bomb on a large subtree.
-        shutil.rmtree(target)
-        _fsync_dir(target.parent)
-        # Authoritative edit -> bump the generation (issue #889).
-        self._bump_marker(
-            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-        )
+        # Resolve ``current`` and check the precondition INSIDE the server lock
+        # (issue #899/#920): the resolved snapshot dir is a concurrent commit's
+        # flip+``_rmtree`` target, so resolving it outside the lock would delete
+        # from -- and bump over -- a dead tree. Same lock the commit's re-check
+        # takes.
+        with self._server_lock(community_id, server_id):
+            current = self._current_dir(community_id, server_id)
+            target = self._safe_target(current, rel_path)
+            if not target.is_dir():
+                raise NotFoundError(f"directory not found: {rel_path.value}")
+            shutil.rmtree(target)
+            _fsync_dir(target.parent)
+            # Authoritative edit -> bump the generation (issue #889).
+            self._bump_marker(
+                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+            )
 
     async def make_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1220,18 +1324,25 @@ class FsStorage(Storage):
         # snapshot, so _current_dir raises NotFoundError; mkdir requires a working
         # set to exist first (servers seed one at create, issue #243). Idempotent:
         # an existing directory is fine (make_dir contract).
-        current = self._current_dir(community_id, server_id)
-        target = self._safe_target(current, rel_path)
-        target.mkdir(parents=True, exist_ok=True)
-        _fsync_dir(target.parent)
-        # Authoritative edit -> bump the generation (issue #889). An empty directory
-        # arguably adds no world content, but bumping uniformly across every
-        # authoritative ``current/`` mutation keeps the staleness invariant simple
-        # (consistency over a per-op carve-out): the hydrate-skip / clobber reasoning
-        # never has to special-case which edit "really" changed the world.
-        self._bump_marker(
-            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-        )
+        # Resolve ``current`` and the target INSIDE the server lock (issue
+        # #899/#920): the resolved snapshot dir is a concurrent commit's
+        # flip+``_rmtree`` target, so resolving it outside the lock would mkdir
+        # into -- and bump over -- a dead tree. Same lock the commit's re-check
+        # takes.
+        with self._server_lock(community_id, server_id):
+            current = self._current_dir(community_id, server_id)
+            target = self._safe_target(current, rel_path)
+            target.mkdir(parents=True, exist_ok=True)
+            _fsync_dir(target.parent)
+            # Authoritative edit -> bump the generation (issue #889). An empty
+            # directory arguably adds no world content, but bumping uniformly across
+            # every authoritative ``current/`` mutation keeps the staleness invariant
+            # simple (consistency over a per-op carve-out): the hydrate-skip / clobber
+            # reasoning never has to special-case which edit "really" changed the
+            # world.
+            self._bump_marker(
+                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+            )
 
     def _atomic_write(self, target: Path, data: bytes) -> None:
         """temp-sibling + fsync + atomic rename (Section 4.4)."""
