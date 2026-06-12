@@ -89,8 +89,11 @@ func TestScanHeldServersMissingScratchRoot(t *testing.T) {
 func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	scratch := t.TempDir()
 
-	// A held set whose region is torn (size not a 4096 multiple, the #703 shape) but
-	// whose marker still records gen 9.
+	// A held set whose region is genuinely torn but whose marker still records gen 9.
+	// Under the unified rule (issue #927) an unaligned size is no longer corrupt per
+	// se; this fixture stays refused because healthyRegion()'s chunk declares a
+	// sector-filling length (4092) whose byte extent (offset 8192 + 4 + 4092 = 12288)
+	// now overruns the truncated size (12278) -> truncated_chunk.
 	torn := filepath.Join(scratch, "torn-server", "region")
 	if err := os.MkdirAll(torn, 0o750); err != nil {
 		t.Fatal(err)
@@ -127,5 +130,36 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("held = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration verifies the boot
+// scan advertises the RECORDED generation for a structurally-sound live-format
+// scratch — the unpadded (non-4096-aligned) tail a crashed or non-gracefully-stopped
+// 26.x server leaves behind (issue #927/#926 item 1). Under the unified region rule
+// such a scratch is not corrupt, so its marker generation N must be advertised (not
+// gen 0). Advertising N lets the #767 skip gate (held >= published) boot the held
+// world directly, preserving the crashed server's progression instead of forcing a
+// gen-0 recovery hydrate that would roll it back by up to a snapshot interval.
+func TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration(t *testing.T) {
+	scratch := t.TempDir()
+
+	// A held set whose region is live-format: unaligned size, byte-precise-valid
+	// trailing chunk (offset*4096 + 4 + length == size). Marker records gen 11.
+	live := filepath.Join(scratch, "live-server", "region")
+	if err := os.MkdirAll(live, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "r.0.0.mca"), unalignedLiveRegion(), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(filepath.Join(scratch, "live-server"), 11); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ScanHeldServers(scratch, nil)
+	want := []session.HeldServer{{ServerID: "live-server", Generation: 11}}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("held = %v, want %v", got, want)
 	}
 }

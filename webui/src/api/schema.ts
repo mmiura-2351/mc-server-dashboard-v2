@@ -1155,16 +1155,14 @@ export interface paths {
          *     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
          *     start — the same convergence as the pre-stream refusal.
          *
-         *     The ``X-Snapshot-Source`` header (issue #923) selects the content-integrity
-         *     region rule. MC 26.x pads region files to a sector boundary only on shutdown, so
-         *     a RUNNING server's periodic snapshot legitimately carries a non-4096-aligned
-         *     tail; under the strict rule the gate would refuse EVERY periodic snapshot and a
-         *     running server would never be checkpointed (crash loses all progression since the
-         *     last graceful stop). When the Worker declares ``running`` the commit applies the
-         *     live (byte-precise) region check; any other value (incl. absent, an older Worker
-         *     or the stopped/at-rest final snapshot) keeps the strict 4096-aligned rule. The
-         *     Worker is already trusted for the snapshot CONTENT, so this mode signal adds no
-         *     new trust surface.
+         *     The content-integrity gate uses the single region rule set (issue #927): a
+         *     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
+         *     every snapshot source. The earlier source-keyed strict/live split (issue #923)
+         *     relied on a ``stopped => 4096-padded`` invariant that does not survive a
+         *     sweep-stop timeout, SIGKILL, OOM, or crash — so the strict rule refused the
+         *     stop-leg checkpoint exactly when it is the last chance to capture the world. The
+         *     byte-precise check still catches realistic tears (a referenced chunk overrunning
+         *     EOF, an entry past EOF, a severed prefix).
          */
         post: operations["publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post"];
         delete?: never;
@@ -4684,7 +4682,6 @@ export interface operations {
                 "content-length"?: number | null;
                 "X-Working-Set-Base-Generation"?: number | null;
                 "X-Worker-Id"?: string | null;
-                "X-Snapshot-Source"?: string | null;
                 authorization?: string | null;
             };
             path: {

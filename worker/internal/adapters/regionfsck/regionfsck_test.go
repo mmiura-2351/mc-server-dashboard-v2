@@ -98,12 +98,16 @@ func TestKnownCompressionSchemesAreAccepted(t *testing.T) {
 	}
 }
 
-func TestNon4096AlignedIsFlagged(t *testing.T) {
+func TestTornMidChunkIsTruncatedChunk(t *testing.T) {
+	// A file truncated mid-write inside its trailing referenced chunk: the size is
+	// no longer a 4096 multiple, but that alone is NOT corruption (issue #927) — the
+	// byte-precise EOF bound catches the real tear (the chunk's declared length now
+	// overruns the shorter file) and classifies it truncated_chunk.
 	image := buildRegion(nil, 3, -1, 2)
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), image[:len(image)-10]) // torn mid-write.
 	reason, _ := CheckRegionFile(path)
-	if reason != ReasonNotAligned {
-		t.Fatalf("reason = %v, want ReasonNotAligned", reason)
+	if reason != ReasonTruncatedChunk {
+		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
 
@@ -207,135 +211,94 @@ func unalignedTrailingChunk(tail int) []byte {
 	return image
 }
 
-func TestUnalignedTrailingChunkIsLiveHealthyButStrictNotAligned(t *testing.T) {
+func TestUnalignedTrailingChunkIsHealthy(t *testing.T) {
 	// A live 26.x world's region: non-4096 size, but the trailing chunk fits
-	// byte-precisely. Live mode treats it as healthy; strict mode flags the size.
+	// byte-precisely. The single rule set (issue #927) treats it as healthy — an
+	// unaligned tail is the on-disk format, not a tear. This is the case the old
+	// strict mode wrongly refused on the stop-leg checkpoint.
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), unalignedTrailingChunk(459))
 
-	reason, err := CheckRegionFileMode(path, true)
+	reason, err := CheckRegionFile(path)
 	if err != nil {
-		t.Fatalf("live: unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if reason != ReasonNone {
-		t.Fatalf("live: reason = %v, want ReasonNone", reason)
-	}
-
-	reason, err = CheckRegionFileMode(path, false)
-	if err != nil {
-		t.Fatalf("strict: unexpected error: %v", err)
-	}
-	if reason != ReasonNotAligned {
-		t.Fatalf("strict: reason = %v, want ReasonNotAligned", reason)
+		t.Fatalf("reason = %v, want ReasonNone", reason)
 	}
 }
 
-func TestTrailingChunkOverrunningEOFIsTruncatedInLiveMode(t *testing.T) {
+func TestUnalignedTrailingChunkOverrunningEOFIsTruncated(t *testing.T) {
 	// An unpadded tail whose trailing chunk's declared length overruns the real EOF
-	// (a genuine tear, not the legitimate unpadded tail): live mode catches it as a
-	// truncated chunk via the byte-precise bound. Strict mode rejects the same bytes
-	// even earlier on the non-4096 size (not_4096_aligned) — still corrupt, just by
-	// the alignment rule it always had — so both modes refuse it.
+	// (a genuine tear, not the legitimate unpadded tail): the byte-precise bound
+	// catches it as a truncated chunk.
 	image := unalignedTrailingChunk(459)
 	offset := int64(2)
 	binary.BigEndian.PutUint32(image[offset*testSector:offset*testSector+4], uint32(testSector*5))
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), image)
 
-	if reason, _ := CheckRegionFileMode(path, true); reason != ReasonTruncatedChunk {
-		t.Fatalf("live: reason = %v, want ReasonTruncatedChunk", reason)
-	}
-	if reason, _ := CheckRegionFileMode(path, false); reason != ReasonNotAligned {
-		t.Fatalf("strict: reason = %v, want ReasonNotAligned", reason)
+	if reason, _ := CheckRegionFile(path); reason != ReasonTruncatedChunk {
+		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
 
-func TestAlignedChunkOverrunningEOFIsTruncatedInBothModes(t *testing.T) {
-	// On an ALIGNED file (so the alignment rule does not short-circuit), a chunk
-	// whose declared length overruns the sectors/EOF is truncated in BOTH modes,
-	// proving the byte-precise live bound still catches a real overrun.
+func TestAlignedChunkOverrunningEOFIsTruncated(t *testing.T) {
+	// On an ALIGNED file, a chunk whose declared length overruns the sectors/EOF is
+	// truncated, proving the byte-precise bound still catches a real overrun.
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"),
 		buildRegion(map[int][2]int{0: {2, 1}}, 3, testSector*5, 2))
-	for _, live := range []bool{true, false} {
-		reason, _ := CheckRegionFileMode(path, live)
-		if reason != ReasonTruncatedChunk {
-			t.Fatalf("live=%v: reason = %v, want ReasonTruncatedChunk", live, reason)
-		}
+	if reason, _ := CheckRegionFile(path); reason != ReasonTruncatedChunk {
+		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
 
-func TestAlignedFilesBehaveTheSameInBothModes(t *testing.T) {
-	// A normal aligned region is healthy in both modes (the live relaxation only
-	// loosens the tail, never the rest of the structure).
+func TestAlignedHealthyRegionIsClean(t *testing.T) {
+	// A normal aligned region is healthy: the single rule set relaxes only the tail,
+	// never the rest of the structure.
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), buildRegion(nil, 3, -1, 2))
-	for _, live := range []bool{true, false} {
-		reason, err := CheckRegionFileMode(path, live)
-		if err != nil {
-			t.Fatalf("live=%v: unexpected error: %v", live, err)
-		}
-		if reason != ReasonNone {
-			t.Fatalf("live=%v: reason = %v, want ReasonNone", live, reason)
-		}
+	reason, err := CheckRegionFile(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != ReasonNone {
+		t.Fatalf("reason = %v, want ReasonNone", reason)
 	}
 }
 
-func TestZeroAndShortFilesBehaveTheSameInBothModes(t *testing.T) {
-	// A 0-byte file is healthy in both modes (issue #905); a non-zero file below the
-	// two header sectors is corrupt in both (the live relaxation does not loosen the
-	// header floor).
-	zero := write(t, filepath.Join(t.TempDir(), "empty.mca"), []byte{})
-	short := write(t, filepath.Join(t.TempDir(), "short.mca"), make([]byte, 100))
-	for _, live := range []bool{true, false} {
-		if reason, err := CheckRegionFileMode(zero, live); err != nil || reason != ReasonNone {
-			t.Fatalf("live=%v zero: reason=%v err=%v, want ReasonNone", live, reason, err)
-		}
-		if reason, _ := CheckRegionFileMode(short, live); reason != ReasonNotAligned {
-			t.Fatalf("live=%v short: reason=%v, want ReasonNotAligned", live, reason)
-		}
-	}
-}
-
-func TestCheckWorkingSetModeLiveAcceptsUnalignedTail(t *testing.T) {
+func TestCheckWorkingSetAcceptsUnalignedTail(t *testing.T) {
+	// The #927 regression case at the working-set level: a set mixing an unaligned
+	// (live-format) tail and a normal aligned region scans healthy — the stop-leg
+	// snapshot of a crashed/non-gracefully-stopped server now PROCEEDS.
 	root := t.TempDir()
 	write(t, filepath.Join(root, "region", "r.0.0.mca"), unalignedTrailingChunk(459))
 	write(t, filepath.Join(root, "region", "r.1.0.mca"), buildRegion(nil, 3, -1, 2))
 
-	live, err := CheckWorkingSetMode(root, true)
+	report, err := CheckWorkingSet(root)
 	if err != nil {
-		t.Fatalf("live: unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if live.Scanned != 2 || !live.Healthy() {
-		t.Fatalf("live: report = %+v, want 2 scanned & healthy", live)
-	}
-
-	strict, err := CheckWorkingSetMode(root, false)
-	if err != nil {
-		t.Fatalf("strict: unexpected error: %v", err)
-	}
-	if strict.Healthy() {
-		t.Fatal("strict: want the unaligned tail flagged")
+	if report.Scanned != 2 || !report.Healthy() {
+		t.Fatalf("report = %+v, want 2 scanned & healthy", report)
 	}
 }
 
-func TestChunkLengthExceedingSectorsIsTruncatedInLiveMode(t *testing.T) {
+func TestInteriorChunkOverrunningSectorAllocationIsTruncated(t *testing.T) {
 	// An interior chunk whose declared length overruns its OWN sector allocation
 	// (sectorCount 1) into a neighbor, yet still fits byte-precisely inside the file
-	// (so the live EOF bound alone would pass). The retained length-vs-sectorCount
-	// consistency check (issue #923 review) must flag it as truncated in BOTH modes.
-	// The file is aligned so the size rule does not short-circuit strict mode.
+	// (so the EOF bound alone would pass). The retained length-vs-sectorCount
+	// consistency check flags it as truncated. The file is aligned, so the size rule
+	// does not short-circuit.
 	image := buildRegion(map[int][2]int{0: {2, 1}}, 4, testSector*2-4, 2)
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), image)
-	for _, live := range []bool{true, false} {
-		reason, _ := CheckRegionFileMode(path, live)
-		if reason != ReasonTruncatedChunk {
-			t.Fatalf("live=%v: reason = %v, want ReasonTruncatedChunk", live, reason)
-		}
+	if reason, _ := CheckRegionFile(path); reason != ReasonTruncatedChunk {
+		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
 
-func TestShortPrefixReadIsTruncatedChunkInLiveMode(t *testing.T) {
-	// A tail torn 1-4 bytes into a referenced chunk's first sector: the live bounds
-	// check proves only the chunk's first byte is inside the file, so the 5-byte
-	// prefix read ends mid-prefix (io.ErrUnexpectedEOF). Live mode classifies this as
-	// a structural TRUNCATED_CHUNK (mirroring the Python validator), not an I/O error.
+func TestShortPrefixReadIsTruncatedChunk(t *testing.T) {
+	// A tail torn 1-4 bytes into a referenced chunk's first sector: the bounds check
+	// proves only the chunk's first byte is inside the file, so the 5-byte prefix
+	// read ends mid-prefix (io.ErrUnexpectedEOF). The check classifies this as a
+	// structural TRUNCATED_CHUNK (mirroring the Python validator), not an I/O error.
 	const offset = 2
 	// Two bytes into sector 2: offset*4096 < size (first byte in file) but the prefix
 	// cannot be fully read.
@@ -347,12 +310,12 @@ func TestShortPrefixReadIsTruncatedChunkInLiveMode(t *testing.T) {
 	image[3] = 1
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), image)
 
-	reason, err := CheckRegionFileMode(path, true)
+	reason, err := CheckRegionFile(path)
 	if err != nil {
-		t.Fatalf("live: unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if reason != ReasonTruncatedChunk {
-		t.Fatalf("live: reason = %v, want ReasonTruncatedChunk", reason)
+		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
 
@@ -424,8 +387,7 @@ func TestWalkerAggregatesMixedHealthAcrossDimensions(t *testing.T) {
 	root := t.TempDir()
 	healthy := buildRegion(nil, 3, -1, 2)
 	alignedBad := buildRegion(nil, 3, -1, 9)                    // bad_compression.
-	torn := buildRegion(nil, 3, -1, 2)                          // truncated below to not_aligned.
-	torn = torn[:len(torn)-10]                                  //
+	torn := make([]byte, testSector)                            // sub-header-size: not_4096_aligned.
 	pastEOF := buildRegion(map[int][2]int{0: {4, 1}}, 3, -1, 2) // sector_out_of_bounds.
 
 	layout := map[string][]byte{

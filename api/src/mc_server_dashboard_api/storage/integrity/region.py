@@ -8,43 +8,45 @@ means the chunk is absent. A present chunk's payload begins at its sector with a
 5-byte prefix: a 4-byte big-endian ``length`` and a 1-byte compression scheme.
 
 A crash during a chunk save (the failure reproduced in #703) truncates the file:
-its size stops being a multiple of 4096, or a location entry points past EOF.
-This module catches that **structurally** — 4096 alignment, location-table
-sector bounds, and per-present-chunk length/compression sanity — reading only the
-two header tables and each present chunk's 5-byte prefix (O(header) per region;
-region payloads are never loaded). It does **not** decompress or NBT-decode.
+a location entry points past EOF, a referenced chunk's declared length overruns
+the real file size, or its prefix is severed mid-write. This module catches that
+**structurally** — location-table sector bounds and per-present-chunk
+length/compression sanity, with BYTE-PRECISE EOF bounds — reading only the two
+header tables and each present chunk's 5-byte prefix (O(header) per region; region
+payloads are never loaded). It does **not** decompress or NBT-decode.
 
-Two modes, keyed by snapshot SOURCE (issue #923). MC 26.x pads region files to a
-sector boundary only on shutdown/close: a STOPPED world's regions are all
-4096-aligned, but a RUNNING (even quiesced) world legitimately keeps an UNPADDED
-tail — the last chunk's data ends mid-sector and the file size is not a multiple
-of 4096. Verified on a live 26.1.2 server: the trailing chunk in such a file is
-complete and decompresses cleanly; it is the on-disk format, not a tear.
+One rule set, applied everywhere (issue #927). An earlier design (issue #923, #925)
+split the rules by snapshot SOURCE: a STOPPED world was assumed 4096-padded (MC 26.x
+pads region files to a sector boundary only on shutdown/close) and its non-4096 size
+treated as a torn save, while a RUNNING world's legitimate UNPADDED tail — the last
+chunk ends mid-sector and the file size is not a 4096 multiple — was accepted. That
+``stopped => padded`` invariant does NOT hold: a sweep-stop timeout, SIGKILL, OOM,
+crash, or host loss can leave a stopped world's regions unpadded, and the stop-leg
+checkpoint then fails exactly when it is the last chance to capture the world. The
+strict alignment check added detection power ONLY under that invalid invariant, so
+the split is collapsed: the single rule set is the former LIVE rule.
 
-* STRICT mode (``live=False``, a stopped/at-rest set): a non-4096 size IS a torn
-  save, and the per-chunk bound is whole-sector. Unchanged from the original.
-* LIVE mode (``live=True``, a running server's periodic snapshot): a non-4096 size
-  is NOT corruption, and the per-chunk EOF bound is BYTE-PRECISE — a present chunk
-  passes when ``offset*4096 + 4 + length <= size``. (The strict whole-file ceiling
-  ``offset + sector_count <= size // 4096`` would wrongly reject a valid trailing
-  chunk because integer division drops the partial final sector.) The
-  length-vs-sectorCount consistency check (``length <= sector_count*4096-4``) is
-  KEPT in live mode too — MC always allocates ``sector_count`` for the chunk's own
-  length, so it costs no false reject and still catches an interior chunk whose
-  declared length overruns its sector allocation into a neighbor. All other rules —
-  header presence (size==0 fine per #905; a non-zero size below 8192 still corrupt),
-  sector offsets inside the header, compression scheme, length>=1 — are identical.
-  A trailing chunk whose declared length overruns the real EOF is still corrupt in
-  BOTH modes.
+* A non-4096-aligned size is NOT corruption: it is the normal on-disk shape of an
+  unpadded tail (verified on a live 26.1.2 server: the trailing chunk is complete
+  and decompresses cleanly). Alignment is retained as a signal only for the
+  sub-header-size case below.
+* A non-zero size below 8192 (two header sectors) is a torn save: a valid region
+  carries both header tables, so anything shorter is structurally broken. The reason
+  name ``not_4096_aligned`` is kept (it is the only alignment-derived verdict left).
+* Per present chunk: the sector offset must clear both header sectors and start
+  before EOF; the compression scheme must be known; the declared length must be
+  >= 1 and fit its own sector allocation (``length <= sector_count*4096 - 4``, the
+  capacity-consistency check); and it must fit byte-precisely within the real file
+  (``offset*4096 + 4 + length <= size``). The byte-precise EOF bound — not the
+  whole-file sector ceiling ``offset + sector_count <= size // 4096``, whose integer
+  division drops the partial final sector — lets a valid unpadded tail pass while
+  still catching a trailing chunk whose declared length overruns EOF.
+* A short prefix read at a bounds-valid offset (the file is torn 1-4 bytes into the
+  chunk's first sector) is ``truncated_chunk``, not a read fault.
+* A 0-byte file is an empty region container (issue #905), structurally sound.
 
-This split mirrors the Go validator (regionfsck.go), the Worker's source-side
-fail-fast. The mode is chosen from the snapshot SOURCE, not the consumer: STRICT
-holds only where alignment is guaranteed at the source — the Worker's stopped-path
-pre-pack fsck and the publish gate for ``X-Snapshot-Source: stopped``/absent. LIVE
-is used everywhere the store or archives DERIVED from it are consumed (the publish
-gate for ``X-Snapshot-Source: running``, backup create/restore, the integrity
-sweep's snapshot fsck), because a running-source publish may have committed a
-legitimate unpadded set into the store and every at-rest consumer must tolerate it.
+This rule-for-rule mirror matches the Go validator (regionfsck.go), the Worker's
+source-side fail-fast.
 
 Quiescence is the caller's responsibility. Run this **only against a quiesced
 working set**: on a live world the read races the server's write and a healthy
@@ -114,7 +116,7 @@ class WorkingSetReport:
         return not self.corrupt
 
 
-def _check_region(size: int, fh: BinaryIO, *, live: bool = False) -> ReasonCode | None:
+def _check_region(size: int, fh: BinaryIO) -> ReasonCode | None:
     """Structurally validate one region container given its byte ``size`` and a
     seekable binary reader ``fh`` positioned at its start.
 
@@ -123,11 +125,9 @@ def _check_region(size: int, fh: BinaryIO, *, live: bool = False) -> ReasonCode 
     the first :class:`ReasonCode` that fails; reads at most the 8 KiB header plus a
     5-byte prefix per present chunk, so it never loads the region payload.
 
-    ``live`` selects the running-server relaxation (issue #923): a non-4096-aligned
-    size is the normal unpadded tail of a live 26.x world (not a torn save) and the
-    whole-file sector ceiling is replaced by a byte-precise per-chunk EOF bound (the
-    length-vs-sector_count consistency check is kept in both modes). ``False`` is the
-    strict at-rest behavior (unchanged). See the module docstring.
+    One rule set (issue #927): a non-4096-aligned size is the normal unpadded tail of
+    a 26.x world (not a torn save) and the per-chunk EOF bound is byte-precise. See
+    the module docstring.
     """
     # A 0-byte file is an empty region container — Minecraft legitimately writes
     # these (e.g. fresh poi/r.*.mca with no chunks yet) — so it is structurally
@@ -137,15 +137,12 @@ def _check_region(size: int, fh: BinaryIO, *, live: bool = False) -> ReasonCode 
 
     # A valid region carries both header tables (location + timestamp), so the
     # smallest sound non-empty file is two sectors. A non-zero size below that is a
-    # torn save in both modes. A size that is not a 4096 multiple is a torn save in
-    # strict mode, but in live mode it is the normal unpadded tail of a running 26.x
-    # world (issue #923), so only the below-header-size floor is enforced there.
+    # torn save. A size that is not a 4096 multiple is NOT corruption (issue #927):
+    # it is the normal unpadded tail of a 26.x world, so only the below-header-size
+    # floor is enforced; the per-chunk byte-precise EOF bound below catches a real
+    # overrun.
     if size < _HEADER_SECTORS * _SECTOR:
         return ReasonCode.NOT_4096_ALIGNED
-    if not live and size % _SECTOR != 0:
-        return ReasonCode.NOT_4096_ALIGNED
-
-    total_sectors = size // _SECTOR
 
     location_table = fh.read(_LOCATION_TABLE_SIZE)
     for index in range(_ENTRY_COUNT):
@@ -155,17 +152,14 @@ def _check_region(size: int, fh: BinaryIO, *, live: bool = False) -> ReasonCode 
         if offset == 0 and sector_count == 0:
             continue  # absent chunk.
 
-        # Sector bounds: a present chunk must sit past both header tables and
-        # stay wholly within the file. In live mode the final sector may be partial
-        # (the unpadded tail), so the whole-sector ceiling is dropped —
-        # ``total_sectors`` loses that partial sector and would wrongly reject a valid
-        # trailing chunk; the byte-precise overrun is checked per chunk below. A chunk
-        # whose first sector starts at or past EOF is still out of bounds.
+        # Sector bounds: a present chunk must sit past both header tables and start
+        # before EOF. The final sector may be partial (the unpadded tail), so the
+        # bound is byte-precise against the real size — a whole-file sector ceiling
+        # would drop that partial sector and wrongly reject a valid trailing chunk; the
+        # byte-precise overrun is checked per chunk below.
         if offset < _HEADER_SECTORS or sector_count == 0:
             return ReasonCode.SECTOR_OUT_OF_BOUNDS
-        if not live and offset + sector_count > total_sectors:
-            return ReasonCode.SECTOR_OUT_OF_BOUNDS
-        if live and offset * _SECTOR >= size:
+        if offset * _SECTOR >= size:
             return ReasonCode.SECTOR_OUT_OF_BOUNDS
 
         fh.seek(offset * _SECTOR)
@@ -184,46 +178,40 @@ def _check_region(size: int, fh: BinaryIO, *, live: bool = False) -> ReasonCode 
 
         # The length prefix counts the compression byte plus the compressed stream
         # and must be positive (length>=1). It must ALSO fit within the chunk's
-        # declared sectors in BOTH modes: MC always allocates
+        # declared sectors: MC always allocates
         # ``sector_count = ceil((4+length)/4096)``, so ``length <= sector_count*4096-4``
-        # holds for every healthy chunk (issue #923's own evidence: len=346, cnt=1) and
+        # holds for every healthy chunk (len=346, cnt=1 is the live-server evidence) and
         # a declared length overrunning its own sector allocation into a neighbor chunk
-        # is a torn-header signature worth catching even in live mode — at zero
-        # false-reject cost.
+        # is a torn-header signature — at zero false-reject cost.
         if length < 1:
             return ReasonCode.TRUNCATED_CHUNK
         available = sector_count * _SECTOR - 4
         if length > available:
             return ReasonCode.TRUNCATED_CHUNK
-        # In live mode the trailing chunk may sit in a partial final sector, so its
-        # length must ALSO fit byte-precisely within the real file
-        # (offset*4096 + 4 + length <= size): this keeps a valid unpadded trailing
-        # chunk passing AND still catches a trailing chunk whose declared length
-        # overruns the actual EOF (a genuine tear).
-        if live and offset * _SECTOR + 4 + length > size:
+        # The trailing chunk may sit in a partial final sector, so its length must ALSO
+        # fit byte-precisely within the real file (offset*4096 + 4 + length <= size):
+        # this keeps a valid unpadded trailing chunk passing AND still catches a
+        # trailing chunk whose declared length overruns the actual EOF (a genuine tear).
+        if offset * _SECTOR + 4 + length > size:
             return ReasonCode.TRUNCATED_CHUNK
 
     return None
 
 
-def check_region_file(path: Path, *, live: bool = False) -> ReasonCode | None:
+def check_region_file(path: Path) -> ReasonCode | None:
     """Structurally validate one ``.mca`` region file.
 
     Returns ``None`` if the file is structurally sound, or the first
     :class:`ReasonCode` that fails. Raises ``OSError`` only on a real I/O error.
-    Reads at most the 8 KiB header plus a 5-byte prefix per present chunk.
-
-    ``live`` selects the running-server relaxation (issue #923); see
-    :func:`_check_region`.
+    Reads at most the 8 KiB header plus a 5-byte prefix per present chunk. The single
+    rule set (issue #927); see :func:`_check_region`.
     """
     size = path.stat().st_size
     with path.open("rb") as fh:
-        return _check_region(size, fh, live=live)
+        return _check_region(size, fh)
 
 
-def check_region_bytes(
-    name: str, data: bytes, *, live: bool = False
-) -> RegionFinding | None:
+def check_region_bytes(name: str, data: bytes) -> RegionFinding | None:
     """Structurally validate one ``.mca`` region held in memory (issue #750).
 
     The object-store adapter has no local working-set tree to walk: its region
@@ -232,10 +220,10 @@ def check_region_bytes(
     beyond the header + per-chunk prefix the check reads) so the object backend can
     apply the same fail-closed gate the fs adapter applies via
     :func:`check_working_set`. Returns a :class:`RegionFinding` carrying ``name``
-    when corrupt, or ``None`` when sound. ``live`` selects the running-server
-    relaxation (issue #923); see :func:`_check_region`.
+    when corrupt, or ``None`` when sound. The single rule set (issue #927); see
+    :func:`_check_region`.
     """
-    reason = _check_region(len(data), io.BytesIO(data), live=live)
+    reason = _check_region(len(data), io.BytesIO(data))
     if reason is None:
         return None
     return RegionFinding(path=Path(name), reason=reason)
@@ -343,7 +331,7 @@ def check_missing_regions(new_root: Path, reference_root: Path) -> MissingRegion
     )
 
 
-def check_working_set(root: Path, *, live: bool = False) -> WorkingSetReport:
+def check_working_set(root: Path) -> WorkingSetReport:
     """Walk ``root`` recursively and validate every ``*.mca`` file beneath it.
 
     Region files live under several world subdirectories — ``region/``,
@@ -352,15 +340,9 @@ def check_working_set(root: Path, *, live: bool = False) -> WorkingSetReport:
     regardless of where it sits. Returns a :class:`WorkingSetReport`; corruption
     is reported in the result, never raised.
 
-    ``live`` selects the running-server relaxation (issue #923) for every region in
-    the set. Strict (``live=False``, the default) applies only at the stopped-source
-    boundary: the publish gate passes it for an absent/``stopped``
-    ``X-Snapshot-Source`` header. Every other caller — the publish gate for a
-    ``running`` source, and the store/archive consumers (backup create/restore,
-    ``check_backup_health``/``check_current_health``, the sweep CLI) — runs live,
-    because once a running-server snapshot is published the at-rest store
-    legitimately holds unpadded regions. See the module docstring above and the
-    STORAGE.md Section 8 mode table for the full call-site mapping.
+    The single rule set (issue #927) applies to every region: a non-4096-aligned
+    tail is the normal on-disk shape, not a tear, at every gate (the publish gate on
+    either source, and the store/archive consumers). See the module docstring above.
     """
     scanned = 0
     corrupt: list[RegionFinding] = []
@@ -368,7 +350,7 @@ def check_working_set(root: Path, *, live: bool = False) -> WorkingSetReport:
         if not path.is_file():
             continue
         scanned += 1
-        reason = check_region_file(path, live=live)
+        reason = check_region_file(path)
         if reason is not None:
             corrupt.append(RegionFinding(path=path, reason=reason))
     return WorkingSetReport(scanned=scanned, corrupt=corrupt)

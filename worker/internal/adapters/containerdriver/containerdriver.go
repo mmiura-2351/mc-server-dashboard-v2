@@ -272,6 +272,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		rconHost:         d.RconHost(spec.ServerID),
 		stopTimeout:      d.stopTimeout,
 		readinessTimeout: d.readinessTimeout,
+		logger:           d.logger,
 		events:           make(chan execution.StatusEvent, 8),
 		exited:           make(chan struct{}),
 		state:            execution.StateStarting,
@@ -592,6 +593,13 @@ func (d *Driver) Sweep(ctx context.Context) error {
 	var errs []error
 	for _, c := range containers {
 		if c.State == containerStateRunning {
+			// This bare docker.Stop is the orphan-sweep stop leg observed in the #927
+			// incident (a redeploy sweep stopped a running 26.x server, then the stop-leg
+			// snapshot found unpadded regions). The daemon-internal SIGTERM→SIGKILL
+			// escalation here is NOT directly observable — unlike the supervised stop in
+			// instance.Stop, which emits a WARN on its explicit kill fallback (see
+			// Instance.Stop). An elapsed-time/exit-code(137) escalation heuristic at this
+			// site is deferred (#927).
 			stopCtx, cancel := context.WithTimeout(ctx, d.stopTimeout+d.sweepCallMargin)
 			err := d.docker.Stop(stopCtx, c.ID, d.stopTimeout)
 			cancel()
@@ -673,6 +681,11 @@ type instance struct {
 	// readinessTimeout bounds the hold-on-starting wait before falling back to
 	// running (issue #345).
 	readinessTimeout time.Duration
+	// logger records the graceful-stop -> kill escalation at WARN (issue #927), so a
+	// stop that timed out (leaving the world's regions unpadded for the stop-leg
+	// snapshot) is diagnosable. Never nil: Start copies the Driver's logger, which
+	// defaults to a discard handler.
+	logger *slog.Logger
 
 	events chan execution.StatusEvent
 	// exited is closed by supervise once the container has reached a terminal
@@ -1050,6 +1063,23 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 
 	if err := i.docker.Stop(stopCtx, id, i.stopTimeout); err == nil && i.waitExit(stopCtx, i.stopTimeout) {
 		return nil
+	}
+
+	// The stop did not confirm the container's exit within the stop timeout, so it is
+	// escalating to a direct kill. This is exactly the case where Minecraft's shutdown
+	// may not have finished sector-padding its region files, so the stop-leg snapshot
+	// captures an unpadded (live-format) world — diagnosable here at WARN with the
+	// server id and the timeout, so an unpadded-scratch cause traces back to a stop
+	// timeout (issue #927). The message distinguishes the two arrival paths: only the
+	// graceful path actually attempted (and timed out) a clean shutdown, while a
+	// forced stop (graceful=false) skips RCON/docker-stop by design and kills
+	// directly, so "graceful stop timed out" would misdescribe it.
+	if graceful {
+		i.logger.Warn("graceful stop timed out; escalating to kill",
+			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
+	} else {
+		i.logger.Warn("forced stop; killing container directly",
+			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
 	}
 
 	if err := i.docker.Kill(stopCtx, id); err != nil {

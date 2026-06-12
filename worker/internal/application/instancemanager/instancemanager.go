@@ -55,13 +55,10 @@ type Transfer interface {
 	// the store generation this working set was hydrated from (issue #847) and
 	// workerID as this Worker's own id (issue #847 bug 3): the API refuses the publish
 	// if the store has since advanced past baseGeneration AND current was published by
-	// a different worker. running tells the API the snapshot SOURCE (issue #923): a
-	// running server's working set has the legitimate unpadded tail of a live 26.x
-	// world, so the publish gate applies the live (byte-precise) region check rather
-	// than the strict (4096-aligned) one. It returns the NEW authoritative store
-	// generation the publish produced (the value of the API's response header, issue
-	// #763); 0 when the header is absent (an older API).
-	Snapshot(ctx context.Context, url, token, workingDir string, baseGeneration uint64, workerID string, running bool) (uint64, error)
+	// a different worker. It returns the NEW authoritative store generation the publish
+	// produced (the value of the API's response header, issue #763); 0 when the header
+	// is absent (an older API).
+	Snapshot(ctx context.Context, url, token, workingDir string, baseGeneration uint64, workerID string) (uint64, error)
 }
 
 // systemClock is the default wall-clock used for the metrics ticker when
@@ -483,11 +480,11 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		//     evicts and terminates the process mid-tar. The worst this yields is a TORN
 		//     capture — the stop's shutdown re-saves regions while the tar reads them.
 		//     A tear that happens DURING the tar is caught downstream by the API's #739
-		//     content-integrity gate. For this running-labeled upload that gate now runs
-		//     the LIVE (byte-precise) region check (issue #923), not the strict one, yet
-		//     it still catches realistic tears: any referenced chunk whose byte extent
-		//     overruns EOF, any entry pointing at/past EOF, garbage prefixes. Those the
-		//     gate REFUSES — the publish aborts, the staging area is dropped, and current/
+		//     content-integrity gate. That gate runs the byte-precise region check (issue
+		//     #927: one rule set, no source-keyed mode), which still catches realistic
+		//     tears: any referenced chunk whose byte extent overruns EOF, any entry
+		//     pointing at/past EOF, garbage prefixes. Those the gate REFUSES — the publish
+		//     aborts, the staging area is dropped, and current/
 		//     keeps the last good generation: no silent corruption and no overwrite. The
 		//     only escape from the byte-precise bound is a truncation landing exactly at
 		//     the final referenced chunk's byte boundary with no entries beyond; that one
@@ -566,7 +563,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// so the API-side timeout fires first and this is the cleanup backstop.
 	transferCtx, cancel := m.transferContext(ctx)
 	defer cancel()
-	gen, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID, running)
+	gen, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: snapshot: %v", err))
@@ -599,18 +596,19 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// checkWorkingSet runs the pre-pack region fsck. For a stopped (at-rest) set it is
-// a single fail-closed scan in STRICT mode. For a RUNNING server it runs in LIVE
-// mode (issue #923: MC 26.x leaves a legitimate unpadded tail on a running world,
-// so a non-4096-aligned region is not corruption there) and retries on detected
-// corruption up to snapshotFsckAttempts times with fsckRetryDelay backoff (#907):
-// the quiesce settle-wait has already let the async save's region writes complete,
-// so a residual tear is a non-chunk writer racing the scan, and that transient
-// should not veto a periodic snapshot — so the latest clean attempt wins, and only
-// a corruption that persists across every attempt refuses the snapshot. A fsck I/O
-// error is returned as-is (the caller treats it as best-effort) and is not retried.
-// On ctx cancellation it returns ctx.Err() (not the last corrupt report) so a
-// cancelled snapshot is not misclassified as corruption.
+// checkWorkingSet runs the pre-pack region fsck (issue #927: ONE rule set — a
+// non-4096-aligned tail is the normal on-disk shape, not a tear, on both the
+// running and the stopped path; the `stopped => padded` invariant the old strict
+// mode relied on does not survive a sweep-stop timeout / SIGKILL / crash). For a
+// stopped (at-rest) set it is a single fail-closed scan. For a RUNNING server it
+// retries on detected corruption up to snapshotFsckAttempts times with
+// fsckRetryDelay backoff (#907): the quiesce settle-wait has already let the async
+// save's region writes complete, so a residual tear is a non-chunk writer racing
+// the scan, and that transient should not veto a periodic snapshot — so the latest
+// clean attempt wins, and only a corruption that persists across every attempt
+// refuses the snapshot. A fsck I/O error is returned as-is (the caller treats it as
+// best-effort) and is not retried. On ctx cancellation it returns ctx.Err() (not the
+// last corrupt report) so a cancelled snapshot is not misclassified as corruption.
 func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir string, running bool) (regionfsck.Report, error) {
 	if !running {
 		return regionfsck.CheckWorkingSet(workingDir)
@@ -618,7 +616,7 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 	var report regionfsck.Report
 	for attempt := 1; ; attempt++ {
 		var err error
-		report, err = regionfsck.CheckWorkingSetMode(workingDir, true)
+		report, err = regionfsck.CheckWorkingSet(workingDir)
 		if err != nil || report.Healthy() || attempt >= snapshotFsckAttempts {
 			return report, err
 		}

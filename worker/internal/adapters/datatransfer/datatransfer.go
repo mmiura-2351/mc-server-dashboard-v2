@@ -68,25 +68,6 @@ const baseGenerationHeader = "X-Working-Set-Base-Generation"
 // permissive.
 const workerIDHeader = "X-Worker-Id"
 
-// snapshotSourceHeader is the REQUEST header the Worker stamps on a snapshot publish
-// with the SOURCE of the working set (issue #923): "running" for a periodic snapshot
-// of a live server, "stopped" for the post-stop final (or at-rest) snapshot. MC 26.x
-// pads region files to a sector boundary only on shutdown, so a running world's
-// regions legitimately carry an unpadded tail; the API's publish-side region check
-// reads this header to apply the live (byte-precise) rule for a "running" source and
-// the strict (4096-aligned) rule otherwise. The data plane already trusts the Worker
-// for the snapshot CONTENT (the Worker authenticates with the shared credential and
-// the whole tar is its bytes), so trusting it for this one structural-mode signal
-// adds no new trust surface. Absent or any non-"running" value defaults to strict.
-const snapshotSourceHeader = "X-Snapshot-Source"
-
-// snapshotSourceRunning / snapshotSourceStopped are the two header values
-// (issue #923).
-const (
-	snapshotSourceRunning = "running"
-	snapshotSourceStopped = "stopped"
-)
-
 // parseGeneration reads the store generation from a response header, returning 0
 // when it is absent or unparseable (the safe direction: the API treats 0 as older
 // than any published store generation and re-hydrates).
@@ -206,7 +187,7 @@ func SweepSnapshotSpools(scratchRoot string) {
 // request body, and removed on every path (delta/streamed snapshot is deferred,
 // FR-DATA-5). A crash before that deferred remove leaks the spool; SweepSnapshotSpools
 // reclaims such leftovers at startup (issue #787).
-func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGeneration uint64, workerID string, running bool) (uint64, error) {
+func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGeneration uint64, workerID string) (uint64, error) {
 	spool, err := os.CreateTemp(filepath.Dir(srcDir), snapshotSpoolPrefix+"*.tar")
 	if err != nil {
 		return 0, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
@@ -247,17 +228,6 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 	if workerID != "" {
 		req.Header.Set(workerIDHeader, workerID)
 	}
-	// Declare the snapshot SOURCE (issue #923) so the API applies the live region
-	// check (byte-precise bounds, an unpadded tail is not corruption) for a running
-	// server's periodic snapshot and the strict check for a stopped/at-rest one. MC
-	// 26.x only sector-pads region files on shutdown, so a running world legitimately
-	// has a non-4096-aligned tail; without this the API publish gate refuses every
-	// periodic snapshot and a running server is never checkpointed.
-	source := snapshotSourceStopped
-	if running {
-		source = snapshotSourceRunning
-	}
-	req.Header.Set(snapshotSourceHeader, source)
 	// Set an explicit length so the API's proven-complete gate can match it.
 	req.ContentLength = size
 

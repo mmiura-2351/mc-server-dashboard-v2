@@ -37,11 +37,19 @@ const displacedPrefix = ".displaced-"
 // that torn world even though the store holds a consistent copy. So a held set with
 // a structurally corrupt region is advertised at generation 0 — held, but at an
 // unknown generation the API treats as older than any published store generation,
-// forcing the hydrate that recovers the consistent store copy. The fsck reads only
-// the region headers (regionfsck), so it is bounded; it runs at most once per held
-// set at registration. A fsck I/O error is best-effort (logged, the recorded
-// generation stands): the API gate remains the correctness backstop, and the
-// startup scan must not wedge on a read fault.
+// forcing the hydrate that recovers the consistent store copy.
+//
+// The fsck uses the single region rule set (issue #927/#926 item 1): a held scratch
+// of a crashed or non-gracefully-stopped 26.x server is live-format (unaligned tails)
+// and structurally sound, so it now PASSES and the worker advertises its held
+// generation — no forced gen-0 recovery hydrate that would discard up to a full
+// snapshot-interval of progression even though the scratch was fine. A genuinely
+// torn scratch (a referenced chunk overrunning EOF, an entry past EOF, a severed
+// prefix) still fails the byte-precise check and falls back to gen 0 as before. The
+// fsck reads only the region headers (regionfsck), so it is bounded; it runs at most
+// once per held set at registration. A fsck I/O error is best-effort (logged, the
+// recorded generation stands): the API gate remains the correctness backstop, and
+// the startup scan must not wedge on a read fault.
 //
 // A subdirectory whose only content is the generation marker is treated as EMPTY
 // and SKIPPED: it holds no real working set, so the API must still hydrate (never
