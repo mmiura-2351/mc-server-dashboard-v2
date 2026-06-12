@@ -68,7 +68,7 @@ class _RaisingPartsClient:
         self._uploads = uploads
         self._code = code
 
-    def get_paginator(self, name: str) -> _PagesPaginator:
+    def get_paginator(self, name: str) -> _PagesPaginator | _RaisingPaginator:
         if name == "list_parts":
             return _RaisingPaginator(self._code)
         return _PagesPaginator("Uploads", self._uploads)
