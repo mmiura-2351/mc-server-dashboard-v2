@@ -719,4 +719,103 @@ describe("ServerFilesTab running notice", () => {
       screen.queryByText(t("files.runningNotice")),
     ).not.toBeInTheDocument();
   });
+
+  it("disables Upload and New folder while the server is running", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.runningNotice"));
+
+    const uploadBtn = screen.getByRole("button", { name: t("files.upload") });
+    const newFolderBtn = screen.getByRole("button", {
+      name: t("files.newFolder"),
+    });
+    expect(uploadBtn).toBeDisabled();
+    expect(newFolderBtn).toBeDisabled();
+  });
+
+  it("enables Upload and New folder while the server is stopped", async () => {
+    routeGet({
+      detail: server({ observed_state: "stopped" }),
+      list: listing([]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    // Use queryBy so we can confirm they are NOT disabled (enabled).
+    const uploadBtn = screen.getByLabelText(t("files.upload"));
+    const newFolderBtn = screen.getByRole("button", {
+      name: t("files.newFolder"),
+    });
+    expect(uploadBtn).not.toBeDisabled();
+    expect(newFolderBtn).not.toBeDisabled();
+  });
+});
+
+describe("ServerFilesTab 409 reason toasts", () => {
+  it("maps server_unsettled to the stop-the-server message on upload", async () => {
+    // Use a stopped server so the file input is rendered; the API then returns
+    // a 409 to exercise the error handler (e.g. a race: server started between
+    // the UI check and the API call).
+    routeGet({
+      detail: server({ observed_state: "stopped" }),
+      list: listing([]),
+    });
+    mockApi.postForm.mockRejectedValue(
+      new ApiError(409, { reason: "server_unsettled" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const fileInput = screen.getByLabelText(t("files.upload"));
+    const file = new File(["x"], "test.zip");
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    expect(
+      await screen.findByText(t("files.error.serverMustBeStopped")),
+    ).toBeInTheDocument();
+  });
+
+  it("maps server_not_stopped to the stop-the-server message on mkdir", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_not_stopped" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    fireEvent.click(screen.getByRole("button", { name: t("files.newFolder") }));
+    fireEvent.change(screen.getByLabelText(t("files.folderName")), {
+      target: { value: "mods" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("files.create") }));
+
+    expect(
+      await screen.findByText(t("files.error.serverMustBeStopped")),
+    ).toBeInTheDocument();
+  });
+
+  it("falls back to the generic message for other errors", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    mockApi.post.mockRejectedValue(new ApiError(500, undefined));
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    fireEvent.click(screen.getByRole("button", { name: t("files.newFolder") }));
+    fireEvent.change(screen.getByLabelText(t("files.folderName")), {
+      target: { value: "mods" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("files.create") }));
+
+    expect(
+      await screen.findByText(t("files.error.generic")),
+    ).toBeInTheDocument();
+  });
 });

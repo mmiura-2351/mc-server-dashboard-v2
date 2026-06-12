@@ -451,7 +451,7 @@ export const ja: Record<TranslationKey, string> = {
   // Files tab (WEBUI_SPEC.md 6.6).
   "files.denied": "このサーバーのファイルを表示する権限がありません。",
   "files.runningNotice":
-    "サーバーは稼働中です — ファイルの変更はライブ作業セットに反映され、有効にするには再起動が必要な場合があります。",
+    "サーバーは稼働中です — ファイルの編集はライブ作業セットに反映されます。アップロードとフォルダの作成にはサーバーを停止する必要があります。",
   "files.root": "ルート",
   "files.loading": "読み込み中…",
   "files.listError":
@@ -509,6 +509,8 @@ export const ja: Record<TranslationKey, string> = {
   "files.renamed": "名前を変更しました。",
   "files.deleted": "削除しました。",
   "files.rolledBack": "選択したバージョンにロールバックしました。",
+  "files.error.serverMustBeStopped":
+    "ファイルのアップロードやフォルダの作成を行う前にサーバーを停止してください。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).

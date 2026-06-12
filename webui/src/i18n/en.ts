@@ -445,7 +445,7 @@ export const en = {
   // conflicts with sibling tab PRs minimal.
   "files.denied": "You do not have permission to view this server's files.",
   "files.runningNotice":
-    "Server is running — file changes go to the live working set and may need a restart to take effect.",
+    "Server is running — file edits go to the live working set. Upload and folder creation require stopping the server first.",
   "files.root": "root",
   "files.loading": "Loading…",
   "files.listError": "Could not list this directory. Try refreshing.",
@@ -501,6 +501,8 @@ export const en = {
   "files.renamed": "Renamed.",
   "files.deleted": "Deleted.",
   "files.rolledBack": "Rolled back to the selected version.",
+  "files.error.serverMustBeStopped":
+    "Stop the server before uploading files or creating folders.",
   "files.error.generic": "Something went wrong. Please try again.",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
