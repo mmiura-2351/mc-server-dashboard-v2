@@ -91,6 +91,15 @@ type Command struct {
 	Path string
 	// Content is the bytes to write for EditFile.
 	Content []byte
+	// TunnelEndpoint is the relay tunnel endpoint to dial for a TunnelDial,
+	// host:port (RELAY.md Section 5).
+	TunnelEndpoint string
+	// TunnelToken is the single-use session token presented to the relay after the
+	// TLS handshake for a TunnelDial (RELAY.md Section 5).
+	TunnelToken string
+	// TunnelCAPEM is the optional PEM CA bundle to verify the relay's tunnel
+	// certificate for a TunnelDial; empty means system roots (RELAY.md Section 5).
+	TunnelCAPEM string
 }
 
 // CommandResult answers a Command. A failure carries an ErrorCode and message;

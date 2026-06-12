@@ -448,6 +448,10 @@ func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
 		out.Content = c.EditFile.GetContent()
 	case *controlplanev1.ApiCommand_ListFiles:
 		out.Path = c.ListFiles.GetPath()
+	case *controlplanev1.ApiCommand_TunnelDial:
+		out.TunnelEndpoint = c.TunnelDial.GetEndpoint()
+		out.TunnelToken = c.TunnelDial.GetToken()
+		out.TunnelCAPEM = c.TunnelDial.GetTlsCaPem()
 	}
 	return out
 }
@@ -515,6 +519,8 @@ func commandKind(cmd *controlplanev1.ApiCommand) string {
 		return "EditFile"
 	case *controlplanev1.ApiCommand_ListFiles:
 		return "ListFiles"
+	case *controlplanev1.ApiCommand_TunnelDial:
+		return "TunnelDial"
 	default:
 		return "unknown"
 	}

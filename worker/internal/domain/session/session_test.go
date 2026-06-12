@@ -772,6 +772,52 @@ func TestQuickCommandBypassesSaturatedCap(t *testing.T) {
 	<-done
 }
 
+// A TunnelDial (a player join) must also bypass the saturated cap: a join must
+// not queue behind a hydrate (issue #958, RELAY.md Section 5). This mirrors the
+// ServerCommand bypass with a TunnelDial as the quick command.
+func TestTunnelDialBypassesSaturatedCap(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newGateHandler("HydrateTrigger")
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// Saturate the cap with one slow hydrate per distinct server.
+	for i := 0; i < maxConcurrentLanes; i++ {
+		id := fmt.Sprintf("slow-%d", i)
+		transport.commands <- Command{CommandID: id, ServerID: id, Kind: "HydrateTrigger"}
+	}
+	waitFor(t, func() bool { return handler.inflightCount() == maxConcurrentLanes })
+
+	// A join (TunnelDial) for a different, idle server must still complete while all
+	// slow lanes hold the cap.
+	transport.commands <- Command{CommandID: "join", ServerID: "join-server", Kind: "TunnelDial"}
+
+	waitFor(t, func() bool {
+		for _, res := range transport.resultsCopy() {
+			if res.CommandID == "join" && res.Success {
+				return true
+			}
+		}
+		return false
+	})
+
+	for _, res := range transport.resultsCopy() {
+		if res.CommandID != "join" {
+			t.Fatalf("slow op %q answered before release; cap was not actually saturated", res.CommandID)
+		}
+	}
+
+	close(handler.release)
+	cancel()
+	<-done
+}
+
 // The bypass must not break per-server FIFO/safety: a ServerCommand queued behind
 // a same-server long-running op must still wait for that op, never racing ahead
 // of it (issue #169). A command must not run against a server mid-hydrate.

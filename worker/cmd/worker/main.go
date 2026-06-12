@@ -28,6 +28,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/datatransfer"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/tunnel"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -179,9 +180,32 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 		host := resolveRconHost(driver, containerRconHost, serverID)
 		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host)
 	}
+	// The relay dial-back dialer (RELAY.md Section 5) splices a player session to
+	// the server's published loopback game port. Its splice goroutines live on the
+	// Worker's root ctx so they are torn down on shutdown; the game bind IP picks
+	// the dial host (loopback when 0.0.0.0). tunnelDialerAdapter bridges the
+	// application-layer TunnelSpec to the adapter's own Spec, keeping the adapter
+	// free of an application-layer import (ARCHITECTURE.md Section 2).
+	tunnelDialer := tunnel.New(ctx, cfg.Driver.Container.GameBindIP, logger)
 	return instancemanager.New(drivers, wc.ScratchDir, openControl).
 		WithLogger(logger).
-		WithWorkerID(wc.ID), nil
+		WithWorkerID(wc.ID).
+		WithTunnelDialer(tunnelDialerAdapter{tunnelDialer}), nil
+}
+
+// tunnelDialerAdapter adapts a tunnel.Dialer to instancemanager.TunnelDialer,
+// translating the application-layer TunnelSpec into the adapter's Spec at the
+// wiring edge so neither layer imports the other's value type.
+type tunnelDialerAdapter struct{ d *tunnel.Dialer }
+
+func (a tunnelDialerAdapter) Dial(ctx context.Context, spec instancemanager.TunnelSpec) error {
+	return a.d.Dial(ctx, tunnel.Spec{
+		ServerID:   spec.ServerID,
+		WorkingDir: spec.WorkingDir,
+		Endpoint:   spec.Endpoint,
+		Token:      spec.Token,
+		CAPEM:      spec.CAPEM,
+	})
 }
 
 // resolveRconHost picks the RCON dial host for a server. It is empty (the host
