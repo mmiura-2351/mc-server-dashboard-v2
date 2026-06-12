@@ -978,6 +978,17 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
   implementation epic (#8). The spool / multipart reclaim paths now apply a 1 h
   age threshold (Section 4.3, #903), so making the sweep periodic or manual no
   longer risks eating a live write's temp.
+  **Multipart long-upload caveat** (#916): the threshold is *not* fully safe for a
+  long-running multipart upload. Unlike an fs spool's mtime — which advances as the
+  write progresses — the S3 `Initiated` timestamp is fixed at create time and never
+  refreshes, so a legitimate upload still streaming after 1 h *would* be aborted by
+  a periodic sweep. The failure is loud, not silent — the upload's next
+  `upload_part`/`complete` gets `NoSuchUpload` — but note that `upload_multipart`'s
+  cleanup path then issues its own abort via the raw client, which raises
+  `NoSuchUpload` and masks the original error; either way the backup
+  fails and **must be retried**. While the sweep runs at startup only this cannot
+  fire (no live upload during recovery); it is a constraint to respect before
+  scheduling the sweep periodically.
 - **Continuous delta sync** (FR-DATA-5) is explicitly deferred; the streaming
   Port shape leaves room for it.
 - **WebUI surfacing of `working_set_incomplete`** (tracked: #900). The 422 the
