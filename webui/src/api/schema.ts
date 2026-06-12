@@ -2184,6 +2184,8 @@ export interface components {
             observed_state: string;
             /** Server Type */
             server_type: string;
+            /** Slug */
+            slug: string;
         };
         /**
          * ServerTypesResponse
@@ -2254,6 +2256,8 @@ export interface components {
             game_port?: number | null;
             /** Name */
             name?: string | null;
+            /** Slug */
+            slug?: string | null;
         };
         /** UserListResponse */
         UserListResponse: {

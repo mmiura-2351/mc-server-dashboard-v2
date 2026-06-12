@@ -1584,6 +1584,10 @@
           "server_type": {
             "title": "Server Type",
             "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
           }
         },
         "required": [
@@ -1598,6 +1602,7 @@
           "memory_limit_mb",
           "cpu_millis",
           "game_port",
+          "slug",
           "desired_state",
           "observed_state",
           "observed_at",
@@ -1774,6 +1779,17 @@
               }
             ],
             "title": "Name"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
           }
         },
         "title": "UpdateServerRequest",
