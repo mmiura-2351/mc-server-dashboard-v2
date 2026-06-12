@@ -878,8 +878,8 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
   refreshes, so a legitimate upload still streaming after 1 h *would* be aborted by
   a periodic sweep. The failure is loud, not silent — the upload's next
   `upload_part`/`complete` gets `NoSuchUpload` — but note that `upload_multipart`'s
-  cleanup path then issues its own abort, which masks the original `NoSuchUpload`
-  with the abort's (now also `NoSuchUpload`/no-op) outcome; either way the backup
+  cleanup path then issues its own abort via the raw client, which raises
+  `NoSuchUpload` and masks the original error; either way the backup
   fails and **must be retried**. While the sweep runs at startup only this cannot
   fire (no live upload during recovery); it is a constraint to respect before
   scheduling the sweep periodically.
