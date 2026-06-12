@@ -61,6 +61,9 @@ class ServerModel(Base):
         # The tracked game port is unique deployment-wide (issue #243); NULLs are
         # allowed (legacy/imported rows carry none) and never collide under Postgres.
         UniqueConstraint("game_port", name="uq_server_game_port"),
+        # The relay slug is unique deployment-wide (issue #955): a DNS label that
+        # becomes the hostname prefix ``<slug>.<base_domain>`` on the relay path.
+        UniqueConstraint("slug", name="uq_server_slug"),
         CheckConstraint(
             _in_clause("server_type", _SERVER_TYPES), name="ck_server_type"
         ),
@@ -110,3 +113,7 @@ class ServerModel(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    # The relay slug (issue #955): a DNS-label string unique deployment-wide,
+    # auto-generated at create and renameable. NOT NULL; the migration backfills
+    # existing rows.
+    slug: Mapped[str] = mapped_column(String, nullable=False, server_default="")

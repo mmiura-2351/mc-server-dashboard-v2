@@ -404,3 +404,28 @@ class GroupAttachmentNotFoundError(ServerError):
 
     The edge maps this to 404.
     """
+
+
+class InvalidSlugError(ServerError):
+    """A slug failed DNS-label format or reserved-word check (issue #955).
+
+    A slug must match ``^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`` and must not be
+    a reserved operational hostname (``www``, ``api``, ``relay``, …). The edge maps
+    this to 422.
+    """
+
+
+class SlugAlreadyTakenError(ServerError):
+    """A slug rename hit the deployment-wide uniqueness constraint (issue #955).
+
+    Slugs are unique across all servers (not community-scoped): a slug already held
+    by another server is a conflict. The edge maps this to 409.
+    """
+
+
+class SlugExhaustedError(ServerError):
+    """Auto-generation could not find a unique slug in the retry budget (issue #955).
+
+    This is a transient capacity condition (extremely unlikely in practice); the
+    edge maps it to 503 so the caller can retry without a client-side code change.
+    """
