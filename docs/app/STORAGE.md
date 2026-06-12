@@ -1009,12 +1009,12 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
   write progresses — the S3 `Initiated` timestamp is fixed at create time and never
   refreshes, so a legitimate upload still streaming after 1 h *would* be aborted by
   a periodic sweep. The failure is loud, not silent — the upload's next
-  `upload_part`/`complete` gets `NoSuchUpload` — but note that `upload_multipart`'s
-  cleanup path then issues its own abort via the raw client, which raises
-  `NoSuchUpload` and masks the original error; either way the backup
-  fails and **must be retried**. While the sweep runs at startup only this cannot
-  fire (no live upload during recovery); it is a constraint to respect before
-  scheduling the sweep periodically.
+  `upload_part`/`complete` gets `NoSuchUpload`, which surfaces as the backup error and
+  **must be retried** (`upload_multipart`'s cleanup routes through the *translated*
+  idempotent abort, so a complete-vs-abort race makes that cleanup a no-op and the
+  original error is no longer masked — issue #935). While the sweep runs at startup
+  only this cannot fire (no live upload during recovery); it is a constraint to
+  respect before scheduling the sweep periodically.
 - **Continuous delta sync** (FR-DATA-5) is explicitly deferred; the streaming
   Port shape leaves room for it.
 - **WebUI surfacing of `working_set_incomplete`** (tracked: #900). The 422 the

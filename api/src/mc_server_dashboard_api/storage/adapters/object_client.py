@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 import aioboto3
@@ -92,9 +92,14 @@ class _Aioboto3S3Client:
                 MultipartUpload={"Parts": completed},
             )
         except BaseException:
-            await self._client.abort_multipart_upload(
-                Bucket=self._bucket, Key=key, UploadId=upload_id
-            )
+            # Route cleanup through the translated, idempotent abort (issue #935):
+            # in a complete-vs-abort race the raw client would raise NoSuchUpload and
+            # that raise would mask the ORIGINAL upload error. The translated method
+            # turns NoSuchUpload into a no-op, so the original error surfaces. Suppress
+            # any OTHER cleanup-abort failure too — losing the orphan upload to a sweep
+            # is recoverable, but masking the original error is not.
+            with suppress(Exception):
+                await self.abort_multipart_upload(key, upload_id)
             raise
 
     async def _upload_part(
