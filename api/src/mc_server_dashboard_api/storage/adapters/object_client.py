@@ -51,7 +51,7 @@ class _Aioboto3S3Client:
         try:
             resp = await self._client.get_object(Bucket=self._bucket, Key=key)
         except ClientError as exc:
-            if _is_not_found(exc):
+            if _is_not_found(exc) or _is_no_such_bucket(exc):
                 raise NotFoundError(f"object not found: {key}") from exc
             raise
         return _iter_body(resp["Body"])
@@ -118,7 +118,7 @@ class _Aioboto3S3Client:
         try:
             resp = await self._client.head_object(Bucket=self._bucket, Key=key)
         except ClientError as exc:
-            if _is_not_found(exc):
+            if _is_not_found(exc) or _is_no_such_bucket(exc):
                 return None
             raise
         size: int = resp["ContentLength"]
@@ -135,19 +135,28 @@ class _Aioboto3S3Client:
         await self._client.delete_object(Bucket=self._bucket, Key=key)
 
     async def list_objects(self, prefix: str) -> list[S3Object]:
+        # A bucketless store reads as empty (issue #946): SeaweedFS auto-creates the
+        # bucket on first WRITE, so a fresh deployment's startup sweep lists before any
+        # bucket exists and ListObjectsV2 raises NoSuchBucket. Treat that as an empty
+        # listing — otherwise the sweep, and with it the FastAPI lifespan, crash-loops.
         paginator = self._client.get_paginator("list_objects_v2")
         out: list[S3Object] = []
-        async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-            for entry in page.get("Contents", []):
-                # S3 ``LastModified`` is a timezone-aware datetime (UTC); the JAR-pool
-                # GC safety window reads it through S3Object (#293).
-                out.append(
-                    S3Object(
-                        key=entry["Key"],
-                        size=entry["Size"],
-                        last_modified=entry["LastModified"],
+        try:
+            async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+                for entry in page.get("Contents", []):
+                    # S3 ``LastModified`` is a timezone-aware datetime (UTC); the
+                    # JAR-pool GC safety window reads it through S3Object (#293).
+                    out.append(
+                        S3Object(
+                            key=entry["Key"],
+                            size=entry["Size"],
+                            last_modified=entry["LastModified"],
+                        )
                     )
-                )
+        except ClientError as exc:
+            if _is_no_such_bucket(exc):
+                return []
+            raise
         return out
 
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
@@ -179,6 +188,12 @@ class _Aioboto3S3Client:
                         )
                     )
         except ClientError as exc:
+            if _is_no_such_bucket(exc):
+                # A bucketless store reads as empty (issue #946): on a fresh
+                # deployment the startup sweep runs before any write has created
+                # the bucket, and SeaweedFS raises NoSuchBucket here. No bucket
+                # means no in-progress uploads, so report an empty listing.
+                return []
             if _is_unsupported(exc):
                 raise MultipartUploadsUnsupportedError(
                     "object store rejected ListMultipartUploads"
@@ -213,10 +228,11 @@ class _Aioboto3S3Client:
                         newest = last_modified
         except ClientError as exc:
             # The upload completed/aborted between ListMultipartUploads and this
-            # ListParts: real S3 raises NoSuchUpload. Treat it as "now" so the
+            # ListParts: real S3 raises NoSuchUpload. The bucket itself could likewise
+            # vanish (NoSuchBucket) in a degenerate race. Treat either as "now" so the
             # vanished upload is never aborted this sweep, rather than letting the
             # error crash the startup sweep — mirroring abort's idempotent handling.
-            if _is_no_such_upload(exc):
+            if _is_no_such_upload(exc) or _is_no_such_bucket(exc):
                 return dt.datetime.now(dt.UTC)
             raise
         return newest if newest is not None else dt.datetime.now(dt.UTC)
@@ -240,6 +256,17 @@ class _Aioboto3S3Client:
 def _is_not_found(exc: ClientError) -> bool:
     code = exc.response.get("Error", {}).get("Code")
     return code in ("404", "NoSuchKey", "NotFound")
+
+
+def _is_no_such_bucket(exc: ClientError) -> bool:
+    # A store whose bucket has never been written (issue #946): SeaweedFS auto-creates
+    # the bucket on first WRITE, so every READ against a fresh deployment raises
+    # NoSuchBucket (verified against SeaweedFS 4.33 for ListObjectsV2, GetObject,
+    # ListMultipartUploads, and ListParts; HeadObject surfaces a bare ``404``, already
+    # matched by ``_is_not_found``). Reads treat it as empty/not-found so the startup
+    # sweep — and the FastAPI lifespan — boot against a bucketless store.
+    code = exc.response.get("Error", {}).get("Code")
+    return code in ("NoSuchBucket",)
 
 
 def _is_no_such_upload(exc: ClientError) -> bool:
