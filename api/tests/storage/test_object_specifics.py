@@ -643,6 +643,25 @@ async def test_sweep_aborts_old_orphan_multipart_upload() -> None:
     )
 
 
+async def test_sweep_aborts_old_orphan_multipart_upload_under_jars_prefix() -> None:
+    # jars/ prefix sweep (issue #916): put_jar uploads under jars/ via multipart, so
+    # a hard crash mid-jar-ingest leaks parts there too. _sweep_multipart enumerates
+    # both communities/ and jars/, so an orphan under jars/ older than the threshold
+    # is aborted — not only the communities/ ones.
+    store, storage = _store_and_storage()
+    store.multipart_uploads["jar-upload-old"] = (
+        "jars/abc123.jar",
+        dt.datetime.now(dt.UTC) - dt.timedelta(hours=2),
+    )
+
+    await storage.sweep()
+
+    assert "jar-upload-old" not in store.multipart_uploads, (
+        "an orphan multipart upload under jars/ older than the threshold must be "
+        "aborted"
+    )
+
+
 async def test_sweep_spares_young_multipart_upload() -> None:
     # Age threshold (issue #903): an upload initiated within the threshold may be a
     # live put_backup/snapshot member upload in progress, so the sweep must NOT abort
@@ -692,3 +711,20 @@ async def test_sweep_degrades_to_warn_when_list_multipart_unsupported(
     ), "an unsupported ListMultipartUploads must log a lifecycle-rule WARN"
     # The rest of the sweep still ran: the orphan staging object was reclaimed.
     assert incoming not in store.objects
+
+
+async def test_fake_abort_multipart_upload_is_idempotent() -> None:
+    # Idempotent abort (issue #916): the Port documents abort as a no-op for an
+    # already-aborted/completed upload id. The fake honours it (pop(..., None)) so a
+    # complete-vs-abort race in a sweep does not crash. Aborting an unknown id is a
+    # no-op; aborting twice is too.
+    store = FakeS3Store()
+    store.multipart_uploads["upload-1"] = (
+        "jars/x.jar",
+        dt.datetime.now(dt.UTC),
+    )
+    async with fake_s3_factory(store)() as client:
+        await client.abort_multipart_upload("jars/missing.jar", "no-such-id")
+        await client.abort_multipart_upload("jars/x.jar", "upload-1")
+        await client.abort_multipart_upload("jars/x.jar", "upload-1")
+    assert "upload-1" not in store.multipart_uploads

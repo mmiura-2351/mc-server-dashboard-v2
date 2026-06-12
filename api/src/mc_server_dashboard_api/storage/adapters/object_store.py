@@ -525,15 +525,21 @@ class ObjectStorage(Storage):
 
         A crash mid-``put_backup`` (or mid-snapshot-member upload) leaves multipart
         parts that the object-listing sweep cannot see (issue #903). List the
-        in-progress uploads under this adapter's key prefixes and abort only those
-        initiated more than ``_MULTIPART_SWEEP_MIN_AGE_S`` ago, so a live upload is
-        never aborted. A backend that does not support ListMultipartUploads degrades
-        to a WARN advising the ``AbortIncompleteMultipartUpload`` bucket lifecycle
-        rule, leaving the rest of the sweep intact.
+        in-progress uploads under this adapter's key prefixes — ``communities/``
+        (snapshot members, backups) AND ``jars/`` (``put_jar`` uploads via multipart
+        too, issue #916) — and abort only those initiated more than
+        ``_MULTIPART_SWEEP_MIN_AGE_S`` ago, so a live upload is never aborted. A
+        backend that does not support ListMultipartUploads degrades to a WARN
+        advising the ``AbortIncompleteMultipartUpload`` bucket lifecycle rule,
+        leaving the rest of the sweep intact.
         """
 
         try:
-            uploads = await client.list_multipart_uploads("communities/")
+            uploads = [
+                upload
+                for prefix in ("communities/", "jars/")
+                for upload in await client.list_multipart_uploads(prefix)
+            ]
         except MultipartUploadsUnsupportedError:
             _LOG.warning(
                 "object store does not support ListMultipartUploads; orphan "

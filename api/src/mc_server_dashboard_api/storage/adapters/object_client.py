@@ -172,14 +172,31 @@ class _Aioboto3S3Client:
         return out
 
     async def abort_multipart_upload(self, key: str, upload_id: str) -> None:
-        await self._client.abort_multipart_upload(
-            Bucket=self._bucket, Key=key, UploadId=upload_id
-        )
+        # Idempotent (issue #916): real S3/MinIO raise NoSuchUpload for an already
+        # aborted/completed upload id, but the Port documents abort as a no-op in
+        # that case (the fake honours it via pop(..., None)). A complete-vs-abort
+        # race in a (future periodic) sweep would otherwise crash here, so translate
+        # NoSuchUpload to a no-op — mirroring the _is_not_found pattern above.
+        try:
+            await self._client.abort_multipart_upload(
+                Bucket=self._bucket, Key=key, UploadId=upload_id
+            )
+        except ClientError as exc:
+            if _is_no_such_upload(exc):
+                return
+            raise
 
 
 def _is_not_found(exc: ClientError) -> bool:
     code = exc.response.get("Error", {}).get("Code")
     return code in ("404", "NoSuchKey", "NotFound")
+
+
+def _is_no_such_upload(exc: ClientError) -> bool:
+    # An already aborted/completed multipart upload id (issue #916): abort is a
+    # no-op in that case, matching the Port's idempotent-abort contract.
+    code = exc.response.get("Error", {}).get("Code")
+    return code in ("NoSuchUpload",)
 
 
 def _is_unsupported(exc: ClientError) -> bool:
