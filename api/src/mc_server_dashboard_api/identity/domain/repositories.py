@@ -64,6 +64,21 @@ class UserRepository(abc.ABC):
         """Count every user row (the total for the admin listing's pagination, #278)."""
 
     @abc.abstractmethod
+    async def lock_for_bootstrap(self) -> int:
+        """Serialize the first-user bootstrap and return the current user count (#909).
+
+        Takes a transaction-scoped advisory lock on a fixed key, then counts the
+        user rows under it. The empty-table case cannot be serialized by a
+        ``SELECT ... FOR UPDATE`` (there are no rows to lock), so concurrent first
+        registrations would each read a count of 0 and both auto-grant
+        platform-admin. The advisory lock makes them serialize on the same key:
+        the second transaction blocks until the first commits, then re-counts the
+        now-incremented set (1) and does not auto-grant. Exactly one user wins the
+        bootstrap grant, mirroring the FOR UPDATE last-admin guard's intent (#260).
+        The lock is released automatically when the caller's transaction ends.
+        """
+
+    @abc.abstractmethod
     async def count_active_platform_admins(self) -> int:
         """Count *active* platform admins (the last-active-admin invariant, #278).
 

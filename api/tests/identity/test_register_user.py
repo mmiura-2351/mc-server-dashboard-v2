@@ -77,6 +77,12 @@ class _FakeUserRepository(UserRepository):
     async def count_all(self) -> int:
         raise NotImplementedError
 
+    async def lock_for_bootstrap(self) -> int:
+        # Count the existing (seeded or already-added) users so the first-user
+        # bootstrap decision is exercised against the fake exactly as against the
+        # DB adapter (#909). Tests seed at most one path, so summing is exact.
+        return len(self._by_username) + len(self.added)
+
     async def count_active_platform_admins(self) -> int:
         raise NotImplementedError
 
@@ -285,6 +291,18 @@ def _register_guarded(
 
 async def test_rejects_when_open_registration_disabled() -> None:
     users = _FakeUserRepository()
+    # A user already exists, so the first-user bootstrap bypass does not apply and
+    # the closed-registration gate is enforced (#909).
+    users.seed(
+        User(
+            id=UserId.new(),
+            username=Username("existing"),
+            email=EmailAddress("existing@example.com"),
+            password_hash="x",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
     attempts = FakeLoginAttemptStore()
     use_case = _register_guarded(
         users, attempts, registration=_registration_config(open=False)
@@ -301,6 +319,68 @@ async def test_rejects_when_open_registration_disabled() -> None:
     assert users.added == []
     # A closed endpoint records nothing -- the request never reached the counter.
     assert attempts.attempts == []
+
+
+async def test_first_user_becomes_platform_admin() -> None:
+    users = _FakeUserRepository()
+    uow = _FakeUnitOfWork(users)
+    use_case = RegisterUser(
+        uow=uow, hasher=_StubHasher(), clock=_FixedClock(), policy=_policy()
+    )
+
+    user = await use_case(
+        username="alice", email="alice@example.com", password=_VALID_PASSWORD
+    )
+
+    assert user.is_platform_admin is True
+    assert users.added == [user]
+
+
+async def test_subsequent_user_is_not_platform_admin() -> None:
+    users = _FakeUserRepository()
+    # One user already exists, so the next registration is an ordinary account.
+    users.seed(
+        User(
+            id=UserId.new(),
+            username=Username("existing"),
+            email=EmailAddress("existing@example.com"),
+            password_hash="x",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+    use_case = RegisterUser(
+        uow=_FakeUnitOfWork(users),
+        hasher=_StubHasher(),
+        clock=_FixedClock(),
+        policy=_policy(),
+    )
+
+    user = await use_case(
+        username="alice", email="alice@example.com", password=_VALID_PASSWORD
+    )
+
+    assert user.is_platform_admin is False
+
+
+async def test_first_user_bootstraps_even_when_registration_closed() -> None:
+    # Fresh closed-registration deployment: the first registration is allowed
+    # regardless of the open flag and becomes the platform admin (#909, PM ruling).
+    users = _FakeUserRepository()
+    attempts = FakeLoginAttemptStore()
+    use_case = _register_guarded(
+        users, attempts, registration=_registration_config(open=False)
+    )
+
+    user = await use_case(
+        username="alice",
+        email="alice@example.com",
+        password=_VALID_PASSWORD,
+        ip="203.0.113.7",
+    )
+
+    assert user.is_platform_admin is True
+    assert users.added == [user]
 
 
 async def test_records_registration_attempt_per_ip() -> None:

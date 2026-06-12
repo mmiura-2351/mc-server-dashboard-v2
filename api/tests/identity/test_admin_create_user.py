@@ -97,7 +97,11 @@ async def test_rejects_duplicate_username() -> None:
 
 
 async def test_created_account_is_not_platform_admin() -> None:
-    uow = FakeUnitOfWork()
+    # A user already exists, so the first-user bootstrap (#909) does not apply: an
+    # ordinary admin-created account is not auto-granted platform admin.
+    repo = FakeUserRepository()
+    repo.seed(make_user(username="existing", email="existing@example.com"))
+    uow = FakeUnitOfWork(users=repo)
     user = await _use_case(uow)(
         username="alice", email="alice@example.com", password=_VALID_PASSWORD
     )
@@ -105,3 +109,13 @@ async def test_created_account_is_not_platform_admin() -> None:
     assert isinstance(user.id, UserId)
     assert isinstance(user.username, Username)
     assert isinstance(user.email, EmailAddress)
+
+
+async def test_first_user_via_admin_path_becomes_platform_admin() -> None:
+    # On a fresh database the first account created -- even through the admin
+    # surface -- is the bootstrap platform admin (#909).
+    uow = FakeUnitOfWork()
+    user = await _use_case(uow)(
+        username="alice", email="alice@example.com", password=_VALID_PASSWORD
+    )
+    assert user.is_platform_admin is True
