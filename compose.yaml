@@ -163,7 +163,7 @@ services:
       # Relay API-side settings (lands with #956). `:-` empty defaults so default
       # bring-up is unchanged; unknown MCD_API_* env vars are silently ignored by
       # the loader until the relay field is declared (config.py, comment line 585).
-      MCD_API_RELAY__ENABLED: "${MCD_API_RELAY__ENABLED:-}"
+      MCD_API_RELAY__ENABLED: "${MCD_API_RELAY__ENABLED:-false}"
       MCD_API_RELAY__CREDENTIAL: "${MCD_API_RELAY__CREDENTIAL:-}"
       MCD_API_RELAY__BASE_DOMAIN: "${MCD_API_RELAY__BASE_DOMAIN:-}"
     volumes:
@@ -255,7 +255,7 @@ services:
       # which refuses an empty api.credential at startup. Only runs under the
       # `relay` profile, so reaching here with a blank key is a real
       # misconfiguration — the relay exits immediately with a clear error.
-      MCD_RELAY_API_CREDENTIAL: "${MCD_API_RELAY_CREDENTIAL:-}"
+      MCD_RELAY_API_CREDENTIAL: "${MCD_API_RELAY__CREDENTIAL:-}"
       # Plaintext control dial on the private compose network (same posture as
       # the worker; the gRPC port is not published to the host).
       MCD_RELAY_API_TLS_INSECURE: "true"
