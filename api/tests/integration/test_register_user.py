@@ -33,6 +33,7 @@ from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
 )
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
+    build_dummy_password_hash,
 )
 from mc_server_dashboard_api.identity.adapters.sleeper import AsyncioSleeper
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
@@ -143,7 +144,7 @@ def _login(engine: AsyncEngine) -> Login:
         attempts=SqlAlchemyLoginAttemptStore(factory),
         brute_force=brute_force,
         hasher=Argon2PasswordHasher(),
-        dummy_password_hash=Argon2PasswordHasher().hash("dummy"),
+        dummy_password_hash=build_dummy_password_hash("argon2", "dummy"),
         tokens=JwtTokenService(
             signing_key="test-signing-key",
             algorithm="HS256",

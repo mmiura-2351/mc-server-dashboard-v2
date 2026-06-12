@@ -47,12 +47,12 @@ class ChangePassword:
             user = await self.uow.users.get_by_id(user_id)
             if user is None:
                 raise UserNotFoundError(str(user_id.value))
-            if not self.hasher.verify(current_password, user.password_hash):
+            if not await self.hasher.verify(current_password, user.password_hash):
                 raise InvalidCredentialsError
             self.policy.validate(new_password, username=user.username, email=user.email)
 
             now = self.clock.now()
-            user.password_hash = self.hasher.hash(new_password)
+            user.password_hash = await self.hasher.hash(new_password)
             user.updated_at = now
             await self.uow.users.update(user)
             await self.uow.refresh_tokens.revoke_all_for_user(user.id, revoked_at=now)

@@ -24,6 +24,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     BcryptPasswordHasher,
+    build_dummy_password_hash,
 )
 from mc_server_dashboard_api.identity.application.login import Login, LoginResult
 from mc_server_dashboard_api.identity.application.restore_session import RestoreResult
@@ -198,7 +199,7 @@ def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
         id=UserId.new(),
         username=Username("alice"),
         email=EmailAddress("alice@example.com"),
-        password_hash=hasher.hash("Wm7!qz#Lp2vT"),
+        password_hash=build_dummy_password_hash("bcrypt", "Wm7!qz#Lp2vT"),
         created_at=now,
         updated_at=now,
     )
@@ -209,7 +210,7 @@ def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
         attempts=FakeLoginAttemptStore(),
         brute_force=make_brute_force_config(),
         hasher=hasher,
-        dummy_password_hash=hasher.hash("dummy"),
+        dummy_password_hash=build_dummy_password_hash("bcrypt", "dummy"),
         tokens=FakeTokenService(),
         clock=FakeClock(now),
         failure_delay=RecordingFailureDelay(),

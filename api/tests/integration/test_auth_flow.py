@@ -26,6 +26,7 @@ from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
 )
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
+    build_dummy_password_hash,
 )
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
@@ -59,7 +60,7 @@ _PASSWORD = "Wm7!qz#Lp2vT"
 _REFRESH_TTL = dt.timedelta(days=14)
 _REUSE_GRACE = dt.timedelta(seconds=60)
 # Static dummy hash for the unknown-user verify path (login timing equalization).
-_DUMMY_HASH = Argon2PasswordHasher().hash("dummy")
+_DUMMY_HASH = build_dummy_password_hash("argon2", "dummy")
 
 
 @pytest.fixture
@@ -91,7 +92,7 @@ async def _seed_user(engine: AsyncEngine) -> User:
         id=UserId.new(),
         username=Username("alice"),
         email=EmailAddress("alice@example.com"),
-        password_hash=hasher.hash(_PASSWORD),
+        password_hash=await hasher.hash(_PASSWORD),
         created_at=now,
         updated_at=now,
     )

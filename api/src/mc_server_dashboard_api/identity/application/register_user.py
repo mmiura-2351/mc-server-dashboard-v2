@@ -183,11 +183,15 @@ async def persist_new_user(
     address = EmailAddress(email)
     policy.validate(password, username=name, email=address)
 
+    # Hash before the bootstrap-locked transaction, exactly as before: the argon2
+    # work is offloaded to a worker thread (issue #938) but stays outside
+    # ``async with uow`` so it never runs while the advisory lock is held.
+    password_hash = await hasher.hash(password)
     user = User(
         id=UserId.new(),
         username=name,
         email=address,
-        password_hash=hasher.hash(password),
+        password_hash=password_hash,
         created_at=now,
         updated_at=now,
     )

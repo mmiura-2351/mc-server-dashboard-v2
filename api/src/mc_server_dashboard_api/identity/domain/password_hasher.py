@@ -6,6 +6,12 @@ adapters live in ``identity.adapters`` and are selected at the edge via
 internally by the algorithm, so the Port takes only the plaintext. Verification
 (login, FR-AUTH-2) compares a candidate plaintext against a stored hash without
 the domain learning the algorithm.
+
+The methods are ``async`` because a memory-hard KDF (argon2) is CPU-bound and
+blocks for tens of milliseconds per call; the adapters offload the work to a
+worker thread so a hash on an async route does not stall the event loop and the
+in-flight requests sharing it (issue #938). The Port surface is async so this
+offloading is invisible to callers and the domain never sees the threading.
 """
 
 from __future__ import annotations
@@ -17,9 +23,9 @@ class PasswordHasher(abc.ABC):
     """Port: hashes a plaintext password into a self-describing hash string."""
 
     @abc.abstractmethod
-    def hash(self, plaintext: str) -> str:
+    async def hash(self, plaintext: str) -> str:
         """Return a storable hash of ``plaintext`` (salt embedded by the KDF)."""
 
     @abc.abstractmethod
-    def verify(self, plaintext: str, password_hash: str) -> bool:
+    async def verify(self, plaintext: str, password_hash: str) -> bool:
         """Return whether ``plaintext`` matches ``password_hash`` (FR-AUTH-2)."""

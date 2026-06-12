@@ -57,7 +57,7 @@ class DeleteAccount:
             actor = await self.uow.users.get_by_id(user_id)
             if actor is None:
                 raise UserNotFoundError(str(user_id.value))
-            if not self.hasher.verify(password, actor.password_hash):
+            if not await self.hasher.verify(password, actor.password_hash):
                 raise InvalidCredentialsError
 
         # The community-owner check still runs in its own committed transaction
