@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -272,6 +273,73 @@ func TestHalfClosePropagates(t *testing.T) {
 	}
 }
 
+// TestSpliceClosesBothConnsOnCleanEOF: after a clean EOF in both directions the
+// splice must fully close both conns (not just CloseWrite), so their fds are
+// released deterministically rather than waiting on the netFD finalizer.
+func TestSpliceClosesBothConnsOnCleanEOF(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, "tok")
+	game := newFakeGame(t)
+	d, workingDir := newDialerForTest(ctx, t, game)
+
+	if err := d.Dial(ctx, Spec{ServerID: "s1", WorkingDir: workingDir, Endpoint: relay.addr(), Token: "tok", CAPEM: relay.caPEM}); err != nil {
+		t.Fatalf("Dial = %v", err)
+	}
+	relayConn := <-relay.accepted
+	gameConn := <-game.accepted
+
+	// Both peers half-close their write side: each copy direction sees a clean EOF,
+	// so splice runs the clean-EOF path and must then fully close both conns.
+	closeWrite(t, relayConn)
+	closeWrite(t, gameConn)
+
+	// Both peers see their reads end (the Dialer half-closed and then fully closed).
+	assertReadClosed(t, relayConn)
+	assertReadClosed(t, gameConn)
+
+	// splice runs in a goroutine: poll until it has finished the full Close +
+	// deregister. An empty registry proves splice completed past wg.Wait() and ran
+	// the explicit Close on both conns (the only path that reaches deregister).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		d.mu.Lock()
+		remaining := len(d.conns)
+		d.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Dialer still tracks %d conns after clean EOF, want 0", remaining)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// closeWrite half-closes conn's write side, failing the test if it cannot.
+func closeWrite(t *testing.T, conn net.Conn) {
+	t.Helper()
+	cw, ok := conn.(interface{ CloseWrite() error })
+	if !ok {
+		t.Fatalf("conn %T does not support CloseWrite", conn)
+	}
+	if err := cw.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+}
+
+// assertReadClosed reads from conn under a short deadline and requires the read
+// to return without delivering data (EOF or a closed-conn error).
+func assertReadClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	if n, err := conn.Read(buf); err == nil {
+		t.Fatalf("read returned %d bytes with nil error, want EOF/closed", n)
+	}
+}
+
 // TestDialRejectsBadToken: the relay closes a tunnel presenting an unknown token
 // without replying, so the Worker's handshake read fails.
 func TestDialRejectsBadToken(t *testing.T) {
@@ -311,6 +379,32 @@ func TestDialHandshakeTimeout(t *testing.T) {
 	err := d.Dial(dialCtx, Spec{ServerID: "s1", WorkingDir: workingDir, Endpoint: relay.addr(), Token: "tok", CAPEM: relay.caPEM})
 	if err == nil {
 		t.Fatal("Dial against a silent relay = nil, want timeout error")
+	}
+}
+
+// TestDialRejectsInvalidCAPEM: a garbage tls_ca_pem yields no usable certificate,
+// so Dial fails before dialing anything (the error becomes a CommandResult error).
+func TestDialRejectsInvalidCAPEM(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	game := newFakeGame(t)
+	d, workingDir := newDialerForTest(ctx, t, game)
+
+	err := d.Dial(ctx, Spec{
+		ServerID: "s1", WorkingDir: workingDir,
+		Endpoint: "127.0.0.1:1", Token: "tok", CAPEM: "-----BEGIN CERTIFICATE-----\nnot-a-cert\n-----END CERTIFICATE-----\n",
+	})
+	if err == nil {
+		t.Fatal("Dial with garbage tls_ca_pem = nil, want a no-usable-certificate error")
+	}
+	if !strings.Contains(err.Error(), "no usable certificate") {
+		t.Fatalf("Dial error = %v, want a no-usable-certificate error", err)
+	}
+	select {
+	case <-game.accepted:
+		t.Fatal("game port was dialed despite an invalid CA bundle")
+	default:
 	}
 }
 

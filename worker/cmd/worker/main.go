@@ -72,13 +72,20 @@ func run(ctx context.Context) error {
 	// (issue #787): nothing else GCs them, and each leaks a world-sized file. Run
 	// before the held-server scan, which only walks directories and never sees them.
 	datatransfer.SweepSnapshotSpools(cfg.Worker.ScratchDir)
+	// Cancel on SIGINT/SIGTERM for a clean stream shutdown. Created before
+	// buildInstanceManager so the tunnel Dialer's splice-teardown (closeAll) is
+	// bound to a context that actually cancels on shutdown, not the never-cancelled
+	// root ctx (RELAY.md Section 5).
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Build the instance manager first: buildInstanceManager runs the container
 	// orphan sweep (cd.Sweep), which force-removes every container this Worker
 	// previously started. Orphaned containers keep writing to their bind-mounted
 	// scratch dirs, so the fsck inside ScanHeldServers must not run until the sweep
 	// has quiesced all live writers. ScanHeldServers is called below, after the
 	// manager is fully initialised. caps is not needed until NewRunner.
-	manager, err := buildInstanceManager(ctx, cfg, logger)
+	manager, err := buildInstanceManager(sigCtx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -112,10 +119,6 @@ func run(ctx context.Context) error {
 	}
 	manager.WithTransfer(datatransfer.New(transferClient).WithLogger(logger))
 	runner := session.NewRunner(dialer, caps, sysClock, logger, session.WithCommandHandler(manager))
-
-	// Cancel the run context on SIGINT/SIGTERM for a clean stream shutdown.
-	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	logger.Info("starting control-plane session", "endpoint", cfg.API.GRPCEndpoint)
 	return runner.Run(sigCtx)
@@ -181,11 +184,12 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host)
 	}
 	// The relay dial-back dialer (RELAY.md Section 5) splices a player session to
-	// the server's published loopback game port. Its splice goroutines live on the
-	// Worker's root ctx so they are torn down on shutdown; the game bind IP picks
-	// the dial host (loopback when 0.0.0.0). tunnelDialerAdapter bridges the
-	// application-layer TunnelSpec to the adapter's own Spec, keeping the adapter
-	// free of an application-layer import (ARCHITECTURE.md Section 2).
+	// the server's published loopback game port. ctx here is the signal-cancelled
+	// context (run() passes sigCtx), so the splice goroutines are torn down when the
+	// Worker receives SIGINT/SIGTERM; the game bind IP picks the dial host (loopback
+	// when 0.0.0.0). tunnelDialerAdapter bridges the application-layer TunnelSpec to
+	// the adapter's own Spec, keeping the adapter free of an application-layer import
+	// (ARCHITECTURE.md Section 2).
 	tunnelDialer := tunnel.New(ctx, cfg.Driver.Container.GameBindIP, logger)
 	return instancemanager.New(drivers, wc.ScratchDir, openControl).
 		WithLogger(logger).

@@ -142,7 +142,10 @@ func (d *Dialer) Dial(ctx context.Context, spec Spec) error {
 	}
 
 	gameAddr := net.JoinHostPort(d.dialHost(), gamePort(spec.WorkingDir))
-	gameConn, err := d.gameDial(ctx, gameAddr)
+	// Dial under setupCtx so a blackholing non-loopback game_bind_ip fails fast
+	// (within the 5 s setup budget) instead of stalling the lane for the kernel
+	// connect timeout while the relay's player window has already expired.
+	gameConn, err := d.gameDial(setupCtx, gameAddr)
 	if err != nil {
 		_ = relayConn.Close()
 		return fmt.Errorf("tunnel: dial game port %q: %w", gameAddr, err)
@@ -168,10 +171,12 @@ func (d *Dialer) tlsConfig(caPEM string) (*tls.Config, error) {
 }
 
 // dialHost picks the host to dial the game port at: loopback when the game bind
-// IP is unset or 0.0.0.0 (loopback reaches an all-interfaces publish), the
-// configured IP otherwise (RELAY.md Section 5).
+// IP is unset or an any-address — IPv4 0.0.0.0 or IPv6 :: / [::] — since loopback
+// reaches an all-interfaces publish; the configured IP otherwise (RELAY.md
+// Section 5).
 func (d *Dialer) dialHost() string {
-	if d.gameBindIP == "" || d.gameBindIP == "0.0.0.0" {
+	switch d.gameBindIP {
+	case "", "0.0.0.0", "::", "[::]":
 		return "127.0.0.1"
 	}
 	return d.gameBindIP
@@ -234,6 +239,12 @@ func (d *Dialer) splice(relayConn, gameConn net.Conn, serverID string) {
 	go func() { defer wg.Done(); copyHalf(relayConn, gameConn) }()
 	wg.Wait()
 
+	// Fully close both conns so their fds are released deterministically. The clean
+	// EOF path only CloseWrites, so without this the read fds linger until the Go
+	// runtime's netFD finalizer runs; on a long-lived Worker they would accumulate.
+	// Double-closing the error path's already-closed conns is harmless.
+	_ = relayConn.Close()
+	_ = gameConn.Close()
 	d.deregister(relayConn, gameConn)
 	d.logger.Debug("tunnel closed", "server_id", serverID)
 }
@@ -302,7 +313,10 @@ func (d *Dialer) closeAll() {
 
 // gamePort reads server-port from the server's working-dir server.properties,
 // falling back to the Minecraft default when the file is absent or the key is
-// unset — mirroring the container driver's published-port resolution.
+// unset — mirroring the container driver's published-port resolution. Keep in
+// sync with containerdriver.ports (containerdriver.go): if the driver ever maps a
+// host port that differs from the container port, the tunnel must dial the host
+// port, not server-port.
 func gamePort(workingDir string) string {
 	props := readProperties(filepath.Join(workingDir, "server.properties"))
 	if port := props["server-port"]; port != "" {
