@@ -269,10 +269,12 @@ func TestSnapshotPacksAndUploadsWithContentLength(t *testing.T) {
 	var gotLen int64
 	var gotBaseGen string
 	var gotWorkerID string
+	var gotSource string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotLen = r.ContentLength
 		gotBaseGen = r.Header.Get("X-Working-Set-Base-Generation")
 		gotWorkerID = r.Header.Get("X-Worker-Id")
+		gotSource = r.Header.Get("X-Snapshot-Source")
 		received, _ = io.ReadAll(r.Body)
 		w.Header().Set("X-Working-Set-Generation", "9")
 		w.WriteHeader(http.StatusNoContent)
@@ -280,7 +282,7 @@ func TestSnapshotPacksAndUploadsWithContentLength(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	gen, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 7, "worker-7")
+	gen, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 7, "worker-7", true)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -297,6 +299,11 @@ func TestSnapshotPacksAndUploadsWithContentLength(t *testing.T) {
 	// publish (#847 bug 3).
 	if gotWorkerID != "worker-7" {
 		t.Fatalf("X-Worker-Id = %q, want %q", gotWorkerID, "worker-7")
+	}
+	// A running-server snapshot declares its source so the API applies the live
+	// (byte-precise) region rule for the unpadded tail of a live 26.x world (#923).
+	if gotSource != "running" {
+		t.Fatalf("X-Snapshot-Source = %q, want %q", gotSource, "running")
 	}
 
 	if gotLen <= 0 || gotLen != int64(len(received)) {
@@ -335,16 +342,18 @@ func TestSnapshotOmitsBaseGenerationHeaderWhenUnknown(t *testing.T) {
 
 	var hadBaseGen bool
 	var hadWorkerID bool
+	var gotSource string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, hadBaseGen = r.Header["X-Working-Set-Base-Generation"]
 		_, hadWorkerID = r.Header["X-Worker-Id"]
+		gotSource = r.Header.Get("X-Snapshot-Source")
 		_, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, ""); err != nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, "", false); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	if hadBaseGen {
@@ -355,6 +364,11 @@ func TestSnapshotOmitsBaseGenerationHeaderWhenUnknown(t *testing.T) {
 	// stays permissive.
 	if hadWorkerID {
 		t.Fatal("X-Worker-Id header sent for an empty worker id")
+	}
+	// A stopped/at-rest snapshot declares "stopped" so the API keeps the strict
+	// 4096-aligned region rule (#923).
+	if gotSource != "stopped" {
+		t.Fatalf("X-Snapshot-Source = %q, want %q", gotSource, "stopped")
 	}
 }
 
@@ -393,7 +407,7 @@ func TestSnapshotExcludesGenerationMarker(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, ""); err != nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, "", false); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
@@ -446,7 +460,7 @@ func TestSnapshotStreamsLargeWorkingSetWithMatchingContentLength(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, ""); err != nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, "", false); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	if gotLen <= fileSize {
@@ -472,7 +486,7 @@ func TestSnapshotRemovesSpoolFile(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, ""); err != nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, "", false); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 	entries, err := os.ReadDir(filepath.Dir(srcDir))
@@ -532,7 +546,7 @@ func TestSnapshotEmptyDirUploadsEmptyTar(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", filepath.Join(t.TempDir(), "absent"), 0, ""); err != nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", filepath.Join(t.TempDir(), "absent"), 0, "", false); err != nil {
 		t.Fatalf("Snapshot of absent dir: %v", err)
 	}
 }
@@ -544,7 +558,7 @@ func TestSnapshotPropagatesServerError(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", t.TempDir(), 0, ""); err == nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", t.TempDir(), 0, "", false); err == nil {
 		t.Fatal("expected an error for a 400 response")
 	}
 }
@@ -886,7 +900,7 @@ func TestSnapshotSkipsVanishedFilesAndSucceeds(t *testing.T) {
 
 	h := &capturingHandler{}
 	c := New(srv.Client()).WithLogger(slog.New(h))
-	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, ""); err != nil {
+	if _, err := c.Snapshot(context.Background(), srv.URL, "tok", srcDir, 0, "", false); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 

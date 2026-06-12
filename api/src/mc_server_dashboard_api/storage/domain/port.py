@@ -158,6 +158,7 @@ class WorkingSetStore(abc.ABC):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
+        live: bool = False,
     ) -> int:
         """Atomically publish the staged snapshot, returning the new generation.
 
@@ -201,6 +202,15 @@ class WorkingSetStore(abc.ABC):
         copy (no bump), so the Worker re-bases on its next start. ``None`` (a Worker
         that never hydrated, or an older Worker that sends no base) skips the
         re-check, matching the pre-stream guard's backward-compatible posture.
+
+        ``live`` selects the running-server region check (issue #923). MC 26.x pads
+        region files only on shutdown, so a RUNNING server's periodic snapshot
+        legitimately carries a non-4096-aligned tail; the data plane passes
+        ``live=True`` when the publishing Worker declares ``X-Snapshot-Source:
+        running`` so the content-integrity gate applies the byte-precise region rule
+        instead of refusing every periodic snapshot. ``False`` (the default, and a
+        stopped/at-rest source) keeps the strict 4096-aligned rule. Backup
+        create/restore and the sweep CLI never set it (they gate at-rest artifacts).
         """
 
     @abc.abstractmethod

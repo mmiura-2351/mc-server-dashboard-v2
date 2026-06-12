@@ -402,6 +402,7 @@ class FsStorage(Storage):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
+        live: bool = False,
     ) -> int:
         fs_handle = _as_fs_handle(handle)
         if fs_handle.consumed:
@@ -425,8 +426,10 @@ class FsStorage(Storage):
         # files (issue #738). Fail-closed — any corrupt region refuses the publish:
         # clean the staging area (mirroring abort) and raise. The ``current`` symlink
         # is never touched, so the prior good snapshot is retained automatically
-        # (last-known-good, #703).
-        report = await asyncio.to_thread(check_working_set, staging)
+        # (last-known-good, #703). ``live`` (issue #923) applies the running-server
+        # region rule when the snapshot source is a live server: MC 26.x pads regions
+        # only on shutdown, so a running world's unpadded tail is not a tear.
+        report = await asyncio.to_thread(check_working_set, staging, live=live)
         if not report.healthy:
             await asyncio.to_thread(_rmtree, staging)
             self._release_staging(staging)

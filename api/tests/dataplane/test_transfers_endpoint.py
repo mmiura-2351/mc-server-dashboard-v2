@@ -768,6 +768,109 @@ def test_snapshot_corrupt_region_is_refused_with_machine_readable_reason(
     assert _read_tar(published) == {"keep.txt": b"prior"}
 
 
+def _unaligned_live_mca(tail: int = 459) -> bytes:
+    """A region with the legitimate UNPADDED tail of a live MC 26.x world (#923):
+    an 8 KiB header plus one chunk in sector 2 ending ``tail`` bytes in, so the size
+    is not a 4096 multiple but the trailing chunk fits byte-precisely. Strict mode
+    flags ``not_4096_aligned``; live mode is healthy."""
+    offset = 2
+    size = offset * 4096 + tail
+    image = bytearray(size)
+    image[0:4] = offset.to_bytes(3, "big") + bytes([1])
+    length = size - offset * 4096 - 4
+    start = offset * 4096
+    image[start : start + 4] = length.to_bytes(4, "big")
+    image[start + 4] = 2  # zlib.
+    return bytes(image)
+
+
+def test_snapshot_running_source_publishes_unaligned_live_working_set(
+    tmp_path: Path,
+) -> None:
+    # A running server's periodic snapshot (X-Snapshot-Source: running) over a
+    # working set whose region has the legitimate unpadded tail of a live 26.x world
+    # must PUBLISH: the content-integrity gate applies the live (byte-precise) region
+    # rule for a running source (issue #923). Without this the gate refuses every
+    # periodic snapshot and a running server is never checkpointed.
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    body = _tar_bytes({"world/region/r.0.0.mca": _unaligned_live_mca()})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={**_auth(), "X-Snapshot-Source": "running"},
+        )
+    assert resp.status_code == 204
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    published = asyncio.run(_read())
+    assert "world/region/r.0.0.mca" in _read_tar(published)
+
+
+def test_snapshot_absent_source_refuses_unaligned_working_set(tmp_path: Path) -> None:
+    # The SAME unaligned working set with NO X-Snapshot-Source header (a stopped/
+    # at-rest publish, or an older Worker) stays STRICT: a stopped 26.x world is
+    # padded, so a non-4096-aligned region there is a real torn save and the gate
+    # refuses it (issue #923). Proves the header defaults to strict.
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+
+    body = _tar_bytes({"world/region/r.0.0.mca": _unaligned_live_mca()})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "working_set_corrupt"
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    published = asyncio.run(_read())
+    assert _read_tar(published) == {"keep.txt": b"prior"}
+
+
+def test_snapshot_stopped_source_refuses_unaligned_working_set(tmp_path: Path) -> None:
+    # An explicit X-Snapshot-Source: stopped is also strict (only "running" relaxes).
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+
+    body = _tar_bytes({"world/region/r.0.0.mca": _unaligned_live_mca()})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={**_auth(), "X-Snapshot-Source": "stopped"},
+        )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "working_set_corrupt"
+
+
 def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
     tmp_path: Path,
 ) -> None:

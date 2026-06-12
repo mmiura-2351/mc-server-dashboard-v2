@@ -40,6 +40,10 @@ type fakeTransfer struct {
 	// snapshotWorkerIDs records, per Snapshot call, the worker id the manager
 	// declared (issue #847 bug 3).
 	snapshotWorkerIDs []string
+	// snapshotRunning records, per Snapshot call, the running flag the manager
+	// declared (issue #923): true for a running server's periodic snapshot (the
+	// live region rule), false for a stopped/at-rest one.
+	snapshotRunning []bool
 	// blockUntilCtxDone, when set, makes Hydrate/Snapshot block until the passed
 	// context is cancelled and then return ctx.Err(), modeling a stalled transfer
 	// the per-transfer deadline (issue #874) must abort. gotCtxErr captures the
@@ -63,7 +67,7 @@ func (f *fakeTransfer) Hydrate(ctx context.Context, _, _, workingDir string) (ui
 	return f.gen, f.err
 }
 
-func (f *fakeTransfer) Snapshot(ctx context.Context, _, _, workingDir string, baseGeneration uint64, workerID string) (uint64, error) {
+func (f *fakeTransfer) Snapshot(ctx context.Context, _, _, workingDir string, baseGeneration uint64, workerID string, running bool) (uint64, error) {
 	f.mu.Lock()
 	if f.blockUntilCtxDone {
 		f.snapshots = append(f.snapshots, workingDir)
@@ -78,6 +82,7 @@ func (f *fakeTransfer) Snapshot(ctx context.Context, _, _, workingDir string, ba
 	f.snapshotHadWorkingSet = append(f.snapshotHadWorkingSet, hasWorkingSet(workingDir))
 	f.snapshotBaseGenerations = append(f.snapshotBaseGenerations, baseGeneration)
 	f.snapshotWorkerIDs = append(f.snapshotWorkerIDs, workerID)
+	f.snapshotRunning = append(f.snapshotRunning, running)
 	if f.seq != nil {
 		*f.seq = append(*f.seq, "transfer")
 	}
