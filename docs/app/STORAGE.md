@@ -525,6 +525,108 @@ generation, so the Worker always sees `held < store` on the next start and
 re-hydrates rather than reusing a stale scratch; see Section 3.3 `restore_backup`
 row). Subsequent snapshots then publish cleanly against the reconciled world.
 
+### 4.6 Worker `.displaced-<id>` trees: lifecycle, operator recovery, and cleanup (#906/#910/#911)
+
+#### What creates a `.displaced-<id>` tree
+
+When a server's final stop snapshot **definitively fails** — refused by the
+integrity gate (#739/#927), refused by the missing-region gate (#854), or
+otherwise non-transiently rejected — issue #845 retains the Worker's scratch dir
+so the only copy of the world survives. On the **next start**, the `HydrateTrigger`
+would normally overwrite the scratch dir with the authoritative snapshot.
+Issue #910 changes that overwrite to a **rename aside**: the old scratch
+`<scratch>/<id>` is moved to `<scratch>/.displaced-<id>` before the new working
+set is unpacked in its place. The displaced tree is the retained-for-recovery copy
+of the world as it stood before the failed final snapshot.
+
+**Location on the Worker.** `<worker.scratch_dir>/.displaced-<server-id>` — a
+dot-prefixed sibling of the server's normal scratch dir. Only one displaced tree
+exists per server at any time (a new hydrate replaces the prior one).
+
+**Lifecycle.** The displaced tree is **never GC'd automatically on server delete**
+— it is the last surviving copy of the world exactly when it is most needed. It is
+reclaimed only when a subsequent snapshot **succeeds** for the same server id
+(`sweepDisplaced`, called from both the running-id and stopped-id
+snapshot-success branches): that success proves the store supersedes the displaced
+world, making the local copy redundant. A server deleted after a failed final
+snapshot never snapshots again and its displaced tree therefore **persists on the
+Worker indefinitely** — bounded to one working-set worth of disk per deleted
+server.
+
+**Boot detection.** At Worker boot, after the held-server scan,
+`WarnOrphanDisplacedTrees` logs a `WARN` for each `.displaced-<id>` tree whose
+server id is **not** in the held-server set. A tree is "assigned" (not logged) if
+the same id also has a live scratch in the held set; it will be GC'd on the next
+successful snapshot. A tree is "orphaned" (logged) if the server was deleted or
+re-placed to another Worker and this Worker will never snapshot it again:
+
+```
+WARN  displaced recovery tree for unknown/unassigned server found at boot;
+      manual cleanup or recovery may be needed (see STORAGE.md Section 4.6)
+      path=<scratch>/.displaced-<id>  server_id=<id>
+```
+
+#### Operator recovery procedure
+
+1. **Identify the displaced tree.** The boot WARN gives the full path. Or scan the
+   Worker's `worker.scratch_dir` for directories matching `.displaced-*`.
+2. **Assess the world.** The displaced tree is a plain working-set directory (the
+   same layout the Worker normally holds in `<scratch>/<id>`). Inspect
+   `level.dat`, region dirs, etc. to confirm the world data looks intact.
+3. **Recover the world.** Two options:
+
+   - **Repack as a new backup (recommended).** Tar the displaced tree, upload it
+     as a backup to a server (the upload-backup flow, issue #281 / `PUT
+     /api/communities/{c}/servers/{s}/backup`), and restore it
+     (`restore_backup`). This brings the world back into the authoritative store
+     and into a new or existing server — no manual SSH to the Worker host needed
+     once the tar is in hand.
+
+   - **Copy directly into an existing server's scratch.** Stop the target server,
+     copy the displaced tree content into `<scratch>/<target-id>` (or swap the
+     whole directory), then start the server. A hydrate will follow from the API
+     unless the Worker holds a fresh enough generation — if in doubt, bump the
+     authoritative store generation by any at-rest edit (`write_file` etc.) so the
+     next start is forced to re-hydrate from the current store, not the patched
+     scratch. **Use with care:** writing directly into the scratch bypasses all
+     integrity gates.
+
+4. **Remove the displaced tree.** Once recovery is confirmed and the world is
+   safely in the store (or the world is genuinely not needed), delete the
+   displaced tree: `rm -rf <scratch>/.displaced-<id>`. The directory name is
+   dot-prefixed so it is never touched by any Worker-internal sweep (the
+   `sweepHydrateLeftovers` and snapshot-spool sweeps only target their own
+   prefixes); only `sweepDisplaced` removes it, and only on a successful snapshot
+   for the matching id.
+
+#### When is manual cleanup safe?
+
+The displaced tree is safe to delete **after** confirming at least one of:
+
+- The world data is in the authoritative store at a generation that covers the
+  events since the last published snapshot (you can inspect the store's `current/`
+  or compare file timestamps).
+- A backup derived from the displaced tree (or from the authoritative store at a
+  sufficiently recent generation) has been made and verified.
+- The world is genuinely not needed (the server was intentionally deleted and its
+  data is expendable).
+
+Do **not** delete the displaced tree speculatively: it may be the only copy of the
+world, and the next authoritative snapshot for this server would have GC'd it for
+free.
+
+#### Accepted micro-edge: running-id snapshot sweeps a displaced tree
+
+A running-id periodic snapshot for server id S succeeds and calls `sweepDisplaced`
+even if S had a stop→failed-final→re-place→hydrate sequence in the interim: the
+new scratch for S (delivered by the hydrate) is the current authoritative world,
+so sweeping `.displaced-S` at that snapshot is correct — the displaced tree is
+no longer the only copy. The `#739` integrity checks gate the publish, so a
+genuinely torn new scratch is refused and the displaced tree is retained until a
+clean snapshot lands. This sequence is a non-regression micro-edge: the recovery
+insurance (`sweepDisplaced` only on success) and the integrity gate together keep
+the displaced tree alive exactly as long as it is needed.
+
 ---
 
 ## 5. File version retention

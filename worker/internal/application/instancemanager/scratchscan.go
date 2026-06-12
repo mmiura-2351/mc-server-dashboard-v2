@@ -115,6 +115,49 @@ func heldGeneration(workingDir, serverID string, log *slog.Logger) uint64 {
 	return gen
 }
 
+// WarnOrphanDisplacedTrees logs a WARN for each .displaced-<id> tree in scratchDir
+// whose server id is NOT in heldServers (issue #911). A .displaced-<id> tree is a
+// last-resort recovery copy kept aside by a hydrate when a server's final stop
+// snapshot failed (STORAGE.md Section 4.6). When the server id is in heldServers
+// the tree will be GC'd on the next successful snapshot (sweepDisplaced); when it
+// is NOT in heldServers the server was deleted or re-placed elsewhere and the tree
+// is an orphan the operator should be aware of.
+//
+// One WARN line is logged per orphaned tree. The function is best-effort: a scan
+// error is ignored (the scratchDir may not yet exist on a first boot). If log is
+// nil, logging is suppressed (tests that don't care about log output).
+func WarnOrphanDisplacedTrees(scratchDir string, held []session.HeldServer, log *slog.Logger) {
+	if log == nil {
+		return
+	}
+	heldIDs := make(map[string]bool, len(held))
+	for _, h := range held {
+		heldIDs[h.ServerID] = true
+	}
+	entries, err := os.ReadDir(scratchDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, displacedPrefix) {
+			continue
+		}
+		serverID := strings.TrimPrefix(name, displacedPrefix)
+		if heldIDs[serverID] {
+			// This server still has a held working set; sweepDisplaced will reclaim
+			// the tree on its next successful snapshot. No WARN needed.
+			continue
+		}
+		log.Warn("displaced recovery tree for unknown/unassigned server found at boot; "+
+			"manual cleanup or recovery may be needed (see STORAGE.md Section 4.6)",
+			"path", filepath.Join(scratchDir, name), "server_id", serverID)
+	}
+}
+
 // hasWorkingSet reports whether workingDir holds a real working set: at least one
 // child that is NOT the generation marker. A dir holding only the marker (or no
 // children, or unreadable) holds no working set.
