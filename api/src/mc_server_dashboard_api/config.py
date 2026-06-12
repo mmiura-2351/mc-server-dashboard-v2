@@ -16,7 +16,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -26,6 +26,35 @@ from pydantic_settings import (
 from mc_server_dashboard_api.identity.domain.password_policy import PRESETS
 
 _MASK = "***"
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    """Treat a blank value as missing for an optional secret.
+
+    compose interpolates an unset/blank ``${VAR}`` to an EMPTY string rather than
+    dropping the variable, so an optional secret sourced from the environment can
+    arrive as ``""`` (or whitespace). Collapse that to ``None`` so the edge's
+    existing ``is None`` fail-fast guards (app factory, Section 3) treat a blank
+    value as missing instead of booting with an empty key/credential (#939).
+    """
+
+    if value is not None and not value.strip():
+        return None
+    return value
+
+
+def _require_nonblank(value: str) -> str:
+    """Reject a blank value for a required secret-bearing setting.
+
+    The required setting has no default, so pydantic only enforces presence — an
+    empty string from a blank ``${VAR}`` interpolation passes that check and boots
+    a broken deployment. Fail fast at load instead (#939).
+    """
+
+    if not value.strip():
+        raise ValueError("must not be blank")
+    return value
+
 
 # Minimum HS256 signing-key length: the key is the shared-secret entropy of the
 # MAC, so it should be at least as long as the 256-bit (32-byte) digest
@@ -137,6 +166,11 @@ class ControlSettings(_Section):
     worker_credential: str | None = None
     tls: ControlTlsSettings = Field(default_factory=ControlTlsSettings)
 
+    # A blank ``${MCD_API_CONTROL__WORKER_CREDENTIAL}`` arrives as "" rather than
+    # unset; collapse it to None so the app factory's fail-fast (control enabled
+    # without a credential) treats a blank as missing (#939).
+    _blank_credential = field_validator("worker_credential")(_blank_to_none)
+
 
 class LogSettings(_Section):
     """Observability (CONFIGURATION.md Section 5.5)."""
@@ -154,6 +188,11 @@ class DatabaseSettings(_Section):
     # change until an operator explicitly tunes them.
     pool_size: int = Field(default=5, gt=0)
     max_overflow: int = Field(default=10, ge=0)
+
+    # ``url`` is required and carries the DB password; a blank value (a blank
+    # ``${MCD_API_DATABASE__URL}`` interpolation) passes the presence check but
+    # boots an engine that cannot connect. Reject it at load (#939).
+    _nonblank_url = field_validator("url")(_require_nonblank)
 
 
 class StorageFsSettings(_Section):
@@ -389,6 +428,12 @@ class TokenSettings(_Section):
     algorithm: Literal["HS256", "RS256"] = "HS256"
     signing_key: str | None = None
     access_ttl_seconds: int = Field(default=900, gt=0)
+
+    # A blank ``${MCD_API_AUTH__TOKEN__SIGNING_KEY}`` arrives as "" rather than
+    # unset; collapse it to None so the app factory's fail-fast (signing key
+    # required to mount auth) treats a blank as missing rather than booting with
+    # an empty key — an empty RS256 key otherwise slips past every guard (#939).
+    _blank_signing_key = field_validator("signing_key")(_blank_to_none)
     refresh_ttl_seconds: int = Field(default=1209600, gt=0)
     # Grace window after a refresh token is rotated within which re-presenting the
     # predecessor is treated as a legitimate concurrent refresh (a fresh pair is
