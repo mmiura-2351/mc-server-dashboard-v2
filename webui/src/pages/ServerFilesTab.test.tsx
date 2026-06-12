@@ -746,13 +746,29 @@ describe("ServerFilesTab running notice", () => {
     await openFiles();
     await screen.findByText(t("files.empty"));
 
-    // Use queryBy so we can confirm they are NOT disabled (enabled).
     const uploadBtn = screen.getByLabelText(t("files.upload"));
     const newFolderBtn = screen.getByRole("button", {
       name: t("files.newFolder"),
     });
     expect(uploadBtn).not.toBeDisabled();
     expect(newFolderBtn).not.toBeDisabled();
+  });
+
+  it("disables Upload and New folder while the server is stopping (transitional)", async () => {
+    routeGet({
+      detail: server({ observed_state: "stopping", desired_state: "stopped" }),
+      list: listing([]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.runningNotice"));
+
+    const uploadBtn = screen.getByRole("button", { name: t("files.upload") });
+    const newFolderBtn = screen.getByRole("button", {
+      name: t("files.newFolder"),
+    });
+    expect(uploadBtn).toBeDisabled();
+    expect(newFolderBtn).toBeDisabled();
   });
 });
 

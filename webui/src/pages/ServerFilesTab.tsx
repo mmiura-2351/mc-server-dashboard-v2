@@ -43,6 +43,7 @@ import {
   encodeUtf8Base64,
   isProbablyText,
 } from "./fileText.ts";
+import { atRest, normalizeState } from "./serverState.ts";
 
 type DirListing = components["schemas"]["DirListingResponse"];
 type FileContent = components["schemas"]["FileContentResponse"];
@@ -112,7 +113,7 @@ export function ServerFilesTab({
 
   const canRead = can("file:read", { serverId: server.id });
   const canEdit = can("file:edit", { serverId: server.id });
-  const running = server.observed_state === "running";
+  const notAtRest = !atRest(normalizeState(server.observed_state));
 
   // Current directory rel-path ("" is the working-set root) and the open file.
   const [dir, setDir] = useState("");
@@ -160,7 +161,9 @@ export function ServerFilesTab({
 
   return (
     <section className="files">
-      {running && <div className="notice info">{t("files.runningNotice")}</div>}
+      {notAtRest && (
+        <div className="notice info">{t("files.runningNotice")}</div>
+      )}
       <SearchBox
         communityId={communityId}
         serverId={server.id}
@@ -172,7 +175,7 @@ export function ServerFilesTab({
         communityId={communityId}
         serverId={server.id}
         canEdit={canEdit}
-        running={running}
+        running={notAtRest}
         onChanged={refetchList}
         onError={onError}
       />
@@ -217,7 +220,7 @@ export function ServerFilesTab({
               serverId={server.id}
               canEdit={canEdit}
               can={can}
-              running={running}
+              running={notAtRest}
               onError={onError}
             />
           )}
