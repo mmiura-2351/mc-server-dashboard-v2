@@ -135,6 +135,7 @@ from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
     BcryptPasswordHasher,
+    build_dummy_password_hash,
 )
 from mc_server_dashboard_api.identity.adapters.sleeper import AsyncioSleeper
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
@@ -592,8 +593,7 @@ _DUMMY_VERIFY_PLAINTEXT = "dummy-password-for-timing-equalization"
 def _dummy_password_hash(algorithm: str) -> str:
     """Pre-compute the static dummy hash for ``algorithm`` once (login timing)."""
 
-    hasher = BcryptPasswordHasher() if algorithm == "bcrypt" else Argon2PasswordHasher()
-    return hasher.hash(_DUMMY_VERIFY_PLAINTEXT)
+    return build_dummy_password_hash(algorithm, _DUMMY_VERIFY_PLAINTEXT)
 
 
 @lru_cache(maxsize=1)

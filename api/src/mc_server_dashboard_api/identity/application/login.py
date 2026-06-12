@@ -113,9 +113,9 @@ class Login:
             if user is None:
                 # Verify against a static dummy hash so the unknown-user path
                 # costs the same as a wrong password (timing-enumeration defence).
-                self.hasher.verify(password, self.dummy_password_hash)
+                await self.hasher.verify(password, self.dummy_password_hash)
                 await self._fail(key, ip, REASON_UNKNOWN_USER, now=now)
-            if not self.hasher.verify(password, user.password_hash):
+            if not await self.hasher.verify(password, user.password_hash):
                 await self._fail(key, ip, REASON_WRONG_PASSWORD, now=now)
             # A deactivated account fails *after* the password verify so it costs
             # the same as a wrong password and shares the uniform error: the

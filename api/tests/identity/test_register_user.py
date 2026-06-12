@@ -166,11 +166,11 @@ class _StubHasher(PasswordHasher):
         # (#909 review: the real hash blocks the event loop).
         self.hash_calls = 0
 
-    def hash(self, plaintext: str) -> str:
+    async def hash(self, plaintext: str) -> str:
         self.hash_calls += 1
         return f"hashed::{plaintext}"
 
-    def verify(self, plaintext: str, password_hash: str) -> bool:
+    async def verify(self, plaintext: str, password_hash: str) -> bool:
         return password_hash == f"hashed::{plaintext}"
 
 

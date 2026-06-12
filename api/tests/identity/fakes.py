@@ -244,10 +244,10 @@ class StubHasher(PasswordHasher):
     def __init__(self) -> None:
         self.verify_calls = 0
 
-    def hash(self, plaintext: str) -> str:
+    async def hash(self, plaintext: str) -> str:
         return f"hashed::{plaintext}"
 
-    def verify(self, plaintext: str, password_hash: str) -> bool:
+    async def verify(self, plaintext: str, password_hash: str) -> bool:
         self.verify_calls += 1
         return password_hash == f"hashed::{plaintext}"
 
