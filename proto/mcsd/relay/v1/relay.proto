@@ -1,0 +1,207 @@
+// The Minecraft Server Dashboard v2 relay-to-API contract.
+//
+// RelayService is served on the API's existing gRPC listener alongside
+// WorkerService. All RPCs are relay-initiated (unary); the relay has no
+// command inbox. Transport posture matches the Worker: server-side TLS plus a
+// shared-secret credential in call metadata, but a separate credential
+// (relay.credential) so relay and Worker credentials rotate independently.
+//
+// See docs/app/RELAY.md Section 6 for the full relay-to-API contract and
+// Section 5 for the tunnel contract (TunnelDial lives in the controlplane
+// package — RELAY.md Section 5 — because it rides the existing Worker stream).
+syntax = "proto3";
+
+package mcsd.relay.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// RelayService is the gRPC service the relay calls on the API. All three RPCs
+// are unary (RELAY.md Section 6): the relay has no persistent stream and no
+// command inbox; every call is relay-initiated.
+service RelayService {
+  // Register is called at relay startup and on reconnect. The API stores the
+  // relay's tunnel endpoint and CA for use in TunnelDial commands, and closes
+  // any game_session rows open but absent from the relay's active set
+  // (orphan healing after a relay crash). RELAY.md Section 6.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // ResolveJoin is the per-connection routing decision. The relay calls it
+  // once per incoming player connection after parsing the Minecraft handshake.
+  // The API returns a routing decision and, on a TUNNEL decision, dispatches
+  // a TunnelDial command to the assigned Worker as a side effect (Section 4).
+  // RELAY.md Sections 4 and 6.
+  rpc ResolveJoin(ResolveJoinRequest) returns (ResolveJoinResponse);
+
+  // ReportSessions delivers batched session lifecycle events (SessionStart and
+  // SessionEnd). The API persists them as game_session rows; upsert-on-id
+  // makes retries after transient errors safe. RELAY.md Sections 6 and 8.
+  rpc ReportSessions(ReportSessionsRequest) returns (ReportSessionsResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Register (RELAY.md Section 6)
+// ---------------------------------------------------------------------------
+
+// RegisterRequest carries the relay's tunnel endpoint and active session set
+// to the API on startup or reconnect.
+message RegisterRequest {
+  // tunnel_endpoint is the host:port the API delivers to Workers in TunnelDial
+  // commands so they know where to dial back. Required. RELAY.md Section 5.
+  string tunnel_endpoint = 1;
+
+  // tunnel_ca_pem is the PEM-encoded CA bundle the API includes in TunnelDial
+  // commands so Workers can verify the relay's tunnel certificate. Empty means
+  // system roots (public CA). RELAY.md Section 5.
+  string tunnel_ca_pem = 2;
+
+  // active_session_ids is the set of session UUIDs currently live on the
+  // relay. The API closes game_session rows that are open but absent from this
+  // set — orphan healing after a relay crash. RELAY.md Section 6.
+  repeated string active_session_ids = 3;
+}
+
+// RegisterResponse carries the deployment-level base domain back to the relay
+// so it has a single config source for hostname routing. RELAY.md Section 6.
+message RegisterResponse {
+  // base_domain is the relay's routing domain (e.g. "mc.example.com").
+  // Slugs are resolved relative to this; a handshake address that does not
+  // end with ".<base_domain>" is treated as unknown. RELAY.md Section 3.
+  string base_domain = 1;
+}
+
+// ---------------------------------------------------------------------------
+// ResolveJoin (RELAY.md Sections 4 and 6)
+// ---------------------------------------------------------------------------
+
+// JoinIntent distinguishes a status ping from a login attempt. The API uses
+// it to decide whether to dispatch a TunnelDial command: STATUS pings that
+// hit a running server are routed through the tunnel just like logins, but
+// stopped-server handling differs (RELAY.md Section 7).
+enum JoinIntent {
+  JOIN_INTENT_UNSPECIFIED = 0;
+  // STATUS is a server-list status ping (next_state = 1 in the Minecraft
+  // handshake). RELAY.md Section 7.
+  JOIN_INTENT_STATUS = 1;
+  // LOGIN is a full login attempt (next_state = 2 in the Minecraft
+  // handshake). RELAY.md Section 4.
+  JOIN_INTENT_LOGIN = 2;
+}
+
+// ResolveJoinRequest asks the API for a routing decision for one incoming
+// player connection.
+message ResolveJoinRequest {
+  // slug is the server identifier extracted from the handshake address by
+  // stripping the base_domain suffix. RELAY.md Section 3.
+  string slug = 1;
+
+  // player_ip is the player's source address as seen by the relay (PII;
+  // recorded in game_session). RELAY.md Section 8.
+  string player_ip = 2;
+
+  // intent distinguishes a status ping from a login attempt. RELAY.md
+  // Sections 6 and 7.
+  JoinIntent intent = 3;
+}
+
+// JoinDecision is the routing outcome the API returns to the relay.
+enum JoinDecision {
+  JOIN_DECISION_UNSPECIFIED = 0;
+  // TUNNEL means the server is running and the Worker has been given a
+  // TunnelDial command. The relay waits for the Worker's dial-back and then
+  // splices. RELAY.md Section 4.
+  JOIN_DECISION_TUNNEL = 1;
+  // STOPPED means the slug resolves to a known server that is not currently
+  // running. The relay responds in-protocol (disconnect reason / status MOTD).
+  // RELAY.md Section 7.
+  JOIN_DECISION_STOPPED = 2;
+  // NOT_FOUND means the slug does not resolve to any known server. The relay
+  // drops the connection silently. RELAY.md Section 7.
+  JOIN_DECISION_NOT_FOUND = 3;
+}
+
+// ResolveJoinResponse carries the routing decision and, for TUNNEL decisions,
+// the single-use token the Worker must present. RELAY.md Section 6.
+message ResolveJoinResponse {
+  // decision is the routing outcome. RELAY.md Section 6.
+  JoinDecision decision = 1;
+
+  // token is the single-use 128-bit session token the Worker presents on the
+  // tunnel dial-back to identify its connection. Set only when decision is
+  // TUNNEL. The token expires in 10 s (RELAY.md Section 4).
+  string token = 2;
+
+  // display_name is the server's human-readable name, used by the relay to
+  // synthesize the stopped-server in-protocol response. Set only when
+  // decision is STOPPED. RELAY.md Section 7.
+  string display_name = 3;
+}
+
+// ---------------------------------------------------------------------------
+// ReportSessions (RELAY.md Sections 6 and 8)
+// ---------------------------------------------------------------------------
+
+// ReportSessionsRequest delivers a batch of session lifecycle events to the
+// API. Batches are flushed every ~5 s or 100 events. RELAY.md Section 6.
+message ReportSessionsRequest {
+  // events is the batch of session lifecycle events. RELAY.md Section 6.
+  repeated SessionEvent events = 1;
+}
+
+// ReportSessionsResponse acknowledges a batch. Empty: the relay does not need
+// per-event acks, only an error on transient failure to trigger a retry.
+message ReportSessionsResponse {}
+
+// SessionEvent is one lifecycle event in a ReportSessions batch.
+// Exactly one of start or end is set. RELAY.md Section 6.
+message SessionEvent {
+  oneof event {
+    // start records a new accepted player session. RELAY.md Section 8.
+    SessionStart start = 1;
+    // end records the closing of a session. RELAY.md Section 8.
+    SessionEnd end = 2;
+  }
+}
+
+// SessionStart records the opening of a player session. Fields mirror the
+// game_session table columns (RELAY.md Section 13).
+message SessionStart {
+  // session_id is the relay-minted UUID, the idempotency key for upserts.
+  string session_id = 1;
+
+  // server_id is the API's identifier for the server the player joined.
+  string server_id = 2;
+
+  // slug is the hostname label used at join time (historical value; slugs are
+  // renameable so this captures what the player typed). RELAY.md Section 13.
+  string slug = 3;
+
+  // player_ip is the player's source address as seen by the relay (PII).
+  // RELAY.md Section 8.
+  string player_ip = 4;
+
+  // username is the name claimed in the Minecraft Login Start packet.
+  // Pre-authentication; with online-mode on, a meaningful-duration session
+  // implies a verified identity. Empty string means absent or unparseable
+  // (maps to NULL in the game_session table — RELAY.md Sections 7 and 13).
+  // RELAY.md Section 8.
+  string username = 5;
+
+  // player_uuid is the UUID claimed in the Login Start packet (present on
+  // protocols that send it; absent on older protocol versions). Empty string
+  // means absent or unparseable (maps to NULL in the game_session table —
+  // RELAY.md Sections 7 and 13).
+  string player_uuid = 6;
+
+  // started_at is when the relay accepted the session (relay clock).
+  google.protobuf.Timestamp started_at = 7;
+}
+
+// SessionEnd records the closing of a player session.
+message SessionEnd {
+  // session_id identifies the session being closed (matches a prior
+  // SessionStart.session_id).
+  string session_id = 1;
+
+  // ended_at is when the relay observed the session close (relay clock).
+  google.protobuf.Timestamp ended_at = 2;
+}

@@ -279,7 +279,8 @@ proto-gen: $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
 		--grpc_python_out=src \
 		--mypy_out=src \
 		--mypy_grpc_out=src \
-		../proto/mcsd/controlplane/v1/control_plane.proto
+		../proto/mcsd/controlplane/v1/control_plane.proto \
+		../proto/mcsd/relay/v1/relay.proto
 
 # Drift gate: regenerate and fail if anything changed -- modified tracked stubs
 # or new untracked ones (CI + `make check`).

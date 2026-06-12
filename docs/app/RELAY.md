@@ -302,7 +302,7 @@ service RelayService {
   relay instance simply replaces the stored endpoint (last-writer-wins).
 - **`ResolveJoin`** — the per-connection routing decision described in
   Section 4. Request: `{slug, player_ip, intent: STATUS|LOGIN}`. Response:
-  `{decision: TUNNEL|STOPPED|NOT_FOUND, token, session_id}` plus, for
+  `{decision: TUNNEL|STOPPED|NOT_FOUND, token}` plus, for
   `STOPPED`, the display name to embed in the synthesized response. The API
   dispatches `TunnelDial` as a side effect of a `TUNNEL` decision; it does
   not wait for the Worker's `CommandResult` (the Worker's "result" is the
