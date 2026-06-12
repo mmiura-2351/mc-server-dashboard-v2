@@ -1,12 +1,17 @@
 # Single-host container deployment for mc-server-dashboard v2 (issue #189).
 #
 # Services:
-#   db      — PostgreSQL, the API's authoritative metadata store.
-#   migrate — one-shot `alembic upgrade head` (same image as api), runs after db.
-#   api     — the FastAPI app + control-plane gRPC server, runs after migrate.
-#   worker  — the execution agent; container driver only, talks to the host
-#             Docker daemon via the mounted socket and creates sibling Minecraft
-#             containers.
+#   db        — PostgreSQL, the API's authoritative metadata store.
+#   migrate   — one-shot `alembic upgrade head` (same image as api), runs after db.
+#   seaweedfs — the S3-compatible object store the API uses by default (issue #702).
+#   api       — the FastAPI app + control-plane gRPC server, runs after migrate.
+#   worker    — the execution agent; container driver only, talks to the host
+#               Docker daemon via the mounted socket and creates sibling Minecraft
+#               containers.
+#
+# Storage backend (issue #702): the shipped default is the `object` backend on the
+# SeaweedFS service below (STORAGE.md Section 7.3). To run the fs backend instead,
+# see docs/dev/DEPLOYMENT.md "Opting back to the fs backend".
 #
 # Secrets and host-specific values come from .env (see .env.example). MC server
 # containers are NOT compose services: the worker creates them at runtime.
@@ -43,6 +48,52 @@ services:
       db:
         condition: service_healthy
 
+  seaweedfs:
+    # The S3-compatible object store backing the default `object` storage backend
+    # (issue #702, STORAGE.md Section 7.3). SeaweedFS is Apache-2.0, master/volume,
+    # and designed for many small files — the object adapter's hot path is
+    # CopyObject-heavy and small-object-heavy (thousands of region/.mca per world).
+    # Pinned to an explicit version tag (never `latest`) so a rebuild is
+    # reproducible.
+    image: chrislusf/seaweedfs:4.33
+    restart: unless-stopped
+    # All-in-one `server` (master+volume+filer) with the S3 gateway. The S3
+    # identities file is written from .env at startup so the access/secret keys
+    # live only in .env (matching the db-password posture) and never in the image
+    # or a committed config. The bucket is auto-created by SeaweedFS on first PUT,
+    # so no init job is needed. Only the S3 port (8333) is reachable on the compose
+    # network; master/volume/filer stay internal.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        # Refuse to write a blank-credential identities file: SeaweedFS 4.33
+        # authenticates blank-key clients, so an empty key would boot a silently
+        # unauthenticated store. The compose `:?` interpolation already fails before
+        # this runs; this is the in-container backstop (issue #702).
+        if [ -z "$$MCD_API_STORAGE__OBJECT__ACCESS_KEY" ] || [ -z "$$MCD_API_STORAGE__OBJECT__SECRET_KEY" ]; then
+          echo "FATAL: MCD_API_STORAGE__OBJECT__ACCESS_KEY/SECRET_KEY must be set to non-empty values (see .env.example)" >&2
+          exit 1
+        fi
+        mkdir -p /etc/seaweedfs
+        printf '{"identities":[{"name":"mcsd","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' \
+          "$$MCD_API_STORAGE__OBJECT__ACCESS_KEY" "$$MCD_API_STORAGE__OBJECT__SECRET_KEY" > /etc/seaweedfs/s3.json
+        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    environment:
+      # `:?` makes compose refuse to start when the value is unset OR empty, so a
+      # fresh `cp .env.example .env` (blank keys) fails loudly instead of booting an
+      # unauthenticated store (issue #702).
+      MCD_API_STORAGE__OBJECT__ACCESS_KEY: "${MCD_API_STORAGE__OBJECT__ACCESS_KEY:?set MCD_API_STORAGE__OBJECT__ACCESS_KEY in .env, e.g. openssl rand -hex 16}"
+      MCD_API_STORAGE__OBJECT__SECRET_KEY: "${MCD_API_STORAGE__OBJECT__SECRET_KEY:?set MCD_API_STORAGE__OBJECT__SECRET_KEY in .env, e.g. openssl rand -hex 32}"
+    volumes:
+      - seaweedfs-data:/data
+    healthcheck:
+      # The S3 gateway's /status returns 200 once it is serving (no auth needed).
+      test: ["CMD", "curl", "-fsS", "http://localhost:8333/status"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   api:
     # Build context is the repo root so the webui stage can reach webui/
     # (issue #490); the Dockerfile copies the python app from api/.
@@ -65,8 +116,20 @@ services:
       # transfers. On the compose network the worker reaches the api by service
       # name.
       MCD_API_SERVER__PUBLIC_BASE_URL: http://api:8000
-      MCD_API_STORAGE__BACKEND: fs
+      # Storage backend (issue #702): the shipped default is `object` on the
+      # seaweedfs service. Set MCD_API_STORAGE__BACKEND=fs in .env to opt back to
+      # the local-volume fs backend (the fs root + volume below stay wired so the
+      # opt-out needs no other change). See docs/dev/DEPLOYMENT.md.
+      MCD_API_STORAGE__BACKEND: ${MCD_API_STORAGE__BACKEND:-object}
       MCD_API_STORAGE__FS__ROOT: /data/storage
+      # Object-backend wiring (read only when backend=object): the in-compose
+      # SeaweedFS S3 gateway, reached by service name on the internal network. The
+      # access/secret keys come from .env (matching the db-password posture).
+      MCD_API_STORAGE__OBJECT__ENDPOINT: http://seaweedfs:8333
+      MCD_API_STORAGE__OBJECT__BUCKET: ${MCD_API_STORAGE__OBJECT__BUCKET:-mcsd}
+      # `:?` rejects unset OR empty so a blank-credential boot fails loudly (#702).
+      MCD_API_STORAGE__OBJECT__ACCESS_KEY: "${MCD_API_STORAGE__OBJECT__ACCESS_KEY:?set MCD_API_STORAGE__OBJECT__ACCESS_KEY in .env, e.g. openssl rand -hex 16}"
+      MCD_API_STORAGE__OBJECT__SECRET_KEY: "${MCD_API_STORAGE__OBJECT__SECRET_KEY:?set MCD_API_STORAGE__OBJECT__SECRET_KEY in .env, e.g. openssl rand -hex 32}"
     volumes:
       - api-storage:/data/storage
     ports:
@@ -78,6 +141,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
 
   worker:
     build: ./worker
@@ -132,6 +197,7 @@ services:
 volumes:
   db-data:
   api-storage:
+  seaweedfs-data:
 
 networks:
   # Pin the compose default network's name so the worker can attach the sibling

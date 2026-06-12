@@ -17,7 +17,7 @@ Docker daemon, mounting the server's working directory and publishing its game
 port. The worker attaches every MC container to the pinned compose network
 (`mcsd`) and reaches each server's RCON by container name over that network, so
 **RCON never leaves the docker network** (the host RCON publication is dropped;
-see Section 6). The `migrate` service is a one-shot that applies the database
+see Section 7). The `migrate` service is a one-shot that applies the database
 schema before `api` starts.
 
 ### CPU priority for game-server containers
@@ -71,13 +71,17 @@ cp .env.example .env
 | `POSTGRES_PASSWORD` | Database password | `openssl rand -base64 32` |
 | `MCD_API_AUTH__TOKEN__SIGNING_KEY` | JWT signing key (HS256, >= 32 bytes) | `openssl rand -base64 48` |
 | `MCD_API_CONTROL__WORKER_CREDENTIAL` | Shared secret authenticating the worker | `openssl rand -base64 48` |
+| `MCD_API_STORAGE__OBJECT__ACCESS_KEY` | S3 access key for the object backend | `openssl rand -hex 16` |
+| `MCD_API_STORAGE__OBJECT__SECRET_KEY` | S3 secret key for the object backend | `openssl rand -hex 16` |
 | `MCSD_SCRATCH_DIR` | Absolute host path for the worker scratch dir | choose a path, e.g. `/opt/mcsd/scratch` |
 | `DOCKER_GID` | GID of the host `docker` group | `getent group docker \| cut -d: -f3` |
 | `API_HTTP_PORT` | Published host port for the API HTTP surface | default `8000` |
 
 `POSTGRES_USER` and `POSTGRES_DB` default to `mcsd`; `MCD_API_CONTROL__WORKER_CREDENTIAL`
 is reused by the worker as its `MCD_WORKER_API_CREDENTIAL` (wired in
-`compose.yaml`), so both sides share the one secret.
+`compose.yaml`), so both sides share the one secret. The two
+`MCD_API_STORAGE__OBJECT__*` keys are the S3 credentials for the **default object
+storage backend** — see [Section 5](#5-storage-backend-object-on-seaweedfs-default).
 
 The scratch directory must exist on the host before the first `up` so the bind
 mount resolves; create it as the user the worker runs as:
@@ -148,7 +152,121 @@ When `MCD_API_WEBUI__DIST_DIR` is unset (the default outside compose), the API
 mounts nothing and serves only the API surface — that is the development posture,
 where Vite serves the UI and proxies the API (WEBUI_SPEC 7.7).
 
-## 5. First-run bootstrap (create the platform admin)
+## 5. Storage backend: `object` on SeaweedFS (default)
+
+The shipped deployment stores all server working sets, snapshots, and backups in
+the **`object` storage backend** (`storage.backend: object`, STORAGE.md
+[Section 7.3](../app/STORAGE.md#73-object-object-storage)), realized over the
+in-compose **SeaweedFS** S3 gateway. SeaweedFS is Apache-2.0 and
+designed for many small files, which fits this workload — a Minecraft world is
+thousands of small `region/`/`poi/`/`entities/` `.mca` objects, and each publish
+server-side-copies them into a fresh snapshot prefix and flips one pointer object.
+
+### Quick start (the default — nothing extra to do)
+
+The `seaweedfs` service is a standard service in `compose.yaml`; `docker compose
+up` provisions it alongside `db`/`api`/`worker`. You only need to set the two S3
+credential keys in `.env` (Section 3):
+
+```sh
+# in .env
+MCD_API_STORAGE__OBJECT__ACCESS_KEY=<openssl rand -hex 16>
+MCD_API_STORAGE__OBJECT__SECRET_KEY=<openssl rand -hex 16>
+```
+
+SeaweedFS writes its S3 identities file from these at startup (so the secrets live
+only in `.env`, matching the database password), and auto-creates the `mcsd`
+bucket on first write. The `api` service waits for the `seaweedfs` healthcheck
+before it boots. No bucket pre-creation or init job is required.
+
+The data lives in the `seaweedfs-data` volume — include it in your backups
+(Section 10).
+
+### Operational trade-off: cost/perf scales with operation count
+
+The object backend's cost and latency are driven by **operation count**, not
+storage size or egress: every snapshot **server-side-copies each world file**
+(CopyObject) into a fresh prefix and uploads new members via multipart, so the
+work per snapshot is `O(number of world files)`. A busy world with tens of
+thousands of region files multiplies that by your **snapshot frequency**.
+
+Guidance: keep the periodic snapshot interval coarse enough that a snapshot
+completes well within the interval (the publish copy is the long pole). If you
+push snapshot frequency up, watch the SeaweedFS volume server's CPU and the
+publish duration in the API logs rather than the bucket size. The app implements
+its own snapshot/version logic, so S3 versioning / object-lock / lifecycle are
+**not** used — SeaweedFS's lack of them is a non-issue, except for the orphan
+multipart sweep below.
+
+### Orphan multipart parts
+
+A hard crash mid-upload can leave in-progress multipart parts. The API's startup
+sweep reclaims them via `ListMultipartUploads` + `AbortMultipartUpload`, aborting
+only uploads older than a 1h age threshold so a live upload is never touched.
+
+SeaweedFS 4.33 returns `ListMultipartUploads` **without** the per-upload
+`Initiated` timestamp, so the sweep cannot read the age directly. It instead
+derives the effective age from the upload's parts via `ListParts` (SeaweedFS does
+return a per-part `LastModified`), using the newest part's timestamp — so a
+genuine crash-orphan with parts **is** reclaimed on SeaweedFS, not just on real
+S3/MinIO. One residual gap: an upload that crashes after `CreateMultipartUpload`
+but **before** its first part has no `Initiated` and no part timestamp, so the
+sweep treats it as just-started and leaves it. Such an entry holds no part bytes.
+If you want to reclaim those on a schedule too, `weed shell s3.clean.uploads` is
+the SeaweedFS-native operator-side cleanup (it removes incomplete uploads older
+than its default 24h); it is optional and complementary to the API sweep.
+
+### Opting back to the fs backend
+
+To run the local-volume **`fs`** backend instead (the previous default; STORAGE.md
+Section 2), set this in `.env` and recreate the `api` service:
+
+```sh
+# in .env
+MCD_API_STORAGE__BACKEND=fs
+```
+
+```sh
+docker compose up -d --force-recreate api
+```
+
+The fs root (`MCD_API_STORAGE__FS__ROOT=/data/storage`) and its `api-storage`
+volume stay wired in `compose.yaml`, so no other change is needed. The
+`seaweedfs` service still starts but is unused; remove it from your compose
+overrides if you want to stop running it.
+
+### Caveat: switching an existing deployment is a data cutover
+
+Changing the backend on an **already-running** deployment (fs → object, or back)
+does **not** migrate existing data. Each backend stores into its own place — the
+`api-storage` volume for fs, the `seaweedfs-data` volume (S3 bucket) for object —
+and there is no automatic copy between them. After a switch, the API sees an empty
+store: existing servers have no published snapshot until they are re-hydrated or
+re-created, and existing backups are not visible. Migration tooling between
+backends is out of scope. Treat a backend switch on a deployment that holds real
+data as a deliberate cutover, and back up both volumes first.
+
+### Running the live SeaweedFS contract tests
+
+`api/tests/storage/test_object_live_seaweedfs.py` exercises the load-bearing
+object-store assumptions (read-after-write on the pointer overwrite PUT,
+server-side CopyObject, multipart + prefix list, and the startup sweep) against a
+real endpoint. It is skipped unless `MCD_TEST_S3_ENDPOINT` is set, so `make check`
+and CI stay green without an S3 instance. To run it against a throwaway SeaweedFS:
+
+```sh
+docker run -d --name swfs-test -p 8333:8333 \
+  -e AK=testak -e SK=testsk --entrypoint sh chrislusf/seaweedfs:4.33 -c \
+  'mkdir -p /etc/seaweedfs && printf "{\"identities\":[{\"name\":\"t\",\"credentials\":[{\"accessKey\":\"%s\",\"secretKey\":\"%s\"}],\"actions\":[\"Admin\",\"Read\",\"Write\",\"List\",\"Tagging\"]}]}" "$AK" "$SK" > /etc/seaweedfs/s3.json && exec weed server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json'
+
+cd api && MCD_TEST_S3_ENDPOINT=http://localhost:8333 \
+  MCD_TEST_S3_ACCESS_KEY=testak MCD_TEST_S3_SECRET_KEY=testsk \
+  uv run pytest tests/storage/test_object_live_seaweedfs.py
+
+docker rm -f swfs-test
+```
+
+## 6. First-run bootstrap (create the platform admin)
 
 There is no seeded admin and **no manual database step**. The first user
 registered over HTTP on a fresh database automatically becomes the platform
@@ -220,7 +338,7 @@ worker outside Compose — as a bare-metal process or in a container launched by
 `--init` to `docker run`. Without an init, these grandchildren become zombies that
 accumulate until the worker process exits.
 
-## 6. How Minecraft server ports reach clients
+## 7. How Minecraft server ports reach clients
 
 The worker's container driver reads each server's `server.properties` and
 publishes its `server-port` (Minecraft default 25565) from the MC container to
@@ -307,7 +425,7 @@ Its handling depends on `driver.container.network` (env
 - **Unset** (bare-metal worker): RCON is published to the host loopback
   (`127.0.0.1`) and dialed there, the historical behavior.
 
-## 7. TLS guidance
+## 8. TLS guidance
 
 The in-compose deployment runs the control plane in plaintext on the private
 compose network: `api` sets `MCD_API_CONTROL__TLS__INSECURE=true` and `worker`
@@ -335,7 +453,7 @@ without first putting TLS on the listener:
 Mount the certificate, key, and CA files into the respective containers and point
 the variables at the in-container paths.
 
-## 8. Upgrade
+## 9. Upgrade
 
 Pull the new revision and rebuild; `migrate` re-runs `alembic upgrade head`
 before the new `api` starts, so the schema is brought current automatically:
@@ -357,6 +475,23 @@ git pull
 ./scripts/deploy_preflight.sh && docker compose up -d --build
 ```
 
+> **Breaking change — the default storage backend is now `object` (SeaweedFS).**
+> Before this revision the shipped default was the local-volume `fs` backend. The
+> `api` service now resolves `MCD_API_STORAGE__BACKEND` to `object` **unless your
+> `.env` pins it to `fs`**. An existing fs deployment that simply `git pull`s and
+> rebuilds will start the API against an **empty** SeaweedFS store — its servers,
+> snapshots, and backups live in the `api-storage` (fs) volume and do **not**
+> migrate automatically (Section 5 "data cutover" caveat). To keep your existing
+> fs data, pin the backend **before** rebuilding:
+>
+> ```sh
+> echo 'MCD_API_STORAGE__BACKEND=fs' >> .env
+> ```
+>
+> To deliberately adopt the object backend on an existing deployment, treat it as
+> a cutover: back up both volumes first, then expect an empty store until servers
+> are re-hydrated/re-created (Section 5).
+
 Stacks that were first deployed before the `api` image pre-created the storage
 mount point have an `api-storage` volume owned by root, so the non-root app
 (uid 10001) cannot write to it. Fix the ownership once, then bring the stack up:
@@ -369,19 +504,29 @@ docker run --rm -v mc-server-dashboard-v2_api-storage:/fix \
 (The volume name is `<project>_api-storage`; `docker volume ls` shows the exact
 names for your project directory.)
 
-## 9. Backups
+## 10. Backups
 
 Two pieces of persistent state matter, both Docker named volumes:
 
 - `db-data` — the PostgreSQL data (all metadata).
-- `api-storage` — the authoritative file storage (`MCD_API_STORAGE__FS__ROOT`),
-  including server files, backups, and snapshots.
+- The storage volume holding server files, backups, and snapshots — which volume
+  depends on the active backend (Section 5): `seaweedfs-data` for the default
+  `object` backend, or `api-storage` for the `fs` backend
+  (`MCD_API_STORAGE__FS__ROOT`).
 
-Back up the database with a logical dump and archive the storage volume. For
-example:
+Back up the database with a logical dump and archive the storage volume. For the
+default object backend:
 
 ```sh
 docker compose exec db pg_dump -U mcsd -d mcsd > backup-db.sql
+docker run --rm -v mc-server-dashboard-v2_seaweedfs-data:/data \
+  -v "$PWD":/backup debian:bookworm-slim \
+  tar czf /backup/backup-storage.tar.gz -C /data .
+```
+
+For the `fs` backend, archive the `api-storage` volume instead:
+
+```sh
 docker run --rm -v mc-server-dashboard-v2_api-storage:/data \
   -v "$PWD":/backup debian:bookworm-slim \
   tar czf /backup/backup-storage.tar.gz -C /data .
@@ -392,7 +537,7 @@ names for your project directory.) The worker scratch dir
 (`MCSD_SCRATCH_DIR`) is a working set rebuilt from the API on demand and does not
 need backing up beyond the persisted `worker-id`.
 
-## 10. Server export / import (ZIP)
+## 11. Server export / import (ZIP)
 
 A whole server moves in and out as a single ZIP archive:
 

@@ -4,7 +4,7 @@
 #
 # The primary checkout is the deploy build source -- `docker compose` builds it
 # from compose.yaml + .env at the repo root (docs/dev/DEPLOYMENT.md Sections 4
-# and 8). Agent sessions have repeatedly left it off `main` (#432), so a rebuild
+# and 9). Agent sessions have repeatedly left it off `main` (#432), so a rebuild
 # would silently ship a stray branch or detached HEAD. Run this before any
 # `docker compose up -d --build`; it refuses (exit 1) when the checkout is not on
 # `main` or the working tree is dirty.

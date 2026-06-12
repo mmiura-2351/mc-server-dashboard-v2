@@ -445,11 +445,21 @@ via `AbortMultipartUpload`. Both reclaim paths apply an **mtime / `Initiated` ag
 threshold** (1 h): a spool or upload younger than the threshold may belong to a
 live write still in flight, so it is left alone — mirroring the `incoming/`
 lease-guard discipline (#183) and keeping the sweep safe even if it ever runs
-periodically rather than only at startup (Section 8.5). If the object store does not
-support `ListMultipartUploads` (SeaweedFS support varies by build), the sweep
-logs a WARN advising an `AbortIncompleteMultipartUpload` bucket lifecycle rule
-and continues the rest of the sweep — orphan-part hygiene degrades to the
-lifecycle rule rather than failing recovery.
+periodically rather than only at startup (Section 8.5).
+
+`Initiated` is **optional** in the S3 `ListMultipartUploads` response, and
+SeaweedFS 4.33 omits it. When it is absent the adapter age-gates the upload by
+its parts instead: `ListParts` returns a per-part `LastModified` (SeaweedFS does
+supply this), and the newest part's timestamp stands in for `Initiated` — so a
+genuine crash-orphan with parts is still reclaimed on SeaweedFS, not only on real
+S3/MinIO. An upload with **zero parts** and no `Initiated` (a crash between
+`CreateMultipartUpload` and the first `UploadPart`) has no timestamp to read and
+is conservatively treated as just-started, so the sweep never aborts it; that
+residual micro-gap holds no part bytes and is left to the operator-side
+`weed shell s3.clean.uploads` (Section 7.3 / DEPLOYMENT.md). If the object store
+does not support `ListMultipartUploads` at all (build-dependent), the sweep logs
+a WARN and continues the rest of the sweep — orphan-part hygiene degrades rather
+than failing recovery.
 
 ### 4.4 Single-file writes
 
@@ -743,6 +753,22 @@ differ**, and #16 selects between them explicitly. Config: set
 | Garbage collection | Orphaned prefixes (from aborted/crashed publishes, or old prefixes after a flip) are reclaimed by a sweep keyed off the live pointer (Section 4.3). |
 | Best for | Decoupling the authoritative store from any host filesystem; durability/scale beyond local disk. |
 | Caveat | No atomic multi-object rename and no real directories — hence the pointer-flip design. List operations are prefix scans. |
+
+**Shipped deployment (issue #702).** This is the **default** backend for the
+compose deployment, realized over **SeaweedFS** (Apache-2.0, master/volume,
+designed for many small files). The deployment wiring, credentials, opt-out, and
+the live contract tests are in
+[DEPLOYMENT.md Section 5](../dev/DEPLOYMENT.md#5-storage-backend-object-on-seaweedfs-default).
+The app implements its own snapshot/version logic, so S3 versioning / object-lock
+are not required. Orphan multipart reclamation likewise does **not** depend on a
+bucket lifecycle rule: the startup sweep age-gates uploads via `ListParts` when
+SeaweedFS omits `Initiated` (Section 4.3), and `weed shell s3.clean.uploads` is
+the optional SeaweedFS-native backstop. The hot
+path is **CopyObject-heavy and small-object-heavy** — each publish server-side
+copies every world file into a fresh prefix and uploads members via multipart — so
+operating cost/latency scale with **operation count** (files × snapshot
+frequency), not stored size or egress; keep the snapshot interval coarse enough
+that a publish completes well within it.
 
 ### 7.4 Why backend switching stays a configuration change
 

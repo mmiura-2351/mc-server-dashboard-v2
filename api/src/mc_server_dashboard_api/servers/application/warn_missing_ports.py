@@ -7,7 +7,7 @@ auto-assignment can hand a new server the host port a legacy server already bind
 
 :class:`WarnLegacyMissingPorts` makes that gap discoverable: run once on API
 startup, it WARN-logs the count and ids of every server with no tracked port, so
-an operator can backfill them (the manual SQL in DEPLOYMENT.md Section 6, or the
+an operator can backfill them (the manual SQL in DEPLOYMENT.md Section 7, or the
 update-port API). It is read-only and informational — it never mutates a row.
 """
 

@@ -15,6 +15,7 @@ adapter's per-operation ``client_factory()`` usage.
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -154,13 +155,22 @@ class _Aioboto3S3Client:
         try:
             async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
                 for entry in page.get("Uploads", []):
+                    key = entry["Key"]
+                    upload_id = entry["UploadId"]
                     # ``Initiated`` is a timezone-aware datetime (UTC); the sweep's
-                    # age threshold reads it through S3MultipartUpload.
+                    # age threshold reads it through S3MultipartUpload. It is OPTIONAL
+                    # in the S3 ListMultipartUploads response and SeaweedFS 4.33 omits
+                    # it (issue #702/#934 validation), so reading it unconditionally
+                    # would crash the startup sweep. Real S3/MinIO supply it; when it
+                    # is absent, derive an effective age from the upload's parts
+                    # (below) so orphan reclamation stays LIVE on SeaweedFS rather
+                    # than relying on an unenforced lifecycle rule.
+                    initiated = entry.get("Initiated")
+                    if initiated is None:
+                        initiated = await self._effective_initiated(key, upload_id)
                     out.append(
                         S3MultipartUpload(
-                            key=entry["Key"],
-                            upload_id=entry["UploadId"],
-                            initiated=entry["Initiated"],
+                            key=key, upload_id=upload_id, initiated=initiated
                         )
                     )
         except ClientError as exc:
@@ -170,6 +180,41 @@ class _Aioboto3S3Client:
                 ) from exc
             raise
         return out
+
+    async def _effective_initiated(self, key: str, upload_id: str) -> dt.datetime:
+        # SeaweedFS omits ``Initiated`` from ListMultipartUploads but does return a
+        # per-part ``LastModified`` from ListParts (verified against 4.33). Use the
+        # NEWEST part's LastModified as the upload's effective initiation time so the
+        # sweep's age guard aborts a genuine crash-orphan while never touching a still
+        # actively-progressing upload (its newest part is recent).
+        #
+        # A just-initiated upload with ZERO parts has no LastModified to read; treat
+        # that conservatively as "now" so it is never aborted. Residual micro-gap: an
+        # upload that crashes after CreateMultipartUpload but before its first
+        # UploadPart has no parts and no Initiated, so the sweep never reclaims it.
+        # Such an entry holds no part bytes; ``weed shell s3.clean.uploads`` is the
+        # SeaweedFS-native operator backstop for that case.
+        paginator = self._client.get_paginator("list_parts")
+        newest: dt.datetime | None = None
+        try:
+            async for page in paginator.paginate(
+                Bucket=self._bucket, Key=key, UploadId=upload_id
+            ):
+                for part in page.get("Parts", []):
+                    last_modified = part.get("LastModified")
+                    if last_modified is not None and (
+                        newest is None or last_modified > newest
+                    ):
+                        newest = last_modified
+        except ClientError as exc:
+            # The upload completed/aborted between ListMultipartUploads and this
+            # ListParts: real S3 raises NoSuchUpload. Treat it as "now" so the
+            # vanished upload is never aborted this sweep, rather than letting the
+            # error crash the startup sweep — mirroring abort's idempotent handling.
+            if _is_no_such_upload(exc):
+                return dt.datetime.now(dt.UTC)
+            raise
+        return newest if newest is not None else dt.datetime.now(dt.UTC)
 
     async def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         # Idempotent (issue #916): real S3/MinIO raise NoSuchUpload for an already

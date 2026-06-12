@@ -9,6 +9,9 @@ the production code translates.
 
 from __future__ import annotations
 
+import datetime as dt
+from collections.abc import AsyncIterator
+
 import pytest
 from botocore.exceptions import ClientError
 
@@ -17,6 +20,72 @@ from mc_server_dashboard_api.storage.adapters.object_client import _Aioboto3S3Cl
 
 def _client_error(code: str) -> ClientError:
     return ClientError({"Error": {"Code": code}}, "AbortMultipartUpload")
+
+
+class _PagesPaginator:
+    """A botocore-paginator double yielding one page with a fixed key/value."""
+
+    def __init__(self, page_key: str, items: list[dict[str, object]]) -> None:
+        self._page_key = page_key
+        self._items = items
+
+    async def _pages(self) -> AsyncIterator[dict[str, object]]:
+        yield {self._page_key: self._items}
+
+    def paginate(self, **_kwargs: object) -> AsyncIterator[dict[str, object]]:
+        return self._pages()
+
+
+class _ListUploadsClient:
+    """An aioboto3-client double serving ListMultipartUploads + ListParts pages.
+
+    ``parts`` maps an upload id to its ListParts entries so the missing-``Initiated``
+    path (SeaweedFS) can be exercised: the adapter falls back to the newest part's
+    ``LastModified`` to age-gate the upload.
+    """
+
+    def __init__(
+        self,
+        uploads: list[dict[str, object]],
+        parts: dict[str, list[dict[str, object]]] | None = None,
+    ) -> None:
+        self._uploads = uploads
+        self._parts = parts or {}
+
+    def get_paginator(self, name: str) -> _PagesPaginator:
+        if name == "list_parts":
+            # The double serves one upload at a time in these tests; return its parts.
+            entries = next(iter(self._parts.values()), [])
+            return _PagesPaginator("Parts", entries)
+        return _PagesPaginator("Uploads", self._uploads)
+
+
+class _RaisingPartsClient:
+    """A double whose ListMultipartUploads omits ``Initiated`` and whose ListParts
+    raises a set code, simulating the upload vanishing between the two calls."""
+
+    def __init__(self, uploads: list[dict[str, object]], code: str) -> None:
+        self._uploads = uploads
+        self._code = code
+
+    def get_paginator(self, name: str) -> _PagesPaginator | _RaisingPaginator:
+        if name == "list_parts":
+            return _RaisingPaginator(self._code)
+        return _PagesPaginator("Uploads", self._uploads)
+
+
+class _RaisingPaginator:
+    """A paginator double that raises a ``ClientError`` when iterated."""
+
+    def __init__(self, code: str) -> None:
+        self._code = code
+
+    async def _pages(self) -> AsyncIterator[dict[str, object]]:
+        raise _client_error(self._code)
+        yield {}  # unreachable; makes this an async generator
+
+    def paginate(self, **_kwargs: object) -> AsyncIterator[dict[str, object]]:
+        return self._pages()
 
 
 class _RaisingAbortClient:
@@ -52,3 +121,88 @@ async def test_abort_multipart_upload_reraises_other_client_errors() -> None:
 
     with pytest.raises(ClientError):
         await client.abort_multipart_upload("jars/x.jar", "live")
+
+
+async def test_list_multipart_uploads_reads_initiated_when_present() -> None:
+    # The S3 ``Initiated`` timestamp drives the sweep's age threshold; when the
+    # backend supplies it, it is read verbatim (issue #903).
+    initiated = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    client = _Aioboto3S3Client(
+        _ListUploadsClient(
+            [{"Key": "communities/k", "UploadId": "u", "Initiated": initiated}]
+        ),
+        "bucket",
+    )
+
+    uploads = await client.list_multipart_uploads("communities/")
+
+    assert len(uploads) == 1
+    assert uploads[0].initiated == initiated
+
+
+async def test_list_multipart_uploads_ages_via_parts_when_initiated_missing() -> None:
+    # SeaweedFS (issue #702/#934 validation) returns ListMultipartUploads entries
+    # WITHOUT the optional ``Initiated`` field but DOES return per-part
+    # ``LastModified`` from ListParts. The adapter must age-gate the upload by the
+    # NEWEST part's LastModified so an old crash-orphan is still reclaimed by the
+    # sweep on SeaweedFS, rather than relying on an unenforced lifecycle rule.
+    older = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    newest = dt.datetime(2026, 1, 2, tzinfo=dt.UTC)
+    client = _Aioboto3S3Client(
+        _ListUploadsClient(
+            [{"Key": "communities/k", "UploadId": "u"}],
+            parts={
+                "u": [
+                    {"PartNumber": 1, "LastModified": older},
+                    {"PartNumber": 2, "LastModified": newest},
+                ]
+            },
+        ),
+        "bucket",
+    )
+
+    uploads = await client.list_multipart_uploads("communities/")
+
+    assert len(uploads) == 1
+    assert uploads[0].initiated == newest
+
+
+async def test_list_multipart_uploads_zero_parts_no_initiated_treated_as_now() -> None:
+    # The conservative edge: a just-initiated SeaweedFS upload with ZERO parts has no
+    # ``Initiated`` AND no part ``LastModified`` to read. It is treated as "now" so
+    # the sweep's age guard never aborts a possibly-live just-started upload. This
+    # leaves a documented residual micro-gap (a crash before the first UploadPart is
+    # not reclaimed by the sweep; ``weed shell s3.clean.uploads`` is the backstop).
+    before = dt.datetime.now(dt.UTC)
+    client = _Aioboto3S3Client(
+        _ListUploadsClient(
+            [{"Key": "communities/k", "UploadId": "u"}], parts={"u": []}
+        ),
+        "bucket",
+    )
+
+    uploads = await client.list_multipart_uploads("communities/")
+
+    assert len(uploads) == 1
+    assert uploads[0].initiated.tzinfo is not None
+    assert uploads[0].initiated >= before
+
+
+async def test_list_multipart_uploads_survives_parts_no_such_upload_race() -> None:
+    # Defense-in-depth: an upload listed by ListMultipartUploads can complete or abort
+    # before the missing-``Initiated`` fallback issues ListParts, on which real S3
+    # raises NoSuchUpload. That must NOT crash the startup sweep — the vanished upload
+    # is treated as "now" (never aborted this sweep) rather than letting the error
+    # propagate, mirroring abort's idempotent NoSuchUpload handling.
+    before = dt.datetime.now(dt.UTC)
+    client = _Aioboto3S3Client(
+        _RaisingPartsClient(
+            [{"Key": "communities/k", "UploadId": "u"}], "NoSuchUpload"
+        ),
+        "bucket",
+    )
+
+    uploads = await client.list_multipart_uploads("communities/")
+
+    assert len(uploads) == 1
+    assert uploads[0].initiated >= before
