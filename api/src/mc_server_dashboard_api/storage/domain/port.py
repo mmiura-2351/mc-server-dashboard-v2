@@ -158,7 +158,6 @@ class WorkingSetStore(abc.ABC):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
-        live: bool = False,
     ) -> int:
         """Atomically publish the staged snapshot, returning the new generation.
 
@@ -203,18 +202,15 @@ class WorkingSetStore(abc.ABC):
         that never hydrated, or an older Worker that sends no base) skips the
         re-check, matching the pre-stream guard's backward-compatible posture.
 
-        ``live`` selects the running-server region check (issue #923). MC 26.x pads
-        region files only on shutdown, so a RUNNING server's periodic snapshot
-        legitimately carries a non-4096-aligned tail; the data plane passes
-        ``live=True`` when the publishing Worker declares ``X-Snapshot-Source:
-        running`` so the content-integrity gate applies the byte-precise region rule
-        instead of refusing every periodic snapshot. ``False`` (the default, and a
-        stopped/at-rest source) keeps the strict 4096-aligned rule. Strict thus
-        applies only at this stopped-source boundary; the store/archive consumers
-        (backup create/restore, the per-store health checks, the sweep CLI) do not
-        call ``commit_snapshot`` and run their own region checks live, because once a
-        running-server snapshot is published the at-rest store legitimately holds
-        unpadded regions. See the STORAGE.md Section 8 mode table.
+        The content-integrity gate uses the single region rule set (issue #927): a
+        non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear,
+        on every source — running OR stopped. The earlier source-keyed strict/live
+        split (issue #923) relied on a ``stopped => 4096-padded`` invariant that does
+        not survive a sweep-stop timeout, SIGKILL, OOM, or crash, so strict would
+        refuse the stop-leg checkpoint exactly when it is the last chance to capture
+        the world. The byte-precise check still catches realistic tears (a referenced
+        chunk overrunning EOF, an entry past EOF, a severed prefix). See the STORAGE.md
+        Section 8 region-rule note.
         """
 
     @abc.abstractmethod

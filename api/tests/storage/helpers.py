@@ -139,25 +139,27 @@ def healthy_region_bytes() -> bytes:
 
 
 def corrupt_region_bytes() -> bytes:
-    """A structurally corrupt ``.mca`` region: size not a multiple of 4096.
+    """A structurally corrupt ``.mca`` region: a non-zero size below the two header
+    sectors.
 
-    Models the crash-during-save truncation reproduced in #703 — a torn region
-    whose byte length is not 4096-aligned, which the integrity walker (#738) flags
-    as ``not_4096_aligned``. The publish/backup integrity gate must refuse a working
-    set containing it.
+    Models the crash-during-save truncation reproduced in #703 — a torn region too
+    short to hold both header tables, which the integrity walker (#738) flags as
+    ``not_4096_aligned`` (the only alignment-derived verdict left after #927: a
+    merely non-4096-aligned size is the normal unpadded tail, no longer corruption).
+    The publish/backup integrity gate must refuse a working set containing it.
     """
 
-    return bytes(2 * 4096 + 17)
+    return bytes(4096 + 17)
 
 
 def mode_invariant_corrupt_region_bytes() -> bytes:
-    """A region that is structurally corrupt in BOTH the strict and live modes.
+    """A region the single rule set still flags as corrupt at every gate (#927).
 
-    ``corrupt_region_bytes`` relies on a non-4096-aligned size, which the LIVE rule
-    deliberately accepts (a running 26.x world's unpadded tail). The at-rest restore
-    gate now runs LIVE (issue #923), so a restore-corruption test needs a tear the
-    live rule still catches: a 3-sector aligned region whose location entry points to
-    sector 4 — past EOF — which is ``sector_out_of_bounds`` regardless of mode.
+    A merely non-4096-aligned size is the normal unpadded tail (accepted), so a
+    gate-corruption test needs a real tear: a 3-sector aligned region whose location
+    entry points to sector 4 — past EOF — which is ``sector_out_of_bounds``. The name
+    is retained for the tests that already reference it; "mode invariant" now means
+    "corrupt under the one rule set everywhere", not "corrupt in both former modes".
     """
 
     image = bytearray(3 * 4096)
@@ -166,13 +168,13 @@ def mode_invariant_corrupt_region_bytes() -> bytes:
 
 
 def unaligned_live_region_bytes(tail: int = 459) -> bytes:
-    """A region with the legitimate UNPADDED tail of a live MC 26.x world (#923).
+    """A region with the legitimate UNPADDED tail of a 26.x world (#923/#927).
 
     Two header sectors plus one chunk in sector 2 whose data ends ``tail`` bytes into
     sector 2 (``tail`` < 4096), so the file size is NOT a multiple of 4096 but the
-    trailing chunk fits byte-precisely. The LIVE region check accepts it; the STRICT
-    check flags ``not_4096_aligned``. Used to commit a running-source snapshot into
-    the store and assert the at-rest consumers (backup/restore/sweep) tolerate it.
+    trailing chunk fits byte-precisely. The single region rule set (#927) accepts it
+    at every gate. Used to commit such a snapshot into the store and assert the
+    publish gate and the at-rest consumers (backup/restore/sweep) tolerate it.
     """
 
     offset = 2

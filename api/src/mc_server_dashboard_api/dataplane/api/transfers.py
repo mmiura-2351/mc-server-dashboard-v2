@@ -97,20 +97,6 @@ _BASE_GENERATION_HEADER = "X-Working-Set-Base-Generation"
 # (datatransfer.go).
 _WORKER_ID_HEADER = "X-Worker-Id"
 
-# The REQUEST header declaring the SOURCE of the snapshot (issue #923): "running"
-# for a live server's periodic snapshot, anything else (incl. absent) for a
-# stopped/at-rest one. MC 26.x pads region files to a sector boundary only on
-# shutdown, so a RUNNING world's regions legitimately carry a non-4096-aligned tail;
-# the content-integrity gate refuses every periodic snapshot under the strict rule.
-# When the source is "running" the publish applies the live (byte-precise) region
-# check. The data plane already trusts the Worker for the snapshot CONTENT (shared
-# credential, the whole tar is its bytes), so trusting this one structural-mode
-# signal adds no new trust surface; an absent/other value defaults to strict, so the
-# header is backward-compatible. Mirrors the constant the Worker sends
-# (datatransfer.go).
-_SNAPSHOT_SOURCE_HEADER = "X-Snapshot-Source"
-_SNAPSHOT_SOURCE_RUNNING = "running"
-
 router = APIRouter(prefix="/data-plane")
 
 _logger = logging.getLogger(__name__)
@@ -306,9 +292,6 @@ async def publish_snapshot(
         int | None, Header(alias=_BASE_GENERATION_HEADER)
     ] = None,
     publisher: Annotated[str | None, Header(alias=_WORKER_ID_HEADER)] = None,
-    snapshot_source: Annotated[
-        str | None, Header(alias=_SNAPSHOT_SOURCE_HEADER)
-    ] = None,
 ) -> None:
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
 
@@ -355,16 +338,14 @@ async def publish_snapshot(
     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
     start — the same convergence as the pre-stream refusal.
 
-    The ``X-Snapshot-Source`` header (issue #923) selects the content-integrity
-    region rule. MC 26.x pads region files to a sector boundary only on shutdown, so
-    a RUNNING server's periodic snapshot legitimately carries a non-4096-aligned
-    tail; under the strict rule the gate would refuse EVERY periodic snapshot and a
-    running server would never be checkpointed (crash loses all progression since the
-    last graceful stop). When the Worker declares ``running`` the commit applies the
-    live (byte-precise) region check; any other value (incl. absent, an older Worker
-    or the stopped/at-rest final snapshot) keeps the strict 4096-aligned rule. The
-    Worker is already trusted for the snapshot CONTENT, so this mode signal adds no
-    new trust surface.
+    The content-integrity gate uses the single region rule set (issue #927): a
+    non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
+    every snapshot source. The earlier source-keyed strict/live split (issue #923)
+    relied on a ``stopped => 4096-padded`` invariant that does not survive a
+    sweep-stop timeout, SIGKILL, OOM, or crash — so the strict rule refused the
+    stop-leg checkpoint exactly when it is the last chance to capture the world. The
+    byte-precise check still catches realistic tears (a referenced chunk overrunning
+    EOF, an entry past EOF, a severed prefix).
     """
 
     if content_length is None:
@@ -433,7 +414,6 @@ async def publish_snapshot(
             handle,
             publisher=publisher,
             expected_base=expected_base,
-            live=snapshot_source == _SNAPSHOT_SOURCE_RUNNING,
         )
         # Stamp the new authoritative generation on the response (issue #763): the
         # Worker records the header as the generation its scratch is now at (the

@@ -51,19 +51,17 @@ class StorageHarness:
         community: CommunityId,
         server: ServerId,
         files: dict[str, bytes],
-        *,
-        live: bool = False,
     ) -> None:
         """Stage ``files`` as a snapshot and publish it (the common arrange step).
 
-        ``live=True`` commits with the running-source region rule (issue #923) so a
-        legitimate unpadded working set lands in the store, as a running 26.x server's
-        periodic snapshot does through the publish gate.
+        The publish gate uses the single region rule set (issue #927), so a legitimate
+        unpadded working set lands in the store regardless of source — there is no
+        mode flag to pass.
         """
 
         handle = await self.storage.begin_snapshot(community, server)
         await self.storage.write_snapshot(handle, tar_stream(files))
-        await self.storage.commit_snapshot(handle, live=live)
+        await self.storage.commit_snapshot(handle)
 
     async def sweep(self) -> None:
         await self._sweep()

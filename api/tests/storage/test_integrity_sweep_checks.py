@@ -133,11 +133,11 @@ async def test_check_backup_health_leases_staging_during_fsck(
 
     leased_during_fsck: list[bool] = []
 
-    def _spy(staging: Path, *, live: bool = False) -> WorkingSetReport:
+    def _spy(staging: Path) -> WorkingSetReport:
         # The extracted staging must be pinned at the moment it is being scanned, so a
         # concurrent sweep would skip it (issue #183).
         leased_during_fsck.append(storage._is_staging_active(staging))
-        return check_working_set(staging, live=live)
+        return check_working_set(staging)
 
     monkeypatch.setattr(fs_module, "check_working_set", _spy)
 

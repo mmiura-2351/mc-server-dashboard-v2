@@ -68,7 +68,7 @@ func (t *gatedTransfer) Hydrate(_ context.Context, _, _, _ string) (uint64, erro
 	return 0, nil
 }
 
-func (t *gatedTransfer) Snapshot(_ context.Context, _, _, _ string, _ uint64, _ string, _ bool) (uint64, error) {
+func (t *gatedTransfer) Snapshot(_ context.Context, _, _, _ string, _ uint64, _ string) (uint64, error) {
 	return 0, nil
 }
 

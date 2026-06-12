@@ -1,9 +1,11 @@
 package containerdriver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
@@ -1202,10 +1204,21 @@ func TestStopRCONPhaseBudgetPreservesEscalationGrace(t *testing.T) {
 }
 
 // When the container ignores docker stop past the timeout, the driver escalates
-// to docker kill.
+// to docker kill and logs the escalation at WARN with the server id (issue #927):
+// a stop timeout can leave the world's regions unpadded for the stop-leg snapshot,
+// so the escalation must be diagnosable.
 func TestGracefulStopEscalatesToKill(t *testing.T) {
+	var buf syncBuffer
 	docker := newFakeDocker()
-	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("rcon dial failed")
+	}, Options{
+		WorkerID:         "w1",
+		StopTimeout:      50 * time.Millisecond,
+		GameBindIP:       "0.0.0.0",
+		ReadinessTimeout: 20 * time.Millisecond,
+		Logger:           slog.New(slog.NewTextHandler(&buf, nil)),
+	})
 	// docker stop does not exit the container; only kill does.
 	docker.stopNoExit = true
 
@@ -1222,6 +1235,30 @@ func TestGracefulStopEscalatesToKill(t *testing.T) {
 	if !docker.killWasCalled() {
 		t.Fatal("expected docker kill escalation")
 	}
+	logged := buf.String()
+	if !strings.Contains(logged, "graceful stop timed out; escalating to kill") ||
+		!strings.Contains(logged, spec().ServerID) {
+		t.Fatalf("expected a WARN escalation log naming the server id; got %q", logged)
+	}
+}
+
+// syncBuffer is a concurrency-safe bytes.Buffer for capturing slog output (the
+// stop escalation may log from a detached goroutine).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // When docker kill fails to terminate the container, the post-Kill waitExit times

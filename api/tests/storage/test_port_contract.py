@@ -460,13 +460,13 @@ async def test_commit_publishes_a_structurally_healthy_region(
 async def test_running_source_publish_then_backup_create_succeeds(
     harness: StorageHarness,
 ) -> None:
-    """After a running-source (live) commit lands an unpadded set in the store, the
-    at-rest backup-create gate must NOT refuse it (issue #923).
+    """After a commit lands an unpadded set in the store, the at-rest backup-create
+    gate must NOT refuse it (issue #923/#927).
 
-    A running 26.x server's working set legitimately carries an unpadded tail. Its
-    content was gated at publish time, so creating a backup of it must succeed —
-    pre-fix the strict create gate raised ``IntegrityCheckError(not_4096_aligned)``,
-    making backups of running servers fail deterministically.
+    A 26.x server's working set legitimately carries an unpadded tail. Its content was
+    gated at publish time, so creating a backup of it must succeed — pre-fix the strict
+    create gate raised ``IntegrityCheckError(not_4096_aligned)``, making backups of
+    running servers fail deterministically.
     """
 
     community, server = new_scope()
@@ -474,7 +474,6 @@ async def test_running_source_publish_then_backup_create_succeeds(
         community,
         server,
         {"world/region/r.0.0.mca": unaligned_live_region_bytes()},
-        live=True,
     )
 
     key = await harness.storage.create_backup_from_current(community, server)
@@ -485,10 +484,10 @@ async def test_sweep_does_not_quarantine_a_live_format_snapshot(
     harness: StorageHarness,
 ) -> None:
     """The integrity-sweep snapshot fsck must report a live-format (unpadded) store
-    as healthy, not quarantine it (issue #923).
+    as healthy, not quarantine it (issue #923/#927).
 
     Pre-fix ``check_current_health`` applied the strict rule to ``current/``, so a
-    perfectly healthy running-source snapshot produced a false ``SNAPSHOT_QUARANTINE``.
+    perfectly healthy unpadded snapshot produced a false ``SNAPSHOT_QUARANTINE``.
     """
 
     community, server = new_scope()
@@ -496,7 +495,6 @@ async def test_sweep_does_not_quarantine_a_live_format_snapshot(
         community,
         server,
         {"world/region/r.0.0.mca": unaligned_live_region_bytes()},
-        live=True,
     )
 
     report = await harness.storage.check_current_health(community, server)
@@ -507,11 +505,11 @@ async def test_restore_of_a_live_format_archive_succeeds(
     harness: StorageHarness,
 ) -> None:
     """A backup created from a live-format ``current/`` is itself unpadded, so the
-    restore-direction gate must tolerate it and republish it (issue #923)."""
+    restore-direction gate must tolerate it and republish it (issue #923/#927)."""
 
     community, server = new_scope()
     original = {"world/region/r.0.0.mca": unaligned_live_region_bytes()}
-    await harness.publish(community, server, original, live=True)
+    await harness.publish(community, server, original)
     key = await harness.storage.create_backup_from_current(community, server)
 
     # Advance current to a different (aligned) set, then restore the live-format

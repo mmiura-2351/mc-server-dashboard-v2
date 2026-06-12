@@ -741,11 +741,12 @@ def test_snapshot_corrupt_region_is_refused_with_machine_readable_reason(
     asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
 
     # A byte-complete upload (clears the length gate) whose ``.mca`` is structurally
-    # corrupt — size not a multiple of 4096, modelling a crash-during-save
-    # truncation (#703). The content-integrity gate (#739) must refuse the publish
-    # with a non-2xx and a machine-readable reason, and leave the prior snapshot.
-    corrupt_mca = bytes(2 * 4096 + 17)
-    body = _tar_bytes({"world/region/r.0.0.mca": corrupt_mca})
+    # corrupt — a location entry past EOF, modelling a crash-during-save tear (#703).
+    # The content-integrity gate (#739) must refuse the publish with a non-2xx and a
+    # machine-readable reason, and leave the prior snapshot. (A merely non-4096-aligned
+    # size is the normal unpadded tail under the single rule set, no longer corruption
+    # — issue #927 — so the fixture must be a real tear.)
+    body = _tar_bytes({"world/region/r.0.0.mca": _corrupt_mca()})
     with client:
         resp = client.post(
             _url(community, server, "snapshot"), content=body, headers=_auth()
@@ -770,10 +771,10 @@ def test_snapshot_corrupt_region_is_refused_with_machine_readable_reason(
 
 
 def _unaligned_live_mca(tail: int = 459) -> bytes:
-    """A region with the legitimate UNPADDED tail of a live MC 26.x world (#923):
-    an 8 KiB header plus one chunk in sector 2 ending ``tail`` bytes in, so the size
-    is not a 4096 multiple but the trailing chunk fits byte-precisely. Strict mode
-    flags ``not_4096_aligned``; live mode is healthy."""
+    """A region with the legitimate UNPADDED tail of a 26.x world (#923/#927): an
+    8 KiB header plus one chunk in sector 2 ending ``tail`` bytes in, so the size is
+    not a 4096 multiple but the trailing chunk fits byte-precisely. The single rule
+    set accepts it at every gate."""
     offset = 2
     size = offset * 4096 + tail
     image = bytearray(size)
@@ -785,14 +786,22 @@ def _unaligned_live_mca(tail: int = 459) -> bytes:
     return bytes(image)
 
 
-def test_snapshot_running_source_publishes_unaligned_live_working_set(
+def _corrupt_mca() -> bytes:
+    """A genuinely torn region: a 3-sector aligned file whose location entry points
+    past EOF (sector_out_of_bounds). The single rule set refuses it at every gate
+    (issue #927)."""
+    image = bytearray(3 * 4096)
+    image[0:4] = (4).to_bytes(3, "big") + bytes([1])  # offset 4, count 1: past EOF.
+    return bytes(image)
+
+
+def test_snapshot_publishes_unaligned_working_set_without_source_header(
     tmp_path: Path,
 ) -> None:
-    # A running server's periodic snapshot (X-Snapshot-Source: running) over a
-    # working set whose region has the legitimate unpadded tail of a live 26.x world
-    # must PUBLISH: the content-integrity gate applies the live (byte-precise) region
-    # rule for a running source (issue #923). Without this the gate refuses every
-    # periodic snapshot and a running server is never checkpointed.
+    # The #927 acceptance case: a working set whose region has the legitimate unpadded
+    # tail of a 26.x world must PUBLISH with NO X-Snapshot-Source header at all (the
+    # mode header is removed end-to-end). This is exactly the stop-leg checkpoint the
+    # old strict rule refused after a sweep-stop timeout / SIGKILL / crash.
     client, storage = _setup(tmp_path)
     community, server = _scope()
     body = _tar_bytes({"world/region/r.0.0.mca": _unaligned_live_mca()})
@@ -800,7 +809,7 @@ def test_snapshot_running_source_publishes_unaligned_live_working_set(
         resp = client.post(
             _url(community, server, "snapshot"),
             content=body,
-            headers={**_auth(), "X-Snapshot-Source": "running"},
+            headers=_auth(),
         )
     assert resp.status_code == 204
 
@@ -818,16 +827,15 @@ def test_snapshot_running_source_publishes_unaligned_live_working_set(
     assert "world/region/r.0.0.mca" in _read_tar(published)
 
 
-def test_snapshot_absent_source_refuses_unaligned_working_set(tmp_path: Path) -> None:
-    # The SAME unaligned working set with NO X-Snapshot-Source header (a stopped/
-    # at-rest publish, or an older Worker) stays STRICT: a stopped 26.x world is
-    # padded, so a non-4096-aligned region there is a real torn save and the gate
-    # refuses it (issue #923). Proves the header defaults to strict.
+def test_snapshot_refuses_genuinely_corrupt_working_set(tmp_path: Path) -> None:
+    # A genuinely torn region (location entry past EOF) is still refused by the
+    # content-integrity gate (issue #927: the single rule set's byte-precise check
+    # catches realistic tears), and current/ keeps the prior good snapshot.
     client, storage = _setup(tmp_path)
     community, server = _scope()
     asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
 
-    body = _tar_bytes({"world/region/r.0.0.mca": _unaligned_live_mca()})
+    body = _tar_bytes({"world/region/r.0.0.mca": _corrupt_mca()})
     with client:
         resp = client.post(
             _url(community, server, "snapshot"), content=body, headers=_auth()
@@ -847,23 +855,6 @@ def test_snapshot_absent_source_refuses_unaligned_working_set(tmp_path: Path) ->
 
     published = asyncio.run(_read())
     assert _read_tar(published) == {"keep.txt": b"prior"}
-
-
-def test_snapshot_stopped_source_refuses_unaligned_working_set(tmp_path: Path) -> None:
-    # An explicit X-Snapshot-Source: stopped is also strict (only "running" relaxes).
-    client, storage = _setup(tmp_path)
-    community, server = _scope()
-    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
-
-    body = _tar_bytes({"world/region/r.0.0.mca": _unaligned_live_mca()})
-    with client:
-        resp = client.post(
-            _url(community, server, "snapshot"),
-            content=body,
-            headers={**_auth(), "X-Snapshot-Source": "stopped"},
-        )
-    assert resp.status_code == 422
-    assert resp.json()["reason"] == "working_set_corrupt"
 
 
 def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(

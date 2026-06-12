@@ -402,7 +402,6 @@ class FsStorage(Storage):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
-        live: bool = False,
     ) -> int:
         fs_handle = _as_fs_handle(handle)
         if fs_handle.consumed:
@@ -426,10 +425,10 @@ class FsStorage(Storage):
         # files (issue #738). Fail-closed — any corrupt region refuses the publish:
         # clean the staging area (mirroring abort) and raise. The ``current`` symlink
         # is never touched, so the prior good snapshot is retained automatically
-        # (last-known-good, #703). ``live`` (issue #923) applies the running-server
-        # region rule when the snapshot source is a live server: MC 26.x pads regions
-        # only on shutdown, so a running world's unpadded tail is not a tear.
-        report = await asyncio.to_thread(check_working_set, staging, live=live)
+        # (last-known-good, #703). The single region rule set (issue #927): a
+        # non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a
+        # tear, on any source — the byte-precise check still catches realistic tears.
+        report = await asyncio.to_thread(check_working_set, staging)
         if not report.healthy:
             await asyncio.to_thread(_rmtree, staging)
             self._release_staging(staging)
@@ -760,12 +759,10 @@ class FsStorage(Storage):
         # Walk the authoritative ``current/`` working set for structurally corrupt
         # ``.mca`` region files (issue #738) BEFORE writing the archive; any corrupt
         # region refuses the backup and no ``.tar.gz`` is written (fail-closed, #703).
-        # ``live=True`` (issue #923): a running-source snapshot may have published a
-        # legitimate unpadded set into ``current/``, and its content was already gated
-        # at publish time — applying the strict rule here would deterministically refuse
-        # backups of running 26.x servers (the on-demand running snapshot before this
-        # archive publishes live-format data).
-        report = await asyncio.to_thread(check_working_set, current, live=True)
+        # The single region rule set (issue #927) tolerates ``current/``'s legitimate
+        # unpadded (live-format) tail — its content was already gated at publish — while
+        # still catching realistic tears.
+        report = await asyncio.to_thread(check_working_set, current)
         if not report.healthy:
             raise IntegrityCheckError(report)
         backups = self._server_root(community_id, server_id) / "backups"
@@ -857,11 +854,11 @@ class FsStorage(Storage):
             # deliberate corrupt restore than no restore, #703). The report is
             # returned either way so the use case can quarantine + audit a forced
             # corrupt restore; the adapter stays filesystem-only and never touches
-            # the DB. ``live=True`` (issue #923): the archive may have been created
-            # from a running-source (unpadded) ``current/``, so it can legitimately
-            # hold a live-format set — its content was gated when that snapshot
-            # published, so the restore gate tolerates the unpadded tail too.
-            report = await asyncio.to_thread(check_working_set, staging, live=True)
+            # the DB. The single region rule set (issue #927): the archive may hold a
+            # legitimate live-format (unpadded) set — its content was gated when that
+            # snapshot published — so the restore gate tolerates the unpadded tail while
+            # still catching realistic tears.
+            report = await asyncio.to_thread(check_working_set, staging)
             if not report.healthy and not force:
                 await asyncio.to_thread(_rmtree, staging)
                 raise IntegrityCheckError(report)
@@ -913,14 +910,14 @@ class FsStorage(Storage):
             await asyncio.to_thread(
                 _extract_tar_gz_into, archive, staging, self._max_restore_bytes
             )
-            # ``live=True`` (issue #923): a backup created from a running-source
-            # (unpadded) ``current/`` is itself live-format, so the fsck must tolerate
-            # the unpadded tail or it would falsely quarantine a healthy backup. A
-            # backup quarantined before #925 solely for ``not_4096_aligned`` is
-            # intentionally rescued to HEALTHY on the next sweep (the verdict is
-            # loadable content); realistic torn shapes (location entry at/past EOF,
-            # truncation severing a referenced chunk) stay caught in live mode.
-            return await asyncio.to_thread(check_working_set, staging, live=True)
+            # The single region rule set (issue #927): a backup created from an
+            # unpadded ``current/`` is itself live-format, so the fsck tolerates the
+            # unpadded tail or it would falsely quarantine a healthy backup. A backup
+            # quarantined before #925 solely for ``not_4096_aligned`` is intentionally
+            # rescued to HEALTHY on the next sweep (the verdict is loadable content);
+            # realistic torn shapes (location entry at/past EOF, truncation severing a
+            # referenced chunk) stay caught by the byte-precise check.
+            return await asyncio.to_thread(check_working_set, staging)
         finally:
             await asyncio.to_thread(_rmtree, staging)
             self._release_staging(staging)
@@ -946,12 +943,11 @@ class FsStorage(Storage):
         # One-shot fsck of the on-disk authoritative snapshot (issue #744). A
         # published snapshot is immutable/quiesced, so scanning ``current/`` in place
         # is safe and needs no staging. Read-only: it never mutates ``current``.
-        # Raises NotFoundError if nothing is published. ``live=True`` (issue #923): the
-        # snapshot may have been published from a running source (legitimate unpadded
-        # tail), so the sweep must tolerate that format or it would falsely quarantine a
-        # healthy live-format snapshot.
+        # Raises NotFoundError if nothing is published. The single region rule set
+        # (issue #927) tolerates a published snapshot's legitimate unpadded tail or the
+        # sweep would falsely quarantine a healthy live-format snapshot.
         current = await asyncio.to_thread(self._current_dir, community_id, server_id)
-        return await asyncio.to_thread(check_working_set, current, live=True)
+        return await asyncio.to_thread(check_working_set, current)
 
     async def prune_to_final_snapshot(
         self, community_id: CommunityId, server_id: ServerId

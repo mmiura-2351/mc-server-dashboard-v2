@@ -243,7 +243,7 @@ authoritative-side stream and the atomic-publish handshake.
 | `open_hydrate_source(community_id, server_id) -> ReadStream` | Open a read stream over the current authoritative working set | The data plane reads from this to feed a Worker on start/relocation (hydrate). Reads `current/`. |
 | `begin_snapshot(community_id, server_id) -> SnapshotHandle` | Start an incoming snapshot transfer | Allocates an isolated `incoming/<transfer-id>/` staging area. |
 | `write_snapshot(handle, WriteStream)` | Stream the Worker's working set into staging | Writes only into staging, never `current/`. May be called incrementally. |
-| `commit_snapshot(handle, *, publisher=None, expected_base=None, live=False) -> int` | Atomically publish the staged snapshot as the new authoritative copy; return the new generation | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. Bumps and returns the working-set generation counter (the new integer the Worker records as the generation its scratch is at) and records `publisher` (the producing Worker's id, issue #847) alongside it in one atomic marker, read back via `current_publisher`. A `None` publisher records no id (the guard stays permissive). `expected_base` is the commit-time stale re-check (issue #899): the generation the data-plane publish guard validated against before the upload stream (what `current` was at guard time). The commit re-reads the generation under the per-server publish/edit lock (Section 2 generation marker) and refuses with `StaleGenerationError` when it advanced past `expected_base` — an at-rest edit or restore that landed DURING the (multi-minute) upload window — so the just-bumped `current` is not clobbered; `None` skips the re-check (no base claim). Refuses with `IncompleteTransferError` if the transfer was not signalled complete. Refuses with `IntegrityCheckError` if the staged set contains corrupt `.mca` region files (issue #739); `live=True` (a running server's periodic snapshot, signalled by `X-Snapshot-Source: running`) applies the byte-precise region rule instead of the strict 4096-aligned one, since MC 26.x leaves a running world's regions unpadded (issue #923) — `False` (a stopped/at-rest source) stays strict. The mode follows the snapshot *source*, not the consumer: at-rest readers of the store/archives (`create_backup_from_current`, `restore_backup`, `check_current_health`, `check_backup_health`) run *live*, because a running-source publish may have committed a legitimate unpadded set (Section 8 mode table). Refuses with `MissingRegionsError` if the staged set dropped some-but-not-all `.mca` files of a still-live dimension (the partial-loss corruption signature, issue #854) — a full-dimension delete (ALL regions of a dir gone) is allowed, only a partial loss is refused; the error carries the per-directory lost names (recovery in Section 4.5). Refused publishes do NOT bump the generation; the staging is discarded. |
+| `commit_snapshot(handle, *, publisher=None, expected_base=None) -> int` | Atomically publish the staged snapshot as the new authoritative copy; return the new generation | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. Bumps and returns the working-set generation counter (the new integer the Worker records as the generation its scratch is at) and records `publisher` (the producing Worker's id, issue #847) alongside it in one atomic marker, read back via `current_publisher`. A `None` publisher records no id (the guard stays permissive). `expected_base` is the commit-time stale re-check (issue #899): the generation the data-plane publish guard validated against before the upload stream (what `current` was at guard time). The commit re-reads the generation under the per-server publish/edit lock (Section 2 generation marker) and refuses with `StaleGenerationError` when it advanced past `expected_base` — an at-rest edit or restore that landed DURING the (multi-minute) upload window — so the just-bumped `current` is not clobbered; `None` skips the re-check (no base claim). Refuses with `IncompleteTransferError` if the transfer was not signalled complete. Refuses with `IntegrityCheckError` if the staged set contains corrupt `.mca` region files (issue #739), using the single region rule set (issue #927): a non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on any source — the byte-precise check still catches realistic tears. Refuses with `MissingRegionsError` if the staged set dropped some-but-not-all `.mca` files of a still-live dimension (the partial-loss corruption signature, issue #854) — a full-dimension delete (ALL regions of a dir gone) is allowed, only a partial loss is refused; the error carries the per-directory lost names (recovery in Section 4.5). Refused publishes do NOT bump the generation; the staging is discarded. |
 | `abort_snapshot(handle)` | Discard an incomplete/failed transfer | Deletes the staging area; `current/` is untouched. Also the cleanup path for crash recovery (Section 4.3). |
 | `current_generation(community_id, server_id) -> int` | Return the current authoritative working-set generation | The counter `commit_snapshot` bumps, read back so the hydrate data plane can stamp the generation it serves (Section 8). Returns 0 when no snapshot has been published. |
 | `current_publisher(community_id, server_id) -> str \| None` | Return the Worker id that published `current` | Read back from the combined `generation` marker (issue #847) so the publish-time generation guard (Section 8) can allow a same-Worker re-publish (lost-response self-heal) while refusing a different-Worker stale publish (A→B→A). `None` when no snapshot has been published, or the last publish declared no id (an older Worker) — in which case the guard cannot prove a foreign publisher and stays permissive. |
@@ -681,7 +681,7 @@ whatever path the API emits:
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
 | `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present, #118). Response always carries `X-Working-Set-Generation: <n>` (the generation of the snapshot served; 0 when no snapshot has been published). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir, generation header still present); `401` |
-| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <id>` (the publishing Worker), both read by the publish-time generation guard (#847); a never-hydrated/older Worker omits them and the guard stays permissive. It MAY also carry `X-Snapshot-Source: running\|stopped` (#923): `running` selects the live region rule (a non-4096-aligned tail is the normal on-disk format of a running 26.x world, not corruption — byte-precise per-chunk bounds), anything else (incl. absent) keeps the strict 4096-aligned rule. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal, #847); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set, #739); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension, #854; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}` capped per #887 — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
+| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <id>` (the publishing Worker), both read by the publish-time generation guard (#847); a never-hydrated/older Worker omits them and the guard stays permissive. The content-integrity gate uses the single region rule set (#927): a non-4096-aligned tail is the normal on-disk format of a 26.x world, not corruption (byte-precise per-chunk bounds), on any source — the `X-Snapshot-Source` mode header (#923) is removed. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal, #847); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set, #739); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension, #854; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}` capped per #887 — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
 
 **`X-Worker-Id` trust (M1).** The `X-Worker-Id` the guard reads is **not**
 authenticated within the shared-credential data plane: any Worker holding the
@@ -739,50 +739,45 @@ full round-trip. A fsck I/O error is best-effort (logged, transfer proceeds) so
 the fsck never wedges a snapshot; the API integrity gate is the correctness
 guarantee.
 
-**Live vs. strict region rule (issue #923).** The structural fsck and the API
-integrity gate run in one of two modes keyed on the snapshot **source**. MC 26.x
-pads region files to a 4096-byte sector boundary only on shutdown/close: a
-**stopped** world's regions are all aligned, but a **running** (even quiesced)
-world legitimately keeps an **unpadded tail** — the last chunk ends mid-sector and
-the file size is not a 4096 multiple. (Verified on a live 26.1.2 server: the
-trailing chunk is complete and decompresses cleanly.) The *strict* rule (a
-stopped/at-rest set) treats a non-4096 size as a torn save with whole-sector
-bounds; the *live* rule (a running server's periodic snapshot) accepts the
-unpadded tail and applies a **byte-precise** per-chunk bound (`offset*4096 + 4 +
-length <= size`) — a trailing chunk whose declared length overruns the real EOF is
-still corrupt in both. Without this split the strict rule refused **every**
-periodic snapshot of a running 26.x server, so a running server was never
-checkpointed and a crash/SIGKILL lost all progression since the last graceful
-stop. The Worker runs *live* for the running periodic path and *strict* for the
-stopped final path, and declares the source to the API with the
-`X-Snapshot-Source: running|stopped` request header so the API publish gate applies
-the same mode (absent/other defaults to strict). The Worker is already trusted for
-the snapshot **content** (shared credential, the whole tar is its bytes), so this
-mode signal adds no new trust surface.
+**One region rule set, applied everywhere (issue #927).** The structural fsck and
+the API integrity gate run **one rule set** at every gate — no source-keyed mode
+split. MC 26.x pads region files to a 4096-byte sector boundary only on
+shutdown/close, so a **running** (even quiesced) world legitimately keeps an
+**unpadded tail** — the last chunk ends mid-sector and the file size is not a 4096
+multiple. (Verified on a live 26.1.2 server: the trailing chunk is complete and
+decompresses cleanly.) The rule accepts that unpadded tail and applies a
+**byte-precise** per-chunk bound (`offset*4096 + 4 + length <= size`): a trailing
+chunk whose declared length overruns the real EOF is still corrupt, an entry
+pointing at/past EOF is `sector_out_of_bounds`, a severed prefix is a short-read
+`truncated_chunk`. Alignment is retained as a signal only for the
+**sub-header-size** case (a non-zero size below the two 4096-byte header sectors is
+a torn save, reported `not_4096_aligned`). A 0-byte file is an empty container
+(healthy, #905).
 
-The mode is chosen by the snapshot **source**, not the consumer — **strict at the
-stopped-source boundary; live everywhere the store/archives are consumed**. Because
-a running-source publish can legitimately commit an unpadded set into `current/`,
-every at-rest consumer that READS the store (or an archive derived from it) must
-run *live* or it would falsely reject healthy data:
+The earlier design (#923/#925) split the rule by snapshot **source**: a **stopped**
+world was assumed 4096-padded, so a non-4096 size there was treated as a torn save
+(strict), while a running source ran the byte-precise rule (live), declared via an
+`X-Snapshot-Source` request header. That `stopped => 4096-padded` invariant **does
+not hold**: a sweep-stop timeout, SIGKILL, OOM, crash, or host loss can leave a
+stopped world's regions unpadded, and the strict rule then refused the **stop-leg
+checkpoint exactly when it is the last chance to capture the world** (observed
+2026-06-12 local: the orphan sweep stopped a running 26.1.2 server, the stop-leg
+redispatch issued a stopped-id snapshot, and the pre-pack fsck refused in 7ms —
+`snapshot refused: 5/22 region files corrupt (e.g. r.-1.-2.mca: not_4096_aligned)`
+— 5 regions still unpadded after the stop timeout). Strict added detection power
+**only** under that invalid invariant, so the split is collapsed and the
+`X-Snapshot-Source` header is removed end-to-end. Every gate — the Worker's pre-pack
+fsck on either path, the API publish gate, `create_backup_from_current`,
+`restore_backup`, `check_current_health`, `check_backup_health`, and the
+integrity-sweep fscks — runs the single rule set, so a legitimately unpadded set
+committed into `current/` (or any archive derived from it) is never falsely rejected.
 
-| Caller | Mode | Why |
-| --- | --- | --- |
-| Worker stopped-path pre-pack fsck | strict | A stopped world is padded at the source; a non-4096 size there is a real tear. |
-| API publish gate, `X-Snapshot-Source: stopped`/absent | strict | Same stopped-source guarantee, enforced at the publish boundary. |
-| Worker running-path pre-pack fsck | live | A running world's unpadded tail is the on-disk format, not a tear. |
-| API publish gate, `X-Snapshot-Source: running` | live | Accepts the running source's legitimate unpadded set. |
-| `create_backup_from_current` | live | Archives `current/`, which may hold a running-source unpadded set (already gated at publish). Strict here would refuse every running-server backup (`_save_all_and_snapshot` forces a running snapshot, then archives). |
-| `restore_backup` | live | A backup made from an unpadded `current/` is itself live-format; the prior publish already gated its content. |
-| `check_current_health` / integrity-sweep snapshot fsck | live | A published snapshot may be live-format; strict would falsely quarantine it. |
-| `check_backup_health` / integrity-sweep per-backup fsck | live | A backup made from a live-format `current/` is itself live-format; strict would falsely quarantine it. |
-
-Because `check_backup_health` now runs live and the sweep rewrites the health
-column every pass, a backup quarantined before #925 whose **only** finding was
-`not_4096_aligned` (all referenced chunk extents within EOF) is re-marked HEALTHY
-on the next sweep. This rescue is intentional: such a backup is loadable content,
-and the realistic torn shapes stay caught in live mode (a location entry at/past
-EOF → `sector_out_of_bounds`; truncation severing a referenced chunk → byte-precise
+Because `check_backup_health` runs the single rule set and the sweep rewrites the
+health column every pass, a backup quarantined before #925 whose **only** finding
+was `not_4096_aligned` (all referenced chunk extents within EOF) is re-marked
+HEALTHY on the next sweep. This rescue is intentional: such a backup is loadable
+content, and the realistic torn shapes stay caught (a location entry at/past EOF →
+`sector_out_of_bounds`; truncation severing a referenced chunk → byte-precise
 `truncated_chunk`/short-prefix).
 
 Transport
