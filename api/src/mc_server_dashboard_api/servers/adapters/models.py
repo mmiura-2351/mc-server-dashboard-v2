@@ -116,4 +116,4 @@ class ServerModel(Base):
     # The relay slug (issue #955): a DNS-label string unique deployment-wide,
     # auto-generated at create and renameable. NOT NULL; the migration backfills
     # existing rows.
-    slug: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    slug: Mapped[str] = mapped_column(String, nullable=False)

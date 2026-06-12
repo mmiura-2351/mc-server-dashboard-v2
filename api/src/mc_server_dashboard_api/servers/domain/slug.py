@@ -50,7 +50,7 @@ _RESERVED: frozenset[str] = frozenset(
 )
 
 # Small embedded wordlist for auto-generation (adjective-like + animal-like).
-# Two parts: ``<word>-<word>-<NN>`` yields ~200 * 200 * 100 = 4 000 000 slots
+# Two parts: ``<word>-<word>-<NN>`` yields 84 * 82 * 100 = 688 800 slots
 # before exhaustion, which is far more than this system's scale (NFR-SCALE-1).
 _WORDS_A: tuple[str, ...] = (
     "amber",
@@ -235,7 +235,8 @@ def validate_slug(slug: str) -> None:
 
     Raises :class:`~mc_server_dashboard_api.servers.domain.errors.InvalidSlugError`
     when the slug does not match the DNS label format or is on the reserved list.
-    Valid slugs are lowercased ASCII so callers should normalise before calling.
+    Uppercase input is rejected with :class:`InvalidSlugError`; callers must not
+    normalise — the API surfaces the error as a 422.
     """
 
     if not _SLUG_RE.fullmatch(slug):

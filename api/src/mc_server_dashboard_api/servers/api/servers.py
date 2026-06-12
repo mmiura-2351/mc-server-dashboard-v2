@@ -599,10 +599,6 @@ async def update_server(
     except SlugAlreadyTakenError as exc:
         # Slug is already held by another server (issue #955).
         raise _conflict("slug_taken") from exc
-    except SlugExhaustedError as exc:
-        # Auto-generation at create exhausted the retry budget (extremely unlikely);
-        # a transient condition, so 503 (issue #955).
-        raise _service_unavailable("slug_exhausted") from exc
     except WorkingSetSeedFailedError as exc:
         # Rewriting server.properties for the port change failed; the row was not
         # committed (no DB/file drift), surfaced as a mapped 503 (issue #311).

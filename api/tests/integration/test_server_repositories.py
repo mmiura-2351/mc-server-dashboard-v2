@@ -275,12 +275,17 @@ async def _insert_legacy_server(
             text(
                 "INSERT INTO server "
                 "(id, community_id, name, mc_edition, mc_version, server_type, "
-                "execution_backend, config, game_port, desired_state, "
+                "execution_backend, config, game_port, slug, desired_state, "
                 "observed_state, created_at, updated_at) VALUES "
                 "(:id, :community_id, :name, 'java', '1.21.1', 'vanilla', "
-                "'host_process', '{}', NULL, 'stopped', 'stopped', now(), now())"
+                "'host_process', '{}', NULL, :slug, 'stopped', 'stopped', now(), now())"
             ),
-            {"id": server_id, "community_id": community_id, "name": name},
+            {
+                "id": server_id,
+                "community_id": community_id,
+                "name": name,
+                "slug": f"legacy-{str(server_id)[:8]}-00",
+            },
         )
     return server_id
 
@@ -397,17 +402,23 @@ async def test_update_game_port_rejects_taken_against_real_db(
         config={},
     )
     # Another server already holds 25570 in the DB; the pre-read catches it.
+    taker_id = uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
             text(
                 "INSERT INTO server "
                 "(id, community_id, name, mc_edition, mc_version, server_type, "
-                "execution_backend, config, game_port, desired_state, "
+                "execution_backend, config, game_port, slug, desired_state, "
                 "observed_state, created_at, updated_at) VALUES "
                 "(:id, :community_id, 'taker', 'java', '1.21.1', 'vanilla', "
-                "'host_process', '{}', 25570, 'stopped', 'stopped', now(), now())"
+                "'host_process', '{}', 25570, :slug, "
+                "'stopped', 'stopped', now(), now())"
             ),
-            {"id": uuid.uuid4(), "community_id": community_id},
+            {
+                "id": taker_id,
+                "community_id": community_id,
+                "slug": f"taker-{str(taker_id)[:8]}-00",
+            },
         )
 
     with pytest.raises(PortAlreadyTakenError):

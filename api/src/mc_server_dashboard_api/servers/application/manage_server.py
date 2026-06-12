@@ -516,12 +516,13 @@ class UpdateServer:
                     slug=slug,
                     changed_keys=changed_keys,
                 )
+                # Slug rename is safe while running (routing is consulted only at
+                # join time; RELAY.md Section 3). The at-rest gate fires only for
+                # name/port changes and unsafe-key config edits.
                 safe_only = (
                     new_name is None
                     and game_port is None
-                    and slug is None
-                    and config is not None
-                    and changed_keys <= _SAFE_CONFIG_KEYS
+                    and (config is None or changed_keys <= _SAFE_CONFIG_KEYS)
                 )
                 if not safe_only and not server.is_at_rest():
                     raise ServerNotStoppedError(str(server_id.value))

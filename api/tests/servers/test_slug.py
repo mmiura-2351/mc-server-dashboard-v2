@@ -420,10 +420,9 @@ async def test_rename_slug_requires_server_update_permission() -> None:
     assert exc_info.value.permission == "server:update"
 
 
-async def test_rename_slug_requires_at_rest() -> None:
-    """Slug rename is blocked for a running server (at-rest gate)."""
-    from mc_server_dashboard_api.servers.domain.errors import ServerNotStoppedError
-
+async def test_rename_slug_allowed_while_running() -> None:
+    """Slug rename does not require the server to be at rest (routing is consulted
+    only at join time; renaming while running is safe — RELAY.md Section 3)."""
     server = _server(
         desired=DesiredState.RUNNING,
         observed=ObservedState.RUNNING,
@@ -432,13 +431,13 @@ async def test_rename_slug_requires_at_rest() -> None:
     repo.seed(server)
     use_case = _make_update_use_case(repo)
 
-    with pytest.raises(ServerNotStoppedError):
-        await use_case(
-            community_id=_COMMUNITY,
-            server_id=server.id,
-            slug="cedar-wolf-07",
-            authorize=_authorize_allow,
-        )
+    updated = await use_case(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        slug="cedar-wolf-07",
+        authorize=_authorize_allow,
+    )
+    assert updated.slug == "cedar-wolf-07"
 
 
 # ---------------------------------------------------------------------------
