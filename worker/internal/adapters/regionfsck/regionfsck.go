@@ -29,20 +29,27 @@
 //   - STRICT mode (a stopped/at-rest set): a non-4096 size IS a torn save, and the
 //     per-chunk bound is whole-sector. Unchanged from the original behavior.
 //   - LIVE mode (a running server's periodic snapshot): a non-4096 size is NOT
-//     corruption, and the per-chunk bound is BYTE-PRECISE — a present chunk passes
-//     when offset*4096 + 4 + length <= size. (The strict whole-sector bound
+//     corruption, and the per-chunk EOF bound is BYTE-PRECISE — a present chunk
+//     passes when offset*4096 + 4 + length <= size. (The strict whole-file ceiling
 //     offset+sectorCount <= size/4096 would wrongly reject a valid trailing chunk
-//     because integer division drops the partial final sector.) All other rules —
+//     because integer division drops the partial final sector.) The
+//     length-vs-sectorCount consistency check (length <= sectorCount*4096-4) is KEPT
+//     in live mode too — MC always allocates sectorCount for the chunk's own length,
+//     so it costs no false reject and still catches an interior chunk whose declared
+//     length overruns its sector allocation into a neighbor. All other rules —
 //     header presence (size==0 fine per #905; a non-zero size below 8192 still
 //     corrupt), sector offsets inside the header, compression scheme, length>=1 —
 //     are identical. A trailing chunk whose declared length overruns the real EOF
 //     is still corrupt in BOTH modes.
 //
-// The mode is chosen by the caller from the snapshot source: the running periodic
-// path runs LIVE, the stopped final path runs STRICT (instancemanager). At-rest
-// store/archive gates (backup create/restore, the integrity sweep CLI) stay STRICT.
-// This split mirrors the Python validator (region.py), which the data plane applies
-// at the publish gate keyed on the X-Snapshot-Source header.
+// The mode is chosen from the snapshot SOURCE, not the consumer: STRICT holds only
+// where alignment is guaranteed at the source — the Worker's stopped-path pre-pack
+// fsck and the API publish gate for X-Snapshot-Source: stopped/absent. LIVE is used
+// everywhere the store or archives derived from it are consumed (the publish gate
+// for running, plus the API's backup create/restore and integrity-sweep fsck),
+// because a running-source publish may have committed a legitimate unpadded set into
+// the store and every at-rest consumer must tolerate it. This split mirrors the
+// Python validator (region.py).
 //
 // Quiescence is the caller's responsibility. Run this *only against a quiesced
 // working set*: on a live world the read races the server's write and a healthy
@@ -61,6 +68,7 @@ package regionfsck
 import (
 	"encoding/binary"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -153,9 +161,10 @@ func CheckRegionFile(path string) (Reason, error) {
 // CheckRegionFileMode is CheckRegionFile with an explicit mode (issue #923). When
 // live is false it is the strict at-rest check (unchanged). When live is true it
 // validates a RUNNING server's working set, where MC 26.x leaves a legitimate
-// unpadded tail: a non-4096-aligned size is NOT corruption and the per-chunk bound
-// is byte-precise (offset*4096 + 4 + length <= size) rather than whole-sector. All
-// other structural rules are identical.
+// unpadded tail: a non-4096-aligned size is NOT corruption and the whole-file sector
+// ceiling is replaced by a byte-precise per-chunk EOF bound (offset*4096 + 4 +
+// length <= size). The length-vs-sectorCount consistency check is kept in both
+// modes; all other structural rules are identical.
 func CheckRegionFileMode(path string, live bool) (Reason, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -221,8 +230,17 @@ func CheckRegionFileMode(path string, live bool) (Reason, error) {
 		}
 
 		if _, err := f.ReadAt(prefix, offset*sectorSize); err != nil {
-			// A short read at a sector the bounds check already proved is within the
-			// file is a real read fault, not corruption.
+			// In live mode the bounds check above only proved the chunk's FIRST byte is
+			// inside the file (offset*4096 < size), not all 5 prefix bytes, so a tail torn
+			// 1-4 bytes into the chunk's first sector ends the file mid-prefix: a short
+			// read there is structural truncation, not an environmental fault, and is
+			// classified ReasonTruncatedChunk to mirror the Python validator (region.py).
+			// In strict mode the whole-sector bound already proved the full prefix is
+			// within the file, so a short read is a real read fault. Any other I/O error
+			// is a read fault in both modes.
+			if live && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+				return ReasonTruncatedChunk, nil
+			}
 			return ReasonNone, err
 		}
 		length := int64(binary.BigEndian.Uint32(prefix[0:4]))
@@ -236,20 +254,25 @@ func CheckRegionFileMode(path string, live bool) (Reason, error) {
 			return ReasonBadCompression, nil
 		}
 
-		// The length prefix counts the compression byte plus the compressed stream.
-		// It must be positive (length>=1). In strict mode it must fit within the
-		// declared whole sectors; in live mode it must fit byte-precisely within the
-		// real file (offset*4096 + 4 + length <= size), which both keeps a valid
-		// trailing chunk passing AND still catches a trailing chunk whose declared
-		// length overruns the actual EOF (a genuine tear, ReasonTruncatedChunk).
+		// The length prefix counts the compression byte plus the compressed stream and
+		// must be positive (length>=1). It must ALSO fit within the chunk's declared
+		// sectors in BOTH modes: MC always allocates sectorCount = ceil((4+length)/4096),
+		// so length <= sectorCount*4096-4 holds for every healthy chunk (issue #923's own
+		// evidence: len=346, cnt=1) and a declared length overrunning its own sector
+		// allocation into a neighbor chunk is a torn-header signature worth catching even
+		// in live mode — at zero false-reject cost.
 		if length < 1 {
 			return ReasonTruncatedChunk, nil
 		}
-		if live {
-			if offset*sectorSize+4+length > size {
-				return ReasonTruncatedChunk, nil
-			}
-		} else if length > sectorCount*sectorSize-4 {
+		if length > sectorCount*sectorSize-4 {
+			return ReasonTruncatedChunk, nil
+		}
+		// In live mode the trailing chunk may sit in a partial final sector, so its
+		// length must ALSO fit byte-precisely within the real file (offset*4096 + 4 +
+		// length <= size): this keeps a valid unpadded trailing chunk passing AND still
+		// catches a trailing chunk whose declared length overruns the actual EOF (a
+		// genuine tear).
+		if live && offset*sectorSize+4+length > size {
 			return ReasonTruncatedChunk, nil
 		}
 	}

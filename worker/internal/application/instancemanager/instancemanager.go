@@ -483,9 +483,16 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		//     evicts and terminates the process mid-tar. The worst this yields is a TORN
 		//     capture — the stop's shutdown re-saves regions while the tar reads them.
 		//     A tear that happens DURING the tar is caught downstream by the API's #739
-		//     content-integrity gate, which refuses the publish and aborts the staging
-		//     area, so current/ keeps the last good generation: no silent corruption and
-		//     no overwrite. And this is a PERIODIC snapshot of a still-running server, not
+		//     content-integrity gate. For this running-labeled upload that gate now runs
+		//     the LIVE (byte-precise) region check (issue #923), not the strict one, yet
+		//     it still catches realistic tears: any referenced chunk whose byte extent
+		//     overruns EOF, any entry pointing at/past EOF, garbage prefixes. The only
+		//     escape from the byte-precise bound is a truncation landing exactly at the
+		//     final referenced chunk's byte boundary with no entries beyond — which is
+		//     indistinguishable from a consistent older state (the lost bytes are
+		//     unreferenced), so the gate refuses the publish and aborts the staging area,
+		//     and current/ keeps the last good generation: no silent corruption and no
+		//     overwrite. And this is a PERIODIC snapshot of a still-running server, not
 		//     the post-stop FINAL one (a stopped-id snapshot, which DOES reserve below),
 		//     so a refused capture simply retries on the next tick — nothing is lost.
 		// A reservation would only convert that refused-and-retried outcome into a

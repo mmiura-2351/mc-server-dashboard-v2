@@ -1028,8 +1028,12 @@ class ObjectStorage(Storage):
             # world, mirroring the fs adapter (#739). Walk the live snapshot's
             # ``.mca`` region bodies BEFORE writing the archive; any corrupt region
             # refuses the backup and no ``.tar.gz`` object is uploaded (fail-closed,
-            # #703).
-            report = await self._check_staged_regions(client, snapshot_prefix, objs)
+            # #703). ``live=True`` (issue #923): a running-source snapshot may hold a
+            # legitimate unpadded set (gated when it published), so the at-rest backup
+            # gate tolerates the unpadded tail, mirroring the fs adapter.
+            report = await self._check_staged_regions(
+                client, snapshot_prefix, objs, live=True
+            )
             if not report.healthy:
                 raise IntegrityCheckError(report)
             # Build the self-contained tar.gz to local scratch (gzip streams, so the
@@ -1104,8 +1108,13 @@ class ObjectStorage(Storage):
                     # #703). With ``force=True`` the operator override publishes anyway
                     # (better a deliberate corrupt restore than no restore, #703). The
                     # report is returned either way so the use case can quarantine +
-                    # audit a forced corrupt restore.
-                    report = await self._check_staged_regions(client, incoming, staged)
+                    # audit a forced corrupt restore. ``live=True`` (issue #923): a
+                    # backup created from a running-source (unpadded) snapshot is itself
+                    # live-format, so the restore gate tolerates the unpadded tail,
+                    # mirroring the fs adapter.
+                    report = await self._check_staged_regions(
+                        client, incoming, staged, live=True
+                    )
                     if not report.healthy and not force:
                         raise IntegrityCheckError(report)
                     # Materialize the staged objects into a fresh snapshot prefix

@@ -315,6 +315,47 @@ func TestCheckWorkingSetModeLiveAcceptsUnalignedTail(t *testing.T) {
 	}
 }
 
+func TestChunkLengthExceedingSectorsIsTruncatedInLiveMode(t *testing.T) {
+	// An interior chunk whose declared length overruns its OWN sector allocation
+	// (sectorCount 1) into a neighbor, yet still fits byte-precisely inside the file
+	// (so the live EOF bound alone would pass). The retained length-vs-sectorCount
+	// consistency check (issue #923 review) must flag it as truncated in BOTH modes.
+	// The file is aligned so the size rule does not short-circuit strict mode.
+	image := buildRegion(map[int][2]int{0: {2, 1}}, 4, testSector*2-4, 2)
+	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), image)
+	for _, live := range []bool{true, false} {
+		reason, _ := CheckRegionFileMode(path, live)
+		if reason != ReasonTruncatedChunk {
+			t.Fatalf("live=%v: reason = %v, want ReasonTruncatedChunk", live, reason)
+		}
+	}
+}
+
+func TestShortPrefixReadIsTruncatedChunkInLiveMode(t *testing.T) {
+	// A tail torn 1-4 bytes into a referenced chunk's first sector: the live bounds
+	// check proves only the chunk's first byte is inside the file, so the 5-byte
+	// prefix read ends mid-prefix (io.ErrUnexpectedEOF). Live mode classifies this as
+	// a structural TRUNCATED_CHUNK (mirroring the Python validator), not an I/O error.
+	const offset = 2
+	// Two bytes into sector 2: offset*4096 < size (first byte in file) but the prefix
+	// cannot be fully read.
+	size := offset*testSector + 2
+	image := make([]byte, size)
+	image[0] = byte(offset >> 16)
+	image[1] = byte(offset >> 8)
+	image[2] = byte(offset)
+	image[3] = 1
+	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), image)
+
+	reason, err := CheckRegionFileMode(path, true)
+	if err != nil {
+		t.Fatalf("live: unexpected error: %v", err)
+	}
+	if reason != ReasonTruncatedChunk {
+		t.Fatalf("live: reason = %v, want ReasonTruncatedChunk", reason)
+	}
+}
+
 func TestCheckRegionFileMissingFileIsIOError(t *testing.T) {
 	_, err := CheckRegionFile(filepath.Join(t.TempDir(), "does-not-exist.mca"))
 	if err == nil {

@@ -40,9 +40,9 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
 from tests.storage.helpers import (
-    corrupt_region_bytes,
     drain,
     healthy_region_bytes,
+    mode_invariant_corrupt_region_bytes,
     read_tar,
     region_targz,
     tar_stream,
@@ -131,7 +131,9 @@ async def test_create_against_corrupt_working_set_raises_and_writes_no_archive(
         tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
     )
     current = server_root / os.readlink(server_root / "current")
-    (current / "world" / "region" / "r.0.0.mca").write_bytes(corrupt_region_bytes())
+    (current / "world" / "region" / "r.0.0.mca").write_bytes(
+        mode_invariant_corrupt_region_bytes()
+    )
 
     with pytest.raises(BackupCorruptError):
         await adapter.create_from_current(community_id=community, server_id=server)
@@ -176,7 +178,10 @@ async def test_restore_corrupt_backup_without_force_translates_to_corrupt_error(
         storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
     )
     ref = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()},
     )
 
     with pytest.raises(BackupCorruptError) as excinfo:
@@ -200,7 +205,10 @@ async def test_restore_corrupt_backup_with_force_publishes_and_reports_corrupt(
         storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
     )
     ref = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()},
     )
 
     corrupt_count = await adapter.restore(
@@ -210,7 +218,7 @@ async def test_restore_corrupt_backup_with_force_publishes_and_reports_corrupt(
     assert corrupt_count == 1
     # The corrupt backup was published despite the corruption.
     assert (await _hydrate(storage, community, server)) == {
-        "world/region/r.0.0.mca": corrupt_region_bytes()
+        "world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()
     }
 
 
@@ -352,7 +360,10 @@ async def test_check_backup_health_returns_corrupt_count(tmp_path: Path) -> None
         storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
     )
     bad = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()},
     )
 
     assert (
@@ -397,7 +408,9 @@ async def test_check_current_health_returns_corrupt_count(tmp_path: Path) -> Non
         tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
     )
     current = server_root / os.readlink(server_root / "current")
-    (current / "world" / "region" / "r.0.0.mca").write_bytes(corrupt_region_bytes())
+    (current / "world" / "region" / "r.0.0.mca").write_bytes(
+        mode_invariant_corrupt_region_bytes()
+    )
     assert (
         await adapter.check_current_health(community_id=community, server_id=server)
         == 1

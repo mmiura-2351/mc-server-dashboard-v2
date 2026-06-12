@@ -24,20 +24,27 @@ complete and decompresses cleanly; it is the on-disk format, not a tear.
 * STRICT mode (``live=False``, a stopped/at-rest set): a non-4096 size IS a torn
   save, and the per-chunk bound is whole-sector. Unchanged from the original.
 * LIVE mode (``live=True``, a running server's periodic snapshot): a non-4096 size
-  is NOT corruption, and the per-chunk bound is BYTE-PRECISE — a present chunk
-  passes when ``offset*4096 + 4 + length <= size``. (The strict whole-sector bound
+  is NOT corruption, and the per-chunk EOF bound is BYTE-PRECISE — a present chunk
+  passes when ``offset*4096 + 4 + length <= size``. (The strict whole-file ceiling
   ``offset + sector_count <= size // 4096`` would wrongly reject a valid trailing
-  chunk because integer division drops the partial final sector.) All other rules —
+  chunk because integer division drops the partial final sector.) The
+  length-vs-sectorCount consistency check (``length <= sector_count*4096-4``) is
+  KEPT in live mode too — MC always allocates ``sector_count`` for the chunk's own
+  length, so it costs no false reject and still catches an interior chunk whose
+  declared length overruns its sector allocation into a neighbor. All other rules —
   header presence (size==0 fine per #905; a non-zero size below 8192 still corrupt),
   sector offsets inside the header, compression scheme, length>=1 — are identical.
   A trailing chunk whose declared length overruns the real EOF is still corrupt in
   BOTH modes.
 
 This split mirrors the Go validator (regionfsck.go), the Worker's source-side
-fail-fast. The mode is chosen from the snapshot source: the data plane runs LIVE
-when the publishing Worker declares ``X-Snapshot-Source: running`` and STRICT
-otherwise; backup create/restore and the integrity sweep CLI operate on at-rest
-store/archive artifacts and stay STRICT.
+fail-fast. The mode is chosen from the snapshot SOURCE, not the consumer: STRICT
+holds only where alignment is guaranteed at the source — the Worker's stopped-path
+pre-pack fsck and the publish gate for ``X-Snapshot-Source: stopped``/absent. LIVE
+is used everywhere the store or archives DERIVED from it are consumed (the publish
+gate for ``X-Snapshot-Source: running``, backup create/restore, the integrity
+sweep's snapshot fsck), because a running-source publish may have committed a
+legitimate unpadded set into the store and every at-rest consumer must tolerate it.
 
 Quiescence is the caller's responsibility. Run this **only against a quiesced
 working set**: on a live world the read races the server's write and a healthy
@@ -118,8 +125,9 @@ def _check_region(size: int, fh: BinaryIO, *, live: bool = False) -> ReasonCode 
 
     ``live`` selects the running-server relaxation (issue #923): a non-4096-aligned
     size is the normal unpadded tail of a live 26.x world (not a torn save) and the
-    per-chunk bound is byte-precise rather than whole-sector. ``False`` is the strict
-    at-rest behavior (unchanged). See the module docstring.
+    whole-file sector ceiling is replaced by a byte-precise per-chunk EOF bound (the
+    length-vs-sector_count consistency check is kept in both modes). ``False`` is the
+    strict at-rest behavior (unchanged). See the module docstring.
     """
     # A 0-byte file is an empty region container — Minecraft legitimately writes
     # these (e.g. fresh poi/r.*.mca with no chunks yet) — so it is structurally
@@ -174,21 +182,26 @@ def _check_region(size: int, fh: BinaryIO, *, live: bool = False) -> ReasonCode 
         if scheme not in _COMPRESSION_SCHEMES:
             return ReasonCode.BAD_COMPRESSION
 
-        # The length prefix counts the compression byte plus the compressed stream.
-        # It must be positive (length>=1). In strict mode it must fit within the
-        # declared whole sectors; in live mode it must fit byte-precisely within the
-        # real file (offset*4096 + 4 + length <= size), which keeps a valid trailing
-        # chunk passing AND still catches a trailing chunk whose declared length
-        # overruns the actual EOF (a genuine tear).
+        # The length prefix counts the compression byte plus the compressed stream
+        # and must be positive (length>=1). It must ALSO fit within the chunk's
+        # declared sectors in BOTH modes: MC always allocates
+        # ``sector_count = ceil((4+length)/4096)``, so ``length <= sector_count*4096-4``
+        # holds for every healthy chunk (issue #923's own evidence: len=346, cnt=1) and
+        # a declared length overrunning its own sector allocation into a neighbor chunk
+        # is a torn-header signature worth catching even in live mode — at zero
+        # false-reject cost.
         if length < 1:
             return ReasonCode.TRUNCATED_CHUNK
-        if live:
-            if offset * _SECTOR + 4 + length > size:
-                return ReasonCode.TRUNCATED_CHUNK
-        else:
-            available = sector_count * _SECTOR - 4
-            if length > available:
-                return ReasonCode.TRUNCATED_CHUNK
+        available = sector_count * _SECTOR - 4
+        if length > available:
+            return ReasonCode.TRUNCATED_CHUNK
+        # In live mode the trailing chunk may sit in a partial final sector, so its
+        # length must ALSO fit byte-precisely within the real file
+        # (offset*4096 + 4 + length <= size): this keeps a valid unpadded trailing
+        # chunk passing AND still catches a trailing chunk whose declared length
+        # overruns the actual EOF (a genuine tear).
+        if live and offset * _SECTOR + 4 + length > size:
+            return ReasonCode.TRUNCATED_CHUNK
 
     return None
 

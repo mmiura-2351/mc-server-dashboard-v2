@@ -32,6 +32,7 @@ from tests.storage.helpers import (
     corrupt_region_bytes,
     drain,
     healthy_region_bytes,
+    mode_invariant_corrupt_region_bytes,
     new_scope,
     read_tar,
     region_targz,
@@ -353,14 +354,19 @@ async def test_restore_corrupt_backup_without_force_refuses_and_keeps_current(
         storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
     )
     good_live = snapshot_dir(tmp_path, community, server)
+    # The restore gate runs in live mode (issue #923), so use a tear the live rule
+    # still catches (a location entry past EOF), not a mere unaligned size.
     key = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()},
     )
 
     with pytest.raises(IntegrityCheckError) as excinfo:
         await storage.restore_backup(community, server, key)
     assert len(excinfo.value.report.corrupt) == 1
-    assert excinfo.value.report.corrupt[0].reason is ReasonCode.NOT_4096_ALIGNED
+    assert excinfo.value.report.corrupt[0].reason is ReasonCode.SECTOR_OUT_OF_BOUNDS
 
     # current still resolves to the prior good snapshot; restore staging was cleaned.
     assert snapshot_dir(tmp_path, community, server) == good_live
@@ -385,8 +391,11 @@ async def test_restore_corrupt_backup_with_force_publishes_and_reports_corruptio
     await _publish(
         storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
     )
+    # The restore gate runs in live mode (issue #923), so use a tear the live rule
+    # still catches (a location entry past EOF), not a mere unaligned size.
+    corrupt_region = mode_invariant_corrupt_region_bytes()
     key = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+        storage, community, server, {"world/region/r.0.0.mca": corrupt_region}
     )
 
     report = await storage.restore_backup(community, server, key, force=True)
@@ -395,7 +404,7 @@ async def test_restore_corrupt_backup_with_force_publishes_and_reports_corruptio
     assert len(report.corrupt) == 1
     # The corrupt backup was published despite the corruption.
     blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {"world/region/r.0.0.mca": corrupt_region_bytes()}
+    assert read_tar(blob) == {"world/region/r.0.0.mca": corrupt_region}
 
 
 async def test_restore_healthy_backup_returns_healthy_report(tmp_path: Path) -> None:
