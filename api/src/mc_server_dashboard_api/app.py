@@ -51,6 +51,11 @@ from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.adapters.relay_server import register_relay_service
+from mc_server_dashboard_api.fleet.adapters.relay_state import (
+    JoinTokenTable,
+    RelayRegistration,
+)
 from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
 from mc_server_dashboard_api.http_problem import install_problem_handlers
@@ -91,6 +96,9 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
     run_reconciler_loop,
+)
+from mc_server_dashboard_api.servers.adapters.server_route_resolver import (
+    ServersServerRouteResolver,
 )
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
@@ -165,6 +173,11 @@ _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
 # fires first and the Worker bound stays a cleanup backstop, never the primary
 # deadline that could kill a transfer the API still considers in flight.
 _TRANSFER_DEADLINE_MARGIN_SECONDS = 60
+
+# TTL of a single-use relay join token (RELAY.md Sections 4, 5): the relay waits
+# at most 10 s for the Worker's dial-back, so a token only needs to outlive that
+# window before it is swept.
+_RELAY_JOIN_TOKEN_TTL = dt.timedelta(seconds=10)
 
 
 def _resolve_config_file() -> Path | None:
@@ -360,6 +373,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "control.worker_credential is required when control.enabled is true"
         )
 
+    # The relay credential and base domain are required whenever the game-ingress
+    # relay is enabled (RELAY.md Section 12); fail fast rather than serving a
+    # RelayService that would admit any relay (NFR-SEC-1) or building a
+    # ``join_hostname`` with no base domain. Mirrors the Worker-credential guard,
+    # and ``not <secret>`` treats a blank-collapsed-to-None as missing (#943).
+    if settings.relay.enabled:
+        if not settings.relay.credential:
+            raise ValueError("relay.credential is required when relay.enabled is true")
+        if not settings.relay.base_domain:
+            raise ValueError("relay.base_domain is required when relay.enabled is true")
+
     # The control channel must be authenticated AND encrypted (NFR-SEC-1). The
     # gRPC listener serves over TLS when control.tls.cert_file/key_file are both
     # set; control.tls.insecure=true opts in to a plaintext listener for
@@ -516,6 +540,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 key_file=settings.control.tls.key_file,
                 insecure=settings.control.tls.insecure,
             )
+            # Game-ingress relay control surface (RELAY.md Sections 4, 6, 12,
+            # issue #956): served on the SAME gRPC listener as WorkerService, only
+            # when relay.enabled. The relay dispatches TunnelDial over the existing
+            # Worker stream, so it shares the control plane and registry built
+            # above; its registration + join-token state are process-local
+            # in-memory adapters like the rest of the control plane. The
+            # required-when-enabled credential/base_domain are validated at the top
+            # of the factory.
+            if settings.relay.enabled:
+                assert settings.relay.credential is not None
+                assert settings.relay.base_domain is not None
+                register_relay_service(
+                    grpc_server,
+                    credential=settings.relay.credential,
+                    base_domain=settings.relay.base_domain,
+                    registration=RelayRegistration(),
+                    token_table=JoinTokenTable(
+                        clock=FleetSystemClock(),
+                        ttl=_RELAY_JOIN_TOKEN_TTL,
+                    ),
+                    resolver=ServersServerRouteResolver(create_session_factory(engine)),
+                    registry=registry,
+                    control_plane=app.state.control_plane,
+                )
+                logging.getLogger(__name__).info(
+                    "relay service registered on the gRPC listener",
+                    extra={"base_domain": settings.relay.base_domain},
+                )
             await grpc_server.start()
             app.state.grpc_server = grpc_server
             app.state.grpc_started = True

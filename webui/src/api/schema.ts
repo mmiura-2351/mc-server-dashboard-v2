@@ -2170,6 +2170,8 @@ export interface components {
             game_port: number | null;
             /** Id */
             id: string;
+            /** Join Hostname */
+            join_hostname: string | null;
             /** Mc Edition */
             mc_edition: string;
             /** Mc Version */

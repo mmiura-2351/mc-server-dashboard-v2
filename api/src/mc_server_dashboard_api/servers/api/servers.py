@@ -16,6 +16,7 @@ serialises the result. Domain errors are translated to HTTP codes here.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import (
@@ -36,6 +37,7 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 # ``Permission`` is community-context-owned (the catalog lives there); the servers
 # routes reference the ``server:*`` codes through it, as the community routes do.
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
+from mc_server_dashboard_api.config import Settings
 from mc_server_dashboard_api.dependencies import (
     ServerUpdateAuthz,
     get_audit_recorder,
@@ -47,6 +49,7 @@ from mc_server_dashboard_api.dependencies import (
     get_read_server,
     get_restart_server,
     get_send_server_command,
+    get_settings,
     get_start_server,
     get_stop_server,
     get_update_server,
@@ -175,7 +178,8 @@ class UpdateServerRequest(BaseModel):
     game_port: int | None = Field(default=None, gt=0, le=65535)
     # Optional slug rename (issue #955). Omitted (None) leaves the slug unchanged;
     # supplied, it is validated (422 invalid/reserved) and checked for global
-    # uniqueness (409 taken), at rest only. Released slugs are immediately reusable
+    # uniqueness (409 taken). The rename is allowed regardless of run state (the
+    # at-rest gate was removed in PR #966); released slugs are immediately reusable
     # (owner decision, RELAY.md Section 15).
     slug: str | None = None
 
@@ -186,6 +190,35 @@ class ServerCommandRequest(BaseModel):
 
 class ServerCommandResponse(BaseModel):
     output: str
+
+
+@dataclass(frozen=True)
+class JoinHostnameConfig:
+    """Relay config needed to build a server's ``join_hostname`` (issue #956).
+
+    ``<slug>.<base_domain>`` when the relay is enabled, else ``None`` — the UI's
+    display switch (RELAY.md Section 14). Resolved from the ``[relay]`` settings at
+    the edge so the response builder stays free of the config loader.
+    """
+
+    enabled: bool
+    base_domain: str | None
+
+    def for_slug(self, slug: str) -> str | None:
+        if not self.enabled or not self.base_domain:
+            return None
+        return f"{slug}.{self.base_domain}"
+
+
+def get_join_hostname_config(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> JoinHostnameConfig:
+    """Resolve the relay ``join_hostname`` config from settings (issue #956)."""
+
+    return JoinHostnameConfig(
+        enabled=settings.relay.enabled,
+        base_domain=settings.relay.base_domain,
+    )
 
 
 class ServerResponse(BaseModel):
@@ -213,13 +246,18 @@ class ServerResponse(BaseModel):
     game_port: int | None
     # The relay slug (issue #955): auto-assigned at create, renameable via PATCH.
     slug: str
+    # The player join hostname ``<slug>.<base_domain>`` when the relay is enabled,
+    # else ``None`` — the UI's display switch (issue #956, RELAY.md Section 14).
+    join_hostname: str | None
     desired_state: str
     observed_state: str
     observed_at: UtcDatetime | None
     assigned_worker_id: str | None
 
     @classmethod
-    def from_entity(cls, server: Server) -> "ServerResponse":
+    def from_entity(
+        cls, server: Server, join_hostname_config: JoinHostnameConfig
+    ) -> "ServerResponse":
         return cls(
             id=str(server.id.value),
             community_id=str(server.community_id.value),
@@ -233,6 +271,7 @@ class ServerResponse(BaseModel):
             cpu_millis=cpu_allocation_from_config(server.config),
             game_port=server.game_port,
             slug=server.slug,
+            join_hostname=join_hostname_config.for_slug(server.slug),
             desired_state=server.desired_state.value,
             observed_state=server.observed_state.value,
             observed_at=server.observed_at,
@@ -256,6 +295,7 @@ async def create_server(
     ],
     use_case: Annotated[CreateServer, Depends(get_create_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     config = _validated_config(body.config)
     try:
@@ -331,7 +371,7 @@ async def create_server(
     await _record(
         recorder, ops.SERVER_CREATE, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.post(
@@ -348,6 +388,7 @@ async def import_server(
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     name: Annotated[str, Form(min_length=1)],
     execution_backend: Annotated[str, Form(min_length=1)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     """Import a whole server from a ZIP export (server:create, issue #274).
 
@@ -409,7 +450,7 @@ async def import_server(
     await _record(
         recorder, ops.SERVER_IMPORT, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.get("/communities/{community_id}/servers")
@@ -419,9 +460,10 @@ async def list_servers(
         object, Depends(require_permission(Permission("server:read")))
     ],
     use_case: Annotated[ListServers, Depends(get_list_servers)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> list[ServerResponse]:
     servers = await use_case(community_id=CommunityId(community_id))
-    return [ServerResponse.from_entity(server) for server in servers]
+    return [ServerResponse.from_entity(server, join_config) for server in servers]
 
 
 @router.get("/communities/{community_id}/servers/{server_id}")
@@ -439,6 +481,7 @@ async def read_server(
         ),
     ],
     use_case: Annotated[ReadServer, Depends(get_read_server)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -447,7 +490,7 @@ async def read_server(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.get("/communities/{community_id}/servers/{server_id}/export")
@@ -509,6 +552,7 @@ async def update_server(
     ],
     use_case: Annotated[UpdateServer, Depends(get_update_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     """Edit a server's name/config/game port.
 
@@ -606,7 +650,7 @@ async def update_server(
     await _record(
         recorder, ops.SERVER_UPDATE, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.delete(
@@ -661,6 +705,7 @@ async def start_server(
     ],
     use_case: Annotated[StartServer, Depends(get_start_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -675,7 +720,7 @@ async def start_server(
         )
         raise _lifecycle_http_error(exc) from exc
     await _record(recorder, ops.SERVER_START, authorized, community_id, server.id.value)
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/stop")
@@ -694,6 +739,7 @@ async def stop_server(
     ],
     use_case: Annotated[StopServer, Depends(get_stop_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
     # Default false = today's graceful stop; ?force=true skips the Worker's
     # graceful path and kills the process immediately (issue #270).
     force: Annotated[bool, Query()] = False,
@@ -712,7 +758,7 @@ async def stop_server(
         )
         raise _lifecycle_http_error(exc) from exc
     await _record(recorder, ops.SERVER_STOP, authorized, community_id, server.id.value)
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/restart")
@@ -731,6 +777,7 @@ async def restart_server(
     ],
     use_case: Annotated[RestartServer, Depends(get_restart_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -747,7 +794,7 @@ async def restart_server(
     await _record(
         recorder, ops.SERVER_RESTART, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/command")

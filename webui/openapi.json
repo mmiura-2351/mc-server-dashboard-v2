@@ -1542,6 +1542,17 @@
             "title": "Id",
             "type": "string"
           },
+          "join_hostname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Join Hostname"
+          },
           "mc_edition": {
             "title": "Mc Edition",
             "type": "string"
@@ -1603,6 +1614,7 @@
           "cpu_millis",
           "game_port",
           "slug",
+          "join_hostname",
           "desired_state",
           "observed_state",
           "observed_at",

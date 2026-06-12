@@ -239,9 +239,24 @@ class ListFilesCommand:
     path: str
 
 
+@dataclass(frozen=True)
+class TunnelDialCommand:
+    """Tell the Worker to dial back the relay's tunnel listener (RELAY.md Section 5).
+
+    Dispatched as a side effect of a TUNNEL ``ResolveJoin`` decision, fire-and-
+    forget: the Worker's "result" is the dial-back arriving at the relay, so the
+    API does not block on the ``CommandResult`` (it is logged for diagnostics).
+    Everything the Worker needs arrives in-band so it requires zero new config.
+    """
+
+    endpoint: str
+    token: str
+    tls_ca_pem: str
+
+
 # The union of commands the lifecycle layer dispatches. File access (ReadFile /
 # EditFile / ListFiles) rides this stream for running servers (ARCHITECTURE.md
-# Section 7.2).
+# Section 7.2). TunnelDial rides it for a relay join (RELAY.md Section 5).
 Command = (
     StartServerCommand
     | StopServerCommand
@@ -252,6 +267,7 @@ Command = (
     | ReadFileCommand
     | EditFileCommand
     | ListFilesCommand
+    | TunnelDialCommand
 )
 
 

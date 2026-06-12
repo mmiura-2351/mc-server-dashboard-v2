@@ -367,6 +367,36 @@ class PortsSettings(_Section):
         return self
 
 
+class RelaySettings(_Section):
+    """Game-ingress relay control surface (CONFIGURATION.md, RELAY.md Section 12).
+
+    ``enabled`` is the master switch (default off, RELAY.md Section 9): it gates
+    serving ``RelayService`` on the gRPC listener, exposing ``join_hostname`` on
+    server responses, and (issue #957) the session prune loop. ``credential`` is
+    the shared secret the relay presents (a separate credential from the Worker's
+    so they rotate independently, RELAY.md Section 6); ``base_domain`` builds
+    ``<slug>.<base_domain>`` for ``join_hostname`` and is returned to the relay on
+    Register. Both are required when ``enabled`` is true, enforced at the edge
+    (app factory) like the Worker credential — declared optional here so a
+    deployment that leaves the relay off need not supply them.
+    ``session_retention_days`` is the ``game_session`` prune window consumed by
+    issue #957; it is parsed and validated here only.
+    """
+
+    enabled: bool = False
+    credential: str | None = None
+    base_domain: str | None = None
+    # The prune window for game_session rows (RELAY.md Section 8); consumed by
+    # issue #957. A zero/negative window is meaningless (it would prune every row
+    # or none); require a positive number of days.
+    session_retention_days: int = Field(default=90, gt=0)
+
+    # A blank ``${MCD_API_RELAY__CREDENTIAL}`` arrives as "" rather than unset;
+    # collapse it to None so the app factory's fail-fast (relay enabled without a
+    # credential) treats a blank as missing (#943).
+    _blank_credential = field_validator("credential")(_blank_to_none)
+
+
 class WebuiSettings(_Section):
     """Built Web UI static-serving (CONFIGURATION.md Section 5.10, WEBUI_SPEC 7.7).
 
@@ -604,6 +634,7 @@ class Settings(BaseSettings):
     ports: PortsSettings = Field(default_factory=PortsSettings)
     webui: WebuiSettings = Field(default_factory=WebuiSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    relay: RelaySettings = Field(default_factory=RelaySettings)
 
     @classmethod
     def settings_customise_sources(
@@ -639,6 +670,11 @@ class Settings(BaseSettings):
         for secret_key in ("access_key", "secret_key"):
             if storage["object"][secret_key] is not None:
                 storage["object"][secret_key] = _MASK
+        relay = self.relay.model_dump()
+        # The relay credential is a secret (RELAY.md Section 6); mask it whenever
+        # present. ``None`` (relay disabled) is not a secret.
+        if relay["credential"] is not None:
+            relay["credential"] = _MASK
         return {
             "server": self.server.model_dump(),
             "control": control,
@@ -651,6 +687,7 @@ class Settings(BaseSettings):
             "ports": self.ports.model_dump(),
             "webui": self.webui.model_dump(),
             "auth": auth,
+            "relay": relay,
         }
 
 

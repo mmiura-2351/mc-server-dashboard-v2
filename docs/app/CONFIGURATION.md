@@ -340,6 +340,25 @@ proxies the API).
 |---|---|---|---|
 | `webui.dist_dir` | *unset* | | Directory of the built SPA to serve at `/`. When set, the API mounts it after every router (so API routes and WS endpoints take precedence) and falls back to `index.html` for unmatched paths so deep links/reloads resolve. Must be an existing directory containing `index.html`; otherwise startup fails fast. When unset, nothing is mounted. |
 
+### 5.11 Game-ingress relay
+
+The game-ingress relay (RELAY.md, epic #659) lets players join at
+`<slug>.<base_domain>` with no port. It is **config-selectable and default off**
+(RELAY.md Section 9): with `relay.enabled=false` (the default) single-host
+operators keep the direct path with zero new setup. When enabled, the API serves
+`RelayService` on the existing gRPC listener (`server.grpc_port`) alongside
+`WorkerService`, exposes `join_hostname` on server responses, and (issue #957)
+runs the session prune loop. `relay.credential` and `relay.base_domain` are both
+required when enabled, enforced fail-fast at the edge (a blank value is treated as
+missing, per the secret-blank rule above).
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `relay.enabled` | `false` | | Master switch: serve `RelayService`, expose `join_hostname`, and run the prune loop (RELAY.md Section 9). |
+| `relay.credential` | *required when enabled* | secret | Shared credential the relay must present (`authorization: Bearer <credential>` metadata) to authenticate its gRPC calls (REQUIREMENTS.md NFR-SEC-1). A **separate** credential from `control.worker_credential` so relay and Worker credentials rotate independently (RELAY.md Section 6). |
+| `relay.base_domain` | *required when enabled* | | Routing domain (e.g. `mc.example.com`); used to build `join_hostname` (`<slug>.<base_domain>`) and returned to the relay on `Register` (RELAY.md Sections 3, 6). |
+| `relay.session_retention_days` | `90` | | `game_session` prune window in days (RELAY.md Section 8; consumed by issue #957). Must be positive. |
+
 ---
 
 ## 6. Worker configuration
