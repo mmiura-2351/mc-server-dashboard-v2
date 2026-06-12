@@ -61,6 +61,27 @@ type Transfer interface {
 	Snapshot(ctx context.Context, url, token, workingDir string, baseGeneration uint64, workerID string) (uint64, error)
 }
 
+// TunnelDialer is the relay dial-back Port (RELAY.md Section 5): for one player
+// session it dials the relay's tunnel listener over TLS, presents the token, dials
+// the local server's loopback game port, and splices the two. Dial returns once
+// the splice is established (or with an error on dial/handshake failure); the
+// splice runs on the adapter's own long-lived context, off this command, and is
+// torn down on Worker shutdown.
+type TunnelDialer interface {
+	Dial(ctx context.Context, spec TunnelSpec) error
+}
+
+// TunnelSpec carries everything one TunnelDial needs: the local server's working
+// dir (for its published game port) and the relay endpoint, token, and optional
+// CA bundle to dial back to (RELAY.md Section 5).
+type TunnelSpec struct {
+	ServerID   string
+	WorkingDir string
+	Endpoint   string
+	Token      string
+	CAPEM      string
+}
+
 // systemClock is the default wall-clock used for the metrics ticker when
 // WithMetrics injects no other clock. It satisfies session.Clock with stdlib
 // time so the application layer stays adapter-free (ARCHITECTURE.md Section 2).
@@ -88,6 +109,7 @@ type Manager struct {
 	scratchDir  string
 	openControl controlFunc
 	transfer    Transfer
+	tunnel      TunnelDialer
 	logger      *slog.Logger
 	// workerID is this Worker's own id, stamped on a snapshot publish so the API's
 	// publish-time generation guard can tell a same-Worker re-publish from a
@@ -240,6 +262,13 @@ func (m *Manager) WithTransfer(t Transfer) *Manager {
 	return m
 }
 
+// WithTunnelDialer wires the relay dial-back TunnelDialer used by TunnelDial
+// (RELAY.md Section 5). Without it, a TunnelDial fails with an internal error.
+func (m *Manager) WithTunnelDialer(t TunnelDialer) *Manager {
+	m.tunnel = t
+	return m
+}
+
 // SetTransferDeadline records the per-transfer bound the API advertised in
 // RegisterAck (session.TransferDeadlineSetter, issue #874). The hydrate/snapshot
 // handlers apply it as a context deadline so an upload/download cannot outlive
@@ -317,6 +346,8 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 		return m.handleEditFile(cmd)
 	case "ListFiles":
 		return m.handleListFiles(cmd)
+	case "TunnelDial":
+		return m.handleTunnelDial(ctx, cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
@@ -1226,6 +1257,40 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 			fmt.Sprintf("instancemanager: server command: %v", err))
 	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true, Output: out}
+}
+
+// handleTunnelDial opens a relay dial-back tunnel for one player session (RELAY.md
+// Section 5). The server must be running locally — a not-running server returns
+// SERVER_NOT_FOUND — and the dialer resolves its published loopback game port from
+// the working dir, dials the relay endpoint, presents the token, and splices the
+// two. It returns once the splice is established; the splice itself runs on the
+// dialer's own long-lived context, off this command, so it outlives the result. A
+// TunnelDial is a quick command: it bypasses the slow-lane cap (session layer) so
+// a join never queues behind a hydrate.
+func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) session.CommandResult {
+	m.mu.Lock()
+	_, running := m.instances[cmd.ServerID]
+	m.mu.Unlock()
+	if !running {
+		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+			"instancemanager: server not running")
+	}
+	if m.tunnel == nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			"instancemanager: tunnel dialer not configured")
+	}
+
+	if err := m.tunnel.Dial(ctx, TunnelSpec{
+		ServerID:   cmd.ServerID,
+		WorkingDir: filepath.Join(m.scratchDir, cmd.ServerID),
+		Endpoint:   cmd.TunnelEndpoint,
+		Token:      cmd.TunnelToken,
+		CAPEM:      cmd.TunnelCAPEM,
+	}); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: tunnel dial: %v", err))
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
 // MaxFileBytes bounds a ReadFile response and an EditFile payload. File access

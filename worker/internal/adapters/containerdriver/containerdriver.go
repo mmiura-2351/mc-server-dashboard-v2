@@ -1417,7 +1417,8 @@ var (
 // ports reads the server's game and RCON ports from its working-dir
 // server.properties, falling back to the Minecraft defaults when the file is
 // absent or a key is unset. Start publishes the game port on the configured host
-// interface and RCON on loopback.
+// interface and RCON on loopback. Keep the game-port resolution in sync with
+// tunnel.gamePort (adapters/tunnel/tunnel.go), which dials the published port.
 func ports(workingDir string) (game, rcon string) {
 	props := readProperties(filepath.Join(workingDir, "server.properties"))
 	game = props["server-port"]

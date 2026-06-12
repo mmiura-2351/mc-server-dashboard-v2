@@ -333,7 +333,8 @@ func (r *Runner) handleCommand(ctx context.Context, cmd Command) CommandResult {
 func IsHandledKind(kind string) bool {
 	switch kind {
 	case "StartServer", "StopServer", "RestartServer", "ServerCommand",
-		"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile", "ListFiles":
+		"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile", "ListFiles",
+		"TunnelDial":
 		return true
 	default:
 		return false
@@ -427,15 +428,18 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 }
 
 // isQuickCommand reports whether a command kind is an instant op that bypasses
-// the global concurrency cap. Only ServerCommand qualifies: it sends one
-// console/RCON line to an already-running server and returns at once. Every other
-// server-scoped kind (StartServer/StopServer/RestartServer, HydrateTrigger/
-// SnapshotTrigger, and the file ops) can run long and stays bounded by the cap
-// (issue #169). The bypass keeps per-server FIFO: it changes only whether a lane
-// acquires a cap slot for a command, never the order in which a server's commands
-// run.
+// the global concurrency cap. ServerCommand qualifies: it sends one console/RCON
+// line to an already-running server and returns at once. TunnelDial qualifies too
+// (RELAY.md Section 5): it dials the relay, completes the token handshake, and
+// returns once the splice is established — the long-lived splice runs on its own
+// goroutines off the lane, so the command itself is instant and a join must not
+// queue behind a hydrate (issue #958). Every other server-scoped kind
+// (StartServer/StopServer/RestartServer, HydrateTrigger/SnapshotTrigger, and the
+// file ops) can run long and stays bounded by the cap (issue #169). The bypass
+// keeps per-server FIFO: it changes only whether a lane acquires a cap slot for a
+// command, never the order in which a server's commands run.
 func isQuickCommand(kind string) bool {
-	return kind == "ServerCommand"
+	return kind == "ServerCommand" || kind == "TunnelDial"
 }
 
 // removeLane drops a lane that never started draining (ctx already cancelled).
