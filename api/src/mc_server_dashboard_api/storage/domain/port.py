@@ -209,8 +209,12 @@ class WorkingSetStore(abc.ABC):
         ``live=True`` when the publishing Worker declares ``X-Snapshot-Source:
         running`` so the content-integrity gate applies the byte-precise region rule
         instead of refusing every periodic snapshot. ``False`` (the default, and a
-        stopped/at-rest source) keeps the strict 4096-aligned rule. Backup
-        create/restore and the sweep CLI never set it (they gate at-rest artifacts).
+        stopped/at-rest source) keeps the strict 4096-aligned rule. Strict thus
+        applies only at this stopped-source boundary; the store/archive consumers
+        (backup create/restore, the per-store health checks, the sweep CLI) do not
+        call ``commit_snapshot`` and run their own region checks live, because once a
+        running-server snapshot is published the at-rest store legitimately holds
+        unpadded regions. See the STORAGE.md Section 8 mode table.
         """
 
     @abc.abstractmethod

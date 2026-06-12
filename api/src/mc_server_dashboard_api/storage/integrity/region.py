@@ -353,9 +353,14 @@ def check_working_set(root: Path, *, live: bool = False) -> WorkingSetReport:
     is reported in the result, never raised.
 
     ``live`` selects the running-server relaxation (issue #923) for every region in
-    the set: the publish gate passes it ``True`` when the snapshot source is a
-    running server (``X-Snapshot-Source: running``) and ``False`` (strict, the
-    default) for a stopped/at-rest set and for every backup/restore/sweep caller.
+    the set. Strict (``live=False``, the default) applies only at the stopped-source
+    boundary: the publish gate passes it for an absent/``stopped``
+    ``X-Snapshot-Source`` header. Every other caller — the publish gate for a
+    ``running`` source, and the store/archive consumers (backup create/restore,
+    ``check_backup_health``/``check_current_health``, the sweep CLI) — runs live,
+    because once a running-server snapshot is published the at-rest store
+    legitimately holds unpadded regions. See the module docstring above and the
+    STORAGE.md Section 8 mode table for the full call-site mapping.
     """
     scanned = 0
     corrupt: list[RegionFinding] = []

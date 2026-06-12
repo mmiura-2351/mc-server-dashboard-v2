@@ -915,7 +915,11 @@ class FsStorage(Storage):
             )
             # ``live=True`` (issue #923): a backup created from a running-source
             # (unpadded) ``current/`` is itself live-format, so the fsck must tolerate
-            # the unpadded tail or it would falsely quarantine a healthy backup.
+            # the unpadded tail or it would falsely quarantine a healthy backup. A
+            # backup quarantined before #925 solely for ``not_4096_aligned`` is
+            # intentionally rescued to HEALTHY on the next sweep (the verdict is
+            # loadable content); realistic torn shapes (location entry at/past EOF,
+            # truncation severing a referenced chunk) stay caught in live mode.
             return await asyncio.to_thread(check_working_set, staging, live=True)
         finally:
             await asyncio.to_thread(_rmtree, staging)
