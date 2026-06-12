@@ -512,6 +512,11 @@ class GrpcControlPlane(ControlPlane):
         await queue.put(
             pb.ApiMessage(correlation_id=command_id, api_command=api_command)
         )
+        # Fire-and-forget: the result is not awaited here. The bare ensure_future
+        # is GC-safe because the pending-map (register_pending above) keeps the
+        # future referenced until the result resolves it or it times out, and the
+        # logging coroutine holds command_id/server_id; the task is not collected
+        # mid-flight despite no local reference being kept.
         asyncio.ensure_future(
             self._log_fire_and_forget_result(command_id, server_id, future)
         )

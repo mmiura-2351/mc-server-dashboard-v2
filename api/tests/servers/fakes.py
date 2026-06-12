@@ -42,6 +42,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFileNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
+from mc_server_dashboard_api.servers.domain.game_session import GameSession
+from mc_server_dashboard_api.servers.domain.game_session_repository import (
+    GameSessionRepository,
+)
 from mc_server_dashboard_api.servers.domain.group_repository import GroupRepository
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
@@ -518,6 +522,34 @@ class FakeBackupRepository(BackupRepository):
         )
 
 
+class FakeGameSessionRepository(GameSessionRepository):
+    def __init__(self) -> None:
+        self.rows: list[GameSession] = []
+        self.deleted_before: list[dt.datetime] = []
+
+    def seed(self, session: GameSession) -> None:
+        self.rows.append(session)
+
+    async def list_for_server(
+        self, server_id: ServerId, *, limit: int, offset: int
+    ) -> list[GameSession]:
+        matching = [r for r in self.rows if r.server_id == server_id]
+        ordered = sorted(
+            matching,
+            key=lambda r: (r.started_at or dt.datetime.min, str(r.id)),
+            reverse=True,
+        )
+        return ordered[offset : offset + limit]
+
+    async def delete_started_before(self, cutoff: dt.datetime) -> int:
+        self.deleted_before.append(cutoff)
+        stale = [
+            r for r in self.rows if r.started_at is not None and r.started_at < cutoff
+        ]
+        self.rows = [r for r in self.rows if r not in stale]
+        return len(stale)
+
+
 class FakeGroupRepository(GroupRepository):
     """In-memory player-group store + attachment join (issue #276).
 
@@ -608,6 +640,7 @@ class FakeUnitOfWork(UnitOfWork):
     resource_grants: FakeResourceGrantSweeper
     backups: FakeBackupRepository
     groups: FakeGroupRepository
+    game_sessions: FakeGameSessionRepository
 
     def __init__(
         self,
@@ -615,11 +648,13 @@ class FakeUnitOfWork(UnitOfWork):
         resource_grants: FakeResourceGrantSweeper | None = None,
         backups: FakeBackupRepository | None = None,
         groups: FakeGroupRepository | None = None,
+        game_sessions: FakeGameSessionRepository | None = None,
     ) -> None:
         self.servers = servers or FakeServerRepository()
         self.resource_grants = resource_grants or FakeResourceGrantSweeper()
         self.backups = backups or FakeBackupRepository()
         self.groups = groups or FakeGroupRepository()
+        self.game_sessions = game_sessions or FakeGameSessionRepository()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":

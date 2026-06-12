@@ -45,6 +45,21 @@ def test_create_app_fails_when_relay_enabled_without_base_domain(
         create_app()
 
 
+def test_create_app_fails_when_relay_enabled_but_control_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The RelayService shares the control-plane gRPC listener, which only starts
+    # when control.enabled. relay.enabled with control.enabled=false would leave
+    # the relay silently unserved while still exposing join_hostname (PR #973
+    # review) — fail fast instead.
+    monkeypatch.setenv("MCD_API_RELAY__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_RELAY__CREDENTIAL", "relay-secret")
+    monkeypatch.setenv("MCD_API_RELAY__BASE_DOMAIN", "mc.example.com")
+    monkeypatch.setenv("MCD_API_CONTROL__ENABLED", "false")
+    with pytest.raises(ValueError, match="relay.enabled requires control.enabled"):
+        create_app()
+
+
 def test_create_app_succeeds_when_relay_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

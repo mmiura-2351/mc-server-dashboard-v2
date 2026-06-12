@@ -45,6 +45,7 @@ from mc_server_dashboard_api.dependencies import (
     get_delete_server,
     get_export_server,
     get_import_server,
+    get_list_game_sessions,
     get_list_servers,
     get_read_server,
     get_restart_server,
@@ -63,6 +64,7 @@ from mc_server_dashboard_api.servers.application.export_import import (
     ImportServer,
 )
 from mc_server_dashboard_api.servers.application.files import MAX_UPLOAD_BYTES
+from mc_server_dashboard_api.servers.application.game_sessions import ListGameSessions
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     SendServerCommand,
@@ -121,6 +123,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
 )
+from mc_server_dashboard_api.servers.domain.game_session import GameSession
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     memory_limit_from_config,
@@ -491,6 +494,77 @@ async def read_server(
     except ServerNotFoundError as exc:
         raise _not_found() from exc
     return ServerResponse.from_entity(server, join_config)
+
+
+class GameSessionResponse(BaseModel):
+    """One recorded game session (RELAY.md Sections 8, 13, 14).
+
+    ``username`` / ``player_uuid`` are the identity **claimed** in Login Start —
+    pre-authentication values, not a verified identity (RELAY.md Section 8). A
+    session of meaningful duration implies the claim survived Mojang auth, but the
+    fields themselves are unverified; the UI labels them as claimed. ``hostname``
+    / ``player_ip`` / ``started_at`` may be ``null`` on a not-yet-reconciled
+    end-before-start placeholder row.
+    """
+
+    id: uuid.UUID
+    # The slug the player joined on, recorded at join time (slugs are renameable).
+    hostname: str | None
+    # The player's source address as the relay saw it (PII; session:read-gated).
+    player_ip: str | None
+    # Claimed (pre-auth) Login Start identity — see the class docstring.
+    username: str | None
+    player_uuid: uuid.UUID | None
+    started_at: UtcDatetime | None
+    ended_at: UtcDatetime | None
+
+    @classmethod
+    def from_entity(cls, session: GameSession) -> "GameSessionResponse":
+        return cls(
+            id=session.id,
+            hostname=session.hostname,
+            player_ip=session.player_ip,
+            username=session.username,
+            player_uuid=session.player_uuid,
+            started_at=session.started_at,
+            ended_at=session.ended_at,
+        )
+
+
+class GameSessionListResponse(BaseModel):
+    sessions: list[GameSessionResponse]
+
+
+@router.get("/communities/{community_id}/servers/{server_id}/sessions")
+async def list_sessions(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object, Depends(require_permission(Permission("session:read")))
+    ],
+    use_case: Annotated[ListGameSessions, Depends(get_list_game_sessions)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> GameSessionListResponse:
+    """List a server's recorded game sessions newest-first (``session:read``).
+
+    Player IPs are PII, so this is gated by ``session:read`` (community-level)
+    rather than ``server:read`` (RELAY.md Section 8). The identity fields are the
+    *claimed* pre-auth Login Start values. Paginated by ``limit``/``offset``.
+    """
+
+    try:
+        sessions = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            limit=limit,
+            offset=offset,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    return GameSessionListResponse(
+        sessions=[GameSessionResponse.from_entity(s) for s in sessions]
+    )
 
 
 @router.get("/communities/{community_id}/servers/{server_id}/export")
