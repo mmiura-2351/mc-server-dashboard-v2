@@ -262,6 +262,13 @@ holding different roles in each, and may also be a platform administrator.
 - FR-AUTH-6: The platform-administrator role uses the **same identity system**
   as ordinary users, distinguished by an administrator role/flag. There is no
   separate admin authentication mechanism.
+- FR-AUTH-7: **Admin bootstrap.** The first user created on a fresh deployment
+  (when no user exists yet) automatically becomes a platform administrator, so a
+  new install is usable without any out-of-band database mutation. The grant is
+  keyed on *no users existing*, not *no admin existing*, so it cannot re-open once
+  any user exists; concurrent first registrations produce exactly one admin; the
+  auto-grant is audited. A fresh deployment with self-registration closed
+  (FR-AUTH-1 open flag off) still permits this single bootstrap registration.
 
 ### 6.2 Communities
 

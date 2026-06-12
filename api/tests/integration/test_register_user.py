@@ -165,6 +165,51 @@ async def test_registers_and_persists(engine: AsyncEngine) -> None:
     assert user.password_hash != _VALID_PASSWORD
 
 
+async def test_first_user_becomes_platform_admin_then_subsequent_does_not(
+    engine: AsyncEngine,
+) -> None:
+    # On a fresh database the first registered user is the bootstrap platform
+    # admin (#909); every later registration defaults to a non-admin account.
+    register = _register(engine)
+    first = await register(
+        username="alice", email="alice@example.com", password=_VALID_PASSWORD
+    )
+    second = await register(
+        username="bob", email="bob@example.com", password=_VALID_PASSWORD
+    )
+    assert first.is_platform_admin is True
+    assert second.is_platform_admin is False
+
+
+async def test_concurrent_first_registrations_produce_exactly_one_admin(
+    engine: AsyncEngine,
+) -> None:
+    # The heart of #909: two simultaneous first registrations against the fresh DB
+    # must serialize on the bootstrap advisory lock so EXACTLY ONE wins the
+    # auto-grant. Without the lock both would read a user count of 0 and both
+    # self-grant platform admin.
+    async def make(username: str) -> User:
+        # A fresh RegisterUser == a fresh UnitOfWork/session/transaction per racer,
+        # matching how two concurrent requests run (each gets its own session from
+        # the pool). Sharing one session would serialize them at the asyncio level
+        # and never exercise the DB lock.
+        return await _register(engine)(
+            username=username,
+            email=f"{username}@example.com",
+            password=_VALID_PASSWORD,
+        )
+
+    first, second = await asyncio.gather(make("alice"), make("bob"))
+
+    admins = [u for u in (first, second) if u.is_platform_admin]
+    assert len(admins) == 1
+
+    factory = create_session_factory(engine)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.users.count_active_platform_admins() == 1
+        assert await uow.users.count_all() == 2
+
+
 async def test_admin_created_account_can_log_in(engine: AsyncEngine) -> None:
     # The whole point of the admin creation surface (issue #368): an account it
     # provisions is a real account the holder can authenticate with.

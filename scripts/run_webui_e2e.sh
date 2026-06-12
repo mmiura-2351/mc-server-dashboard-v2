@@ -7,7 +7,8 @@
 #   2. the API (alembic upgrade head, then uvicorn) with the control plane off
 #      (no worker in CI — servers park unassigned/stopped, which the suite
 #      asserts),
-#   3. the seeded platform admin (register over HTTP + promote in the DB),
+#   3. the bootstrap platform admin (register the first user over HTTP; the API
+#      auto-grants platform admin to the first user, issue #909 — no DB step),
 #   4. `playwright test`, which itself starts the Vite dev server.
 #
 # Everything it starts, it stops on exit. CI runs this same script as its one
@@ -131,12 +132,11 @@ if [ -z "$ready" ]; then
   exit 1
 fi
 
-echo "==> seeding the platform admin"
+echo "==> bootstrapping the platform admin"
 export MCD_E2E_API_URL="$API_URL"
-# Promote the seeded admin in the DB — the one out-of-band bootstrap step
-# (DEPLOYMENT.md 5), run via the API's pinned asyncpg so no psql is needed.
-ADMIN_USERNAME="${MCD_E2E_ADMIN_USERNAME:-e2e-admin}"
-export MCD_E2E_PROMOTE_CMD="cd '$REPO_ROOT/api' && MCD_API_DATABASE__URL='$DB_URL' uv run python '$REPO_ROOT/webui/e2e/promote_admin.py' '$ADMIN_USERNAME'"
+# The first user registered on the fresh DB is auto-granted platform admin by the
+# API (issue #909) — no out-of-band DB step. seed-admin.mjs registers it and
+# asserts the auto-grant fired (the fresh-deployment bootstrap e2e coverage).
 node webui/e2e/seed-admin.mjs
 
 echo "==> running Playwright"

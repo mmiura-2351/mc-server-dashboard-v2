@@ -133,6 +133,20 @@ async def register_user(
             target_id=user.id.value,
         )
     )
+    # First-user bootstrap (#909): the very first registrant is auto-granted
+    # platform admin. The manual psql step it replaces left no audit trail, so
+    # record the grant explicitly (the admin-API grant path is audited the same
+    # way). The new user is both actor and target -- the system granted it to them.
+    if user.is_platform_admin:
+        await recorder.record(
+            AuditEvent(
+                operation=ops.USER_PLATFORM_ADMIN_GRANT,
+                outcome=Outcome.SUCCESS,
+                actor_id=user.id.value,
+                target_type=ops.TARGET_USER,
+                target_id=user.id.value,
+            )
+        )
     return UserResponse.from_entity(user)
 
 

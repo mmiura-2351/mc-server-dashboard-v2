@@ -132,6 +132,15 @@ async def admin_create_user(
             status.HTTP_422_UNPROCESSABLE_CONTENT, _field_reason(exc)
         ) from exc
     await _audit(recorder, ops.USER_CREATE, admin=admin, target=user.id.value)
+    # First-user bootstrap (#909): if this admin-created account is the very first
+    # user on the database, persist_new_user auto-grants it platform admin. The
+    # grant is shared with open registration, so audit it the same way that route
+    # does -- unreachable on an empty DB via HTTP (admin-gated), but a future
+    # caller of this shared path inherits an audited grant.
+    if user.is_platform_admin:
+        await _audit(
+            recorder, ops.USER_PLATFORM_ADMIN_GRANT, admin=admin, target=user.id.value
+        )
     return UserResponse.from_entity(user)
 
 
