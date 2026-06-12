@@ -369,12 +369,8 @@ async def test_prune_deletes_stale_end_only_placeholder(engine: AsyncEngine) -> 
     sink = ServersSessionSink(create_session_factory(engine))
     stale = str(uuid.uuid4())
     fresh = str(uuid.uuid4())
-    await sink.record_end(
-        session_id=stale, ended_at=_NOW - dt.timedelta(days=100)
-    )
-    await sink.record_end(
-        session_id=fresh, ended_at=_NOW - dt.timedelta(days=10)
-    )
+    await sink.record_end(session_id=stale, ended_at=_NOW - dt.timedelta(days=100))
+    await sink.record_end(session_id=fresh, ended_at=_NOW - dt.timedelta(days=10))
     cutoff = _NOW - dt.timedelta(days=90)
     factory = create_session_factory(engine)
     async with ServersUnitOfWork(factory) as uow:
@@ -384,9 +380,7 @@ async def test_prune_deletes_stale_end_only_placeholder(engine: AsyncEngine) -> 
     async with engine.connect() as conn:
         remaining = {
             str(r.id)
-            for r in (
-                await conn.execute(text("SELECT id FROM game_session"))
-            ).all()
+            for r in (await conn.execute(text("SELECT id FROM game_session"))).all()
         }
     assert remaining == {fresh}
 
