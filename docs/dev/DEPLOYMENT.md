@@ -71,8 +71,9 @@ cp .env.example .env
 | `POSTGRES_PASSWORD` | Database password | `openssl rand -base64 32` |
 | `MCD_API_AUTH__TOKEN__SIGNING_KEY` | JWT signing key (HS256, >= 32 bytes) | `openssl rand -base64 48` |
 | `MCD_API_CONTROL__WORKER_CREDENTIAL` | Shared secret authenticating the worker | `openssl rand -base64 48` |
-| `MCD_API_STORAGE__OBJECT__ACCESS_KEY` | S3 access key for the object backend | `openssl rand -hex 16` |
-| `MCD_API_STORAGE__OBJECT__SECRET_KEY` | S3 secret key for the object backend | `openssl rand -hex 16` |
+| `COMPOSE_PROFILES` | Active compose profiles; ships as `object` to run the SeaweedFS service. Set empty to drop it for the fs backend | leave as `object` (default) |
+| `MCD_API_STORAGE__OBJECT__ACCESS_KEY` | S3 access key for the object backend (required when `COMPOSE_PROFILES=object`) | `openssl rand -hex 16` |
+| `MCD_API_STORAGE__OBJECT__SECRET_KEY` | S3 secret key for the object backend (required when `COMPOSE_PROFILES=object`) | `openssl rand -hex 16` |
 | `MCSD_SCRATCH_DIR` | Absolute host path for the worker scratch dir | choose a path, e.g. `/opt/mcsd/scratch` |
 | `DOCKER_GID` | GID of the host `docker` group | `getent group docker \| cut -d: -f3` |
 | `API_HTTP_PORT` | Published host port for the API HTTP surface | default `8000` |
@@ -81,7 +82,9 @@ cp .env.example .env
 is reused by the worker as its `MCD_WORKER_API_CREDENTIAL` (wired in
 `compose.yaml`), so both sides share the one secret. The two
 `MCD_API_STORAGE__OBJECT__*` keys are the S3 credentials for the **default object
-storage backend** — see [Section 5](#5-storage-backend-object-on-seaweedfs-default).
+storage backend**; they are required only while `COMPOSE_PROFILES=object` (the
+default) and unused after the fs opt-out — see
+[Section 5](#5-storage-backend-object-on-seaweedfs-default).
 
 The scratch directory must exist on the host before the first `up` so the bind
 mount resolves; create it as the user the worker runs as:
@@ -164,20 +167,25 @@ server-side-copies them into a fresh snapshot prefix and flips one pointer objec
 
 ### Quick start (the default — nothing extra to do)
 
-The `seaweedfs` service is a standard service in `compose.yaml`; `docker compose
-up` provisions it alongside `db`/`api`/`worker`. You only need to set the two S3
-credential keys in `.env` (Section 3):
+The `seaweedfs` service is gated behind the `object` compose profile, which
+`.env.example` ships active via `COMPOSE_PROFILES=object`; with that default,
+`docker compose up` provisions it alongside `db`/`api`/`worker`. You only need to
+set the two S3 credential keys in `.env` (Section 3):
 
 ```sh
-# in .env
+# in .env (COMPOSE_PROFILES=object is already the .env.example default)
 MCD_API_STORAGE__OBJECT__ACCESS_KEY=<openssl rand -hex 16>
 MCD_API_STORAGE__OBJECT__SECRET_KEY=<openssl rand -hex 16>
 ```
 
-SeaweedFS writes its S3 identities file from these at startup (so the secrets live
-only in `.env`, matching the database password), and auto-creates the `mcsd`
-bucket on first write. The `api` service waits for the `seaweedfs` healthcheck
-before it boots. No bucket pre-creation or init job is required.
+Blank keys fail loudly at boot: the seaweedfs entrypoint refuses a blank-key
+identities file, and the api refuses to start the object backend with blank creds
+(naming the missing variables). SeaweedFS writes its S3 identities file from these
+at startup (so the secrets live only in `.env`, matching the database password),
+and auto-creates the `mcsd` bucket on first write. The `api` service waits for the
+`seaweedfs` healthcheck before it boots (a `required: false` dependency, so the api
+still starts cleanly after the fs opt-out drops the service). No bucket
+pre-creation or init job is required.
 
 The data lives in the `seaweedfs-data` volume — include it in your backups
 (Section 10).
@@ -219,21 +227,31 @@ than its default 24h); it is optional and complementary to the API sweep.
 ### Opting back to the fs backend
 
 To run the local-volume **`fs`** backend instead (the previous default; STORAGE.md
-Section 2), set this in `.env` and recreate the `api` service:
+Section 2), set both of these in `.env` — clear `COMPOSE_PROFILES` and pin the
+backend:
 
 ```sh
 # in .env
+COMPOSE_PROFILES=
 MCD_API_STORAGE__BACKEND=fs
 ```
 
-```sh
-docker compose up -d --force-recreate api
-```
+Clearing `COMPOSE_PROFILES` drops the `seaweedfs` service entirely (it is gated
+behind the `object` profile), so the stack no longer runs — or waits on — a
+SeaweedFS instance it does not use; the api's dependency on it is `required: false`,
+so the api starts cleanly. With the service gone, the S3 credential keys
+(`MCD_API_STORAGE__OBJECT__*`) are **not required** and may stay blank.
 
 The fs root (`MCD_API_STORAGE__FS__ROOT=/data/storage`) and its `api-storage`
-volume stay wired in `compose.yaml`, so no other change is needed. The
-`seaweedfs` service still starts but is unused; remove it from your compose
-overrides if you want to stop running it.
+volume stay wired in `compose.yaml`, so no other change is needed. Recreate the
+stack to apply:
+
+```sh
+docker compose up -d --remove-orphans
+```
+
+`--remove-orphans` clears the now-deselected `seaweedfs` container if it was
+running before the opt-out (its `seaweedfs-data` volume is left intact).
 
 ### Caveat: switching an existing deployment is a data cutover
 
@@ -482,15 +500,31 @@ git pull
 > rebuilds will start the API against an **empty** SeaweedFS store — its servers,
 > snapshots, and backups live in the `api-storage` (fs) volume and do **not**
 > migrate automatically (Section 5 "data cutover" caveat). To keep your existing
-> fs data, pin the backend **before** rebuilding:
+> fs data, opt back to fs **before** rebuilding — pin the backend and drop the
+> SeaweedFS service (Section 5 "Opting back to the fs backend"):
 >
 > ```sh
-> echo 'MCD_API_STORAGE__BACKEND=fs' >> .env
+> printf 'COMPOSE_PROFILES=\nMCD_API_STORAGE__BACKEND=fs\n' >> .env
 > ```
 >
 > To deliberately adopt the object backend on an existing deployment, treat it as
 > a cutover: back up both volumes first, then expect an empty store until servers
 > are re-hydrated/re-created (Section 5).
+
+> **Upgrade note — the `seaweedfs` service is now profile-gated.** The service is
+> behind the `object` compose profile, which `.env.example` activates with
+> `COMPOSE_PROFILES=object`. An existing **object** deployment whose `.env` predates
+> this revision has no `COMPOSE_PROFILES` line; after `git pull` the next
+> `docker compose up` would **not** start `seaweedfs` (an unset `COMPOSE_PROFILES`
+> selects no profiles), and the api would fail to reach the object store. Add the
+> line once before rebuilding:
+>
+> ```sh
+> echo 'COMPOSE_PROFILES=object' >> .env
+> ```
+>
+> (fs deployments set `COMPOSE_PROFILES=` empty instead — see the breaking-change
+> box above.)
 
 Stacks that were first deployed before the `api` image pre-created the storage
 mount point have an `api-storage` volume owned by root, so the non-root app
