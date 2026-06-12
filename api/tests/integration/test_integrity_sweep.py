@@ -62,8 +62,8 @@ from tests.servers.fakes import (
     FakeVersionValidator,
 )
 from tests.storage.helpers import (
-    corrupt_region_bytes,
     healthy_region_bytes,
+    mode_invariant_corrupt_region_bytes,
     region_targz,
     tar_stream,
 )
@@ -181,13 +181,18 @@ async def test_sweep_classifies_backups_and_flags_a_corrupt_snapshot(
         tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
     )
     live = server_root / os.readlink(server_root / "current")
-    (live / "world" / "region" / "r.0.0.mca").write_bytes(corrupt_region_bytes())
+    (live / "world" / "region" / "r.0.0.mca").write_bytes(
+        mode_invariant_corrupt_region_bytes()
+    )
 
     good_ref = await _put_backup(
         storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
     )
     bad_ref = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()},
     )
     healthy_row = _backup(server, good_ref)
     corrupt_row = _backup(server, bad_ref)
@@ -223,7 +228,10 @@ async def test_sweep_is_idempotent_on_the_health_column(
     factory = create_session_factory(engine)
     storage = FsStorage(tmp_path)
     bad_ref = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()},
     )
     corrupt_row = _backup(server, bad_ref)
     async with ServersUnitOfWork(factory) as uow:

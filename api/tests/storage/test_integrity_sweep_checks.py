@@ -23,8 +23,8 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
 )
 from tests.storage.helpers import (
-    corrupt_region_bytes,
     healthy_region_bytes,
+    mode_invariant_corrupt_region_bytes,
     new_scope,
     region_targz,
     snapshot_dir,
@@ -76,7 +76,10 @@ async def test_check_backup_health_reports_corrupt_for_a_torn_archive(
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     key = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()},
     )
 
     report = await storage.check_backup_health(community, server, key)
@@ -91,7 +94,10 @@ async def test_check_backup_health_cleans_its_staging(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     key = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region_bytes()}
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()},
     )
 
     await storage.check_backup_health(community, server, key)
@@ -127,11 +133,11 @@ async def test_check_backup_health_leases_staging_during_fsck(
 
     leased_during_fsck: list[bool] = []
 
-    def _spy(staging: Path) -> WorkingSetReport:
+    def _spy(staging: Path, *, live: bool = False) -> WorkingSetReport:
         # The extracted staging must be pinned at the moment it is being scanned, so a
         # concurrent sweep would skip it (issue #183).
         leased_during_fsck.append(storage._is_staging_active(staging))
-        return check_working_set(staging)
+        return check_working_set(staging, live=live)
 
     monkeypatch.setattr(fs_module, "check_working_set", _spy)
 
@@ -173,7 +179,9 @@ async def test_check_current_health_reports_corrupt_snapshot(tmp_path: Path) -> 
     # Tamper the published snapshot in place to model the 2026-06-09 corruption
     # that predates the create gate (a published-then-torn region).
     live = snapshot_dir(tmp_path, community, server)
-    (live / "world" / "region" / "r.0.0.mca").write_bytes(corrupt_region_bytes())
+    (live / "world" / "region" / "r.0.0.mca").write_bytes(
+        mode_invariant_corrupt_region_bytes()
+    )
 
     report = await storage.check_current_health(community, server)
 

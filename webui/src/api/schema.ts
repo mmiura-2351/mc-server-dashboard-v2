@@ -1154,6 +1154,17 @@ export interface paths {
          *     contract as the pre-stream refusal) when it advanced past that base. The staging
          *     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
          *     start — the same convergence as the pre-stream refusal.
+         *
+         *     The ``X-Snapshot-Source`` header (issue #923) selects the content-integrity
+         *     region rule. MC 26.x pads region files to a sector boundary only on shutdown, so
+         *     a RUNNING server's periodic snapshot legitimately carries a non-4096-aligned
+         *     tail; under the strict rule the gate would refuse EVERY periodic snapshot and a
+         *     running server would never be checkpointed (crash loses all progression since the
+         *     last graceful stop). When the Worker declares ``running`` the commit applies the
+         *     live (byte-precise) region check; any other value (incl. absent, an older Worker
+         *     or the stopped/at-rest final snapshot) keeps the strict 4096-aligned rule. The
+         *     Worker is already trusted for the snapshot CONTENT, so this mode signal adds no
+         *     new trust surface.
          */
         post: operations["publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post"];
         delete?: never;
@@ -4673,6 +4684,7 @@ export interface operations {
                 "content-length"?: number | null;
                 "X-Working-Set-Base-Generation"?: number | null;
                 "X-Worker-Id"?: string | null;
+                "X-Snapshot-Source"?: string | null;
                 authorization?: string | null;
             };
             path: {

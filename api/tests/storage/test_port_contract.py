@@ -46,12 +46,14 @@ from tests.storage.helpers import (
     drain,
     healthy_region_bytes,
     malicious_tar_with_escape,
+    mode_invariant_corrupt_region_bytes,
     new_scope,
     read_tar,
     region_targz,
     stream_of,
     tar_bytes,
     tar_stream,
+    unaligned_live_region_bytes,
 )
 
 # --- working-set hydrate / snapshot (Section 3.1) --------------------------
@@ -455,6 +457,74 @@ async def test_commit_publishes_a_structurally_healthy_region(
     assert read_tar(blob) == files
 
 
+async def test_running_source_publish_then_backup_create_succeeds(
+    harness: StorageHarness,
+) -> None:
+    """After a running-source (live) commit lands an unpadded set in the store, the
+    at-rest backup-create gate must NOT refuse it (issue #923).
+
+    A running 26.x server's working set legitimately carries an unpadded tail. Its
+    content was gated at publish time, so creating a backup of it must succeed —
+    pre-fix the strict create gate raised ``IntegrityCheckError(not_4096_aligned)``,
+    making backups of running servers fail deterministically.
+    """
+
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {"world/region/r.0.0.mca": unaligned_live_region_bytes()},
+        live=True,
+    )
+
+    key = await harness.storage.create_backup_from_current(community, server)
+    assert key in await harness.storage.list_backups(community, server)
+
+
+async def test_sweep_does_not_quarantine_a_live_format_snapshot(
+    harness: StorageHarness,
+) -> None:
+    """The integrity-sweep snapshot fsck must report a live-format (unpadded) store
+    as healthy, not quarantine it (issue #923).
+
+    Pre-fix ``check_current_health`` applied the strict rule to ``current/``, so a
+    perfectly healthy running-source snapshot produced a false ``SNAPSHOT_QUARANTINE``.
+    """
+
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {"world/region/r.0.0.mca": unaligned_live_region_bytes()},
+        live=True,
+    )
+
+    report = await harness.storage.check_current_health(community, server)
+    assert report.healthy is True
+
+
+async def test_restore_of_a_live_format_archive_succeeds(
+    harness: StorageHarness,
+) -> None:
+    """A backup created from a live-format ``current/`` is itself unpadded, so the
+    restore-direction gate must tolerate it and republish it (issue #923)."""
+
+    community, server = new_scope()
+    original = {"world/region/r.0.0.mca": unaligned_live_region_bytes()}
+    await harness.publish(community, server, original, live=True)
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    # Advance current to a different (aligned) set, then restore the live-format
+    # backup over it: the restore gate must accept the unpadded archive.
+    await harness.publish(
+        community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    await harness.storage.restore_backup(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == original
+
+
 # --- JAR store / reuse (Section 3.2) ---------------------------------------
 
 
@@ -717,13 +787,17 @@ async def test_restore_corrupt_backup_without_force_is_refused(
 ) -> None:
     """Restoring a backup carrying a corrupt ``.mca`` without ``force`` is refused on
     BOTH backends (#750/#743): the gate raises ``IntegrityCheckError`` and the live
-    snapshot is left untouched, so a known-corrupt backup never re-poisons it."""
+    snapshot is left untouched, so a known-corrupt backup never re-poisons it. The
+    restore gate runs in live mode (issue #923), so the fixture is a tear the live
+    rule still catches (a location entry past EOF), not a mere unaligned size."""
 
     community, server = new_scope()
     await harness.publish(
         community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
     )
-    corrupt = region_targz({"world/region/r.0.0.mca": corrupt_region_bytes()})
+    corrupt = region_targz(
+        {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()}
+    )
     key = await harness.storage.put_backup(community, server, stream_of(corrupt))
 
     with pytest.raises(IntegrityCheckError):
@@ -745,7 +819,9 @@ async def test_restore_corrupt_backup_with_force_publishes_and_reports(
     await harness.publish(
         community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
     )
-    corrupt_region = corrupt_region_bytes()
+    # The restore gate runs in live mode (issue #923), so use a tear the live rule
+    # still catches (a location entry past EOF), not a mere unaligned size.
+    corrupt_region = mode_invariant_corrupt_region_bytes()
     corrupt = region_targz({"world/region/r.0.0.mca": corrupt_region})
     key = await harness.storage.put_backup(community, server, stream_of(corrupt))
 

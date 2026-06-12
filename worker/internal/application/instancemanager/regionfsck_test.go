@@ -33,6 +33,27 @@ func healthyRegion() []byte {
 	return image
 }
 
+// unalignedLiveRegion is a structurally-sound region with the legitimate UNPADDED
+// tail of a live MC 26.x world (issue #923): an 8 KiB header plus one chunk in
+// sector 2 whose data ends mid-sector, so the file size is NOT a multiple of 4096
+// but the trailing chunk fits byte-precisely (offset*4096 + 4 + length == size).
+// Live mode accepts it; strict mode flags not_4096_aligned.
+func unalignedLiveRegion() []byte {
+	const tail = 459 // partial final sector, mirroring the observed 922,059-byte file.
+	size := 2*fsckSector + tail
+	image := make([]byte, size)
+	image[2] = 2 // location entry 0: offset sector 2.
+	image[3] = 1 // one (partial) sector.
+	start := 2 * fsckSector
+	length := uint32(size - start - 4)
+	image[start] = byte(length >> 24)
+	image[start+1] = byte(length >> 16)
+	image[start+2] = byte(length >> 8)
+	image[start+3] = byte(length)
+	image[start+4] = 2 // zlib.
+	return image
+}
+
 // seedWorkingSet writes data into <scratch>/<serverID>/region/r.0.0.mca.
 func seedWorkingSet(t *testing.T, m *Manager, serverID string, data []byte) {
 	t.Helper()
@@ -216,6 +237,53 @@ func TestSnapshotTriggerStoppedServerFsckNotRetried(t *testing.T) {
 	}
 	if len(tr.snapshots) != 0 {
 		t.Fatalf("at-rest corrupt set must not be uploaded; snapshots = %v", tr.snapshots)
+	}
+}
+
+// A RUNNING server's periodic snapshot over a working set with the legitimate
+// unpadded tail of a live MC 26.x world (non-4096-aligned but byte-precisely valid)
+// PROCEEDS: the running path runs the fsck in LIVE mode, where the unpadded tail is
+// not corruption (#923). It also declares running=true on the upload so the API
+// applies the same live rule at the publish gate.
+func TestSnapshotTriggerRunningServerUnalignedTailProceedsLiveMode(t *testing.T) {
+	ctrl := &fakeControl{reply: "ok"}
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	m.fsckRetryDelay = 0
+	m.settlePollInterval = 0
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	seedWorkingSet(t, m, "s1", unalignedLiveRegion())
+
+	res := m.Handle(context.Background(), snapshotCmd())
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger over an unaligned live working set = %+v, want success", res)
+	}
+	if len(tr.snapshots) != 1 {
+		t.Fatalf("live unaligned set must be uploaded; snapshots = %v", tr.snapshots)
+	}
+	if len(tr.snapshotRunning) != 1 || !tr.snapshotRunning[0] {
+		t.Fatalf("running snapshot must declare running=true; got %v", tr.snapshotRunning)
+	}
+}
+
+// The STOPPED-id (at-rest) snapshot over the SAME unaligned tail is REFUSED: a
+// stopped 26.x world is padded, so a non-4096-aligned region there is a real torn
+// save. The stopped path runs the fsck in STRICT mode and declares running=false.
+func TestSnapshotTriggerStoppedServerUnalignedTailRefusedStrictMode(t *testing.T) {
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+
+	seedWorkingSet(t, m, "s1", unalignedLiveRegion())
+
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger over an at-rest unaligned set = %+v, want transfer-failed", res)
+	}
+	if len(tr.snapshots) != 0 {
+		t.Fatalf("at-rest unaligned set must not be uploaded; snapshots = %v", tr.snapshots)
 	}
 }
 

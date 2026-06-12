@@ -149,6 +149,118 @@ def test_zero_length_chunk_is_truncated(tmp_path: Path) -> None:
     assert check_region_file(path) is ReasonCode.TRUNCATED_CHUNK
 
 
+def _unaligned_live_region(tail: int = 459) -> bytes:
+    """Build a region with the legitimate UNPADDED tail of a live MC 26.x world.
+
+    An 8 KiB header plus one chunk in sector 2 whose data ends ``tail`` bytes into
+    sector 2 (``tail`` < 4096), so the file size is NOT a multiple of 4096 but the
+    trailing chunk fits byte-precisely: ``offset*4096 + 4 + length == size`` (issue
+    #923). Live mode accepts it; strict mode flags ``not_4096_aligned``.
+    """
+    offset = 2
+    size = offset * _SECTOR + tail
+    image = bytearray(size)
+    image[0:4] = offset.to_bytes(3, "big") + bytes([1])
+    length = size - offset * _SECTOR - 4
+    start = offset * _SECTOR
+    image[start : start + 4] = length.to_bytes(4, "big")
+    image[start + 4] = 2  # zlib.
+    return bytes(image)
+
+
+def test_unaligned_tail_is_live_healthy_but_strict_not_aligned(tmp_path: Path) -> None:
+    # A live 26.x world's region: non-4096 size, but the trailing chunk fits
+    # byte-precisely. Live mode is healthy; strict mode flags the size (issue #923).
+    path = _write(tmp_path / "r.0.0.mca", _unaligned_live_region())
+    assert check_region_file(path, live=True) is None
+    assert check_region_file(path, live=False) is ReasonCode.NOT_4096_ALIGNED
+
+
+def test_unaligned_tail_overrunning_eof_is_corrupt_in_both_modes(
+    tmp_path: Path,
+) -> None:
+    # Same unpadded tail but the trailing chunk's declared length overruns the real
+    # EOF (a genuine tear): live mode catches it as a truncated chunk via the
+    # byte-precise bound; strict mode rejects the same bytes even earlier on the
+    # non-4096 size. Both modes refuse it (issue #923).
+    image = bytearray(_unaligned_live_region())
+    start = 2 * _SECTOR
+    image[start : start + 4] = (_SECTOR * 5).to_bytes(4, "big")
+    path = _write(tmp_path / "r.0.0.mca", bytes(image))
+    assert check_region_file(path, live=True) is ReasonCode.TRUNCATED_CHUNK
+    assert check_region_file(path, live=False) is ReasonCode.NOT_4096_ALIGNED
+
+
+def test_aligned_chunk_overrunning_eof_is_truncated_in_both_modes(
+    tmp_path: Path,
+) -> None:
+    # On an ALIGNED file the byte-precise live bound still catches a chunk whose
+    # declared length overruns its sectors/EOF: truncated in BOTH modes (issue #923).
+    image = _build_region(chunks={0: (2, 1)}, length=_SECTOR * 5)
+    path = _write(tmp_path / "r.0.0.mca", image)
+    assert check_region_file(path, live=True) is ReasonCode.TRUNCATED_CHUNK
+    assert check_region_file(path, live=False) is ReasonCode.TRUNCATED_CHUNK
+
+
+def test_aligned_and_zero_files_behave_the_same_in_both_modes(tmp_path: Path) -> None:
+    # The live relaxation only loosens the unpadded tail: a normal aligned region is
+    # healthy in both modes, a 0-byte file is healthy in both (issue #905), and a
+    # non-zero file below the header floor is corrupt in both (issue #923).
+    aligned = _write(tmp_path / "aligned.mca", _build_region())
+    empty = _write(tmp_path / "empty.mca", b"")
+    short = _write(tmp_path / "short.mca", bytes(100))
+    for live in (True, False):
+        assert check_region_file(aligned, live=live) is None
+        assert check_region_file(empty, live=live) is None
+        assert check_region_file(short, live=live) is ReasonCode.NOT_4096_ALIGNED
+
+
+def test_working_set_live_mode_accepts_unaligned_tail(tmp_path: Path) -> None:
+    _write(tmp_path / "region" / "r.0.0.mca", _unaligned_live_region())
+    _write(tmp_path / "region" / "r.1.0.mca", _build_region())
+
+    live = check_working_set(tmp_path, live=True)
+    assert live.scanned == 2
+    assert live.healthy is True
+
+    strict = check_working_set(tmp_path, live=False)
+    assert strict.healthy is False
+
+
+def test_check_region_bytes_live_mode_accepts_unaligned_tail() -> None:
+    data = _unaligned_live_region()
+    assert check_region_bytes("region/r.0.0.mca", data, live=True) is None
+    finding = check_region_bytes("region/r.0.0.mca", data, live=False)
+    assert finding is not None
+    assert finding.reason is ReasonCode.NOT_4096_ALIGNED
+
+
+def test_chunk_length_exceeding_sectors_is_truncated_in_live_mode(
+    tmp_path: Path,
+) -> None:
+    # An interior chunk whose declared length overruns its OWN sector allocation
+    # (sector_count 1) into a neighbor, yet still fits byte-precisely inside the file
+    # (the live EOF bound alone would pass). The retained length-vs-sector_count
+    # consistency check (issue #923 review) flags it as truncated in BOTH modes. The
+    # file is aligned so the size rule does not short-circuit strict mode.
+    image = _build_region(chunks={0: (2, 1)}, sectors=4, length=_SECTOR * 2 - 4)
+    path = _write(tmp_path / "r.0.0.mca", image)
+    assert check_region_file(path, live=True) is ReasonCode.TRUNCATED_CHUNK
+    assert check_region_file(path, live=False) is ReasonCode.TRUNCATED_CHUNK
+
+
+def test_short_prefix_read_is_truncated_chunk_in_live_mode(tmp_path: Path) -> None:
+    # A tail torn 1-4 bytes into a referenced chunk's first sector: the live bounds
+    # check proves only the chunk's first byte is inside the file, so the 5-byte
+    # prefix read ends mid-prefix. Live mode classifies this structural truncation as
+    # TRUNCATED_CHUNK, mirroring the Go validator (issue #923 review).
+    offset = 2
+    image = bytearray(offset * _SECTOR + 2)  # two bytes into sector 2.
+    image[0:4] = offset.to_bytes(3, "big") + bytes([1])
+    path = _write(tmp_path / "r.0.0.mca", bytes(image))
+    assert check_region_file(path, live=True) is ReasonCode.TRUNCATED_CHUNK
+
+
 def test_walker_on_clean_working_set_is_healthy(tmp_path: Path) -> None:
     _write(tmp_path / "region" / "r.0.0.mca", _build_region())
     _write(tmp_path / "entities" / "r.0.0.mca", _build_region())

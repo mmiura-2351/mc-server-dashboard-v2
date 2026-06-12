@@ -55,10 +55,13 @@ type Transfer interface {
 	// the store generation this working set was hydrated from (issue #847) and
 	// workerID as this Worker's own id (issue #847 bug 3): the API refuses the publish
 	// if the store has since advanced past baseGeneration AND current was published by
-	// a different worker. It returns the NEW authoritative store generation the publish
-	// produced (the value of the API's response header, issue #763); 0 when the header
-	// is absent (an older API).
-	Snapshot(ctx context.Context, url, token, workingDir string, baseGeneration uint64, workerID string) (uint64, error)
+	// a different worker. running tells the API the snapshot SOURCE (issue #923): a
+	// running server's working set has the legitimate unpadded tail of a live 26.x
+	// world, so the publish gate applies the live (byte-precise) region check rather
+	// than the strict (4096-aligned) one. It returns the NEW authoritative store
+	// generation the publish produced (the value of the API's response header, issue
+	// #763); 0 when the header is absent (an older API).
+	Snapshot(ctx context.Context, url, token, workingDir string, baseGeneration uint64, workerID string, running bool) (uint64, error)
 }
 
 // systemClock is the default wall-clock used for the metrics ticker when
@@ -480,9 +483,17 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		//     evicts and terminates the process mid-tar. The worst this yields is a TORN
 		//     capture — the stop's shutdown re-saves regions while the tar reads them.
 		//     A tear that happens DURING the tar is caught downstream by the API's #739
-		//     content-integrity gate, which refuses the publish and aborts the staging
-		//     area, so current/ keeps the last good generation: no silent corruption and
-		//     no overwrite. And this is a PERIODIC snapshot of a still-running server, not
+		//     content-integrity gate. For this running-labeled upload that gate now runs
+		//     the LIVE (byte-precise) region check (issue #923), not the strict one, yet
+		//     it still catches realistic tears: any referenced chunk whose byte extent
+		//     overruns EOF, any entry pointing at/past EOF, garbage prefixes. Those the
+		//     gate REFUSES — the publish aborts, the staging area is dropped, and current/
+		//     keeps the last good generation: no silent corruption and no overwrite. The
+		//     only escape from the byte-precise bound is a truncation landing exactly at
+		//     the final referenced chunk's byte boundary with no entries beyond; that one
+		//     PASSES the gate, which is acceptable because it is indistinguishable from a
+		//     consistent older state (the lost bytes are unreferenced). And this is a
+		//     PERIODIC snapshot of a still-running server, not
 		//     the post-stop FINAL one (a stopped-id snapshot, which DOES reserve below),
 		//     so a refused capture simply retries on the next tick — nothing is lost.
 		// A reservation would only convert that refused-and-retried outcome into a
@@ -555,7 +566,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// so the API-side timeout fires first and this is the cleanup backstop.
 	transferCtx, cancel := m.transferContext(ctx)
 	defer cancel()
-	gen, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
+	gen, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID, running)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: snapshot: %v", err))
@@ -589,7 +600,9 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 }
 
 // checkWorkingSet runs the pre-pack region fsck. For a stopped (at-rest) set it is
-// a single fail-closed scan. For a RUNNING server it retries on detected
+// a single fail-closed scan in STRICT mode. For a RUNNING server it runs in LIVE
+// mode (issue #923: MC 26.x leaves a legitimate unpadded tail on a running world,
+// so a non-4096-aligned region is not corruption there) and retries on detected
 // corruption up to snapshotFsckAttempts times with fsckRetryDelay backoff (#907):
 // the quiesce settle-wait has already let the async save's region writes complete,
 // so a residual tear is a non-chunk writer racing the scan, and that transient
@@ -605,7 +618,7 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 	var report regionfsck.Report
 	for attempt := 1; ; attempt++ {
 		var err error
-		report, err = regionfsck.CheckWorkingSet(workingDir)
+		report, err = regionfsck.CheckWorkingSetMode(workingDir, true)
 		if err != nil || report.Healthy() || attempt >= snapshotFsckAttempts {
 			return report, err
 		}

@@ -150,6 +150,42 @@ def corrupt_region_bytes() -> bytes:
     return bytes(2 * 4096 + 17)
 
 
+def mode_invariant_corrupt_region_bytes() -> bytes:
+    """A region that is structurally corrupt in BOTH the strict and live modes.
+
+    ``corrupt_region_bytes`` relies on a non-4096-aligned size, which the LIVE rule
+    deliberately accepts (a running 26.x world's unpadded tail). The at-rest restore
+    gate now runs LIVE (issue #923), so a restore-corruption test needs a tear the
+    live rule still catches: a 3-sector aligned region whose location entry points to
+    sector 4 — past EOF — which is ``sector_out_of_bounds`` regardless of mode.
+    """
+
+    image = bytearray(3 * 4096)
+    image[0:4] = (4).to_bytes(3, "big") + bytes([1])  # offset 4, count 1: past EOF.
+    return bytes(image)
+
+
+def unaligned_live_region_bytes(tail: int = 459) -> bytes:
+    """A region with the legitimate UNPADDED tail of a live MC 26.x world (#923).
+
+    Two header sectors plus one chunk in sector 2 whose data ends ``tail`` bytes into
+    sector 2 (``tail`` < 4096), so the file size is NOT a multiple of 4096 but the
+    trailing chunk fits byte-precisely. The LIVE region check accepts it; the STRICT
+    check flags ``not_4096_aligned``. Used to commit a running-source snapshot into
+    the store and assert the at-rest consumers (backup/restore/sweep) tolerate it.
+    """
+
+    offset = 2
+    size = offset * 4096 + tail
+    image = bytearray(size)
+    image[0:4] = offset.to_bytes(3, "big") + bytes([1])
+    length = size - offset * 4096 - 4
+    start = offset * 4096
+    image[start : start + 4] = length.to_bytes(4, "big")
+    image[start + 4] = 2  # zlib.
+    return bytes(image)
+
+
 def region_targz(files: dict[str, bytes]) -> bytes:
     """A self-contained ``tar.gz`` of ``{rel_path: content}`` (a backup archive).
 

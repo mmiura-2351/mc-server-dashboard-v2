@@ -648,6 +648,7 @@ class ObjectStorage(Storage):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
+        live: bool = False,
     ) -> int:
         h = _as_object_handle(handle)
         if h.consumed:
@@ -668,8 +669,12 @@ class ObjectStorage(Storage):
             # (mirroring abort) and raise; the pointer is never flipped, so the prior
             # snapshot is retained (last-known-good, #703). The object backend has no
             # local working-set tree, so each region is checked from its object body
-            # one at a time (bounded per-member, like the backup builder).
-            report = await self._check_staged_regions(client, incoming, staged)
+            # one at a time (bounded per-member, like the backup builder). ``live``
+            # (issue #923) applies the running-server region rule for a live snapshot
+            # source: a running 26.x world's unpadded tail is not a tear.
+            report = await self._check_staged_regions(
+                client, incoming, staged, live=live
+            )
             if not report.healthy:
                 await _delete_prefix(client, incoming)
                 self._release_staging(incoming)
@@ -835,7 +840,12 @@ class ObjectStorage(Storage):
             await client.delete_object(server_prefix + _GENERATION)
 
     async def _check_staged_regions(
-        self, client: S3Client, staged_prefix: str, staged: list[S3Object]
+        self,
+        client: S3Client,
+        staged_prefix: str,
+        staged: list[S3Object],
+        *,
+        live: bool = False,
     ) -> WorkingSetReport:
         """Structurally fsck the staged ``.mca`` region objects (issue #750).
 
@@ -845,6 +855,8 @@ class ObjectStorage(Storage):
         posture as the backup builder, never the whole working set at once. Returns
         a :class:`WorkingSetReport` whose ``corrupt`` list names the staged member
         of each structurally torn region (paths relative to ``staged_prefix``).
+        ``live`` selects the running-server region rule (issue #923); see
+        :func:`check_region_bytes`.
         """
 
         scanned = 0
@@ -855,7 +867,7 @@ class ObjectStorage(Storage):
                 continue
             scanned += 1
             data = await _read_all(client, obj.key)
-            finding = check_region_bytes(name, data)
+            finding = check_region_bytes(name, data, live=live)
             if finding is not None:
                 corrupt.append(finding)
         return WorkingSetReport(scanned=scanned, corrupt=corrupt)
@@ -1016,8 +1028,12 @@ class ObjectStorage(Storage):
             # world, mirroring the fs adapter (#739). Walk the live snapshot's
             # ``.mca`` region bodies BEFORE writing the archive; any corrupt region
             # refuses the backup and no ``.tar.gz`` object is uploaded (fail-closed,
-            # #703).
-            report = await self._check_staged_regions(client, snapshot_prefix, objs)
+            # #703). ``live=True`` (issue #923): a running-source snapshot may hold a
+            # legitimate unpadded set (gated when it published), so the at-rest backup
+            # gate tolerates the unpadded tail, mirroring the fs adapter.
+            report = await self._check_staged_regions(
+                client, snapshot_prefix, objs, live=True
+            )
             if not report.healthy:
                 raise IntegrityCheckError(report)
             # Build the self-contained tar.gz to local scratch (gzip streams, so the
@@ -1092,8 +1108,13 @@ class ObjectStorage(Storage):
                     # #703). With ``force=True`` the operator override publishes anyway
                     # (better a deliberate corrupt restore than no restore, #703). The
                     # report is returned either way so the use case can quarantine +
-                    # audit a forced corrupt restore.
-                    report = await self._check_staged_regions(client, incoming, staged)
+                    # audit a forced corrupt restore. ``live=True`` (issue #923): a
+                    # backup created from a running-source (unpadded) snapshot is itself
+                    # live-format, so the restore gate tolerates the unpadded tail,
+                    # mirroring the fs adapter.
+                    report = await self._check_staged_regions(
+                        client, incoming, staged, live=True
+                    )
                     if not report.healthy and not force:
                         raise IntegrityCheckError(report)
                     # Materialize the staged objects into a fresh snapshot prefix

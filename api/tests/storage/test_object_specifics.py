@@ -38,9 +38,9 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 from tests.storage.helpers import (
-    corrupt_region_bytes,
     drain,
     healthy_region_bytes,
+    mode_invariant_corrupt_region_bytes,
     new_scope,
     read_tar,
     stream_of,
@@ -466,7 +466,11 @@ async def test_create_backup_refuses_corrupt_live_snapshot() -> None:
     await _publish(storage, community, server, {"world/region/r.0.0.mca": b"\0" * 8192})
     pointer_key = _server_prefix(community, server) + _POINTER
     snap_prefix = json.loads(store.objects[pointer_key])["snapshot"]
-    store.objects[snap_prefix + "world/region/r.0.0.mca"] = corrupt_region_bytes()
+    # The create gate runs in live mode (issue #923), so plant a tear the live rule
+    # still catches (a location entry past EOF), not a mere unaligned size.
+    store.objects[snap_prefix + "world/region/r.0.0.mca"] = (
+        mode_invariant_corrupt_region_bytes()
+    )
 
     backups_prefix = _server_prefix(community, server) + "backups/"
     with pytest.raises(IntegrityCheckError):
