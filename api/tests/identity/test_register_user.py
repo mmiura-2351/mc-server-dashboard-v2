@@ -75,7 +75,9 @@ class _FakeUserRepository(UserRepository):
         raise NotImplementedError
 
     async def count_all(self) -> int:
-        raise NotImplementedError
+        # Mirror lock_for_bootstrap's count so the closed-registration pre-check
+        # (#909 review) is exercised against the fake exactly as against the DB.
+        return len(self._by_username) + len(self.added)
 
     async def lock_for_bootstrap(self) -> int:
         # Count the existing (seeded or already-added) users so the first-user
@@ -158,7 +160,14 @@ class _FixedClock(Clock):
 
 
 class _StubHasher(PasswordHasher):
+    def __init__(self) -> None:
+        # Counts hash calls so the closed-registration pre-check test can assert no
+        # argon2 hash is computed when an existing user short-circuits the request
+        # (#909 review: the real hash blocks the event loop).
+        self.hash_calls = 0
+
     def hash(self, plaintext: str) -> str:
+        self.hash_calls += 1
         return f"hashed::{plaintext}"
 
     def verify(self, plaintext: str, password_hash: str) -> bool:
@@ -278,10 +287,11 @@ def _register_guarded(
     attempts: FakeLoginAttemptStore,
     *,
     registration: RegistrationConfig,
+    hasher: _StubHasher | None = None,
 ) -> RegisterUser:
     return RegisterUser(
         uow=_FakeUnitOfWork(users),
-        hasher=_StubHasher(),
+        hasher=hasher or _StubHasher(),
         clock=_FixedClock(),
         policy=_policy(),
         attempts=attempts,
@@ -304,8 +314,9 @@ async def test_rejects_when_open_registration_disabled() -> None:
         )
     )
     attempts = FakeLoginAttemptStore()
+    hasher = _StubHasher()
     use_case = _register_guarded(
-        users, attempts, registration=_registration_config(open=False)
+        users, attempts, registration=_registration_config(open=False), hasher=hasher
     )
 
     with pytest.raises(RegistrationDisabledError):
@@ -319,6 +330,39 @@ async def test_rejects_when_open_registration_disabled() -> None:
     assert users.added == []
     # A closed endpoint records nothing -- the request never reached the counter.
     assert attempts.attempts == []
+    # The refusal short-circuits before validation and the argon2 hash (#909
+    # review): a closed deployment must not burn a hash per unauthenticated POST.
+    assert hasher.hash_calls == 0
+
+
+async def test_closed_registration_refusal_leaks_no_validation_detail() -> None:
+    # With a user present and registration closed, a request carrying an invalid
+    # password (or email) must still be refused with the uniform Registration
+    # DisabledError, never a 422 leaking the failure reason (#909 review: the
+    # second-and-later request keeps the pre-PR closed-deployment semantics).
+    users = _FakeUserRepository()
+    users.seed(
+        User(
+            id=UserId.new(),
+            username=Username("existing"),
+            email=EmailAddress("existing@example.com"),
+            password_hash="x",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+    attempts = FakeLoginAttemptStore()
+    use_case = _register_guarded(
+        users, attempts, registration=_registration_config(open=False)
+    )
+
+    with pytest.raises(RegistrationDisabledError):
+        await use_case(
+            username="alice",
+            email="not-an-email",
+            password="short",
+            ip="203.0.113.7",
+        )
 
 
 async def test_first_user_becomes_platform_admin() -> None:
@@ -381,6 +425,9 @@ async def test_first_user_bootstraps_even_when_registration_closed() -> None:
 
     assert user.is_platform_admin is True
     assert users.added == [user]
+    # The closed endpoint never throttles the bootstrap registrant: the per-IP cap
+    # is an open-registration control, so nothing is recorded (cap-skip semantics).
+    assert attempts.attempts == []
 
 
 async def test_records_registration_attempt_per_ip() -> None:

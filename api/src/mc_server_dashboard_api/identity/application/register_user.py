@@ -71,6 +71,20 @@ class RegisterUser:
         self, *, username: str, email: str, password: str, ip: str | None = None
     ) -> User:
         now = self.clock.now()
+        # Closed-registration fast path (#909 review): refuse immediately if any
+        # user already exists, before validation, the argon2 hash, and the locked
+        # bootstrap transaction. This restores the pre-PR behaviour for the
+        # second-and-later request on a closed deployment -- a uniform 403 at
+        # near-zero cost, leaking no validation detail and recording no per-IP
+        # attempt -- and keeps an unauthenticated POST from burning an argon2 hash
+        # on every call (a DoS regression the in-transaction-only gate introduced).
+        # This is race-safe: the user count is monotonic (the last-active-admin
+        # guards never let the table return to zero), so "count > 0" cannot flip
+        # back to 0. The count == 0 case still falls through to the authoritative
+        # locked check in persist_new_user, where concurrent first registrations
+        # serialize and exactly one wins the bootstrap grant.
+        if not self.registration.open and await self._users_exist():
+            raise RegistrationDisabledError
         # The first-ever registration is allowed regardless of the open flag and
         # becomes the platform admin (#909): a fresh closed-registration deployment
         # must still be able to create its bootstrap admin without a config flip.
@@ -116,6 +130,19 @@ class RegisterUser:
         if count >= self.registration.ip_threshold:
             raise RegistrationThrottledError
         await self.attempts.record_registration(ip=ip, at=now)
+
+    async def _users_exist(self) -> bool:
+        """Cheap, non-locking "does any user exist?" check for the closed gate.
+
+        Reads ``count_all`` outside the bootstrap advisory lock: the count is
+        monotonic (the last-active-admin guards never let it drop to zero), so a
+        "> 0" answer cannot become stale. The authoritative, race-safe gate stays
+        the locked check in :func:`persist_new_user`; this only short-circuits the
+        common second-and-later closed-registration request.
+        """
+
+        async with self.uow:
+            return await self.uow.users.count_all() > 0
 
 
 async def persist_new_user(
