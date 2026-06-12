@@ -516,8 +516,9 @@ git pull
 > `COMPOSE_PROFILES=object`. An existing **object** deployment whose `.env` predates
 > this revision has no `COMPOSE_PROFILES` line; after `git pull` the next
 > `docker compose up` would **not** start `seaweedfs` (an unset `COMPOSE_PROFILES`
-> selects no profiles), and the api would fail to reach the object store. Add the
-> line once before rebuilding:
+> selects no profiles); the api boots and serves but all storage operations
+> (snapshot, backup, file reads/writes) error at runtime because the S3 client
+> cannot reach the object store. Add the line once before rebuilding:
 >
 > ```sh
 > echo 'COMPOSE_PROFILES=object' >> .env
