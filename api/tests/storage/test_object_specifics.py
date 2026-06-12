@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -24,6 +26,8 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     _GENERATION,
     _POINTER,
     ObjectStorage,
+    S3Client,
+    S3ClientFactory,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
@@ -68,6 +72,70 @@ async def _publish(
     handle = await storage.begin_snapshot(community, server)
     await storage.write_snapshot(handle, tar_stream(files))
     await storage.commit_snapshot(handle, publisher=publisher)
+
+
+class _AfterCloseUseError(AssertionError):
+    """Raised when the adapter calls a client after its context manager exited."""
+
+
+class _CloseTrackingClient:
+    """Wrap an :class:`S3Client`, refusing every call made after close.
+
+    A factory hands one of these out per ``async with``; once the context exits,
+    any further method call on the (now dead) client raises — exactly the
+    use-after-close that, with the real aioboto3 client, leaks an aiohttp
+    ClientSession/connector on every snapshot publish (issue #948).
+    """
+
+    def __init__(self, inner: S3Client) -> None:
+        self._inner = inner
+        self._closed = False
+
+    def close(self) -> None:
+        self._closed = True
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        async def _guarded(*args: object, **kwargs: object) -> object:
+            if self._closed:
+                raise _AfterCloseUseError(
+                    f"client.{name} called after the client context closed"
+                )
+            return await attr(*args, **kwargs)
+
+        return _guarded
+
+
+def _close_tracking_factory(inner: S3ClientFactory) -> S3ClientFactory:
+    @asynccontextmanager
+    async def _factory() -> AsyncIterator[S3Client]:
+        async with inner() as real:
+            tracker = _CloseTrackingClient(real)
+            try:
+                yield tracker
+            finally:
+                tracker.close()
+
+    return _factory
+
+
+async def test_commit_does_not_use_the_client_after_its_context_closes() -> None:
+    # Issue #948: the post-flip GC ran on a client whose context had already
+    # exited, so with the real aioboto3 client it leaked one aiohttp
+    # ClientSession + connector per publish. Refuse any client call made after the
+    # client context closed; a publish must complete without one.
+    store = FakeS3Store()
+    storage = ObjectStorage(_close_tracking_factory(fake_s3_factory(store)))
+    community, server = new_scope()
+
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+
+    assert await storage.current_generation(community, server) == 1
 
 
 async def test_generation_and_publisher_share_one_atomic_marker_object() -> None:
@@ -278,10 +346,7 @@ async def test_sweep_reread_skips_prefix_made_live_after_pointer_read() -> None:
     """
 
     import json as _json
-    from collections.abc import AsyncIterator
-    from contextlib import asynccontextmanager
 
-    from mc_server_dashboard_api.storage.adapters.object_store import S3Client
     from tests.storage.fake_s3 import FakeS3Client
 
     store = FakeS3Store()

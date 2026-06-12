@@ -747,10 +747,14 @@ class ObjectStorage(Storage):
                 generation = await self._bump_generation(
                     client, server_prefix, publisher
                 )
-        # Reclaim the staging prefix and the superseded snapshot prefix AFTER the lock
-        # (issue #920): no edit can observe the old prefix once the flip is published
-        # (edits re-read the pointer under the lock), so this is safe outside it.
-        await self._gc_after_flip(client, incoming, old_prefix, new_prefix)
+            # Reclaim the staging prefix and the superseded snapshot prefix AFTER the
+            # lock (issue #920): no edit can observe the old prefix once the flip is
+            # published (edits re-read the pointer under the lock), so this is safe
+            # outside the lock. It MUST stay INSIDE the client context, though, or the
+            # GC runs on a closed client and the aioboto3 backend lazily opens a fresh
+            # aiohttp ClientSession/connector that nothing closes — one leaked per
+            # publish (issue #948).
+            await self._gc_after_flip(client, incoming, old_prefix, new_prefix)
         # Release the staging lease so a later sweep is not blocked by a now-dead
         # handle (issue #160).
         self._release_staging(incoming)
