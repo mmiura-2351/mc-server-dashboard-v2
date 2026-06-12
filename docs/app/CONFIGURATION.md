@@ -96,7 +96,10 @@ or token is marked **secret** in the tables below.
 - Secret values are **masked** wherever configuration is logged or echoed, in
   line with the structured-logging masking rule (REQUIREMENTS.md NFR-OBS-1).
 - A missing **required** secret is a fatal startup error (Section 2); the
-  service does not fall back to an insecure default.
+  service does not fall back to an insecure default. A **blank** value (an empty
+  or whitespace-only string — the natural result of a blank `${VAR}` compose
+  interpolation) is treated as missing, so it fails fast the same way rather than
+  booting with an empty key/credential.
 
 The M1 secrets are: the API token-signing key (Section 5), the Worker's
 credential for authenticating to the API, and the TLS material for the

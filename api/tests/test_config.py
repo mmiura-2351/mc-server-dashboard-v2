@@ -39,6 +39,18 @@ def test_missing_required_database_url_fails_fast(
         load_settings(config_file=None)
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_database_url_fails_fast(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    # ``database.url`` is required; a blank ``${MCD_API_DATABASE__URL}``
+    # interpolation arrives as "" and passes the presence check but boots an
+    # engine that cannot connect. Reject the blank value at load (#939).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", blank)
+    with pytest.raises(ValueError, match="url"):
+        load_settings(config_file=None)
+
+
 def test_toml_file_overrides_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -551,6 +563,20 @@ def test_hs256_signing_key_at_32_bytes_is_accepted(
     monkeypatch.setenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", "x" * 32)
     settings = load_settings(config_file=None)
     assert settings.auth.token.signing_key == "x" * 32
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_signing_key_is_treated_as_missing(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    # A blank ``${MCD_API_AUTH__TOKEN__SIGNING_KEY}`` interpolation arrives as ""
+    # (or whitespace); collapse it to None so the app factory's "required" guard
+    # fires rather than the HS256 length floor (or no guard at all for RS256)
+    # admitting an empty key (#939).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", blank)
+    settings = load_settings(config_file=None)
+    assert settings.auth.token.signing_key is None
 
 
 # --- Cross-field consistency (issue #163) -----------------------------------

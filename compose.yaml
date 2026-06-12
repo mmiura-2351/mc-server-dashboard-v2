@@ -3,7 +3,9 @@
 # Services:
 #   db        — PostgreSQL, the API's authoritative metadata store.
 #   migrate   — one-shot `alembic upgrade head` (same image as api), runs after db.
-#   seaweedfs — the S3-compatible object store the API uses by default (issue #702).
+#   seaweedfs — the S3-compatible object store the API uses by default (issue #702);
+#               gated behind the `object` compose profile (default-on via
+#               COMPOSE_PROFILES in .env.example, issue #940).
 #   api       — the FastAPI app + control-plane gRPC server, runs after migrate.
 #   worker    — the execution agent; container driver only, talks to the host
 #               Docker daemon via the mounted socket and creates sibling Minecraft
@@ -23,7 +25,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # `:?` rejects unset OR empty so a blank DB password (which the api's
+      # MCD_API_DATABASE__URL is built from) fails loudly rather than booting an
+      # unauthenticated/unconnectable DB (#939).
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env, e.g. openssl rand -base64 32}"
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - db-data:/var/lib/postgresql/data
@@ -57,6 +62,14 @@ services:
     # reproducible.
     image: chrislusf/seaweedfs:4.33
     restart: unless-stopped
+    # Gated behind the `object` compose profile so an fs-backend operator can drop
+    # the service entirely (issue #940). `.env.example` ships COMPOSE_PROFILES=object
+    # as the default, so the default experience is unchanged: seaweedfs runs and its
+    # entrypoint guard enforces non-blank credentials. An fs operator sets
+    # COMPOSE_PROFILES= (empty) + MCD_API_STORAGE__BACKEND=fs and is then free of both
+    # this service and the running instance — and of the credential requirement (the
+    # env below uses `:-`, not `:?`, so `config`/`up` resolve with no keys set).
+    profiles: ["object"]
     # All-in-one `server` (master+volume+filer) with the S3 gateway. The S3
     # identities file is written from .env at startup so the access/secret keys
     # live only in .env (matching the db-password posture) and never in the image
@@ -69,8 +82,12 @@ services:
       - |
         # Refuse to write a blank-credential identities file: SeaweedFS 4.33
         # authenticates blank-key clients, so an empty key would boot a silently
-        # unauthenticated store. The compose `:?` interpolation already fails before
-        # this runs; this is the in-container backstop (issue #702).
+        # unauthenticated store. This guard is THE fail-fast for the seaweedfs side:
+        # the compose env below uses `:-` (not `:?`) because compose interpolates a
+        # service's env even when its profile is inactive, so a `:?` here would break
+        # the fs opt-out (empty profile, no creds) at `config`/`up` time (issue #940).
+        # This container only runs when the `object` profile is active, so reaching
+        # here with blank keys is a real misconfiguration — fail loudly (issue #702).
         if [ -z "$$MCD_API_STORAGE__OBJECT__ACCESS_KEY" ] || [ -z "$$MCD_API_STORAGE__OBJECT__SECRET_KEY" ]; then
           echo "FATAL: MCD_API_STORAGE__OBJECT__ACCESS_KEY/SECRET_KEY must be set to non-empty values (see .env.example)" >&2
           exit 1
@@ -80,11 +97,13 @@ services:
           "$$MCD_API_STORAGE__OBJECT__ACCESS_KEY" "$$MCD_API_STORAGE__OBJECT__SECRET_KEY" > /etc/seaweedfs/s3.json
         exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
     environment:
-      # `:?` makes compose refuse to start when the value is unset OR empty, so a
-      # fresh `cp .env.example .env` (blank keys) fails loudly instead of booting an
-      # unauthenticated store (issue #702).
-      MCD_API_STORAGE__OBJECT__ACCESS_KEY: "${MCD_API_STORAGE__OBJECT__ACCESS_KEY:?set MCD_API_STORAGE__OBJECT__ACCESS_KEY in .env, e.g. openssl rand -hex 16}"
-      MCD_API_STORAGE__OBJECT__SECRET_KEY: "${MCD_API_STORAGE__OBJECT__SECRET_KEY:?set MCD_API_STORAGE__OBJECT__SECRET_KEY in .env, e.g. openssl rand -hex 32}"
+      # `:-` (empty default), NOT `:?`: compose interpolates a service's env even
+      # when its profile is inactive, so a `:?` here would break the fs opt-out
+      # (empty profile, no creds) at `config`/`up` time. The blank-key fail-fast for
+      # this service is the entrypoint guard above; it runs only under the `object`
+      # profile (issue #940, #702).
+      MCD_API_STORAGE__OBJECT__ACCESS_KEY: "${MCD_API_STORAGE__OBJECT__ACCESS_KEY:-}"
+      MCD_API_STORAGE__OBJECT__SECRET_KEY: "${MCD_API_STORAGE__OBJECT__SECRET_KEY:-}"
     volumes:
       - seaweedfs-data:/data
     healthcheck:
@@ -104,8 +123,10 @@ services:
     restart: unless-stopped
     environment:
       MCD_API_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      MCD_API_AUTH__TOKEN__SIGNING_KEY: ${MCD_API_AUTH__TOKEN__SIGNING_KEY}
-      MCD_API_CONTROL__WORKER_CREDENTIAL: ${MCD_API_CONTROL__WORKER_CREDENTIAL}
+      # `:?` rejects unset OR empty so a blank signing key / worker credential
+      # fails loudly here rather than slipping past the api's fail-fast (#939).
+      MCD_API_AUTH__TOKEN__SIGNING_KEY: "${MCD_API_AUTH__TOKEN__SIGNING_KEY:?set MCD_API_AUTH__TOKEN__SIGNING_KEY in .env, e.g. openssl rand -base64 48}"
+      MCD_API_CONTROL__WORKER_CREDENTIAL: "${MCD_API_CONTROL__WORKER_CREDENTIAL:?set MCD_API_CONTROL__WORKER_CREDENTIAL in .env, e.g. openssl rand -base64 48}"
       # Serve the built SPA from the api origin (no reverse proxy, no CORS): the
       # image builds webui/dist into this path (WEBUI_SPEC 7.7, issue #490).
       MCD_API_WEBUI__DIST_DIR: /app/webui/dist
@@ -127,9 +148,14 @@ services:
       # access/secret keys come from .env (matching the db-password posture).
       MCD_API_STORAGE__OBJECT__ENDPOINT: http://seaweedfs:8333
       MCD_API_STORAGE__OBJECT__BUCKET: ${MCD_API_STORAGE__OBJECT__BUCKET:-mcsd}
-      # `:?` rejects unset OR empty so a blank-credential boot fails loudly (#702).
-      MCD_API_STORAGE__OBJECT__ACCESS_KEY: "${MCD_API_STORAGE__OBJECT__ACCESS_KEY:?set MCD_API_STORAGE__OBJECT__ACCESS_KEY in .env, e.g. openssl rand -hex 16}"
-      MCD_API_STORAGE__OBJECT__SECRET_KEY: "${MCD_API_STORAGE__OBJECT__SECRET_KEY:?set MCD_API_STORAGE__OBJECT__SECRET_KEY in .env, e.g. openssl rand -hex 32}"
+      # `:-` (empty default), NOT `:?`: this env evaluates ALWAYS, including in fs
+      # mode where no creds exist, so a `:?` here would break the fs opt-out
+      # (issue #940). The fail-fast for object mode lives where the backend is
+      # actually known: the api's `_build_storage` rejects blank object creds at boot
+      # (naming the variables), and the seaweedfs entrypoint guard refuses a
+      # blank-key identities file when the `object` profile is active (#702).
+      MCD_API_STORAGE__OBJECT__ACCESS_KEY: "${MCD_API_STORAGE__OBJECT__ACCESS_KEY:-}"
+      MCD_API_STORAGE__OBJECT__SECRET_KEY: "${MCD_API_STORAGE__OBJECT__SECRET_KEY:-}"
     volumes:
       - api-storage:/data/storage
     ports:
@@ -141,8 +167,12 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      # `required: false` so the api still starts when the `object` profile is off
+      # (fs opt-out, issue #940): the dependency is enforced (wait for healthy) only
+      # when seaweedfs is part of the active profile set, and ignored otherwise.
       seaweedfs:
         condition: service_healthy
+        required: false
 
   worker:
     build: ./worker

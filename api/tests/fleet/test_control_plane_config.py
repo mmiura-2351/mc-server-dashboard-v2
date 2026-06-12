@@ -23,6 +23,19 @@ def test_create_app_fails_when_control_enabled_without_credential(
         create_app()
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_create_app_fails_when_control_enabled_with_blank_credential(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    # A blank ``${MCD_API_CONTROL__WORKER_CREDENTIAL}`` interpolation arrives as ""
+    # rather than unset; it is collapsed to None so the same "required" fail-fast
+    # fires rather than admitting any Worker on an empty credential (#939).
+    monkeypatch.setenv("MCD_API_CONTROL__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_CONTROL__WORKER_CREDENTIAL", blank)
+    with pytest.raises(ValueError, match="worker_credential"):
+        create_app()
+
+
 def test_create_app_succeeds_when_control_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
