@@ -13,14 +13,17 @@ message flow, and the requirement mapping) see
 proto/
 ├── buf.yaml                                  # buf module: lint + breaking config
 ├── buf.gen.yaml                              # code generation (Go via buf)
-└── mcsd/controlplane/v1/control_plane.proto  # the WorkerService bidi-stream contract
+├── mcsd/controlplane/v1/control_plane.proto  # the WorkerService bidi-stream contract
+└── mcsd/relay/v1/relay.proto                 # the RelayService relay-to-API contract
 ```
 
 Generated stubs (do not edit by hand; regenerate with `make proto-gen`):
 
 ```
 worker/internal/controlplane/mcsd/controlplane/v1/   # Go: *.pb.go, *_grpc.pb.go
-api/src/mcsd/controlplane/v1/                         # Python: *_pb2.py(i), *_pb2_grpc.py(i)
+worker/internal/controlplane/mcsd/relay/v1/          # Go: *.pb.go, *_grpc.pb.go
+api/src/mcsd/controlplane/v1/                        # Python: *_pb2.py(i), *_pb2_grpc.py(i)
+api/src/mcsd/relay/v1/                               # Python: *_pb2.py(i), *_pb2_grpc.py(i)
 ```
 
 The proto package is `mcsd.controlplane.v1`. The version segment is part of the
@@ -126,7 +129,7 @@ Generated Go and Python are excluded from the strict lint/type gates
 
 ## Conventions
 
-- proto3, package `mcsd.controlplane.v1`.
+- proto3, packages `mcsd.controlplane.v1` and `mcsd.relay.v1`.
 - Lint uses the buf `STANDARD` rule set. The single exception is the
   request/response naming rules for the `Session` RPC, whose request and
   response are the multiplexing `WorkerMessage` / `ApiMessage` envelopes rather

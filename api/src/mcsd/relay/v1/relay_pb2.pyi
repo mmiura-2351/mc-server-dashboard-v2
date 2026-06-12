@@ -232,7 +232,6 @@ class ResolveJoinResponse(_message.Message):
 
     DECISION_FIELD_NUMBER: _builtins.int
     TOKEN_FIELD_NUMBER: _builtins.int
-    SESSION_ID_FIELD_NUMBER: _builtins.int
     DISPLAY_NAME_FIELD_NUMBER: _builtins.int
     decision: Global___JoinDecision.ValueType
     """decision is the routing outcome. RELAY.md Section 6."""
@@ -240,11 +239,6 @@ class ResolveJoinResponse(_message.Message):
     """token is the single-use 128-bit session token the Worker presents on the
     tunnel dial-back to identify its connection. Set only when decision is
     TUNNEL. The token expires in 10 s (RELAY.md Section 4).
-    """
-    session_id: _builtins.str
-    """session_id is the relay-minted UUID identifying this session in
-    game_session. Set when decision is TUNNEL (used for ReportSessions).
-    RELAY.md Section 6.
     """
     display_name: _builtins.str
     """display_name is the server's human-readable name, used by the relay to
@@ -256,12 +250,11 @@ class ResolveJoinResponse(_message.Message):
         *,
         decision: Global___JoinDecision.ValueType = ...,
         token: _builtins.str = ...,
-        session_id: _builtins.str = ...,
         display_name: _builtins.str = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["decision", b"decision", "display_name", b"display_name", "session_id", b"session_id", "token", b"token"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["decision", b"decision", "display_name", b"display_name", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
@@ -380,12 +373,15 @@ class SessionStart(_message.Message):
     username: _builtins.str
     """username is the name claimed in the Minecraft Login Start packet.
     Pre-authentication; with online-mode on, a meaningful-duration session
-    implies a verified identity. RELAY.md Section 8.
+    implies a verified identity. Empty string means absent or unparseable
+    (maps to NULL in the game_session table — RELAY.md Sections 7 and 13).
+    RELAY.md Section 8.
     """
     player_uuid: _builtins.str
     """player_uuid is the UUID claimed in the Login Start packet (present on
-    protocols that send it; absent on older protocol versions). RELAY.md
-    Section 7.
+    protocols that send it; absent on older protocol versions). Empty string
+    means absent or unparseable (maps to NULL in the game_session table —
+    RELAY.md Sections 7 and 13).
     """
     @_builtins.property
     def started_at(self) -> _timestamp_pb2.Timestamp:

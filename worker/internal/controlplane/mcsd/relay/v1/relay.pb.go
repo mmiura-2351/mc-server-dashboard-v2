@@ -349,14 +349,10 @@ type ResolveJoinResponse struct {
 	// tunnel dial-back to identify its connection. Set only when decision is
 	// TUNNEL. The token expires in 10 s (RELAY.md Section 4).
 	Token string `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
-	// session_id is the relay-minted UUID identifying this session in
-	// game_session. Set when decision is TUNNEL (used for ReportSessions).
-	// RELAY.md Section 6.
-	SessionId string `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	// display_name is the server's human-readable name, used by the relay to
 	// synthesize the stopped-server in-protocol response. Set only when
 	// decision is STOPPED. RELAY.md Section 7.
-	DisplayName   string `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	DisplayName   string `protobuf:"bytes,3,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -401,13 +397,6 @@ func (x *ResolveJoinResponse) GetDecision() JoinDecision {
 func (x *ResolveJoinResponse) GetToken() string {
 	if x != nil {
 		return x.Token
-	}
-	return ""
-}
-
-func (x *ResolveJoinResponse) GetSessionId() string {
-	if x != nil {
-		return x.SessionId
 	}
 	return ""
 }
@@ -606,11 +595,14 @@ type SessionStart struct {
 	PlayerIp string `protobuf:"bytes,4,opt,name=player_ip,json=playerIp,proto3" json:"player_ip,omitempty"`
 	// username is the name claimed in the Minecraft Login Start packet.
 	// Pre-authentication; with online-mode on, a meaningful-duration session
-	// implies a verified identity. RELAY.md Section 8.
+	// implies a verified identity. Empty string means absent or unparseable
+	// (maps to NULL in the game_session table — RELAY.md Sections 7 and 13).
+	// RELAY.md Section 8.
 	Username string `protobuf:"bytes,5,opt,name=username,proto3" json:"username,omitempty"`
 	// player_uuid is the UUID claimed in the Login Start packet (present on
-	// protocols that send it; absent on older protocol versions). RELAY.md
-	// Section 7.
+	// protocols that send it; absent on older protocol versions). Empty string
+	// means absent or unparseable (maps to NULL in the game_session table —
+	// RELAY.md Sections 7 and 13).
 	PlayerUuid string `protobuf:"bytes,6,opt,name=player_uuid,json=playerUuid,proto3" json:"player_uuid,omitempty"`
 	// started_at is when the relay accepted the session (relay clock).
 	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
@@ -768,13 +760,11 @@ const file_mcsd_relay_v1_relay_proto_rawDesc = "" +
 	"\x12ResolveJoinRequest\x12\x12\n" +
 	"\x04slug\x18\x01 \x01(\tR\x04slug\x12\x1b\n" +
 	"\tplayer_ip\x18\x02 \x01(\tR\bplayerIp\x121\n" +
-	"\x06intent\x18\x03 \x01(\x0e2\x19.mcsd.relay.v1.JoinIntentR\x06intent\"\xa6\x01\n" +
+	"\x06intent\x18\x03 \x01(\x0e2\x19.mcsd.relay.v1.JoinIntentR\x06intent\"\x87\x01\n" +
 	"\x13ResolveJoinResponse\x127\n" +
 	"\bdecision\x18\x01 \x01(\x0e2\x1b.mcsd.relay.v1.JoinDecisionR\bdecision\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\tR\x05token\x12\x1d\n" +
-	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\x12!\n" +
-	"\fdisplay_name\x18\x04 \x01(\tR\vdisplayName\"L\n" +
+	"\x05token\x18\x02 \x01(\tR\x05token\x12!\n" +
+	"\fdisplay_name\x18\x03 \x01(\tR\vdisplayName\"L\n" +
 	"\x15ReportSessionsRequest\x123\n" +
 	"\x06events\x18\x01 \x03(\v2\x1b.mcsd.relay.v1.SessionEventR\x06events\"\x18\n" +
 	"\x16ReportSessionsResponse\"{\n" +
