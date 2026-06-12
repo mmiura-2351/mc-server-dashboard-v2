@@ -1,7 +1,7 @@
 """Promote a user to platform admin directly in the database.
 
 The first platform admin cannot be granted through the (admin-gated) API, so the
-deploy bootstrap does it with one SQL UPDATE (DEPLOYMENT.md Section 5). This is
+deploy bootstrap does it with one SQL UPDATE (DEPLOYMENT.md Section 6). This is
 that step, scripted for the E2E harness: it reads the same async DSN the API
 uses (``MCD_API_DATABASE__URL``) and flips ``is_platform_admin`` for one
 username. Run it via ``uv run`` from ``api/`` so it reuses the API's pinned

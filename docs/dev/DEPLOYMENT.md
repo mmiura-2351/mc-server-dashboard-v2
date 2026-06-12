@@ -201,13 +201,20 @@ multipart sweep below.
 ### Orphan multipart parts
 
 A hard crash mid-upload can leave in-progress multipart parts. The API's startup
-sweep reclaims them via `ListMultipartUploads` + `AbortMultipartUpload`. This
-SeaweedFS build returns `ListMultipartUploads` **without** the per-upload
-`Initiated` timestamp, so the sweep cannot age-gate those uploads and
-conservatively leaves them alone (it never aborts a possibly-live upload). If you
-run long enough to accumulate orphan parts, configure an
-`AbortIncompleteMultipartUpload` bucket lifecycle rule on SeaweedFS to reclaim
-them on a schedule.
+sweep reclaims them via `ListMultipartUploads` + `AbortMultipartUpload`, aborting
+only uploads older than a 1h age threshold so a live upload is never touched.
+
+SeaweedFS 4.33 returns `ListMultipartUploads` **without** the per-upload
+`Initiated` timestamp, so the sweep cannot read the age directly. It instead
+derives the effective age from the upload's parts via `ListParts` (SeaweedFS does
+return a per-part `LastModified`), using the newest part's timestamp — so a
+genuine crash-orphan with parts **is** reclaimed on SeaweedFS, not just on real
+S3/MinIO. One residual gap: an upload that crashes after `CreateMultipartUpload`
+but **before** its first part has no `Initiated` and no part timestamp, so the
+sweep treats it as just-started and leaves it. Such an entry holds no part bytes.
+If you want to reclaim those on a schedule too, `weed shell s3.clean.uploads` is
+the SeaweedFS-native operator-side cleanup (it removes incomplete uploads older
+than its default 24h); it is optional and complementary to the API sweep.
 
 ### Opting back to the fs backend
 

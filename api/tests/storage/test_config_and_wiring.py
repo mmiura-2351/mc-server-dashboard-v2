@@ -76,6 +76,23 @@ def test_app_factory_fails_fast_on_object_without_keys(
         create_app(settings)
 
 
+def test_app_factory_fails_fast_on_object_with_blank_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # compose interpolates an unset ``${MCD_API_STORAGE__OBJECT__ACCESS_KEY}`` to an
+    # EMPTY string, not None; an `is None`-only guard would boot a silently
+    # unauthenticated deployment against SeaweedFS. Empty/whitespace values must fail
+    # fast with the same error as a missing one (#702).
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__ENDPOINT", "https://s3.example:9000")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__BUCKET", "mcsd")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__ACCESS_KEY", "")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__SECRET_KEY", "   ")
+    cfg = _write_toml(tmp_path, '[storage]\nbackend = "object"\n')
+    settings = load_settings(config_file=cfg)
+    with pytest.raises(ValueError, match="access_key"):
+        create_app(settings)
+
+
 def test_app_factory_builds_object_storage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

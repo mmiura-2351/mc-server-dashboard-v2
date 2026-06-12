@@ -70,7 +70,7 @@ class ServerRepository(abc.ABC):
         set (:meth:`list_game_ports`), so auto-assignment can hand their real
         (server.properties-bound) host port to a new server and collide. This
         read powers the startup WARN that lists those rows so an operator can
-        backfill them (DEPLOYMENT.md Section 6). Spans all communities — a
+        backfill them (DEPLOYMENT.md Section 7). Spans all communities — a
         deployment-wide gap, not scoped to one community.
         """
 

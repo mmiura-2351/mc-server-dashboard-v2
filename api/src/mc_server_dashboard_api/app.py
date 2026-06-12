@@ -188,14 +188,18 @@ def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
             version_retention=settings.storage.version_retention,
         )
     obj = settings.storage.object
+    # Treat empty/whitespace as missing, not just None: compose interpolates an unset
+    # ``${MCD_API_STORAGE__OBJECT__ACCESS_KEY}`` to "" rather than dropping it, so an
+    # `is None`-only guard would boot a silently-unauthenticated deployment against
+    # SeaweedFS (which accepts blank-credential clients). Fail fast instead (#702).
     missing = [
         name
         for name in ("endpoint", "bucket", "access_key", "secret_key")
-        if getattr(obj, name) is None
+        if not (getattr(obj, name) or "").strip()
     ]
     if missing:
         raise ValueError(
-            "storage.backend 'object' requires "
+            "storage.backend 'object' requires non-empty "
             + ", ".join(f"storage.object.{name}" for name in missing)
         )
     assert obj.endpoint is not None
@@ -646,7 +650,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # rows predate port tracking (#243) and are invisible to port
             # auto-assignment, so a new server can collide on the host port a
             # legacy server already binds. The WARN lists them so an operator can
-            # backfill them (DEPLOYMENT.md Section 6). Run from inside the loop's
+            # backfill them (DEPLOYMENT.md Section 7). Run from inside the loop's
             # startup-once section (after the reset) — read-only and failure-
             # tolerant, so it never gates ticking nor crashes the boot.
             reconciler_warn_missing_ports = WarnLegacyMissingPorts(

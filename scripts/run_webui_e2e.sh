@@ -134,7 +134,7 @@ fi
 echo "==> seeding the platform admin"
 export MCD_E2E_API_URL="$API_URL"
 # Promote the seeded admin in the DB — the one out-of-band bootstrap step
-# (DEPLOYMENT.md 5), run via the API's pinned asyncpg so no psql is needed.
+# (DEPLOYMENT.md 6), run via the API's pinned asyncpg so no psql is needed.
 ADMIN_USERNAME="${MCD_E2E_ADMIN_USERNAME:-e2e-admin}"
 export MCD_E2E_PROMOTE_CMD="cd '$REPO_ROOT/api' && MCD_API_DATABASE__URL='$DB_URL' uv run python '$REPO_ROOT/webui/e2e/promote_admin.py' '$ADMIN_USERNAME'"
 node webui/e2e/seed-admin.mjs

@@ -13,9 +13,10 @@ so a backend that violates one is caught before it ships as the default:
 3. **Multipart upload + prefix ListObjectsV2** — every working-set member is
    uploaded via multipart and listed by prefix.
 
-It also exercises the startup ``sweep`` path against the real endpoint, covering
-the #916-item-4 question: SeaweedFS's ListMultipartUploads omits the optional
-``Initiated`` timestamp, which the adapter tolerates (see ``object_client``).
+It also exercises the startup ``sweep`` path against the real endpoint: SeaweedFS's
+ListMultipartUploads omits the optional ``Initiated`` timestamp, so the adapter
+age-gates uploads via ``ListParts`` (per-part ``LastModified``) instead — a recent
+orphan is left alone, an old one is reclaimed (see ``object_client``).
 
 Gated on ``MCD_TEST_S3_ENDPOINT`` (with ``MCD_TEST_S3_BUCKET`` /
 ``MCD_TEST_S3_ACCESS_KEY`` / ``MCD_TEST_S3_SECRET_KEY``); skipped cleanly when
@@ -153,19 +154,16 @@ async def test_full_publish_hydrate_cycle() -> None:
     await storage.prune_to_final_snapshot(community, server)
 
 
-async def test_startup_sweep_tolerates_orphan_multipart_upload() -> None:
-    # The #916-item-4 verification: a crash-leftover in-progress multipart upload is
-    # listed by SeaweedFS WITHOUT an ``Initiated`` timestamp. The startup sweep must
-    # complete (not crash on the missing field) and must NOT abort the upload (its
-    # age is treated as "now", below the abort threshold), degrading orphan
-    # reclamation to the bucket lifecycle rule.
-    factory = _factory()
-    storage = ObjectStorage(factory)
-    community, server = _scope()
-    key = (
-        f"communities/{community.value}/servers/{server.value}/"
-        "incoming/orphan/region/r.0.0.mca"
-    )
+async def _create_orphan_part(factory: S3ClientFactory, key: str) -> str:
+    # Manufacture a real crash-leftover: a multipart upload with one uploaded part
+    # left in-progress (never completed/aborted). SeaweedFS lists it WITHOUT
+    # ``Initiated`` but DOES return the part's ``LastModified`` via ListParts.
+    #
+    # ``client._client`` is the raw aioboto3 client behind the adapter. The adapter's
+    # public surface (the S3Client Port) deliberately exposes no "create a multipart
+    # upload and leave it dangling" operation — completing/aborting is the only sane
+    # public contract — so reaching the private client is the only way to FABRICATE
+    # the crash-orphan state this test needs to verify the sweep against.
     async with factory() as client:
         created = await client._client.create_multipart_upload(  # type: ignore[attr-defined]
             Bucket=_BUCKET, Key=key
@@ -178,6 +176,22 @@ async def test_startup_sweep_tolerates_orphan_multipart_upload() -> None:
             PartNumber=1,
             Body=b"z" * (6 * 1024 * 1024),
         )
+    return str(upload_id)
+
+
+async def test_startup_sweep_leaves_recent_orphan_multipart_upload() -> None:
+    # A crash-leftover in-progress multipart upload is listed by SeaweedFS WITHOUT an
+    # ``Initiated`` timestamp. The startup sweep must complete (not crash on the
+    # missing field) and must NOT abort a RECENT upload: its effective age, derived
+    # from its newest part's ``LastModified`` (ListParts), is below the 1h threshold.
+    factory = _factory()
+    storage = ObjectStorage(factory)
+    community, server = _scope()
+    key = (
+        f"communities/{community.value}/servers/{server.value}/"
+        "incoming/orphan/region/r.0.0.mca"
+    )
+    upload_id = await _create_orphan_part(factory, key)
     try:
         # Must not raise (pre-fix this crashed with KeyError('Initiated')).
         await storage.sweep()
@@ -189,6 +203,42 @@ async def test_startup_sweep_tolerates_orphan_multipart_upload() -> None:
     finally:
         async with factory() as client:
             await client.abort_multipart_upload(key, upload_id)
+
+
+async def test_startup_sweep_reclaims_old_orphan_multipart_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The reclamation that the missing-``Initiated`` fix restores on SeaweedFS: a
+    # genuinely OLD orphan upload IS aborted by the sweep. We cannot make a live
+    # store backdate a part's ``LastModified``, so we pin the OTHER half honestly —
+    # drop the age threshold to 0 so the sweep treats the freshly-uploaded part
+    # (real ListParts ``LastModified``, a moment in the past) as past-threshold. This
+    # demonstrates the ListParts-derived age actually drives an abort end-to-end on
+    # SeaweedFS; the 1h cutoff itself is pinned by the unit tests.
+    from mc_server_dashboard_api.storage.adapters import object_store
+
+    monkeypatch.setattr(object_store, "_MULTIPART_SWEEP_MIN_AGE_S", 0)
+    factory = _factory()
+    storage = ObjectStorage(factory)
+    community, server = _scope()
+    key = (
+        f"communities/{community.value}/servers/{server.value}/"
+        "incoming/orphan/region/r.0.0.mca"
+    )
+    upload_id = await _create_orphan_part(factory, key)
+    aborted = False
+    try:
+        await storage.sweep()
+        async with factory() as client:
+            uploads = await client.list_multipart_uploads(
+                f"communities/{community.value}/"
+            )
+        assert not any(u.upload_id == upload_id for u in uploads)
+        aborted = True
+    finally:
+        if not aborted:
+            async with factory() as client:
+                await client.abort_multipart_upload(key, upload_id)
 
 
 async def _read(client: object, key: str) -> bytes:
