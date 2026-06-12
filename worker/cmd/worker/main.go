@@ -91,6 +91,12 @@ func run(ctx context.Context) error {
 	// quiesced working set — scanning a live world races the server's writes and
 	// can false-positive a healthy region as corrupt (issue #834).
 	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, logger)
+	// Log a WARN for each .displaced-<id> tree whose server id is not in the held
+	// set (issue #911): those trees are orphaned recovery copies — the server was
+	// deleted or re-placed elsewhere — and will never be GC'd automatically. The
+	// operator should inspect them (STORAGE.md Section 4.6) and remove or recover
+	// the world manually.
+	instancemanager.WarnOrphanDisplacedTrees(cfg.Worker.ScratchDir, heldServers, logger)
 	caps := session.Capabilities{
 		WorkerID:      cfg.Worker.ID,
 		WorkerVersion: version,
