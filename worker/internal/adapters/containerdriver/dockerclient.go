@@ -230,7 +230,17 @@ func drainPullStream(r io.Reader) error {
 // is not part of a registry host:port (which always precedes a "/"), so
 // "host:5000/img" stays untagged (→ latest) while "img:1.21" and
 // "host:5000/img:1.21" split correctly.
+//
+// A digest-pinned ref ("name@sha256:...") is returned whole as the name with an
+// empty tag: the Engine's /images/create contract pulls by digest from fromImage
+// alone, with no tag param (ImagePull omits it for an empty tag). Splitting on the
+// digest's own colon would send fromImage="name@sha256" and tag="<hex>", which the
+// Engine rejects, so lazy pull would never succeed for a digest-pinned image
+// (issue #915).
 func splitImageTag(image string) (name, tag string) {
+	if strings.Contains(image, "@") {
+		return image, ""
+	}
 	lastColon := strings.LastIndex(image, ":")
 	if lastColon < 0 || strings.Contains(image[lastColon:], "/") {
 		return image, "latest"
