@@ -648,11 +648,16 @@ directory you own (set `MCD_RELAY_TLS_DIR` in `.env` to this path):
 
 ```sh
 mkdir -p /etc/mcsd/relay
+# Replace <tunnel-host> with the hostname part of MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT
+# (e.g. relay.example.com). The SAN must match the host the Worker dials — Go
+# ignores CN and requires a matching DNS or IP SAN.
+# For a raw-IP endpoint use: -addext "subjectAltName=IP:<addr>"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
   -keyout /etc/mcsd/relay/tunnel-key.pem \
   -out    /etc/mcsd/relay/tunnel-cert.pem \
   -days 3650 -nodes \
-  -subj "/CN=mcsd-relay-tunnel"
+  -subj "/CN=mcsd-relay-tunnel" \
+  -addext "subjectAltName=DNS:<tunnel-host>"
 ```
 
 The cert and key are bind-mounted read-only into the relay container at
@@ -676,9 +681,9 @@ relay advertises an empty CA bundle and Workers fall back to their system roots.
 
    | Variable | How to get it |
    |---|---|
-   | `MCD_API_RELAY_CREDENTIAL` | `openssl rand -base64 48` |
-   | `MCD_API_RELAY_ENABLED` | set to `true` |
-   | `MCD_API_RELAY_BASE_DOMAIN` | e.g. `mc.example.com` |
+   | `MCD_API_RELAY__CREDENTIAL` | `openssl rand -base64 48` |
+   | `MCD_API_RELAY__ENABLED` | set to `true` |
+   | `MCD_API_RELAY__BASE_DOMAIN` | e.g. `mc.example.com` |
    | `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` | e.g. `<host>:25665` |
    | `MCD_RELAY_TLS_DIR` | host path to `tunnel-cert.pem` / `tunnel-key.pem` |
 
@@ -688,20 +693,30 @@ relay advertises an empty CA bundle and Workers fall back to their system roots.
    docker compose up -d --build
    ```
 
+### Single-host port collision
+
+The relay binds `0.0.0.0:25565` for the game listener. The API's default
+game-port allocator range is `25565..25664`, so the first server created on a
+single host that also runs the relay will fail to publish its game port — even a
+`127.0.0.1:25565` publish conflicts with an existing `0.0.0.0:25565` bind.
+
+**Fix:** shift the allocator range up by setting `MCD_API_PORTS__RANGE_START`
+(e.g. `25566`) in `.env`, or run the relay on a separate host.
+
 ### Direct path vs relay path
 
 | | Direct path (today) | Relay path |
 |---|---|---|
 | `relay.enabled` (API) | `false` (default) | `true` |
 | Player address | `<worker host>:<game_port>` | `<slug>.<base_domain>` |
-| `driver.container.game_bind_ip` | `0.0.0.0` (compose default) | keep the worker default `127.0.0.1` — no inbound game port needed |
+| `driver.container.game_bind_ip` | `0.0.0.0` (compose default) | `127.0.0.1` — no inbound game port needed |
+| `MCD_WORKER_GAME_BIND_IP` in `.env` | unset (defaults to `0.0.0.0`) | `127.0.0.1` |
 | Host firewall (worker) | game-port range open | nothing inbound on the Worker |
 
-When the relay is enabled, set `MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP` back
-to `127.0.0.1` (or remove the override from `compose.yaml`) so game ports bind
-only on loopback — the Worker dials its own loopback game port into the tunnel,
-and no inbound game-port range is needed on the worker host. The relay takes all
-inbound player traffic on port 25565.
+When the relay is enabled, set `MCD_WORKER_GAME_BIND_IP=127.0.0.1` in `.env`
+so game ports bind only on loopback — the Worker dials its own loopback game
+port into the tunnel, and no inbound game-port range is needed on the worker
+host. The relay takes all inbound player traffic on port 25565.
 
 The two paths are not mutually exclusive at the protocol level (a server is
 reachable both ways during migration); `relay.enabled` governs whether the

@@ -160,6 +160,12 @@ services:
       # blank-key identities file when the `object` profile is active (#702).
       MCD_API_STORAGE__OBJECT__ACCESS_KEY: "${MCD_API_STORAGE__OBJECT__ACCESS_KEY:-}"
       MCD_API_STORAGE__OBJECT__SECRET_KEY: "${MCD_API_STORAGE__OBJECT__SECRET_KEY:-}"
+      # Relay API-side settings (lands with #956). `:-` empty defaults so default
+      # bring-up is unchanged; unknown MCD_API_* env vars are silently ignored by
+      # the loader until the relay field is declared (config.py, comment line 585).
+      MCD_API_RELAY__ENABLED: "${MCD_API_RELAY__ENABLED:-}"
+      MCD_API_RELAY__CREDENTIAL: "${MCD_API_RELAY__CREDENTIAL:-}"
+      MCD_API_RELAY__BASE_DOMAIN: "${MCD_API_RELAY__BASE_DOMAIN:-}"
     volumes:
       - api-storage:/data/storage
     ports:
@@ -200,7 +206,9 @@ services:
       # from outside the host (the code default is 127.0.0.1, loopback-only). The
       # host firewall governs which game ports are actually reachable. RCON always
       # stays on loopback regardless of this value.
-      MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP: "0.0.0.0"
+      # Set MCD_WORKER_GAME_BIND_IP=127.0.0.1 in .env when the relay is enabled
+      # (relay path: Worker dials its own loopback, no inbound game-port range needed).
+      MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP: "${MCD_WORKER_GAME_BIND_IP:-0.0.0.0}"
       # Attach the MC containers the worker creates to the compose network (pinned
       # to "mcsd" below) so RCON is reached over the docker network at the
       # container's name, never the host loopback. Inside this containerized worker
