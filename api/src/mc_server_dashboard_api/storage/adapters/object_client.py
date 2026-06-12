@@ -15,6 +15,7 @@ adapter's per-operation ``client_factory()`` usage.
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -155,12 +156,19 @@ class _Aioboto3S3Client:
             async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
                 for entry in page.get("Uploads", []):
                     # ``Initiated`` is a timezone-aware datetime (UTC); the sweep's
-                    # age threshold reads it through S3MultipartUpload.
+                    # age threshold reads it through S3MultipartUpload. It is OPTIONAL
+                    # in the S3 ListMultipartUploads response and SeaweedFS omits it
+                    # (issue #702 validation against SeaweedFS 4.33), so a present
+                    # KeyError would crash the startup sweep. Absent -> treat the
+                    # upload as just-initiated ("now") so the age guard never aborts
+                    # it: orphan reclamation degrades to the
+                    # ``AbortIncompleteMultipartUpload`` bucket lifecycle rule, the
+                    # same safe posture as the unsupported-operation path below.
                     out.append(
                         S3MultipartUpload(
                             key=entry["Key"],
                             upload_id=entry["UploadId"],
-                            initiated=entry["Initiated"],
+                            initiated=entry.get("Initiated", dt.datetime.now(dt.UTC)),
                         )
                     )
         except ClientError as exc:

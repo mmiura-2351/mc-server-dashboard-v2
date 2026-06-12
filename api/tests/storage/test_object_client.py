@@ -9,6 +9,9 @@ the production code translates.
 
 from __future__ import annotations
 
+import datetime as dt
+from collections.abc import AsyncIterator
+
 import pytest
 from botocore.exceptions import ClientError
 
@@ -17,6 +20,29 @@ from mc_server_dashboard_api.storage.adapters.object_client import _Aioboto3S3Cl
 
 def _client_error(code: str) -> ClientError:
     return ClientError({"Error": {"Code": code}}, "AbortMultipartUpload")
+
+
+class _ListUploadsPaginator:
+    """A botocore-paginator double yielding one page of ``Uploads`` entries."""
+
+    def __init__(self, uploads: list[dict[str, object]]) -> None:
+        self._uploads = uploads
+
+    async def _pages(self) -> AsyncIterator[dict[str, object]]:
+        yield {"Uploads": self._uploads}
+
+    def paginate(self, **_kwargs: object) -> AsyncIterator[dict[str, object]]:
+        return self._pages()
+
+
+class _ListUploadsClient:
+    """An aioboto3-client double whose paginator returns set ``Uploads`` entries."""
+
+    def __init__(self, uploads: list[dict[str, object]]) -> None:
+        self._uploads = uploads
+
+    def get_paginator(self, _name: str) -> _ListUploadsPaginator:
+        return _ListUploadsPaginator(self._uploads)
 
 
 class _RaisingAbortClient:
@@ -52,3 +78,39 @@ async def test_abort_multipart_upload_reraises_other_client_errors() -> None:
 
     with pytest.raises(ClientError):
         await client.abort_multipart_upload("jars/x.jar", "live")
+
+
+async def test_list_multipart_uploads_reads_initiated_when_present() -> None:
+    # The S3 ``Initiated`` timestamp drives the sweep's age threshold; when the
+    # backend supplies it, it is read verbatim (issue #903).
+    initiated = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    client = _Aioboto3S3Client(
+        _ListUploadsClient(
+            [{"Key": "communities/k", "UploadId": "u", "Initiated": initiated}]
+        ),
+        "bucket",
+    )
+
+    uploads = await client.list_multipart_uploads("communities/")
+
+    assert len(uploads) == 1
+    assert uploads[0].initiated == initiated
+
+
+async def test_list_multipart_uploads_tolerates_missing_initiated() -> None:
+    # SeaweedFS (issue #702 validation) returns ListMultipartUploads entries WITHOUT
+    # the optional ``Initiated`` field, which would crash the sweep with a KeyError.
+    # A missing timestamp is treated as "just now" so the sweep's age guard never
+    # aborts the upload — orphan reclamation degrades to the lifecycle rule, the same
+    # posture as the unsupported-operation path.
+    before = dt.datetime.now(dt.UTC)
+    client = _Aioboto3S3Client(
+        _ListUploadsClient([{"Key": "communities/k", "UploadId": "u"}]),
+        "bucket",
+    )
+
+    uploads = await client.list_multipart_uploads("communities/")
+
+    assert len(uploads) == 1
+    assert uploads[0].initiated.tzinfo is not None
+    assert uploads[0].initiated >= before

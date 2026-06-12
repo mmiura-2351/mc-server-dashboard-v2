@@ -744,6 +744,19 @@ differ**, and #16 selects between them explicitly. Config: set
 | Best for | Decoupling the authoritative store from any host filesystem; durability/scale beyond local disk. |
 | Caveat | No atomic multi-object rename and no real directories — hence the pointer-flip design. List operations are prefix scans. |
 
+**Shipped deployment (issue #702).** This is the **default** backend for the
+compose deployment, realized over **SeaweedFS** (Apache-2.0, master/volume,
+designed for many small files). The deployment wiring, credentials, opt-out, and
+the live contract tests are in
+[DEPLOYMENT.md Section 5](../dev/DEPLOYMENT.md#5-storage-backend-object-on-seaweedfs-default).
+The app implements its own snapshot/version logic, so S3 versioning / object-lock
+/ lifecycle are not required (SeaweedFS's lack of them is a non-issue). The hot
+path is **CopyObject-heavy and small-object-heavy** — each publish server-side
+copies every world file into a fresh prefix and uploads members via multipart — so
+operating cost/latency scale with **operation count** (files × snapshot
+frequency), not stored size or egress; keep the snapshot interval coarse enough
+that a publish completes well within it.
+
 ### 7.4 Why backend switching stays a configuration change
 
 The contract is what callers depend on: opaque keys/handles, scope-by-id, the
