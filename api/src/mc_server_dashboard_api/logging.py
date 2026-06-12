@@ -46,11 +46,16 @@ class JsonFormatter(logging.Formatter):
             payload["correlation_id"] = cid
         ei = record.exc_info
         if not isinstance(ei, tuple):
-            # Callers such as asyncio's call_exception_handler set exc_info=True
-            # directly on the record (skipping Logger.makeRecord, which normally
-            # normalises True to a sys.exc_info() tuple).  Resolve it here so
-            # formatException always receives a proper (type, value, tb) triple.
-            ei = sys.exc_info() if ei else None
+            if isinstance(ei, BaseException):
+                # Logger._log converts a BaseException instance to a tuple; mirror
+                # that here so the traceback attached to the instance is preserved.
+                ei = (type(ei), ei, ei.__traceback__)
+            else:
+                # Callers such as asyncio's call_exception_handler set exc_info=True
+                # directly on the record (skipping Logger.makeRecord, which normally
+                # normalises True to a sys.exc_info() tuple).  Resolve it here so
+                # formatException always receives a proper (type, value, tb) triple.
+                ei = sys.exc_info() if ei else None
         if isinstance(ei, tuple) and ei[0] is not None:
             payload["exception"] = self.formatException(ei)
         return json.dumps(payload)
