@@ -12,6 +12,7 @@
 .PHONY: all check lint format test docs-check \
 	api-env-check api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race worker-e2e-compile \
+	relay-lint relay-format relay-test relay-test-race \
 	webui-lint webui-format webui-test webui-build webui-e2e \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
@@ -44,11 +45,11 @@ all: check
 # Full verification gate. Matches the pre-push hook and CI.
 check: hooks-check lint test webui-build openapi-check proto-check docs-check
 
-lint: api-lint worker-lint webui-lint proto-lint
+lint: api-lint worker-lint relay-lint webui-lint proto-lint
 
-format: api-format worker-format webui-format
+format: api-format worker-format relay-format webui-format
 
-test: api-test worker-test worker-e2e-compile webui-test hooks-test
+test: api-test worker-test worker-e2e-compile relay-test webui-test hooks-test
 
 # docs/ convention gate (docs/README.md Conventions): relative links resolve,
 # no section-mark glyph, no 'v1' versioning term. Pure stdlib python3, no deps.
@@ -127,6 +128,35 @@ worker-test-race:
 # so the pre-push hook catches the dangling consumer the way CI does.
 worker-e2e-compile:
 	cd worker && go vet -tags e2e ./test/e2e/...
+
+# ---------------------------------------------------------------------------
+# relay/ (Go) -- the game ingress relay (docs/app/RELAY.md). Same Go toolchain
+# and lint posture as worker/; it reuses the pinned golangci-lint installed into
+# worker/.bin (one binary for both modules).
+# ---------------------------------------------------------------------------
+
+relay-lint: $(GOLANGCI)
+	@out="$$(cd relay && gofmt -l .)"; \
+	if [ -n "$$out" ]; then \
+		echo "gofmt: the following files are not formatted:"; \
+		echo "$$out"; \
+		echo "run 'make relay-format' to fix"; \
+		exit 1; \
+	fi
+	cd relay && go vet ./...
+	cd relay && GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ../worker/.bin/golangci-lint run
+
+relay-format:
+	cd relay && gofmt -w .
+
+relay-test:
+	cd relay && go test ./...
+
+# Relay test suite under the race detector (the relay is concurrency-heavy:
+# splice goroutines, the token rendezvous, the batched reporter). Mirrors
+# worker-test-race; kept out of the fast pre-push gate, run by CI.
+relay-test-race:
+	cd relay && go test -race ./...
 
 # ---------------------------------------------------------------------------
 # webui/ (Node via npm)
@@ -273,6 +303,10 @@ proto-breaking:
 # plugins); Python via grpcio-tools + mypy-protobuf (pinned in api/ dev group).
 proto-gen: $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
 	cd proto && buf generate
+	# The relay is a sibling Go module and cannot import the worker module's
+	# internal/ stubs, so generate it its own copy of the mcsd.relay.v1 package
+	# (buf.gen.relay.yaml, scoped to the relay proto). See proto/README.md.
+	cd proto && buf generate --template buf.gen.relay.yaml --path mcsd/relay/v1/relay.proto
 	cd api && uv run python -m grpc_tools.protoc \
 		-I ../proto \
 		--python_out=src \
@@ -285,11 +319,11 @@ proto-gen: $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
 # Drift gate: regenerate and fail if anything changed -- modified tracked stubs
 # or new untracked ones (CI + `make check`).
 proto-check: proto-gen
-	@dirty="$$(git status --porcelain -- worker/internal/controlplane api/src/mcsd)"; \
+	@dirty="$$(git status --porcelain -- worker/internal/controlplane relay/internal/genproto api/src/mcsd)"; \
 	if [ -n "$$dirty" ]; then \
 		echo "proto stubs are stale; run 'make proto-gen' and commit:"; \
 		echo "$$dirty"; \
-		git --no-pager diff -- worker/internal/controlplane api/src/mcsd; \
+		git --no-pager diff -- worker/internal/controlplane relay/internal/genproto api/src/mcsd; \
 		exit 1; \
 	fi
 

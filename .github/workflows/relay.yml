@@ -1,0 +1,87 @@
+name: relay
+
+on:
+  pull_request:
+    paths:
+      - "relay/**"
+      - "proto/contract/**"
+      - "Makefile"
+      - ".github/workflows/relay.yml"
+  push:
+    branches: [main]
+    paths:
+      - "relay/**"
+      - "proto/contract/**"
+      - "Makefile"
+      - ".github/workflows/relay.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: relay
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go (caches the module + build cache)
+        id: setup-go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: relay/go.mod
+
+      # The golangci-lint pin is the single source of truth in the Makefile
+      # (GOLANGCI_VERSION). Read it out so the cache key and the install step
+      # below both follow that one pin. The relay reuses the worker module's
+      # golangci-lint install location (worker/.bin), one binary for both.
+      - name: Resolve pinned golangci-lint version
+        id: golangci
+        working-directory: ${{ github.workspace }}
+        run: |
+          version="$(sed -n 's/^GOLANGCI_VERSION := //p' Makefile)"
+          if [ -z "$version" ]; then
+            echo "could not read GOLANGCI_VERSION from Makefile" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache golangci-lint binary
+        id: cache-golangci
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: worker/.bin/golangci-lint
+          key: golangci-lint-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}-${{ steps.golangci.outputs.version }}
+
+      - name: Format check (gofmt)
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "gofmt: the following files are not formatted:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Install golangci-lint (pinned)
+        if: steps.cache-golangci.outputs.cache-hit != 'true'
+        working-directory: worker
+        run: GOBIN="$(pwd)/.bin" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${{ steps.golangci.outputs.version }}
+
+      - name: Lint (golangci-lint)
+        run: ../worker/.bin/golangci-lint run
+
+      # The -race flag mirrors the worker gate: the relay is concurrency-heavy
+      # (splice goroutines, the token rendezvous, the batched reporter).
+      - name: Test (race detector + coverage)
+        run: |
+          go test -race -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1

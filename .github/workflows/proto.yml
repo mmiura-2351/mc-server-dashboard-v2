@@ -10,6 +10,7 @@ on:
     paths:
       - "proto/**"
       - "worker/internal/controlplane/**"
+      - "relay/internal/genproto/**"
       - "api/src/mcsd/**"
       - "api/pyproject.toml"
       - "api/uv.lock"
@@ -20,6 +21,7 @@ on:
     paths:
       - "proto/**"
       - "worker/internal/controlplane/**"
+      - "relay/internal/genproto/**"
       - "api/src/mcsd/**"
       - "api/pyproject.toml"
       - "api/uv.lock"
