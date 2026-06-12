@@ -557,13 +557,15 @@ server.
 `WarnOrphanDisplacedTrees` logs a `WARN` for each `.displaced-<id>` tree whose
 server id is **not** in the held-server set. A tree is "assigned" (not logged) if
 the same id also has a live scratch in the held set; it will be GC'd on the next
-successful snapshot. A tree is "orphaned" (logged) if the server was deleted or
-re-placed to another Worker and this Worker will never snapshot it again:
+successful snapshot. Note: a held-but-idle server that never snapshots again retains
+its displaced tree silently and indefinitely — this is INTENDED (the tree is the
+recovery copy; reclaiming it requires a successful snapshot). The manual-cleanup
+criteria below apply equally to this case. A tree is "orphaned" (logged) if the
+server was deleted or re-placed to another Worker and this Worker will never
+snapshot it again:
 
 ```
-WARN  displaced recovery tree for unknown/unassigned server found at boot;
-      manual cleanup or recovery may be needed (see STORAGE.md Section 4.6)
-      path=<scratch>/.displaced-<id>  server_id=<id>
+WARN  displaced recovery tree for unknown/unassigned server found at boot; manual cleanup or recovery may be needed (see STORAGE.md Section 4.6)  path=<scratch>/.displaced-<id>  server_id=<id>
 ```
 
 #### Operator recovery procedure
@@ -571,13 +573,15 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot;
 1. **Identify the displaced tree.** The boot WARN gives the full path. Or scan the
    Worker's `worker.scratch_dir` for directories matching `.displaced-*`.
 2. **Assess the world.** The displaced tree is a plain working-set directory (the
-   same layout the Worker normally holds in `<scratch>/<id>`). Inspect
-   `level.dat`, region dirs, etc. to confirm the world data looks intact.
+   same layout the Worker normally holds in `<scratch>/<id>`). `level.dat` and
+   region dirs live under `world/` inside the displaced tree (e.g.
+   `.displaced-<id>/world/level.dat`, `.displaced-<id>/world/region/`). Inspect
+   those paths to confirm the world data looks intact.
 3. **Recover the world.** Two options:
 
    - **Repack as a new backup (recommended).** Tar the displaced tree, upload it
-     as a backup to a server (the upload-backup flow, issue #281 / `PUT
-     /api/communities/{c}/servers/{s}/backup`), and restore it
+     as a backup to a server (the upload-backup flow, issue #281 / `POST
+     /api/communities/{community_id}/servers/{server_id}/backups/upload`), and restore it
      (`restore_backup`). This brings the world back into the authoritative store
      and into a new or existing server — no manual SSH to the Worker host needed
      once the tar is in hand.
