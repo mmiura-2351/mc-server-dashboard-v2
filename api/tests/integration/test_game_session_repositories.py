@@ -283,6 +283,114 @@ async def test_prune_deletes_only_rows_older_than_cutoff(engine: AsyncEngine) ->
     assert [str(r.id) for r in rows] == [fresh]
 
 
+async def test_start_for_deleted_server_is_dropped_mid_batch(
+    engine: AsyncEngine,
+) -> None:
+    # A start referencing a server that no longer exists violates the FK; it must
+    # be dropped (the docstring promise) without wedging the batch, so a following
+    # good start still ingests (poison-event isolation, issue #957).
+    server_id = await _seed_server(engine)
+    sink = ServersSessionSink(create_session_factory(engine))
+    missing_server = uuid.uuid4()
+    poison = str(uuid.uuid4())
+    good = str(uuid.uuid4())
+    await sink.record_start(_start(missing_server, session_id=poison, started_at=_NOW))
+    await sink.record_start(_start(server_id, session_id=good, started_at=_NOW))
+    # The poison row was dropped; the good row after it still ingested.
+    assert await _count_rows(engine) == 1
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        rows = await uow.game_sessions.list_for_server(
+            ServerId(server_id), limit=10, offset=0
+        )
+    assert [str(r.id) for r in rows] == [good]
+
+
+async def test_start_with_malformed_ip_is_dropped_mid_batch(
+    engine: AsyncEngine,
+) -> None:
+    # A non-INET player_ip raises DataError on the cast; it is dropped without
+    # wedging the batch, and a following good start still ingests.
+    server_id = await _seed_server(engine)
+    sink = ServersSessionSink(create_session_factory(engine))
+    poison = SessionStart(
+        session_id=str(uuid.uuid4()),
+        server_id=str(server_id),
+        hostname="amber-falcon-42",
+        player_ip="not-an-ip",
+        username="steve",
+        player_uuid=None,
+        started_at=_NOW,
+    )
+    good = str(uuid.uuid4())
+    await sink.record_start(poison)
+    await sink.record_start(_start(server_id, session_id=good, started_at=_NOW))
+    assert await _count_rows(engine) == 1
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        rows = await uow.game_sessions.list_for_server(
+            ServerId(server_id), limit=10, offset=0
+        )
+    assert [str(r.id) for r in rows] == [good]
+
+
+async def test_record_start_truncates_oversized_username_and_hostname(
+    engine: AsyncEngine,
+) -> None:
+    # Defensive truncation at the seam: a username past the 16-char protocol max
+    # and a hostname past the 253-char DNS max are clipped, not rejected.
+    server_id = await _seed_server(engine)
+    sink = ServersSessionSink(create_session_factory(engine))
+    sid = str(uuid.uuid4())
+    long_username = "a" * 40
+    long_hostname = "h" * 300
+    start = SessionStart(
+        session_id=sid,
+        server_id=str(server_id),
+        hostname=long_hostname,
+        player_ip="203.0.113.7",
+        username=long_username,
+        player_uuid=None,
+        started_at=_NOW,
+    )
+    await sink.record_start(start)
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        rows = await uow.game_sessions.list_for_server(
+            ServerId(server_id), limit=10, offset=0
+        )
+    assert rows[0].username == "a" * 16
+    assert rows[0].hostname == "h" * 253
+
+
+async def test_prune_deletes_stale_end_only_placeholder(engine: AsyncEngine) -> None:
+    # An end-only placeholder (started_at IS NULL) whose start never arrived must
+    # be pruned by its ended_at so it does not live forever (issue #957).
+    sink = ServersSessionSink(create_session_factory(engine))
+    stale = str(uuid.uuid4())
+    fresh = str(uuid.uuid4())
+    await sink.record_end(
+        session_id=stale, ended_at=_NOW - dt.timedelta(days=100)
+    )
+    await sink.record_end(
+        session_id=fresh, ended_at=_NOW - dt.timedelta(days=10)
+    )
+    cutoff = _NOW - dt.timedelta(days=90)
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        deleted = await uow.game_sessions.delete_started_before(cutoff)
+        await uow.commit()
+    assert deleted == 1
+    async with engine.connect() as conn:
+        remaining = {
+            str(r.id)
+            for r in (
+                await conn.execute(text("SELECT id FROM game_session"))
+            ).all()
+        }
+    assert remaining == {fresh}
+
+
 async def test_sessions_cascade_on_server_delete(engine: AsyncEngine) -> None:
     server_id = await _seed_server(engine)
     sink = ServersSessionSink(create_session_factory(engine))

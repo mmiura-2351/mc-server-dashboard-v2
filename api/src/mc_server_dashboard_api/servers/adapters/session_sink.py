@@ -30,8 +30,10 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, cast
 
+from asyncpg import DataError as AsyncpgDataError
 from sqlalchemy import CursorResult, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from mc_server_dashboard_api.fleet.domain.session_sink import SessionSink, SessionStart
@@ -40,6 +42,32 @@ from mc_server_dashboard_api.servers.adapters.game_session_models import (
 )
 
 _LOG = logging.getLogger(__name__)
+
+# Protocol-derived caps so a malformed event cannot blow past the column or
+# wedge the batch: the Minecraft username max is 16 chars and a DNS name max is
+# 253; we truncate defensively at the seam rather than reject the whole batch.
+_USERNAME_MAX = 16
+_HOSTNAME_MAX = 253
+
+
+def _truncate(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    return value[:limit]
+
+
+def _is_poison_value(exc: DBAPIError) -> bool:
+    """Whether ``exc`` is a per-event data defect to drop, not a transient fault.
+
+    A malformed ``player_ip`` fails asyncpg's client-side INET coercion, which
+    SQLAlchemy surfaces as a generic :class:`DBAPIError` wrapping an asyncpg
+    ``DataError`` (it is *not* mapped to ``sqlalchemy.exc.DataError``). We unwrap
+    to confirm that root cause so connection/operational ``DBAPIError``s still
+    propagate (the relay's at-least-once retry is correct for those).
+    """
+
+    cause = exc.orig.__cause__ if exc.orig is not None else None
+    return isinstance(cause, AsyncpgDataError)
 
 
 def _parse_uuid(value: str | None) -> uuid.UUID | None:
@@ -72,9 +100,9 @@ class ServersSessionSink(SessionSink):
         values = {
             "id": session_id,
             "server_id": server_id,
-            "hostname": start.hostname,
+            "hostname": _truncate(start.hostname, _HOSTNAME_MAX),
             "player_ip": start.player_ip,
-            "username": start.username,
+            "username": _truncate(start.username, _USERNAME_MAX),
             "player_uuid": _parse_uuid(start.player_uuid),
             "started_at": start.started_at,
             "ended_at": None,
@@ -95,9 +123,34 @@ class ServersSessionSink(SessionSink):
             },
             where=GameSessionModel.started_at.is_(None),
         )
+        # Poison-event isolation (issue #957): a start for a deleted server (FK
+        # violation -> IntegrityError) or a malformed player_ip (INET cast ->
+        # DataError) must not wedge the whole ReportSessions batch. Each event has
+        # its own transaction (own session here), so we drop the bad event with a
+        # WARN and let the relay keep advancing; connection/operational errors
+        # still propagate so the relay's at-least-once retry kicks in.
         async with self._session_factory() as session:
-            await session.execute(stmt)
-            await session.commit()
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except IntegrityError:
+                # FK violation: the start references a server that no longer
+                # exists (honors the "unknown server_id is dropped" promise).
+                await session.rollback()
+                self._log_dropped_start(session_id, server_id)
+            except DBAPIError as exc:
+                if not _is_poison_value(exc):
+                    raise
+                # Malformed player_ip (asyncpg INET DataError): drop this event.
+                await session.rollback()
+                self._log_dropped_start(session_id, server_id)
+
+    @staticmethod
+    def _log_dropped_start(session_id: uuid.UUID, server_id: uuid.UUID) -> None:
+        _LOG.warning(
+            "ReportSessions start is unpersistable; dropping",
+            extra={"session_id": str(session_id), "server_id": str(server_id)},
+        )
 
     async def record_end(self, *, session_id: str, ended_at: dt.datetime) -> None:
         parsed = _parse_uuid(session_id)

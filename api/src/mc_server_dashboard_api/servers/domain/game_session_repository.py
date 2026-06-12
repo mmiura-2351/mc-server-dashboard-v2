@@ -35,6 +35,10 @@ class GameSessionRepository(abc.ABC):
     async def delete_started_before(self, cutoff: dt.datetime) -> int:
         """Delete sessions whose ``started_at`` is strictly older than ``cutoff``.
 
+        End-only placeholder rows (``started_at IS NULL`` — the start was lost to
+        the relay's drop-oldest cap or the server was deleted before a late start)
+        are pruned by their ``ended_at`` instead, so they do not live forever.
+
         Returns the number of rows deleted. The retention prune loop computes
         ``cutoff = now - relay.session_retention_days`` and calls this each tick;
         rows also cascade away when their server is deleted.

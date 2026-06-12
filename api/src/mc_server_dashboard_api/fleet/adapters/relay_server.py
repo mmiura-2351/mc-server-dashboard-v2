@@ -105,6 +105,15 @@ class RelayServicer(RelayServiceServicer):
         # Orphan healing (RELAY.md Sections 6, 10): close any open game_session
         # rows the relay no longer tracks — sessions a relay crash dropped without
         # a SessionEnd. The registration's active set is authoritative.
+        #
+        # There is a benign millisecond race between this healing (the relay
+        # re-Registers its active set every 60 s) and a concurrent start flush: a
+        # session that started just after the relay snapshotted its active set is
+        # absent from active_session_ids and gets a premature ended_at here. The
+        # next ReportSessions end is a no-op (ended_at already set), and the
+        # following 60 s Register carries the session in its active set, so the
+        # worst case is one session showing a slightly-early ended_at — acceptable
+        # healed semantics, not a correctness break.
         closed = await self._session_sink.close_absent(
             active_session_ids=list(request.active_session_ids),
             ended_at=self._clock.now(),

@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, select
+from sqlalchemy import CursorResult, and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.game_session_models import (
@@ -68,7 +68,18 @@ class SqlAlchemyGameSessionRepository(GameSessionRepository):
         return [_to_game_session(row) for row in rows]
 
     async def delete_started_before(self, cutoff: dt.datetime) -> int:
+        # Prune normal rows by started_at, plus end-only placeholders (start lost
+        # to the relay's drop-oldest cap, or the server deleted before a late
+        # start) by their ended_at so they don't live forever (issue #957).
         result = await self._session.execute(
-            delete(GameSessionModel).where(GameSessionModel.started_at < cutoff)
+            delete(GameSessionModel).where(
+                or_(
+                    GameSessionModel.started_at < cutoff,
+                    and_(
+                        GameSessionModel.started_at.is_(None),
+                        GameSessionModel.ended_at < cutoff,
+                    ),
+                )
+            )
         )
         return cast("CursorResult[Any]", result).rowcount
