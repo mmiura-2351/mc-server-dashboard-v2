@@ -829,3 +829,56 @@ def test_database_max_overflow_from_env(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("MCD_API_DATABASE__MAX_OVERFLOW", "15")
     settings = load_settings(config_file=None)
     assert settings.database.max_overflow == 15
+
+
+# --- [relay] section (issue #956, RELAY.md Section 12) ---
+
+
+def test_relay_defaults_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.relay.enabled is False
+    assert settings.relay.credential is None
+    assert settings.relay.base_domain is None
+    assert settings.relay.session_retention_days == 90
+
+
+def test_relay_section_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The deploy wiring (PR #972) expects the standard pydantic-settings ``__``
+    # nesting: MCD_API_RELAY__ENABLED / __CREDENTIAL / __BASE_DOMAIN.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_RELAY__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_RELAY__CREDENTIAL", "relay-secret")
+    monkeypatch.setenv("MCD_API_RELAY__BASE_DOMAIN", "mc.example.com")
+    settings = load_settings(config_file=None)
+    assert settings.relay.enabled is True
+    assert settings.relay.credential == "relay-secret"
+    assert settings.relay.base_domain == "mc.example.com"
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_relay_blank_credential_is_missing(
+    blank: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A blank ``${MCD_API_RELAY__CREDENTIAL}`` interpolation collapses to None so
+    # the app factory's required-when-enabled guard treats it as missing (#943).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_RELAY__CREDENTIAL", blank)
+    settings = load_settings(config_file=None)
+    assert settings.relay.credential is None
+
+
+def test_relay_session_retention_days_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[relay]\nsession_retention_days = 0\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+def test_relay_credential_masked_in_dump(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_RELAY__CREDENTIAL", "relay-secret")
+    settings = load_settings(config_file=None)
+    assert settings.masked_dump()["relay"]["credential"] == "***"
