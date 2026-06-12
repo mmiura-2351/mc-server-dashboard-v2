@@ -10,6 +10,10 @@
 #   worker    — the execution agent; container driver only, talks to the host
 #               Docker daemon via the mounted socket and creates sibling Minecraft
 #               containers.
+#   relay     — the game ingress relay (epic #659, issue #960); gated behind the
+#               `relay` compose profile (opt-in). Accepts player TCP on :25565,
+#               and the Worker dial-back on :25665 (TLS). Requires a wildcard DNS
+#               record and TLS material — see docs/dev/DEPLOYMENT.md "Relay".
 #
 # Storage backend (issue #702): the shipped default is the `object` backend on the
 # SeaweedFS service below (STORAGE.md Section 7.3). To run the fs backend instead,
@@ -221,6 +225,46 @@ services:
     # (e.g. processes re-parented from Forge installer forks) that exec.Cmd.Wait
     # cannot reap because the worker itself runs as PID 1 without an init.
     init: true
+    depends_on:
+      - api
+
+  relay:
+    build: ./relay
+    image: mcsd-relay:dev
+    restart: unless-stopped
+    # Gated behind the `relay` compose profile so default bring-up is unchanged
+    # (issue #960, epic #659). Add `relay` to COMPOSE_PROFILES in .env to enable
+    # it, then configure the required relay keys in .env (see .env.example and
+    # docs/dev/DEPLOYMENT.md "Relay").
+    profiles: ["relay"]
+    environment:
+      MCD_RELAY_API_GRPC_ENDPOINT: api:50051
+      # `:-` (empty default), NOT `:?`: compose interpolates a service's env even
+      # when its profile is inactive, so a `:?` here would break plain
+      # `docker compose config` / `up` when the relay profile is off (same
+      # reason as the seaweedfs object keys, issue #940). The blank-credential
+      # fail-fast for this service is the relay binary's own config validation,
+      # which refuses an empty api.credential at startup. Only runs under the
+      # `relay` profile, so reaching here with a blank key is a real
+      # misconfiguration — the relay exits immediately with a clear error.
+      MCD_RELAY_API_CREDENTIAL: "${MCD_API_RELAY_CREDENTIAL:-}"
+      # Plaintext control dial on the private compose network (same posture as
+      # the worker; the gRPC port is not published to the host).
+      MCD_RELAY_API_TLS_INSECURE: "true"
+      MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT: "${MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT:-}"
+      # Tunnel TLS material (cert + key) are bind-mounted by the operator into
+      # /etc/mcsd/; self-signed is fine — the CA travels in-band to Workers.
+      MCD_RELAY_TUNNEL_TLS_CERT_FILE: /etc/mcsd/tunnel-cert.pem
+      MCD_RELAY_TUNNEL_TLS_KEY_FILE: /etc/mcsd/tunnel-key.pem
+    volumes:
+      # Mount the tunnel TLS material (self-signed or CA-issued) from the host.
+      # Generate once: see docs/dev/DEPLOYMENT.md "Relay — TLS material".
+      # The operator sets MCD_RELAY_TLS_DIR in .env to the host directory that
+      # contains tunnel-cert.pem and tunnel-key.pem.
+      - "${MCD_RELAY_TLS_DIR:-/etc/mcsd/relay}:/etc/mcsd:ro"
+    ports:
+      - "25565:25565"    # game listener (players join here)
+      - "25665:25665"    # tunnel listener (Workers dial back here)
     depends_on:
       - api
 
