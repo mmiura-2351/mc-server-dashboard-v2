@@ -16,6 +16,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from mc_server_dashboard_api.storage.adapters.object_client import _Aioboto3S3Client
+from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 
 
 def _client_error(code: str) -> ClientError:
@@ -261,6 +262,97 @@ async def test_list_multipart_uploads_survives_parts_no_such_upload_race() -> No
     client = _Aioboto3S3Client(
         _RaisingPartsClient(
             [{"Key": "communities/k", "UploadId": "u"}], "NoSuchUpload"
+        ),
+        "bucket",
+    )
+
+    uploads = await client.list_multipart_uploads("communities/")
+
+    assert len(uploads) == 1
+    assert uploads[0].initiated >= before
+
+
+class _RaisingObjectClient:
+    """A client double whose get_object/head_object raise a set code."""
+
+    def __init__(self, code: str) -> None:
+        self._code = code
+
+    async def get_object(self, **_kwargs: object) -> dict[str, object]:
+        raise _client_error(self._code)
+
+    async def head_object(self, **_kwargs: object) -> dict[str, object]:
+        raise _client_error(self._code)
+
+
+class _RaisingListClient:
+    """A client double whose paginators raise a set code on iteration."""
+
+    def __init__(self, code: str) -> None:
+        self._code = code
+
+    def get_paginator(self, _name: str) -> _RaisingPaginator:
+        return _RaisingPaginator(self._code)
+
+
+# --- Bucketless store reads as empty/not-found (issue #946) ------------------
+#
+# SeaweedFS auto-creates the bucket on first WRITE, so on a fresh deployment every
+# READ raises NoSuchBucket before any bucket exists. Empirically (SeaweedFS 4.33):
+# ListObjectsV2 / GetObject / ListMultipartUploads / ListParts all surface
+# ``NoSuchBucket``; HeadObject surfaces a bare ``404`` (already handled). The read
+# paths must treat NoSuchBucket as empty/not-found so the startup sweep — and the
+# FastAPI lifespan — boot against a bucketless store, while other errors still raise.
+
+
+async def test_get_object_no_such_bucket_raises_not_found() -> None:
+    client = _Aioboto3S3Client(_RaisingObjectClient("NoSuchBucket"), "bucket")
+
+    with pytest.raises(NotFoundError):
+        await client.get_object("communities/k")
+
+
+async def test_get_object_other_error_reraises() -> None:
+    client = _Aioboto3S3Client(_RaisingObjectClient("AccessDenied"), "bucket")
+
+    with pytest.raises(ClientError):
+        await client.get_object("communities/k")
+
+
+async def test_head_object_no_such_bucket_returns_none() -> None:
+    client = _Aioboto3S3Client(_RaisingObjectClient("NoSuchBucket"), "bucket")
+
+    assert await client.head_object("communities/k") is None
+
+
+async def test_list_objects_no_such_bucket_returns_empty() -> None:
+    client = _Aioboto3S3Client(_RaisingListClient("NoSuchBucket"), "bucket")
+
+    assert await client.list_objects("communities/") == []
+
+
+async def test_list_objects_other_error_reraises() -> None:
+    client = _Aioboto3S3Client(_RaisingListClient("AccessDenied"), "bucket")
+
+    with pytest.raises(ClientError):
+        await client.list_objects("communities/")
+
+
+async def test_list_multipart_uploads_no_such_bucket_returns_empty() -> None:
+    client = _Aioboto3S3Client(_RaisingListClient("NoSuchBucket"), "bucket")
+
+    assert await client.list_multipart_uploads("communities/") == []
+
+
+async def test_effective_initiated_survives_parts_no_such_bucket_race() -> None:
+    # Defense-in-depth uniformity (issue #946): if the bucket vanishes between the
+    # ListMultipartUploads that listed an upload and the missing-``Initiated`` fallback
+    # ListParts, NoSuchBucket must be treated as "now" (never aborted this sweep)
+    # rather than crashing the sweep — mirroring the NoSuchUpload race handling.
+    before = dt.datetime.now(dt.UTC)
+    client = _Aioboto3S3Client(
+        _RaisingPartsClient(
+            [{"Key": "communities/k", "UploadId": "u"}], "NoSuchBucket"
         ),
         "bucket",
     )

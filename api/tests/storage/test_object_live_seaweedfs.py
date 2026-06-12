@@ -40,6 +40,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     ObjectStorage,
     S3ClientFactory,
 )
+from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     RelPath,
@@ -64,11 +65,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _factory() -> S3ClientFactory:
+def _factory(bucket: str = _BUCKET) -> S3ClientFactory:
     assert _ENDPOINT is not None
     return make_s3_client_factory(
         endpoint=_ENDPOINT,
-        bucket=_BUCKET,
+        bucket=bucket,
         access_key=_ACCESS_KEY,
         secret_key=_SECRET_KEY,
     )
@@ -239,6 +240,36 @@ async def test_startup_sweep_reclaims_old_orphan_multipart_upload(
         if not aborted:
             async with factory() as client:
                 await client.abort_multipart_upload(key, upload_id)
+
+
+async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> None:
+    # Issue #946: SeaweedFS auto-creates the bucket on first WRITE, not on read. A
+    # fresh deployment's FastAPI lifespan runs the startup sweep before any write has
+    # created the bucket, so every read raises NoSuchBucket. The full sweep() and the
+    # representative reads (list/head/get) must all succeed as EMPTY against such a
+    # bucketless store — otherwise the api crash-loops at boot on the shipped default.
+    # A unique never-written bucket per run guarantees the bucketless precondition.
+    bucket = f"mcsdfresh{uuid.uuid4().hex[:16]}"
+    factory = _factory(bucket)
+    storage = ObjectStorage(factory)
+
+    # The exact path that crash-looped: the startup sweep over a bucketless store.
+    await storage.sweep()
+
+    async with factory() as client:
+        assert await client.list_objects("communities/") == []
+        assert await client.list_multipart_uploads("communities/") == []
+        assert await client.head_object("communities/missing") is None
+        with pytest.raises(NotFoundError):
+            await _read(client, "communities/missing")
+
+        # A write auto-creates the bucket; the just-written object is then visible.
+        key = "communities/probe.json"
+        await client.put_object(key, b"{}")
+        assert await client.head_object(key) == 2
+        assert await _read(client, key) == b"{}"
+        assert any(obj.key == key for obj in await client.list_objects("communities/"))
+        await client.delete_object(key)
 
 
 async def _read(client: object, key: str) -> bytes:

@@ -763,7 +763,13 @@ The app implements its own snapshot/version logic, so S3 versioning / object-loc
 are not required. Orphan multipart reclamation likewise does **not** depend on a
 bucket lifecycle rule: the startup sweep age-gates uploads via `ListParts` when
 SeaweedFS omits `Initiated` (Section 4.3), and `weed shell s3.clean.uploads` is
-the optional SeaweedFS-native backstop. The hot
+the optional SeaweedFS-native backstop. **Bucket provisioning (issue #946).**
+SeaweedFS auto-creates the bucket on the first **write**, not on read, so a fresh
+deployment needs no manual bucket setup: every **read** against the not-yet-created
+bucket returns `NoSuchBucket`, which the adapter treats as empty/not-found, so the
+startup sweep (and the API lifespan) boot cleanly against a bucketless store and the
+first publish creates the bucket. A non-SeaweedFS S3 backend that does not
+auto-create buckets must have the bucket **pre-provisioned**. The hot
 path is **CopyObject-heavy and small-object-heavy** — each publish server-side
 copies every world file into a fresh prefix and uploads members via multipart — so
 operating cost/latency scale with **operation count** (files × snapshot

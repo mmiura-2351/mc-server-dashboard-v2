@@ -185,7 +185,12 @@ at startup (so the secrets live only in `.env`, matching the database password),
 and auto-creates the `mcsd` bucket on first write. The `api` service waits for the
 `seaweedfs` healthcheck before it boots (a `required: false` dependency, so the api
 still starts cleanly after the fs opt-out drops the service). No bucket
-pre-creation or init job is required.
+pre-creation or init job is required: on a fresh store the bucket does not yet
+exist, every **read** against it returns `NoSuchBucket`, and the adapter treats
+that as empty/not-found so the API's startup sweep boots cleanly — the first
+publish then creates the bucket (issue #946). A **non-SeaweedFS** S3 backend that
+does not auto-create buckets must have the bucket **pre-provisioned** before the
+API starts.
 
 The data lives in the `seaweedfs-data` volume — include it in your backups
 (Section 10).
