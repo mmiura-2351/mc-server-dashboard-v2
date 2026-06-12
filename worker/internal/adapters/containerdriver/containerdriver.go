@@ -102,7 +102,7 @@ var (
 // path gives the pull its own generous deadline rather than the create call's
 // short budget; a slow first pull of a large tier completes within it on a
 // healthy host, and the bound only caps a wedged/never-finishing pull. A var (not
-// a const) so tests can shrink it.
+// a const) so a future test can shrink it; none does today.
 var defaultImagePullTimeout = 10 * time.Minute
 
 // defaultGameBindIP is the host interface the game port is published on when
@@ -514,7 +514,10 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 		info, inspectErr := d.docker.Inspect(ctx, create.Name)
 		switch {
 		case errors.Is(inspectErr, errNotFound):
-			// The name is free; retry the create.
+			// The name is free; retry the create. This calls Create directly, not
+			// createPullingOnMiss: reaching this loop at all means the first create
+			// got past image resolution to the name-conflict check, so the base image
+			// is already on the host and a pull-on-miss wrapper would never fire.
 			id, createErr := d.docker.Create(ctx, create)
 			if createErr == nil {
 				return id, nil

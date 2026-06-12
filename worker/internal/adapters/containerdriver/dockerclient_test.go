@@ -461,7 +461,10 @@ func TestEngineClientImagePullNon2xxFails(t *testing.T) {
 }
 
 // splitImageTag splits on the tag colon, defaulting to latest when none is given
-// and leaving a registry host:port (which precedes a "/") untagged (issue #904).
+// and leaving a registry host:port (which precedes a "/") untagged (issue #904). A
+// digest-pinned ref (name@sha256:...) stays whole as the fromImage with no tag, so
+// the Engine pulls by digest rather than choking on a "tag" of the hex digest
+// (issue #915).
 func TestSplitImageTag(t *testing.T) {
 	cases := []struct {
 		image, name, tag string
@@ -471,12 +474,41 @@ func TestSplitImageTag(t *testing.T) {
 		{"img", "img", "latest"},
 		{"registry:5000/img", "registry:5000/img", "latest"},
 		{"registry:5000/img:1.21", "registry:5000/img", "1.21"},
+		{"img@sha256:abc123", "img@sha256:abc123", ""},
+		{"eclipse-temurin@sha256:abc123", "eclipse-temurin@sha256:abc123", ""},
+		{"registry:5000/img@sha256:abc123", "registry:5000/img@sha256:abc123", ""},
 	}
 	for _, tc := range cases {
 		name, tag := splitImageTag(tc.image)
 		if name != tc.name || tag != tc.tag {
 			t.Errorf("splitImageTag(%q) = (%q, %q), want (%q, %q)", tc.image, name, tag, tc.name, tc.tag)
 		}
+	}
+}
+
+// ImagePull passes a digest-pinned ref as fromImage with no tag param, the Engine
+// /images/create contract for pulling by digest; splitting it on the last colon
+// would send tag=<hex digest>, which the Engine rejects, so lazy pull would never
+// succeed for a digest-pinned base image (issue #915).
+func TestEngineClientImagePullByDigest(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"Download complete"}` + "\n"))
+	})
+	c := d.client(t)
+
+	const ref = "eclipse-temurin@sha256:abc123"
+	if err := c.ImagePull(context.Background(), ref); err != nil {
+		t.Fatalf("ImagePull: %v", err)
+	}
+	q, err := url.ParseQuery(d.requests[0].query)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", d.requests[0].query, err)
+	}
+	if q.Get("fromImage") != ref {
+		t.Fatalf("fromImage = %q, want %q", q.Get("fromImage"), ref)
+	}
+	if _, ok := q["tag"]; ok {
+		t.Fatalf("tag = %q, want no tag param for a digest pull", q.Get("tag"))
 	}
 }
 
