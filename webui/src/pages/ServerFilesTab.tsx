@@ -28,14 +28,14 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { api } from "../api/client.ts";
+import { ApiError, api } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
-import { t } from "../i18n/index.ts";
+import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import {
@@ -43,6 +43,7 @@ import {
   encodeUtf8Base64,
   isProbablyText,
 } from "./fileText.ts";
+import { atRest, normalizeState } from "./serverState.ts";
 
 type DirListing = components["schemas"]["DirListingResponse"];
 type FileContent = components["schemas"]["FileContentResponse"];
@@ -50,6 +51,21 @@ type DirEntry = components["schemas"]["DirEntryResponse"];
 type ServerResponse = components["schemas"]["ServerResponse"];
 type SearchResult = components["schemas"]["SearchResponse"];
 type FileVersions = components["schemas"]["FileVersionsResponse"];
+
+/**
+ * Map a file-operation error to its toast message. 409 reasons
+ * `server_unsettled` and `server_not_stopped` (at-rest-only precondition
+ * failures) get an actionable message; everything else falls back to generic.
+ */
+function fileOperationErrorMessage(error: unknown): TranslationKey {
+  if (error instanceof ApiError && error.status === 409) {
+    const r = error.reason;
+    if (r === "server_unsettled" || r === "server_not_stopped") {
+      return "files.error.serverMustBeStopped";
+    }
+  }
+  return "files.error.generic";
+}
 
 /** Base `/communities/{cid}/servers/{sid}/files` path for `server`. */
 function filesBase(communityId: string, serverId: string): string {
@@ -97,7 +113,7 @@ export function ServerFilesTab({
 
   const canRead = can("file:read", { serverId: server.id });
   const canEdit = can("file:edit", { serverId: server.id });
-  const running = server.observed_state === "running";
+  const notAtRest = !atRest(normalizeState(server.observed_state));
 
   // Current directory rel-path ("" is the working-set root) and the open file.
   const [dir, setDir] = useState("");
@@ -107,7 +123,7 @@ export function ServerFilesTab({
     if (onForbidden(error)) {
       return;
     }
-    showToast(t("files.error.generic"), "error");
+    showToast(t(fileOperationErrorMessage(error)), "error");
   };
 
   const listKey = ["files", "list", communityId, server.id, dir];
@@ -145,7 +161,9 @@ export function ServerFilesTab({
 
   return (
     <section className="files">
-      {running && <div className="notice info">{t("files.runningNotice")}</div>}
+      {notAtRest && (
+        <div className="notice info">{t("files.runningNotice")}</div>
+      )}
       <SearchBox
         communityId={communityId}
         serverId={server.id}
@@ -157,6 +175,7 @@ export function ServerFilesTab({
         communityId={communityId}
         serverId={server.id}
         canEdit={canEdit}
+        running={notAtRest}
         onChanged={refetchList}
         onError={onError}
       />
@@ -201,7 +220,7 @@ export function ServerFilesTab({
               serverId={server.id}
               canEdit={canEdit}
               can={can}
-              running={running}
+              running={notAtRest}
               onError={onError}
             />
           )}
@@ -751,6 +770,7 @@ function Toolbar({
   communityId,
   serverId,
   canEdit,
+  running,
   onChanged,
   onError,
 }: {
@@ -758,6 +778,7 @@ function Toolbar({
   communityId: string;
   serverId: string;
   canEdit: boolean;
+  running: boolean;
   onChanged: () => void;
   onError: (error: unknown) => void;
 }) {
@@ -788,6 +809,10 @@ function Toolbar({
     return null;
   }
 
+  const atRestTooltip = running
+    ? t("files.error.serverMustBeStopped")
+    : undefined;
+
   return (
     <div className="toolbar-row files-toolbar">
       <label className="files-extract">
@@ -798,24 +823,37 @@ function Toolbar({
         />
         {t("files.extractZip")}
       </label>
-      <label className="btn sm file-upload">
-        {t("files.upload")}
-        <input
-          type="file"
-          hidden
-          aria-label={t("files.upload")}
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file !== undefined) {
-              upload.mutate(file);
-            }
-            e.target.value = "";
-          }}
-        />
-      </label>
+      {running ? (
+        <button
+          type="button"
+          className="btn sm file-upload"
+          disabled
+          title={atRestTooltip}
+        >
+          {t("files.upload")}
+        </button>
+      ) : (
+        <label className="btn sm file-upload">
+          {t("files.upload")}
+          <input
+            type="file"
+            hidden
+            aria-label={t("files.upload")}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file !== undefined) {
+                upload.mutate(file);
+              }
+              e.target.value = "";
+            }}
+          />
+        </label>
+      )}
       <button
         type="button"
         className="btn sm"
+        disabled={running}
+        title={atRestTooltip}
         onClick={() => setMkdirOpen(true)}
       >
         {t("files.newFolder")}
