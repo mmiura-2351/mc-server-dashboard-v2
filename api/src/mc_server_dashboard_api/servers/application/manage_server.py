@@ -44,6 +44,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    SlugAlreadyTakenError,
     UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
@@ -66,6 +67,7 @@ from mc_server_dashboard_api.servers.domain.server_properties import (
     set_rcon_properties,
     set_server_port,
 )
+from mc_server_dashboard_api.servers.domain.slug import generate_slug, validate_slug
 from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
     SNAPSHOT_INTERVAL_CONFIG_KEY,
     override_from_config,
@@ -268,6 +270,12 @@ class CreateServer:
                 assigned_port = validate_explicit_port(
                     game_port, self.port_range, taken=taken
                 )
+            # Auto-assign the relay slug (issue #955): pick a fresh unique slug
+            # inside the same transaction that inserts the server row so the
+            # taken-set read and insert are consistent; the UNIQUE constraint
+            # backstops a concurrent racer.
+            taken_slugs = await self.uow.servers.list_slugs()
+            assigned_slug = generate_slug(taken=taken_slugs)
             server = Server(
                 id=ServerId.new(),
                 community_id=community_id,
@@ -278,6 +286,7 @@ class CreateServer:
                 execution_backend=parsed_backend,
                 config=config,
                 game_port=assigned_port,
+                slug=assigned_slug,
                 # A new server is at rest: the operator has not asked it to run, and
                 # no Worker has reported on it (DATABASE.md Section 7).
                 desired_state=DesiredState.STOPPED,
@@ -443,8 +452,13 @@ class UpdateServer:
         config: dict[str, Any] | None = None,
         execution_backend: str | None = None,
         game_port: int | None = None,
+        slug: str | None = None,
         authorize: Callable[[str], Awaitable[bool]],
     ) -> Server:
+        # Validate the slug format before any DB work (422 beats 409, same
+        # precedence as the port range check).
+        if slug is not None:
+            validate_slug(slug)
         new_name = None if name is None else ServerName(name)
         if config is not None:
             # Validate the overrides carried on config before any write; each
@@ -499,13 +513,16 @@ class UpdateServer:
                     new_name=new_name,
                     game_port=game_port,
                     execution_backend=execution_backend,
+                    slug=slug,
                     changed_keys=changed_keys,
                 )
+                # Slug rename is safe while running (routing is consulted only at
+                # join time; RELAY.md Section 3). The at-rest gate fires only for
+                # name/port changes and unsafe-key config edits.
                 safe_only = (
                     new_name is None
                     and game_port is None
-                    and config is not None
-                    and changed_keys <= _SAFE_CONFIG_KEYS
+                    and (config is None or changed_keys <= _SAFE_CONFIG_KEYS)
                 )
                 if not safe_only and not server.is_at_rest():
                     raise ServerNotStoppedError(str(server_id.value))
@@ -532,6 +549,14 @@ class UpdateServer:
                         port=game_port,
                     )
                     server.game_port = game_port
+                if slug is not None and slug != server.slug:
+                    # Uniqueness check excluding the server's own current slug
+                    # (a server renaming to its own slug is a no-op, not a conflict).
+                    # The deployment-wide UNIQUE(slug) constraint backstops a racer.
+                    clash = await self.uow.servers.get_by_slug(slug)
+                    if clash is not None and clash.id != server_id:
+                        raise SlugAlreadyTakenError(slug)
+                    server.slug = slug
                 server.updated_at = self.clock.now()
                 await self.uow.servers.update(server)
                 await self.uow.commit()
@@ -544,6 +569,7 @@ class UpdateServer:
         new_name: ServerName | None,
         game_port: int | None,
         execution_backend: str | None,
+        slug: str | None,
         changed_keys: set[str],
     ) -> None:
         """Enforce the per-update permission gate (issue #458).
@@ -564,6 +590,7 @@ class UpdateServer:
             new_name is not None
             or game_port is not None
             or execution_backend is not None
+            or slug is not None
             or bool(changed_keys - _SCHEDULING_CONFIG_KEYS)
         )
         required: list[str] = []

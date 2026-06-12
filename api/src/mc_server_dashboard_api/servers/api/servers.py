@@ -96,6 +96,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
     InvalidMemoryLimitError,
     InvalidServerNameError,
+    InvalidSlugError,
     InvalidSnapshotIntervalError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
@@ -110,6 +111,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotRunningError,
     ServerNotStoppedError,
+    SlugAlreadyTakenError,
+    SlugExhaustedError,
     UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
@@ -170,6 +173,11 @@ class UpdateServerRequest(BaseModel):
     # server.properties. Schema-bounded to a valid TCP port so a wildly invalid
     # value is a 422 at parse time.
     game_port: int | None = Field(default=None, gt=0, le=65535)
+    # Optional slug rename (issue #955). Omitted (None) leaves the slug unchanged;
+    # supplied, it is validated (422 invalid/reserved) and checked for global
+    # uniqueness (409 taken), at rest only. Released slugs are immediately reusable
+    # (owner decision, RELAY.md Section 15).
+    slug: str | None = None
 
 
 class ServerCommandRequest(BaseModel):
@@ -203,6 +211,8 @@ class ServerResponse(BaseModel):
     # not a hard cap (owner decision).
     cpu_millis: int | None
     game_port: int | None
+    # The relay slug (issue #955): auto-assigned at create, renameable via PATCH.
+    slug: str
     desired_state: str
     observed_state: str
     observed_at: UtcDatetime | None
@@ -222,6 +232,7 @@ class ServerResponse(BaseModel):
             memory_limit_mb=memory_limit_from_config(server.config),
             cpu_millis=cpu_allocation_from_config(server.config),
             game_port=server.game_port,
+            slug=server.slug,
             desired_state=server.desired_state.value,
             observed_state=server.observed_state.value,
             observed_at=server.observed_at,
@@ -306,6 +317,11 @@ async def create_server(
         raise _service_unavailable("port_range_exhausted") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except SlugExhaustedError as exc:
+        # Auto-generation could not find a unique slug within the retry budget
+        # (extremely unlikely in practice); a transient capacity condition (issue
+        # #955). Surface 503 so the caller can retry.
+        raise _service_unavailable("slug_exhausted") from exc
     except WorkingSetSeedFailedError as exc:
         # The row committed but seeding the working set failed (issue #243). The
         # server is left in a degraded-but-repairable state (the files API can
@@ -540,6 +556,7 @@ async def update_server(
             config=config,
             execution_backend=body.execution_backend,
             game_port=body.game_port,
+            slug=body.slug,
             authorize=authz.authorize,
         )
     except PermissionDeniedError as exc:
@@ -576,6 +593,12 @@ async def update_server(
         raise _conflict("port_taken") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except InvalidSlugError as exc:
+        # Slug failed the DNS-label format check or is a reserved word (issue #955).
+        raise _unprocessable("invalid_slug") from exc
+    except SlugAlreadyTakenError as exc:
+        # Slug is already held by another server (issue #955).
+        raise _conflict("slug_taken") from exc
     except WorkingSetSeedFailedError as exc:
         # Rewriting server.properties for the port change failed; the row was not
         # committed (no DB/file drift), surfaced as a mapped 503 (issue #311).

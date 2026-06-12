@@ -497,12 +497,14 @@ precedent, gate it behind a `relay` profile so default bring-up is unchanged.
 
 ## 13. Database changes
 
-One migration (`0016_relay_ingress`):
+Migration `0016_relay_ingress` (shipped with issue #955) adds the slug column.
+`game_session`, permission seeding, and further relay infrastructure arrive in
+a later migration with issue #957.
 
 - **`server.slug`** — `TEXT NOT NULL`, `UNIQUE` deployment-wide, backfilled
   with generated slugs for existing rows. (Distinct from the per-community
   `UNIQUE(community_id, name)` on display names.)
-- **`game_session`** — new table:
+- **`game_session`** — new table (issue #957):
 
 | Column | Type | Notes |
 |---|---|---|
