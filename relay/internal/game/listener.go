@@ -242,7 +242,7 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 
 	switch res.Decision {
 	case apiclient.DecisionTunnel:
-		l.spliceLogin(ctx, conn, hs, login, slug, ip, res.Token)
+		l.spliceLogin(ctx, conn, r, hs, login, slug, ip, res.Token)
 	case apiclient.DecisionStopped:
 		l.disconnect(conn, mc.StoppedMOTD(res.DisplayName))
 	default:
@@ -254,7 +254,7 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 // spliceLogin completes a TUNNEL login: wait for the dial-back, replay the
 // buffered bytes, record the session, and splice. A worker that never dials
 // back yields a Login Disconnect (RELAY.md Section 4).
-func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, hs mc.Handshake, login mc.LoginStart, slug, ip, token string) {
+func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Reader, hs mc.Handshake, login mc.LoginStart, slug, ip, token string) {
 	tconn, ok := l.awaitTunnel(ctx, token)
 	if !ok {
 		l.disconnect(conn, "Could not reach the server — please try again shortly.")
@@ -275,6 +275,19 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, hs mc.Handsha
 		_ = tconn.Close()
 		_ = conn.Close()
 		return
+	}
+	// Forward any client bytes already pulled into the bufio buffer past the Login
+	// Start (a client that pipelined more before the splice). Reading from conn
+	// directly in the splice would strand them. Vanilla clients wait for the
+	// server's Encryption Request so this is usually empty, but a correct relay
+	// must not drop pipelined bytes.
+	if n := r.Buffered(); n > 0 {
+		buffered, _ := r.Peek(n)
+		if _, err := tconn.Write(buffered); err != nil {
+			_ = tconn.Close()
+			_ = conn.Close()
+			return
+		}
 	}
 
 	// serverID is not yet known to the relay (the API holds the slug→server

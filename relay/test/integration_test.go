@@ -267,6 +267,64 @@ func TestLoginSplice(t *testing.T) {
 	h.api.mu.Unlock()
 }
 
+// TestLoginSplicePipelinedBytes verifies that bytes a client pipelines right
+// after Login Start (pulled into the relay's read buffer before the splice) are
+// forwarded to the Worker, not stranded.
+func TestLoginSplicePipelinedBytes(t *testing.T) {
+	h := newHarness(t)
+
+	const sentinel = byte(0xCC)
+	gotSentinel := make(chan byte, 1)
+	go func() {
+		token := <-h.api.dialTunnel
+		tlsConn := dialTunnelWithRetry(t, h.tunnelAddr, token)
+		if tlsConn == nil {
+			return
+		}
+		br := bufio.NewReader(tlsConn)
+		// handshake, login start, then the pipelined sentinel byte.
+		if _, err := readOnePacket(br); err != nil {
+			t.Errorf("read handshake: %v", err)
+			return
+		}
+		if _, err := readOnePacket(br); err != nil {
+			t.Errorf("read login start: %v", err)
+			return
+		}
+		b, err := br.ReadByte()
+		if err != nil {
+			t.Errorf("read pipelined byte: %v", err)
+			return
+		}
+		gotSentinel <- b
+		_, _ = io.Copy(io.Discard, br)
+		_ = tlsConn.Close()
+	}()
+
+	player, err := net.Dial("tcp", h.gameAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = player.Close() }()
+
+	// Send handshake + login start + a sentinel byte in ONE write, so the
+	// sentinel lands in the relay's read buffer behind the parsed packets.
+	payload := append(handshakePacket(765, "amber.mc.example.com", 25565, 2), loginStartPacket("Steve")...)
+	payload = append(payload, sentinel)
+	if _, err := player.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case b := <-gotSentinel:
+		if b != sentinel {
+			t.Errorf("worker got pipelined byte %#x, want %#x", b, sentinel)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never received the pipelined byte")
+	}
+}
+
 // TestStatusStoppedSynthesized verifies a status ping to a stopped server gets
 // the synthesized in-protocol response (no tunnel involved).
 func TestStatusStoppedSynthesized(t *testing.T) {
