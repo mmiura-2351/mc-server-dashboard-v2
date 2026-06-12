@@ -2,7 +2,9 @@
 
 import json
 import logging
+import sys
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
@@ -71,6 +73,57 @@ class _CapturingHandler(logging.Handler):
         self.lines.append(self.format(record))
 
 
+def _record_with_exc_info(message: str, exc_info: object) -> logging.LogRecord:
+    r = logging.LogRecord(
+        name="test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg=message,
+        args=(),
+        exc_info=None,
+    )
+    r.exc_info = exc_info  # type: ignore[assignment]
+    return r
+
+
+def test_exc_info_bool_active_exception_includes_traceback() -> None:
+    """exc_info=True while an exception is active must format without raising
+    and the output must contain the traceback (not just be silently dropped)."""
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        record = _record_with_exc_info("oops", True)
+        line = JsonFormatter().format(record)
+    parsed = json.loads(line)
+    assert "exception" in parsed
+    assert "ValueError" in parsed["exception"]
+    assert "boom" in parsed["exception"]
+
+
+def test_exc_info_bool_no_active_exception_does_not_raise() -> None:
+    """exc_info=True with no active exception must not raise and must still
+    produce a valid JSON record (exception key may be absent or empty)."""
+    assert sys.exc_info() == (None, None, None)  # guard: no active exception
+    record = _record_with_exc_info("no-exc", True)
+    line = JsonFormatter().format(record)
+    json.loads(line)  # must not raise
+
+
+def test_exc_info_tuple_formats_traceback_unchanged() -> None:
+    """Regular (type, value, tb) tuple must still produce the traceback in output."""
+    try:
+        raise RuntimeError("original")
+    except RuntimeError:
+        ei = sys.exc_info()
+        record = _record_with_exc_info("err", ei)
+    line = JsonFormatter().format(record)
+    parsed = json.loads(line)
+    assert "exception" in parsed
+    assert "RuntimeError" in parsed["exception"]
+    assert "original" in parsed["exception"]
+
+
 def test_startup_log_contains_masked_config() -> None:
     settings = Settings(
         database=DatabaseSettings(url="postgresql+asyncpg://u:secret@db/app")
@@ -88,3 +141,74 @@ def test_startup_log_contains_masked_config() -> None:
     startup = [r for r in startup if r["message"] == "api starting"]
     assert startup, "startup log line not captured"
     assert startup[0]["config"]["database"]["url"] == "***"
+
+
+# ---------------------------------------------------------------------------
+# Parametrized regression: every exc_info shape must produce valid JSON
+# and never raise.  The BaseException-instance case must also carry the
+# traceback (i.e. the 'exception' key must be present in the payload).
+# ---------------------------------------------------------------------------
+
+
+def _make_exc_with_tb() -> BaseException:
+    """Return a live ValueError with __traceback__ populated."""
+    try:
+        raise ValueError("instance-exc")
+    except ValueError as exc:
+        return exc
+
+
+def _make_exc_tuple() -> tuple[object, ...]:
+    """Return a real (type, value, tb) from sys.exc_info()."""
+    try:
+        raise TypeError("tuple-exc")
+    except TypeError:
+        return sys.exc_info()
+
+
+@pytest.mark.parametrize(
+    "ei,expect_exception_key",
+    [
+        (None, False),
+        (False, False),
+        ((None, None, None), False),
+        pytest.param(True, True, id="bool-true-active"),
+        pytest.param(True, False, id="bool-true-no-active"),
+        pytest.param("tuple", True, id="real-tuple"),
+        pytest.param("instance", True, id="baseexception-instance"),
+    ],
+)
+def test_exc_info_shapes_produce_valid_json(
+    ei: object, expect_exception_key: bool
+) -> None:
+    """Every exc_info shape must serialise to valid JSON without raising."""
+    # Resolve sentinels to real objects before any active-exception context.
+    exc_with_tb = _make_exc_with_tb()
+    exc_tuple = _make_exc_tuple()
+
+    if ei == "tuple":
+        ei = exc_tuple
+    elif ei == "instance":
+        ei = exc_with_tb
+
+    # For the bool-true-active variant we need an active exception context.
+    if expect_exception_key and ei is True:
+        try:
+            raise RuntimeError("active")
+        except RuntimeError:
+            record = _record_with_exc_info("msg", True)
+            line = JsonFormatter().format(record)
+    else:
+        # Ensure no active exception for the no-active variant.
+        assert sys.exc_info() == (None, None, None) or ei is not True
+        record = _record_with_exc_info("msg", ei)
+        line = JsonFormatter().format(record)
+
+    parsed = json.loads(line)  # must not raise
+
+    if expect_exception_key:
+        assert "exception" in parsed, f"expected 'exception' key for ei={ei!r}"
+    # For the instance case, verify the traceback text is present.
+    if ei is exc_with_tb:
+        assert "instance-exc" in parsed["exception"]
+        assert "Traceback" in parsed["exception"]
