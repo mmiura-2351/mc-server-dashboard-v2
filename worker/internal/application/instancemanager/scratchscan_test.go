@@ -1,6 +1,8 @@
 package instancemanager
 
 import (
+	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -8,6 +10,21 @@ import (
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
+
+// capturingSlogHandler is a minimal slog.Handler that captures log records for
+// test assertions, keeping tests off real I/O and making WarnOrphanDisplacedTrees
+// observable without depending on slog.Default() output.
+type capturingSlogHandler struct {
+	records []slog.Record
+}
+
+func (h *capturingSlogHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+func (h *capturingSlogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *capturingSlogHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *capturingSlogHandler) WithGroup(_ string) slog.Handler      { return h }
 
 // TestScanHeldServersReportsNonEmptyDirsWithGeneration verifies the registration
 // scan reports non-empty scratch subdirectories with the generation recorded in
@@ -161,5 +178,101 @@ func TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration(t *testing.T) 
 	want := []session.HeldServer{{ServerID: "live-server", Generation: 11}}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("held = %v, want %v", got, want)
+	}
+}
+
+// TestWarnOrphanDisplacedTreesLogsUnassigned verifies WarnOrphanDisplacedTrees
+// emits a WARN for each .displaced-<id> tree whose server id is NOT in heldServers
+// (issue #911): the server was deleted or re-placed elsewhere and the displaced tree
+// is now an orphan the operator must handle manually.
+func TestWarnOrphanDisplacedTreesLogsUnassigned(t *testing.T) {
+	scratch := t.TempDir()
+
+	// .displaced-s1: server s1 is NOT held -> must produce a WARN.
+	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-s1"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// .displaced-s2: server s2 IS held -> must NOT produce a WARN.
+	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-s2"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// A plain server dir: ignored (not a displaced prefix).
+	if err := os.MkdirAll(filepath.Join(scratch, "s3"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	held := []session.HeldServer{{ServerID: "s2", Generation: 1}}
+	h := &capturingSlogHandler{}
+	log := slog.New(h)
+	WarnOrphanDisplacedTrees(scratch, held, log)
+
+	// Exactly one WARN: for .displaced-s1 (the unassigned orphan).
+	if len(h.records) != 1 {
+		t.Fatalf("got %d log records, want 1; records = %v", len(h.records), h.records)
+	}
+	if h.records[0].Level != slog.LevelWarn {
+		t.Fatalf("log level = %v, want Warn", h.records[0].Level)
+	}
+	// Verify the record carries the displaced path and server id.
+	foundPath, foundID := false, false
+	h.records[0].Attrs(func(a slog.Attr) bool {
+		switch a.Key {
+		case "path":
+			if a.Value.String() == filepath.Join(scratch, ".displaced-s1") {
+				foundPath = true
+			}
+		case "server_id":
+			if a.Value.String() == "s1" {
+				foundID = true
+			}
+		}
+		return true
+	})
+	if !foundPath {
+		t.Fatalf("log record missing path=%q", filepath.Join(scratch, ".displaced-s1"))
+	}
+	if !foundID {
+		t.Fatalf("log record missing server_id=s1")
+	}
+}
+
+// TestWarnOrphanDisplacedTreesSilentWhenAllAssigned verifies no WARNs are emitted
+// when every displaced tree belongs to a currently-held server (issue #911): those
+// trees will be GC'd by sweepDisplaced on the next successful snapshot.
+func TestWarnOrphanDisplacedTreesSilentWhenAllAssigned(t *testing.T) {
+	scratch := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-s1"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	held := []session.HeldServer{{ServerID: "s1", Generation: 3}}
+	h := &capturingSlogHandler{}
+	WarnOrphanDisplacedTrees(scratch, held, slog.New(h))
+
+	if len(h.records) != 0 {
+		t.Fatalf("got %d log records, want 0 (s1 is held, no orphan warn needed)", len(h.records))
+	}
+}
+
+// TestWarnOrphanDisplacedTreesNilLoggerIsSafe verifies that WarnOrphanDisplacedTrees
+// does not panic when log is nil (issue #911): callers that don't care about log
+// output (or tests that pass nil) must not crash.
+func TestWarnOrphanDisplacedTreesNilLoggerIsSafe(t *testing.T) {
+	scratch := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-s1"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Must not panic.
+	WarnOrphanDisplacedTrees(scratch, nil, nil)
+}
+
+// TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe verifies an absent scratch
+// root does not panic or error (issue #911): a first-boot Worker has no scratch dir.
+func TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe(t *testing.T) {
+	h := &capturingSlogHandler{}
+	WarnOrphanDisplacedTrees(filepath.Join(t.TempDir(), "does-not-exist"), nil, slog.New(h))
+	if len(h.records) != 0 {
+		t.Fatalf("got %d records from absent scratch dir, want 0", len(h.records))
 	}
 }
