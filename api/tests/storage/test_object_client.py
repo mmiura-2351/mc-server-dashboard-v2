@@ -60,6 +60,34 @@ class _ListUploadsClient:
         return _PagesPaginator("Uploads", self._uploads)
 
 
+class _RaisingPartsClient:
+    """A double whose ListMultipartUploads omits ``Initiated`` and whose ListParts
+    raises a set code, simulating the upload vanishing between the two calls."""
+
+    def __init__(self, uploads: list[dict[str, object]], code: str) -> None:
+        self._uploads = uploads
+        self._code = code
+
+    def get_paginator(self, name: str) -> _PagesPaginator:
+        if name == "list_parts":
+            return _RaisingPaginator(self._code)
+        return _PagesPaginator("Uploads", self._uploads)
+
+
+class _RaisingPaginator:
+    """A paginator double that raises a ``ClientError`` when iterated."""
+
+    def __init__(self, code: str) -> None:
+        self._code = code
+
+    async def _pages(self) -> AsyncIterator[dict[str, object]]:
+        raise _client_error(self._code)
+        yield {}  # unreachable; makes this an async generator
+
+    def paginate(self, **_kwargs: object) -> AsyncIterator[dict[str, object]]:
+        return self._pages()
+
+
 class _RaisingAbortClient:
     """An aioboto3-client double whose ``abort_multipart_upload`` raises a set code."""
 
@@ -157,4 +185,24 @@ async def test_list_multipart_uploads_zero_parts_no_initiated_treated_as_now() -
 
     assert len(uploads) == 1
     assert uploads[0].initiated.tzinfo is not None
+    assert uploads[0].initiated >= before
+
+
+async def test_list_multipart_uploads_survives_parts_no_such_upload_race() -> None:
+    # Defense-in-depth: an upload listed by ListMultipartUploads can complete or abort
+    # before the missing-``Initiated`` fallback issues ListParts, on which real S3
+    # raises NoSuchUpload. That must NOT crash the startup sweep — the vanished upload
+    # is treated as "now" (never aborted this sweep) rather than letting the error
+    # propagate, mirroring abort's idempotent NoSuchUpload handling.
+    before = dt.datetime.now(dt.UTC)
+    client = _Aioboto3S3Client(
+        _RaisingPartsClient(
+            [{"Key": "communities/k", "UploadId": "u"}], "NoSuchUpload"
+        ),
+        "bucket",
+    )
+
+    uploads = await client.list_multipart_uploads("communities/")
+
+    assert len(uploads) == 1
     assert uploads[0].initiated >= before

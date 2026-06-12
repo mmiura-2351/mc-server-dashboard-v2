@@ -196,15 +196,24 @@ class _Aioboto3S3Client:
         # SeaweedFS-native operator backstop for that case.
         paginator = self._client.get_paginator("list_parts")
         newest: dt.datetime | None = None
-        async for page in paginator.paginate(
-            Bucket=self._bucket, Key=key, UploadId=upload_id
-        ):
-            for part in page.get("Parts", []):
-                last_modified = part.get("LastModified")
-                if last_modified is not None and (
-                    newest is None or last_modified > newest
-                ):
-                    newest = last_modified
+        try:
+            async for page in paginator.paginate(
+                Bucket=self._bucket, Key=key, UploadId=upload_id
+            ):
+                for part in page.get("Parts", []):
+                    last_modified = part.get("LastModified")
+                    if last_modified is not None and (
+                        newest is None or last_modified > newest
+                    ):
+                        newest = last_modified
+        except ClientError as exc:
+            # The upload completed/aborted between ListMultipartUploads and this
+            # ListParts: real S3 raises NoSuchUpload. Treat it as "now" so the
+            # vanished upload is never aborted this sweep, rather than letting the
+            # error crash the startup sweep — mirroring abort's idempotent handling.
+            if _is_no_such_upload(exc):
+                return dt.datetime.now(dt.UTC)
+            raise
         return newest if newest is not None else dt.datetime.now(dt.UTC)
 
     async def abort_multipart_upload(self, key: str, upload_id: str) -> None:

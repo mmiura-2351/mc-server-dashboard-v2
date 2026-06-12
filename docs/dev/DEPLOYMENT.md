@@ -17,7 +17,7 @@ Docker daemon, mounting the server's working directory and publishing its game
 port. The worker attaches every MC container to the pinned compose network
 (`mcsd`) and reaches each server's RCON by container name over that network, so
 **RCON never leaves the docker network** (the host RCON publication is dropped;
-see Section 6). The `migrate` service is a one-shot that applies the database
+see Section 7). The `migrate` service is a one-shot that applies the database
 schema before `api` starts.
 
 ### CPU priority for game-server containers
