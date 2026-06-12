@@ -304,18 +304,26 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 // ok=false.
 func (l *Listener) awaitTunnel(ctx context.Context, token string) (net.Conn, bool) {
 	ch := l.tokens.Register(token)
-	defer l.tokens.Cancel(token)
 
 	timer := time.NewTimer(dialBackTimeout)
 	defer timer.Stop()
 	select {
 	case tconn := <-ch:
+		l.tokens.Cancel(token)
 		return tconn, true
 	case <-timer.C:
-		return nil, false
 	case <-ctx.Done():
-		return nil, false
 	}
+
+	// Timed out (or shutting down). If Cancel finds the waiter gone, a concurrent
+	// Deliver already won the race and a connection is en route on ch; drain and
+	// close it so the Worker's dial-back is not leaked.
+	if !l.tokens.Cancel(token) {
+		if tconn := <-ch; tconn != nil {
+			_ = tconn.Close()
+		}
+	}
+	return nil, false
 }
 
 // disconnect sends a Login Disconnect with reason and closes the connection

@@ -60,10 +60,33 @@ func TestTokenTableExpiry(t *testing.T) {
 func TestTokenTableCancel(t *testing.T) {
 	table := NewTokenTable(10*time.Second, nil)
 	table.Register("tok")
-	table.Cancel("tok")
+	if !table.Cancel("tok") {
+		t.Error("Cancel of a live waiter should report removed=true")
+	}
 	c, _ := net.Pipe()
 	defer func() { _ = c.Close() }()
 	if table.Deliver("tok", c) {
 		t.Error("cancelled waiter should not match")
+	}
+}
+
+// TestTokenTableCancelAfterDeliver verifies the leak-guard contract: once
+// Deliver has consumed a token, Cancel reports removed=false so the waiter
+// knows a connection is en route and must be drained/closed.
+func TestTokenTableCancelAfterDeliver(t *testing.T) {
+	table := NewTokenTable(10*time.Second, nil)
+	ch := table.Register("tok")
+	c, _ := net.Pipe()
+	defer func() { _ = c.Close() }()
+
+	if !table.Deliver("tok", c) {
+		t.Fatal("deliver should match")
+	}
+	if table.Cancel("tok") {
+		t.Error("Cancel after Deliver should report removed=false")
+	}
+	// The delivered conn is waiting on the channel for the waiter to drain.
+	if got := <-ch; got != c {
+		t.Error("delivered conn not on the channel")
 	}
 }

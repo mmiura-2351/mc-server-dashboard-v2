@@ -59,12 +59,18 @@ func (t *TokenTable) Register(token string) <-chan net.Conn {
 	return ch
 }
 
-// Cancel removes the waiter for token, if any. Idempotent: safe to call after a
-// successful Deliver.
-func (t *TokenTable) Cancel(token string) {
+// Cancel removes the waiter for token and reports whether it was still present.
+// A false return means a concurrent Deliver already consumed the token and a
+// connection is (or will be) sent on the waiter's channel — the caller must
+// drain and close it to avoid leaking the Worker's dial-back. Idempotent.
+func (t *TokenTable) Cancel(token string) (removed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if _, ok := t.waiters[token]; !ok {
+		return false
+	}
 	delete(t.waiters, token)
+	return true
 }
 
 // Deliver hands conn to the waiter registered for token, consuming the token
