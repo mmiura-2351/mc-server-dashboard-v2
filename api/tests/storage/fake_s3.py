@@ -131,7 +131,12 @@ class FakeS3Client:
         ]
 
     async def abort_multipart_upload(self, key: str, upload_id: str) -> None:
-        self._store.multipart_uploads.pop(upload_id, None)
+        # Honour ``key`` like real S3 (issue #935): a key/upload_id mismatch leaves the
+        # upload in place — the real backend would return NoSuchUpload there, which the
+        # adapter's idempotent translation turns into a no-op. Stays idempotent on a
+        # matching pair (pop a present id; absent id is a no-op).
+        if self._store.multipart_uploads.get(upload_id, (None, None))[0] == key:
+            self._store.multipart_uploads.pop(upload_id, None)
 
 
 def fake_s3_factory(store: FakeS3Store) -> S3ClientFactory:

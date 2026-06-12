@@ -123,6 +123,69 @@ async def test_abort_multipart_upload_reraises_other_client_errors() -> None:
         await client.abort_multipart_upload("jars/x.jar", "live")
 
 
+class _UploadClient:
+    """An aioboto3-client double for ``upload_multipart``: complete fails, and the
+    cleanup abort raises a set code so the masking behaviour can be pinned."""
+
+    def __init__(self, complete_error: ClientError, abort_code: str) -> None:
+        self._complete_error = complete_error
+        self._abort_code = abort_code
+        self.abort_calls = 0
+
+    async def create_multipart_upload(self, **_kwargs: object) -> dict[str, object]:
+        return {"UploadId": "u"}
+
+    async def upload_part(self, **_kwargs: object) -> dict[str, object]:
+        return {"ETag": "etag"}
+
+    async def complete_multipart_upload(self, **_kwargs: object) -> None:
+        raise self._complete_error
+
+    async def abort_multipart_upload(self, **_kwargs: object) -> None:
+        self.abort_calls += 1
+        raise _client_error(self._abort_code)
+
+
+async def _one_part() -> AsyncIterator[bytes]:
+    yield b"data"
+
+
+async def test_upload_multipart_cleanup_abort_no_such_upload_surfaces() -> None:
+    # Complete-vs-abort race (issue #935): the original complete failure (e.g. a
+    # periodic sweep aborted the upload, so complete returns NoSuchUpload) must
+    # surface — NOT be masked by the cleanup abort's own NoSuchUpload. Routing cleanup
+    # through the translated idempotent abort makes that abort a no-op, so the original
+    # error wins. ``operation_name`` distinguishes the two errors below.
+    complete_error = ClientError(
+        {"Error": {"Code": "NoSuchUpload"}}, "CompleteMultipartUpload"
+    )
+    upload = _UploadClient(complete_error, "NoSuchUpload")
+    client = _Aioboto3S3Client(upload, "bucket")
+
+    with pytest.raises(ClientError) as excinfo:
+        await client.upload_multipart("jars/x.jar", _one_part())
+
+    assert excinfo.value is complete_error
+    assert upload.abort_calls == 1
+
+
+async def test_upload_multipart_cleanup_abort_other_error_does_not_mask() -> None:
+    # If the cleanup abort fails with a DIFFERENT error (e.g. AccessDenied), the
+    # original upload error must still win — the orphan upload is recoverable by the
+    # sweep, masking the cause is not (issue #935).
+    complete_error = ClientError(
+        {"Error": {"Code": "InternalError"}}, "CompleteMultipartUpload"
+    )
+    upload = _UploadClient(complete_error, "AccessDenied")
+    client = _Aioboto3S3Client(upload, "bucket")
+
+    with pytest.raises(ClientError) as excinfo:
+        await client.upload_multipart("jars/x.jar", _one_part())
+
+    assert excinfo.value is complete_error
+    assert upload.abort_calls == 1
+
+
 async def test_list_multipart_uploads_reads_initiated_when_present() -> None:
     # The S3 ``Initiated`` timestamp drives the sweep's age threshold; when the
     # backend supplies it, it is read verbatim (issue #903).
