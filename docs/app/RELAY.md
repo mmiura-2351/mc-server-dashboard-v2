@@ -302,7 +302,8 @@ service RelayService {
   relay instance simply replaces the stored endpoint (last-writer-wins).
 - **`ResolveJoin`** — the per-connection routing decision described in
   Section 4. Request: `{slug, player_ip, intent: STATUS|LOGIN}`. Response:
-  `{decision: TUNNEL|STOPPED|NOT_FOUND, token}` plus, for
+  `{decision: TUNNEL|STOPPED|NOT_FOUND, token, server_id}` (`server_id` set
+  on `TUNNEL`, carried into `SessionStart`) plus, for
   `STOPPED`, the display name to embed in the synthesized response. The API
   dispatches `TunnelDial` as a side effect of a `TUNNEL` decision; it does
   not wait for the Worker's `CommandResult` (the Worker's "result" is the
@@ -482,6 +483,7 @@ config, wiring at the edge.
 | `tunnel.listen` | `:25665` | Worker dial-back listener (TLS). |
 | `tunnel.public_endpoint` | — (required) | `host:port` advertised to Workers via `Register` → `TunnelDial`. |
 | `tunnel.tls.cert_file` / `tunnel.tls.key_file` | — (required) | Tunnel listener TLS material. Self-signed is fine: the matching CA PEM travels `Register` → API → `TunnelDial` → Worker verification. |
+| `tunnel.tls.advertised_ca_file` | — (derive from `cert_file`) | CA bundle advertised to Workers for verifying the tunnel cert. Unset → derive from `cert_file` (self-signed). `system` → advertise empty (Workers use system roots; for a publicly-issued cert). A path → advertise that PEM. |
 | `log.level` / `log.format` | as Worker | Standard logging keys. |
 
 **Worker: no new configuration.** Everything a `TunnelDial` needs arrives in

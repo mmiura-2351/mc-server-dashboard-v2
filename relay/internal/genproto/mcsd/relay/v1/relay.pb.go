@@ -813,9 +813,9 @@ const file_mcsd_relay_v1_relay_proto_rawDesc = "" +
 	"\fRelayService\x12K\n" +
 	"\bRegister\x12\x1e.mcsd.relay.v1.RegisterRequest\x1a\x1f.mcsd.relay.v1.RegisterResponse\x12T\n" +
 	"\vResolveJoin\x12!.mcsd.relay.v1.ResolveJoinRequest\x1a\".mcsd.relay.v1.ResolveJoinResponse\x12]\n" +
-	"\x0eReportSessions\x12$.mcsd.relay.v1.ReportSessionsRequest\x1a%.mcsd.relay.v1.ReportSessionsResponseB\xd7\x01\n" +
+	"\x0eReportSessions\x12$.mcsd.relay.v1.ReportSessionsRequest\x1a%.mcsd.relay.v1.ReportSessionsResponseB\xd2\x01\n" +
 	"\x11com.mcsd.relay.v1B\n" +
-	"RelayProtoP\x01Z`github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/relay/v1;relayv1\xa2\x02\x03MRX\xaa\x02\rMcsd.Relay.V1\xca\x02\rMcsd\\Relay\\V1\xe2\x02\x19Mcsd\\Relay\\V1\\GPBMetadata\xea\x02\x0fMcsd::Relay::V1b\x06proto3"
+	"RelayProtoP\x01Z[github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto/mcsd/relay/v1;relayv1\xa2\x02\x03MRX\xaa\x02\rMcsd.Relay.V1\xca\x02\rMcsd\\Relay\\V1\xe2\x02\x19Mcsd\\Relay\\V1\\GPBMetadata\xea\x02\x0fMcsd::Relay::V1b\x06proto3"
 
 var (
 	file_mcsd_relay_v1_relay_proto_rawDescOnce sync.Once

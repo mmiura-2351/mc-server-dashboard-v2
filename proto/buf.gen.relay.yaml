@@ -1,0 +1,28 @@
+# Code generation for the relay's copy of the mcsd.relay.v1 stubs.
+#
+# The default buf.gen.yaml emits every package — including mcsd.relay.v1 —
+# under the worker module (worker/internal/controlplane/...). Go's internal/
+# import rule bars the relay (a sibling module) from importing the worker's
+# internal package, so the relay needs its own importable copy of the relay
+# stubs. This template generates ONLY the relay package into the relay module's
+# own internal/ tree (which the relay itself may import). It is driven by the
+# same `make proto-gen` (a second `buf generate` invocation scoped to the relay
+# proto) and gated by `proto-check` like the primary stubs.
+#
+# Plugin versions are the same pinned binaries the primary template uses.
+version: v2
+
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto
+
+plugins:
+  - local: ../worker/.bin/protoc-gen-go
+    out: ../relay/internal/genproto
+    opt: paths=source_relative
+
+  - local: ../worker/.bin/protoc-gen-go-grpc
+    out: ../relay/internal/genproto
+    opt: paths=source_relative
