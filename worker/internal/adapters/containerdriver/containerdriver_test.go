@@ -1242,6 +1242,47 @@ func TestGracefulStopEscalatesToKill(t *testing.T) {
 	}
 }
 
+// A forced stop (graceful=false) that escalates to a kill logs the FORCED-stop
+// WARN, not the graceful one: a forced stop skips the clean shutdown by design, so
+// "graceful stop timed out" would misdescribe it (#927 diagnostic accuracy).
+func TestForcedStopEscalatesToKillWithForcedMessage(t *testing.T) {
+	var buf syncBuffer
+	docker := newFakeDocker()
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("rcon dial failed")
+	}, Options{
+		WorkerID:         "w1",
+		StopTimeout:      50 * time.Millisecond,
+		GameBindIP:       "0.0.0.0",
+		ReadinessTimeout: 20 * time.Millisecond,
+		Logger:           slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	// docker stop does not exit the container; only kill does.
+	docker.stopNoExit = true
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := inst.Stop(context.Background(), false); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if !docker.killWasCalled() {
+		t.Fatal("expected docker kill escalation")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "forced stop; killing container directly") ||
+		!strings.Contains(logged, spec().ServerID) {
+		t.Fatalf("expected a forced-stop WARN naming the server id; got %q", logged)
+	}
+	if strings.Contains(logged, "graceful stop timed out") {
+		t.Fatalf("forced stop must not log the graceful-timeout message; got %q", logged)
+	}
+}
+
 // syncBuffer is a concurrency-safe bytes.Buffer for capturing slog output (the
 // stop escalation may log from a detached goroutine).
 type syncBuffer struct {

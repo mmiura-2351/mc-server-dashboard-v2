@@ -155,7 +155,15 @@ snapshot makes the generation marker durable while the live world files are neve
 fsynced by the Worker, so a power loss can leave a durable gen-N marker next to a
 torn local world. A held set whose region is torn is advertised at **generation 0**
 — treated as stale, forcing the hydrate that recovers the consistent store copy
-rather than booting the torn world. The fsck requires a quiesced working set
+rather than booting the torn world. The fsck applies the single byte-precise
+region rule (issue #927/#926 item 1): a *structurally sound* scratch left by a
+crashed or non-gracefully-stopped 26.x server is **live-format** — its region
+files carry the legitimate unpadded (non-4096-aligned) tail — so it now PASSES and
+the Worker advertises its **held generation**. The #767 skip gate can then boot
+that world directly, preserving the crashed server's progression, instead of a
+forced gen-0 hydrate that would roll it back by up to a snapshot interval. Only a
+*genuinely* torn scratch (a chunk overrunning EOF, an entry past EOF, a severed
+prefix) falls back to generation 0. The fsck requires a quiesced working set
 (regionfsck's safety contract), so the Worker's startup sequence runs the
 container orphan sweep first to stop any live writers before scanning. A Worker that reports nothing held, or an
 older Worker that does not set the field, hydrates as before. The
