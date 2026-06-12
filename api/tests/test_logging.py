@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sys
 
 from fastapi.testclient import TestClient
 
@@ -69,6 +70,57 @@ class _CapturingHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         self.lines.append(self.format(record))
+
+
+def _record_with_exc_info(message: str, exc_info: object) -> logging.LogRecord:
+    r = logging.LogRecord(
+        name="test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg=message,
+        args=(),
+        exc_info=None,
+    )
+    r.exc_info = exc_info  # type: ignore[assignment]
+    return r
+
+
+def test_exc_info_bool_active_exception_includes_traceback() -> None:
+    """exc_info=True while an exception is active must format without raising
+    and the output must contain the traceback (not just be silently dropped)."""
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        record = _record_with_exc_info("oops", True)
+        line = JsonFormatter().format(record)
+    parsed = json.loads(line)
+    assert "exception" in parsed
+    assert "ValueError" in parsed["exception"]
+    assert "boom" in parsed["exception"]
+
+
+def test_exc_info_bool_no_active_exception_does_not_raise() -> None:
+    """exc_info=True with no active exception must not raise and must still
+    produce a valid JSON record (exception key may be absent or empty)."""
+    assert sys.exc_info() == (None, None, None)  # guard: no active exception
+    record = _record_with_exc_info("no-exc", True)
+    line = JsonFormatter().format(record)
+    json.loads(line)  # must not raise
+
+
+def test_exc_info_tuple_formats_traceback_unchanged() -> None:
+    """Regular (type, value, tb) tuple must still produce the traceback in output."""
+    try:
+        raise RuntimeError("original")
+    except RuntimeError:
+        ei = sys.exc_info()
+        record = _record_with_exc_info("err", ei)
+    line = JsonFormatter().format(record)
+    parsed = json.loads(line)
+    assert "exception" in parsed
+    assert "RuntimeError" in parsed["exception"]
+    assert "original" in parsed["exception"]
 
 
 def test_startup_log_contains_masked_config() -> None:
