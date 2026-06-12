@@ -87,7 +87,19 @@ type TunnelTLSConfig struct {
 	CertFile string
 	// KeyFile is the tunnel listener's TLS private key. Required. Secret.
 	KeyFile string
+	// AdvertisedCAFile controls the CA bundle the relay advertises to Workers
+	// (Register → TunnelDial) for verifying the tunnel certificate:
+	//   - unset (empty): derive from CertFile (the self-signed default — the
+	//     listener cert IS the chain Workers verify against).
+	//   - SystemRootsCA ("system"): advertise an empty bundle, so Workers verify
+	//     against their system roots (the cert is issued by a public CA).
+	//   - any other value: a path to a PEM bundle to advertise verbatim.
+	AdvertisedCAFile string
 }
+
+// SystemRootsCA is the sentinel value for tunnel.tls.advertised_ca_file that
+// advertises an empty CA bundle (Workers fall back to system roots).
+const SystemRootsCA = "system"
 
 // LogConfig is the observability surface, identical to the Worker's.
 type LogConfig struct {
@@ -117,8 +129,9 @@ type fileConfig struct {
 		Listen         *string `toml:"listen"`
 		PublicEndpoint *string `toml:"public_endpoint"`
 		TLS            struct {
-			CertFile *string `toml:"cert_file"`
-			KeyFile  *string `toml:"key_file"`
+			CertFile         *string `toml:"cert_file"`
+			KeyFile          *string `toml:"key_file"`
+			AdvertisedCAFile *string `toml:"advertised_ca_file"`
 		} `toml:"tls"`
 	} `toml:"tunnel"`
 	Log struct {
@@ -198,6 +211,7 @@ func applyFile(cfg *Config, path string) error {
 	setString(&cfg.Tunnel.PublicEndpoint, fc.Tunnel.PublicEndpoint)
 	setString(&cfg.Tunnel.TLS.CertFile, fc.Tunnel.TLS.CertFile)
 	setString(&cfg.Tunnel.TLS.KeyFile, fc.Tunnel.TLS.KeyFile)
+	setString(&cfg.Tunnel.TLS.AdvertisedCAFile, fc.Tunnel.TLS.AdvertisedCAFile)
 	setString(&cfg.Log.Level, fc.Log.Level)
 	setString(&cfg.Log.Format, fc.Log.Format)
 
@@ -231,6 +245,7 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	setEnvString(&cfg.Tunnel.PublicEndpoint, getenv, "TUNNEL_PUBLIC_ENDPOINT")
 	setEnvString(&cfg.Tunnel.TLS.CertFile, getenv, "TUNNEL_TLS_CERT_FILE")
 	setEnvString(&cfg.Tunnel.TLS.KeyFile, getenv, "TUNNEL_TLS_KEY_FILE")
+	setEnvString(&cfg.Tunnel.TLS.AdvertisedCAFile, getenv, "TUNNEL_TLS_ADVERTISED_CA_FILE")
 	setEnvString(&cfg.Log.Level, getenv, "LOG_LEVEL")
 	setEnvString(&cfg.Log.Format, getenv, "LOG_FORMAT")
 

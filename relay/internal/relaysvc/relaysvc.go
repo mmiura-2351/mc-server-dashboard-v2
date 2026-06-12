@@ -22,6 +22,12 @@ var (
 	backoffMax     = 30 * time.Second
 )
 
+// reRegisterInterval is how often Run re-registers after a successful Register.
+// Register is idempotent and cheap; re-running it heals an API restart (the API
+// re-learns the tunnel endpoint/CA and re-runs orphan healing against the
+// relay's active session set) without restarting the relay. RELAY.md Section 6.
+var reRegisterInterval = 60 * time.Second
+
 // registrar is the subset of the API client relaysvc needs. Narrowed for tests.
 type registrar interface {
 	Register(ctx context.Context, tunnelEndpoint, tunnelCAPEM string, activeSessionIDs []string) (string, error)
@@ -87,7 +93,9 @@ func (s *Service) RegisterOnce(ctx context.Context) error {
 // Run registers at startup and re-registers on failure with backoff until ctx
 // is cancelled. A successful registration learns base_domain; a later failure
 // keeps serving against the last known base_domain while retrying (RELAY.md
-// Sections 6 and 10).
+// Sections 6 and 10). After a success it re-registers every reReg interval so
+// an API restart heals (the API re-learns the endpoint/CA and re-runs orphan
+// healing against the relay's active session set) without a relay restart.
 func (s *Service) Run(ctx context.Context) {
 	attempt := 0
 	for {
@@ -100,11 +108,12 @@ func (s *Service) Run(ctx context.Context) {
 			continue
 		}
 		s.logger.Info("relay registered with API", "base_domain", s.BaseDomain())
-		// Registered. The relay has no command inbox; nothing to do until the
-		// process is asked to re-register (only on a connection-level failure,
-		// surfaced as a ResolveJoin/Register error). Wait for shutdown.
-		<-ctx.Done()
-		return
+		attempt = 0
+		// Re-register periodically so an API restart re-learns the relay's tunnel
+		// endpoint/CA and re-delivers the active session ids for orphan healing.
+		if !sleepCtx(ctx, reRegisterInterval) {
+			return
+		}
 	}
 }
 

@@ -70,6 +70,36 @@ func TestTokenTableCancel(t *testing.T) {
 	}
 }
 
+// TestTokenTableDeliverOnExpiredKeepsWaiter is the regression for the
+// expired-Deliver leak: a dial-back that lands after the token's TTL but while
+// the waiter is still registered must (a) return false from Deliver and (b)
+// NOT delete the entry, so the waiter's later Cancel still returns true. If
+// Deliver deleted the entry, Cancel would return false — falsely signalling "a
+// conn is en route on the channel" — and the waiter would block forever.
+func TestTokenTableDeliverOnExpiredKeepsWaiter(t *testing.T) {
+	now := time.Unix(0, 0)
+	table := NewTokenTable(10*time.Second, func() time.Time { return now })
+
+	ch := table.Register("tok")
+	now = now.Add(11 * time.Second) // TTL elapsed, waiter still registered.
+
+	c, _ := net.Pipe()
+	defer func() { _ = c.Close() }()
+	if table.Deliver("tok", c) {
+		t.Fatal("expired token should not match")
+	}
+	// Nothing must have been sent on the channel (the waiter is not unblocked).
+	select {
+	case <-ch:
+		t.Fatal("expired Deliver must not send on the channel")
+	default:
+	}
+	// The entry survives, so the waiter's Cancel reclaims it (removed=true).
+	if !table.Cancel("tok") {
+		t.Error("Cancel after an expired Deliver should report removed=true")
+	}
+}
+
 // TestTokenTableCancelAfterDeliver verifies the leak-guard contract: once
 // Deliver has consumed a token, Cancel reports removed=false so the waiter
 // knows a connection is en route and must be drained/closed.

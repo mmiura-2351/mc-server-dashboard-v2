@@ -16,7 +16,14 @@ type IPCaps struct {
 	mu          sync.Mutex
 	conns       map[string]uint32
 	joinWindows map[string]*rateWindow
+	lastSweep   time.Time
 }
+
+// joinWindowSweepInterval bounds how often AllowJoin opportunistically evicts
+// expired rate windows, so the joinWindows map tracks only recently-active IPs
+// rather than every IP that ever attempted a login (hostile churn would
+// otherwise grow it without bound).
+const joinWindowSweepInterval = time.Minute
 
 type rateWindow struct {
 	windowStart time.Time
@@ -78,6 +85,7 @@ func (c *IPCaps) AllowJoin(ip string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
+	c.sweepExpired(now)
 	w := c.joinWindows[ip]
 	if w == nil || now.Sub(w.windowStart) >= time.Second {
 		c.joinWindows[ip] = &rateWindow{windowStart: now, count: 1}
@@ -88,4 +96,19 @@ func (c *IPCaps) AllowJoin(ip string) bool {
 	}
 	w.count++
 	return true
+}
+
+// sweepExpired evicts rate windows whose one-second window has elapsed, at most
+// once per joinWindowSweepInterval. Caller must hold c.mu. This bounds the
+// joinWindows map to recently-active source IPs.
+func (c *IPCaps) sweepExpired(now time.Time) {
+	if now.Sub(c.lastSweep) < joinWindowSweepInterval {
+		return
+	}
+	c.lastSweep = now
+	for ip, w := range c.joinWindows {
+		if now.Sub(w.windowStart) >= time.Second {
+			delete(c.joinWindows, ip)
+		}
+	}
 }

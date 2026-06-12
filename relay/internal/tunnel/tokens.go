@@ -77,17 +77,21 @@ func (t *TokenTable) Cancel(token string) (removed bool) {
 // (single-use). It returns true on a match. A missing, expired, or
 // already-consumed token returns false; the caller closes conn without a
 // response (RELAY.md Section 5).
+//
+// An expired entry is left in place (NOT deleted): the waiter is still blocked
+// on its channel and reclaims the entry via Cancel. Deleting it here would make
+// the waiter's Cancel return false — signalling "a conn is en route on the
+// channel" — when nothing was sent, hanging the waiter forever. Preserves the
+// invariant "Cancel returns false ⇒ a conn is en route on the channel".
 func (t *TokenTable) Deliver(token string, conn net.Conn) bool {
 	t.mu.Lock()
 	w, ok := t.waiters[token]
-	if ok {
+	if ok && t.now().Before(w.expires) {
 		delete(t.waiters, token)
+		t.mu.Unlock()
+		w.ch <- conn
+		return true
 	}
 	t.mu.Unlock()
-
-	if !ok || !t.now().Before(w.expires) {
-		return false
-	}
-	w.ch <- conn
-	return true
+	return false
 }

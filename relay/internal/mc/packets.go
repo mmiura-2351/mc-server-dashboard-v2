@@ -70,7 +70,7 @@ func ReadStatusResponse(r *bufio.Reader) (string, error) {
 	if id != 0x00 {
 		return "", fmt.Errorf("mc: status response: unexpected packet id 0x%02x", id)
 	}
-	return readString(br, br)
+	return readString(br, br, maxStringLen)
 }
 
 // ReadStatusRequest reads the client's Status Request packet (id 0x00, empty

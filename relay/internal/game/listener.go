@@ -26,6 +26,11 @@ const preRouteDeadline = 5 * time.Second
 // dial-back after a TUNNEL decision (RELAY.md Section 4).
 const dialBackTimeout = 10 * time.Second
 
+// resolveJoinTimeout bounds each ResolveJoin RPC so a black-holed API
+// connection cannot wedge the player goroutine indefinitely (the conn read
+// deadline is already cleared on the login path before this call).
+const resolveJoinTimeout = 5 * time.Second
+
 // Resolver is the API surface the listener needs. Narrowed to an interface so
 // tests inject a fake.
 type Resolver interface {
@@ -128,9 +133,10 @@ func (l *Listener) handle(ctx context.Context, conn net.Conn) {
 func (l *Listener) handleStatus(ctx context.Context, conn net.Conn, r *bufio.Reader, hs mc.Handshake, slug, ip string) {
 	defer func() { _ = conn.Close() }()
 
-	// The client sends an (empty) Status Request next; read and discard it. We
-	// answer from the cache or a synthesized/forwarded response regardless.
-	if _, _, err := readStatusRequest(r); err != nil {
+	// The client sends an (empty) Status Request (id 0x00) next; read and discard
+	// it. Reject anything that is not a Status Request rather than answering a
+	// stray packet (RELAY.md Section 7).
+	if id, _, err := readStatusRequest(r); err != nil || id != 0x00 {
 		return
 	}
 
@@ -142,6 +148,10 @@ func (l *Listener) handleStatus(ctx context.Context, conn net.Conn, r *bufio.Rea
 		}
 	}
 
+	// Refresh the deadline: a cache miss can spend most of the accept deadline on
+	// the resolve + dial-back status exchange, so the status response and the
+	// Ping read must not inherit a nearly-expired deadline (RELAY.md Section 7).
+	_ = conn.SetDeadline(time.Now().Add(preRouteDeadline))
 	if err := writePacket(conn, mc.StatusResponsePacket(statusJSON)); err != nil {
 		return
 	}
@@ -158,7 +168,9 @@ func (l *Listener) handleStatus(ctx context.Context, conn net.Conn, r *bufio.Rea
 // answer from the unavailable fallback. It returns the status JSON to send, or
 // "" if the connection should be dropped (NOT_FOUND).
 func (l *Listener) resolveStatus(ctx context.Context, hs mc.Handshake, slug, ip string) string {
-	res, err := l.resolver.ResolveJoin(ctx, slug, ip, apiclient.IntentStatus)
+	rctx, cancel := context.WithTimeout(ctx, resolveJoinTimeout)
+	defer cancel()
+	res, err := l.resolver.ResolveJoin(rctx, slug, ip, apiclient.IntentStatus)
 	if err != nil {
 		// API unreachable: no cache entry (we are here on a miss), so synthesize an
 		// "unavailable" response (RELAY.md Section 10).
@@ -234,7 +246,9 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	// timeout on spliced sessions).
 	_ = conn.SetReadDeadline(time.Time{})
 
-	res, err := l.resolver.ResolveJoin(ctx, slug, ip, apiclient.IntentLogin)
+	rctx, cancel := context.WithTimeout(ctx, resolveJoinTimeout)
+	res, err := l.resolver.ResolveJoin(rctx, slug, ip, apiclient.IntentLogin)
+	cancel()
 	if err != nil {
 		l.disconnect(conn, "Dashboard unavailable — please try again shortly.")
 		return
@@ -242,7 +256,7 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 
 	switch res.Decision {
 	case apiclient.DecisionTunnel:
-		l.spliceLogin(ctx, conn, r, hs, login, slug, ip, res.Token)
+		l.spliceLogin(ctx, conn, r, hs, login, res.ServerID, slug, ip, res.Token)
 	case apiclient.DecisionStopped:
 		l.disconnect(conn, mc.StoppedMOTD(res.DisplayName))
 	default:
@@ -254,7 +268,7 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 // spliceLogin completes a TUNNEL login: wait for the dial-back, replay the
 // buffered bytes, record the session, and splice. A worker that never dials
 // back yields a Login Disconnect (RELAY.md Section 4).
-func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Reader, hs mc.Handshake, login mc.LoginStart, slug, ip, token string) {
+func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Reader, hs mc.Handshake, login mc.LoginStart, serverID, slug, ip, token string) {
 	tconn, ok := l.awaitTunnel(ctx, token)
 	if !ok {
 		l.disconnect(conn, "Could not reach the server — please try again shortly.")
@@ -290,10 +304,10 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 		}
 	}
 
-	// serverID is not yet known to the relay (the API holds the slug→server
-	// mapping). The session is keyed by the relay-minted id; the API resolves the
-	// server from the slug on its side. Pass the slug as the server reference.
-	sessionID := l.sessions.Start(slug, slug, ip, login.Name, login.UUID)
+	// serverID is the API's server identifier from the ResolveJoin decision; the
+	// slug is recorded separately as the historical hostname label (RELAY.md
+	// Section 8).
+	sessionID := l.sessions.Start(serverID, slug, ip, login.Name, login.UUID)
 	defer l.sessions.End(sessionID)
 
 	splice.Splice(conn, tconn)

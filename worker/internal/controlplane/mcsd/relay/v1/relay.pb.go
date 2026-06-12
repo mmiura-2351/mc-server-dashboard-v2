@@ -352,7 +352,11 @@ type ResolveJoinResponse struct {
 	// display_name is the server's human-readable name, used by the relay to
 	// synthesize the stopped-server in-protocol response. Set only when
 	// decision is STOPPED. RELAY.md Section 7.
-	DisplayName   string `protobuf:"bytes,3,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	DisplayName string `protobuf:"bytes,3,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	// server_id is the API's identifier for the server the player joined, which
+	// the relay carries into SessionStart.server_id (the relay cannot resolve
+	// slug→server itself). Set only when decision is TUNNEL. RELAY.md Section 8.
+	ServerId      string `protobuf:"bytes,4,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -404,6 +408,13 @@ func (x *ResolveJoinResponse) GetToken() string {
 func (x *ResolveJoinResponse) GetDisplayName() string {
 	if x != nil {
 		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *ResolveJoinResponse) GetServerId() string {
+	if x != nil {
+		return x.ServerId
 	}
 	return ""
 }
@@ -760,11 +771,12 @@ const file_mcsd_relay_v1_relay_proto_rawDesc = "" +
 	"\x12ResolveJoinRequest\x12\x12\n" +
 	"\x04slug\x18\x01 \x01(\tR\x04slug\x12\x1b\n" +
 	"\tplayer_ip\x18\x02 \x01(\tR\bplayerIp\x121\n" +
-	"\x06intent\x18\x03 \x01(\x0e2\x19.mcsd.relay.v1.JoinIntentR\x06intent\"\x87\x01\n" +
+	"\x06intent\x18\x03 \x01(\x0e2\x19.mcsd.relay.v1.JoinIntentR\x06intent\"\xa4\x01\n" +
 	"\x13ResolveJoinResponse\x127\n" +
 	"\bdecision\x18\x01 \x01(\x0e2\x1b.mcsd.relay.v1.JoinDecisionR\bdecision\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\tR\x05token\x12!\n" +
-	"\fdisplay_name\x18\x03 \x01(\tR\vdisplayName\"L\n" +
+	"\fdisplay_name\x18\x03 \x01(\tR\vdisplayName\x12\x1b\n" +
+	"\tserver_id\x18\x04 \x01(\tR\bserverId\"L\n" +
 	"\x15ReportSessionsRequest\x123\n" +
 	"\x06events\x18\x01 \x03(\v2\x1b.mcsd.relay.v1.SessionEventR\x06events\"\x18\n" +
 	"\x16ReportSessionsResponse\"{\n" +

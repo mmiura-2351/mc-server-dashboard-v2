@@ -60,7 +60,7 @@ func TestLoginDisconnectPacket(t *testing.T) {
 	if id != 0x00 {
 		t.Fatalf("disconnect id = 0x%02x, want 0x00", id)
 	}
-	js, err := readString(br, br)
+	js, err := readString(br, br, maxStringLen)
 	if err != nil {
 		t.Fatal(err)
 	}

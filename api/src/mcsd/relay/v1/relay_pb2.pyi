@@ -233,6 +233,7 @@ class ResolveJoinResponse(_message.Message):
     DECISION_FIELD_NUMBER: _builtins.int
     TOKEN_FIELD_NUMBER: _builtins.int
     DISPLAY_NAME_FIELD_NUMBER: _builtins.int
+    SERVER_ID_FIELD_NUMBER: _builtins.int
     decision: Global___JoinDecision.ValueType
     """decision is the routing outcome. RELAY.md Section 6."""
     token: _builtins.str
@@ -245,16 +246,22 @@ class ResolveJoinResponse(_message.Message):
     synthesize the stopped-server in-protocol response. Set only when
     decision is STOPPED. RELAY.md Section 7.
     """
+    server_id: _builtins.str
+    """server_id is the API's identifier for the server the player joined, which
+    the relay carries into SessionStart.server_id (the relay cannot resolve
+    slug→server itself). Set only when decision is TUNNEL. RELAY.md Section 8.
+    """
     def __init__(
         self,
         *,
         decision: Global___JoinDecision.ValueType = ...,
         token: _builtins.str = ...,
         display_name: _builtins.str = ...,
+        server_id: _builtins.str = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["decision", b"decision", "display_name", b"display_name", "token", b"token"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["decision", b"decision", "display_name", b"display_name", "server_id", b"server_id", "token", b"token"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

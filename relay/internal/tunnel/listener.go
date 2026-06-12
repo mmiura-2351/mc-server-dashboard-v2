@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"strings"
@@ -14,6 +15,13 @@ import (
 // dialHandshakeDeadline bounds how long a tunnel connection has to send its
 // handshake line before it is dropped (RELAY.md Section 5).
 const dialHandshakeDeadline = 5 * time.Second
+
+// maxHandshakeBytes hard-caps the pre-auth handshake read on the
+// internet-exposed tunnel listener. The whole legal handshake
+// ("MCSD-TUNNEL/1\n<128-bit token>\n") is well under this; a peer that streams
+// more, or never sends a newline, is dropped silently rather than allowed to
+// buffer unbounded data before authenticating.
+const maxHandshakeBytes = 256
 
 // handshakePrefix is the fixed first line of the Worker dial-back handshake
 // (RELAY.md Section 5): "MCSD-TUNNEL/1\n" followed by "<token>\n".
@@ -80,17 +88,22 @@ func (l *Listener) handle(conn net.Conn) {
 // cleared on success so the subsequent splice is not bounded.
 func readHandshake(conn net.Conn) (string, bool) {
 	_ = conn.SetReadDeadline(time.Now().Add(dialHandshakeDeadline))
-	r := bufio.NewReader(conn)
+	// Hard-cap the pre-auth read: a bufio.Reader sized to maxHandshakeBytes over a
+	// LimitReader of the same size. ReadSlice returns ErrBufferFull if a line
+	// exceeds the buffer (no newline within the cap), and the LimitReader yields
+	// io.EOF once the cap is consumed across both lines — either way an over-long
+	// or newline-free handshake is dropped silently.
+	r := bufio.NewReaderSize(io.LimitReader(conn, maxHandshakeBytes), maxHandshakeBytes)
 
-	first, err := r.ReadString('\n')
-	if err != nil || strings.TrimRight(first, "\n") != handshakePrefix {
+	first, err := r.ReadSlice('\n')
+	if err != nil || strings.TrimRight(string(first), "\n") != handshakePrefix {
 		return "", false
 	}
-	tokenLine, err := r.ReadString('\n')
+	tokenLine, err := r.ReadSlice('\n')
 	if err != nil {
 		return "", false
 	}
-	token := strings.TrimRight(tokenLine, "\n")
+	token := strings.TrimRight(string(tokenLine), "\n")
 	if token == "" {
 		return "", false
 	}

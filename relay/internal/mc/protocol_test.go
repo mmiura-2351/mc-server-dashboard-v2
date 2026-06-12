@@ -129,15 +129,59 @@ func TestReadLoginStartNameOnlyLegacy(t *testing.T) {
 	}
 }
 
-func TestReadLoginStartOptionalUUID(t *testing.T) {
-	// Protocol 760 (1.19.1) "has UUID" = false: name, then a 0 byte.
-	raw := buildPacket(0x00, append(appendString(nil, "Bob"), 0x00))
-	ls, err := ReadLoginStart(bufio.NewReader(bytes.NewReader(raw)), 760)
-	if err != nil {
-		t.Fatal(err)
+func TestReadLoginStartSigDataVersions(t *testing.T) {
+	// Protocols 759/760 (1.19–1.19.2): the byte after the name is "has signature
+	// data", NOT "has UUID". The relay must record name only and never read the
+	// trailing bytes as a UUID, even when has_sig_data=1 is followed by
+	// signature material that looks like a 16-byte UUID.
+	uuidLike := []byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb}
+	for _, proto := range []int32{759, 760} {
+		for _, hasSig := range []byte{0x00, 0x01} {
+			body := appendString(nil, "Bob")
+			body = append(body, hasSig)
+			if hasSig == 0x01 {
+				body = append(body, uuidLike...) // signature bytes — must not be read as a UUID
+			}
+			raw := buildPacket(0x00, body)
+			ls, err := ReadLoginStart(bufio.NewReader(bytes.NewReader(raw)), proto)
+			if err != nil {
+				t.Fatalf("proto %d has_sig=%d: %v", proto, hasSig, err)
+			}
+			if ls.Name != "Bob" {
+				t.Errorf("proto %d has_sig=%d: name=%q, want Bob", proto, hasSig, ls.Name)
+			}
+			if ls.UUID != "" {
+				t.Errorf("proto %d has_sig=%d: uuid=%q, want empty (signature bytes must not be parsed as UUID)", proto, hasSig, ls.UUID)
+			}
+		}
 	}
-	if ls.Name != "Bob" || ls.UUID != "" {
-		t.Errorf("name=%q uuid=%q, want Bob / empty", ls.Name, ls.UUID)
+}
+
+func TestReadLoginStartBoolUUIDVersions(t *testing.T) {
+	// Protocols 761–763 (1.19.3–1.20.1): name + bool "has UUID" + optional UUID.
+	uuid := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
+	for _, proto := range []int32{761, 762, 763} {
+		// has UUID = true.
+		body := appendString(nil, "Bob")
+		body = append(body, 0x01)
+		body = append(body, uuid...)
+		ls, err := ReadLoginStart(bufio.NewReader(bytes.NewReader(buildPacket(0x00, body))), proto)
+		if err != nil {
+			t.Fatalf("proto %d has_uuid=1: %v", proto, err)
+		}
+		if ls.Name != "Bob" || ls.UUID != "12345678-9abc-def0-1122-334455667788" {
+			t.Errorf("proto %d has_uuid=1: name=%q uuid=%q", proto, ls.Name, ls.UUID)
+		}
+
+		// has UUID = false.
+		raw := buildPacket(0x00, append(appendString(nil, "Bob"), 0x00))
+		ls, err = ReadLoginStart(bufio.NewReader(bytes.NewReader(raw)), proto)
+		if err != nil {
+			t.Fatalf("proto %d has_uuid=0: %v", proto, err)
+		}
+		if ls.Name != "Bob" || ls.UUID != "" {
+			t.Errorf("proto %d has_uuid=0: name=%q uuid=%q, want Bob / empty", proto, ls.Name, ls.UUID)
+		}
 	}
 }
 

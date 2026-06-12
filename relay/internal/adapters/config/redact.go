@@ -35,6 +35,7 @@ func (c Config) LogValue() slog.Value {
 			slog.Group("tls",
 				slog.String("cert_file", c.Tunnel.TLS.CertFile),
 				slog.String("key_file", masked(c.Tunnel.TLS.KeyFile)),
+				slog.String("advertised_ca_file", c.Tunnel.TLS.AdvertisedCAFile),
 			),
 		),
 		slog.Group("log",

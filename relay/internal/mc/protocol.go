@@ -27,10 +27,16 @@ const (
 	MaxPreRouteBytes = 1024
 	// maxVarIntBytes is the byte ceiling for a 32-bit VarInt.
 	maxVarIntBytes = 5
-	// maxStringLen bounds a decoded string field. server_address is ≤255 and the
-	// login name is ≤16; this single ceiling rejects an absurd length prefix
-	// before allocating.
+	// maxStringLen is the protocol's absolute string ceiling (32767). It bounds
+	// fields with no tighter contextual limit (e.g. the server's Status Response
+	// JSON, itself capped by the 1 KiB packet ceiling).
 	maxStringLen = 32767
+	// maxServerAddressLen bounds the handshake server_address field (the spec
+	// caps it at 255), rejecting a hostile length prefix before allocating.
+	maxServerAddressLen = 255
+	// maxPlayerNameLen bounds the Login Start player name (the spec caps it at
+	// 16).
+	maxPlayerNameLen = 16
 )
 
 // ErrVarIntTooLong is returned when a VarInt exceeds five bytes (it would not
@@ -74,13 +80,15 @@ func appendVarInt(dst []byte, v int32) []byte {
 	}
 }
 
-// readString reads a VarInt-length-prefixed UTF-8 string from r.
-func readString(r io.Reader, br io.ByteReader) (string, error) {
+// readString reads a VarInt-length-prefixed UTF-8 string from r, rejecting a
+// length prefix above maxLen (the caller's contextual ceiling) before
+// allocating.
+func readString(r io.Reader, br io.ByteReader, maxLen int) (string, error) {
 	length, _, err := readVarInt(br)
 	if err != nil {
 		return "", err
 	}
-	if length < 0 || int(length) > maxStringLen {
+	if length < 0 || int(length) > maxLen {
 		return "", fmt.Errorf("mc: string length %d out of range", length)
 	}
 	buf := make([]byte, length)
@@ -154,7 +162,7 @@ func ReadHandshake(r *bufio.Reader) (Handshake, error) {
 	if err != nil {
 		return Handshake{}, err
 	}
-	addr, err := readString(br, br)
+	addr, err := readString(br, br, maxServerAddressLen)
 	if err != nil {
 		return Handshake{}, err
 	}
@@ -191,11 +199,19 @@ type LoginStart struct {
 }
 
 // Protocol version boundaries for the Login Start UUID field (RELAY.md
-// Section 7). 764 is 1.20.2 (UUID required); 759 is 1.19 (the optional/varying
-// range begins). Below 759 the packet is name-only.
+// Section 7). The Login Start body shape varies by version:
+//
+//   - 764+ (1.20.2+):  name + UUID (always present, no prefix bool).
+//   - 761–763 (1.19.3–1.20.1): name + bool "has UUID" + optional UUID.
+//   - 759–760 (1.19–1.19.2): name + bool "has signature data" + optional sig
+//     data + bool "has UUID" + optional UUID. The FIRST bool is signature
+//     data, not the UUID flag, so the bool+UUID shortcut must NOT be applied
+//     here — misreading the signature bytes yields a garbage claimed UUID. We
+//     record name only.
+//   - <759: name only.
 const (
 	protoUUIDRequired = 764
-	protoUUIDOptional = 759
+	protoUUIDBoolMin  = 761
 )
 
 // ReadLoginStart reads one Login Start packet from r and parses it
@@ -217,34 +233,31 @@ func ReadLoginStart(r *bufio.Reader, protocolVersion int32) (LoginStart, error) 
 		// anyway with a null identity.
 		return ls, nil
 	}
-	name, err := readString(br, br)
-	if err != nil || len(name) > 16 {
+	name, err := readString(br, br, maxPlayerNameLen)
+	if err != nil {
 		return ls, nil
 	}
 	ls.Name = name
 
-	if protocolVersion >= protoUUIDOptional {
-		// 1.20.2+ always sends the UUID; the 1.19.x range sends it optionally
-		// (preceded by a bool on some builds). Best-effort: read 16 bytes if they
-		// are there. A short read just leaves UUID empty.
-		if protocolVersion < protoUUIDRequired {
-			// In the optional range some clients prefix a boolean "has UUID". Peek it
-			// without committing: if a single byte remains and it is 0, there is no
-			// UUID; if 1, a UUID follows.
-			has, err := br.ReadByte()
-			if err != nil {
-				return ls, nil
-			}
-			if has == 0 {
-				return ls, nil
-			}
-			// has == 1 (UUID present) or any other build shape: fall through and try
-			// to read 16 bytes.
-		}
-		uuid, err := readUUID(br)
-		if err == nil {
+	switch {
+	case protocolVersion >= protoUUIDRequired:
+		// 1.20.2+ always sends the UUID directly after the name.
+		if uuid, err := readUUID(br); err == nil {
 			ls.UUID = uuid
 		}
+	case protocolVersion >= protoUUIDBoolMin:
+		// 1.19.3–1.20.1: a boolean "has UUID" precedes the optional UUID.
+		has, err := br.ReadByte()
+		if err != nil || has == 0 {
+			return ls, nil
+		}
+		if uuid, err := readUUID(br); err == nil {
+			ls.UUID = uuid
+		}
+	default:
+		// 759–760 (1.19–1.19.2) the byte after the name is "has signature data",
+		// not "has UUID"; parsing a UUID here would record signature bytes as a
+		// garbage identity, so record name only. <759 is name-only too.
 	}
 	return ls, nil
 }

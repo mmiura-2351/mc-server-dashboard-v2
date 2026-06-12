@@ -134,6 +134,11 @@ message ResolveJoinResponse {
   // synthesize the stopped-server in-protocol response. Set only when
   // decision is STOPPED. RELAY.md Section 7.
   string display_name = 3;
+
+  // server_id is the API's identifier for the server the player joined, which
+  // the relay carries into SessionStart.server_id (the relay cannot resolve
+  // slug→server itself). Set only when decision is TUNNEL. RELAY.md Section 8.
+  string server_id = 4;
 }
 
 // ---------------------------------------------------------------------------

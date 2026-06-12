@@ -84,6 +84,50 @@ func TestReporterRetriesOnError(t *testing.T) {
 	}
 }
 
+// TestReporterRetryBufferBounded asserts the retry buffer is capped during a
+// sustained outage: repeated failed flushes drop the oldest events rather than
+// growing without bound, and the buffer never exceeds MaxBufferedEvents.
+func TestReporterRetryBufferBounded(t *testing.T) {
+	// Always-failing client so events are restored on every flush.
+	fake := &fakeReportClient{failN: 1 << 30}
+	r := NewReporter(fake, discardLogger(), nil)
+
+	// Buffer more starts than the cap, flushing between batches so capOldest runs
+	// on the restore path.
+	for i := 0; i < MaxBufferedEvents+500; i++ {
+		r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+		if i%100 == 0 {
+			r.flush(context.Background())
+		}
+	}
+	r.flush(context.Background())
+
+	r.mu.Lock()
+	got := len(r.pendStarts)
+	r.mu.Unlock()
+	if got > MaxBufferedEvents {
+		t.Errorf("pendStarts = %d, exceeds cap %d", got, MaxBufferedEvents)
+	}
+}
+
+func TestCapOldestDropsFront(t *testing.T) {
+	buf := make([]int, MaxBufferedEvents+3)
+	for i := range buf {
+		buf[i] = i
+	}
+	out := capOldest(buf, "start", discardLogger())
+	if len(out) != MaxBufferedEvents {
+		t.Fatalf("len = %d, want %d", len(out), MaxBufferedEvents)
+	}
+	// Oldest (front) three were dropped; the newest is retained at the tail.
+	if out[0] != 3 {
+		t.Errorf("front element = %d, want 3 (oldest dropped)", out[0])
+	}
+	if out[len(out)-1] != MaxBufferedEvents+2 {
+		t.Errorf("tail element = %d, want newest retained", out[len(out)-1])
+	}
+}
+
 func TestReporterRunFlushesOnShutdown(t *testing.T) {
 	fake := &fakeReportClient{}
 	r := NewReporter(fake, discardLogger(), nil)

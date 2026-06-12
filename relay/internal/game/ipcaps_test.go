@@ -1,6 +1,7 @@
 package game
 
 import (
+	"net"
 	"testing"
 	"time"
 )
@@ -44,6 +45,36 @@ func TestIPCapsJoinRate(t *testing.T) {
 	if !caps.AllowJoin("1.1.1.1") {
 		t.Error("join in a new window should be allowed")
 	}
+}
+
+// TestIPCapsJoinWindowsBounded asserts the joinWindows map does not grow
+// without bound under hostile churn: each unique source IP joins once and never
+// returns, but the opportunistic sweep evicts windows whose one-second window
+// has elapsed, so the map collapses back to (about) the current second's
+// active IPs rather than retaining every IP forever.
+func TestIPCapsJoinWindowsBounded(t *testing.T) {
+	now := time.Unix(0, 0)
+	caps := NewIPCaps(0, 10, func() time.Time { return now })
+
+	// 1000 unique IPs each join once at t=0.
+	for i := 0; i < 1000; i++ {
+		caps.AllowJoin(uniqueIP(i))
+	}
+	if got := len(caps.joinWindows); got != 1000 {
+		t.Fatalf("after first burst, joinWindows = %d, want 1000", got)
+	}
+
+	// Advance well past the window and the sweep interval, then a single fresh
+	// join triggers the sweep, evicting all the now-stale windows.
+	now = now.Add(2 * joinWindowSweepInterval)
+	caps.AllowJoin("fresh")
+	if got := len(caps.joinWindows); got > 1 {
+		t.Errorf("after sweep, joinWindows = %d, want <= 1 (stale windows evicted)", got)
+	}
+}
+
+func uniqueIP(i int) string {
+	return net.IPv4(10, byte(i/65536%256), byte(i/256%256), byte(i%256)).String()
 }
 
 func TestIPCapsZeroDisables(t *testing.T) {

@@ -26,6 +26,12 @@ const (
 	FlushMaxEvents       = 100
 )
 
+// MaxBufferedEvents caps each pending event slice (starts and ends separately)
+// during a sustained API outage. Beyond it the oldest events are dropped
+// (drop-oldest) with a log line — bounding memory at the cost of losing the
+// oldest session records rather than the whole process. RELAY.md Section 6.
+const MaxBufferedEvents = 10_000
+
 // reportClient is the subset of the API client the reporter needs. Narrowed to
 // an interface so tests inject a fake.
 type reportClient interface {
@@ -162,8 +168,20 @@ func (r *Reporter) flush(ctx context.Context) {
 	if err := r.client.ReportSessions(ctx, starts, ends); err != nil {
 		r.logger.Warn("session report failed; will retry", "error", err, "starts", len(starts), "ends", len(ends))
 		r.mu.Lock()
-		r.pendStarts = append(starts, r.pendStarts...)
-		r.pendEnds = append(ends, r.pendEnds...)
+		r.pendStarts = capOldest(append(starts, r.pendStarts...), "start", r.logger)
+		r.pendEnds = capOldest(append(ends, r.pendEnds...), "end", r.logger)
 		r.mu.Unlock()
 	}
+}
+
+// capOldest bounds a pending-event slice to MaxBufferedEvents by dropping the
+// oldest (front) entries during a sustained outage, logging the loss so it is
+// never silent.
+func capOldest[T any](buf []T, kind string, logger *slog.Logger) []T {
+	if len(buf) <= MaxBufferedEvents {
+		return buf
+	}
+	dropped := len(buf) - MaxBufferedEvents
+	logger.Warn("session retry buffer full; dropping oldest events", "kind", kind, "dropped", dropped, "cap", MaxBufferedEvents)
+	return buf[dropped:]
 }

@@ -53,6 +53,9 @@ type ResolveResult struct {
 	Decision Decision
 	// Token is the single-use tunnel token, set only when Decision is Tunnel.
 	Token string
+	// ServerID is the API's identifier for the resolved server, set only when
+	// Decision is Tunnel (carried into SessionStart.server_id).
+	ServerID string
 	// DisplayName is the server's name, set only when Decision is Stopped.
 	DisplayName string
 }
@@ -120,6 +123,7 @@ func (c *Client) ResolveJoin(ctx context.Context, slug, playerIP string, intent 
 	return ResolveResult{
 		Decision:    fromProtoDecision(resp.GetDecision()),
 		Token:       resp.GetToken(),
+		ServerID:    resp.GetServerId(),
 		DisplayName: resp.GetDisplayName(),
 	}, nil
 }

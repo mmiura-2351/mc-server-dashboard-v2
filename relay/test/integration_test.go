@@ -40,6 +40,10 @@ import (
 
 const baseDomain = "mc.example.com"
 
+// testServerID is the server_id the fake API returns on a TUNNEL decision; the
+// relay must carry it into SessionStart.server_id (distinct from the slug).
+const testServerID = "srv-uuid-1234"
+
 // fakeAPI is an in-process RelayService. It returns a fixed token for TUNNEL
 // resolves and captures reported sessions.
 type fakeAPI struct {
@@ -75,7 +79,7 @@ func (a *fakeAPI) ResolveJoin(_ context.Context, req *relayv1.ResolveJoinRequest
 		default:
 		}
 	}
-	return &relayv1.ResolveJoinResponse{Decision: relayv1.JoinDecision_JOIN_DECISION_TUNNEL, Token: a.token}, nil
+	return &relayv1.ResolveJoinResponse{Decision: relayv1.JoinDecision_JOIN_DECISION_TUNNEL, Token: a.token, ServerId: testServerID}, nil
 }
 
 func (a *fakeAPI) ReportSessions(_ context.Context, req *relayv1.ReportSessionsRequest) (*relayv1.ReportSessionsResponse, error) {
@@ -261,8 +265,19 @@ func TestLoginSplice(t *testing.T) {
 		return s >= 1 && e >= 1
 	})
 	h.api.mu.Lock()
-	if len(h.api.starts) > 0 && h.api.starts[0].GetUsername() != "Steve" {
-		t.Errorf("reported username = %q, want Steve", h.api.starts[0].GetUsername())
+	if len(h.api.starts) > 0 {
+		start := h.api.starts[0]
+		if start.GetUsername() != "Steve" {
+			t.Errorf("reported username = %q, want Steve", start.GetUsername())
+		}
+		// server_id is the API's identifier from ResolveJoin, distinct from the
+		// slug (the historical hostname label).
+		if start.GetServerId() != testServerID {
+			t.Errorf("reported server_id = %q, want %q", start.GetServerId(), testServerID)
+		}
+		if start.GetServerId() == start.GetSlug() {
+			t.Errorf("server_id must not duplicate the slug (%q)", start.GetSlug())
+		}
 	}
 	h.api.mu.Unlock()
 }

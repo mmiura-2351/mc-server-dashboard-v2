@@ -55,12 +55,13 @@ func run(ctx context.Context) error {
 	logger := newLogger(cfg.Log)
 	logger.Info("relay configuration loaded", "config", cfg)
 
-	// The tunnel CA the relay advertises to Workers (Register → TunnelDial) is the
-	// listener's certificate PEM: with self-signed material the cert file is the
-	// chain the Worker verifies against (RELAY.md Section 5).
-	tunnelCAPEM, err := os.ReadFile(cfg.Tunnel.TLS.CertFile)
+	// The tunnel CA the relay advertises to Workers (Register → TunnelDial) for
+	// verifying the tunnel certificate (RELAY.md Section 5). Three cases keyed on
+	// tunnel.tls.advertised_ca_file: unset → the listener cert PEM (self-signed
+	// default); "system" → empty (Workers use system roots); a path → that PEM.
+	tunnelCAPEM, err := advertisedTunnelCA(cfg.Tunnel.TLS)
 	if err != nil {
-		return fmt.Errorf("read tunnel cert %q: %w", cfg.Tunnel.TLS.CertFile, err)
+		return err
 	}
 
 	conn, err := dial(cfg.API, logger)
@@ -71,7 +72,7 @@ func run(ctx context.Context) error {
 
 	apiClient := apiclient.New(conn, cfg.API.Credential)
 	reporter := session.NewReporter(apiClient, logger, time.Now)
-	svc := relaysvc.New(apiClient, reporter, cfg.Tunnel.PublicEndpoint, string(tunnelCAPEM), logger)
+	svc := relaysvc.New(apiClient, reporter, cfg.Tunnel.PublicEndpoint, tunnelCAPEM, logger)
 
 	tokens := tunnel.NewTokenTable(tokenTTL, time.Now)
 	cache := game.NewStatusCache(time.Duration(cfg.Game.StatusCacheSeconds)*time.Second, time.Now)
@@ -159,6 +160,29 @@ func dial(api config.APIConfig, logger *slog.Logger) (*grpc.ClientConn, error) {
 		return nil, fmt.Errorf("dial API %q: %w", api.GRPCEndpoint, err)
 	}
 	return conn, nil
+}
+
+// advertisedTunnelCA returns the CA PEM the relay advertises to Workers for
+// verifying the tunnel certificate (RELAY.md Section 5), per
+// tunnel.tls.advertised_ca_file: unset → the listener cert PEM (self-signed
+// default); SystemRootsCA → "" (Workers use system roots); a path → that file.
+func advertisedTunnelCA(t config.TunnelTLSConfig) (string, error) {
+	switch t.AdvertisedCAFile {
+	case "":
+		pem, err := os.ReadFile(t.CertFile)
+		if err != nil {
+			return "", fmt.Errorf("read tunnel cert %q: %w", t.CertFile, err)
+		}
+		return string(pem), nil
+	case config.SystemRootsCA:
+		return "", nil
+	default:
+		pem, err := os.ReadFile(t.AdvertisedCAFile)
+		if err != nil {
+			return "", fmt.Errorf("read advertised tunnel CA %q: %w", t.AdvertisedCAFile, err)
+		}
+		return string(pem), nil
+	}
 }
 
 // buildTunnelTLS loads the tunnel listener's server certificate.
