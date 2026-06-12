@@ -70,11 +70,30 @@ class RegisterUser:
     async def __call__(
         self, *, username: str, email: str, password: str, ip: str | None = None
     ) -> User:
-        if not self.registration.open:
-            raise RegistrationDisabledError
-
         now = self.clock.now()
-        await self._enforce_ip_limit(ip, now=now)
+        # Closed-registration fast path (#909 review): refuse immediately if any
+        # user already exists, before validation, the argon2 hash, and the locked
+        # bootstrap transaction. This restores the pre-PR behaviour for the
+        # second-and-later request on a closed deployment -- a uniform 403 at
+        # near-zero cost, leaking no validation detail and recording no per-IP
+        # attempt -- and keeps an unauthenticated POST from burning an argon2 hash
+        # on every call (a DoS regression the in-transaction-only gate introduced).
+        # This is race-safe: the user count is monotonic (the last-active-admin
+        # guards never let the table return to zero), so "count > 0" cannot flip
+        # back to 0. The count == 0 case still falls through to the authoritative
+        # locked check in persist_new_user, where concurrent first registrations
+        # serialize and exactly one wins the bootstrap grant.
+        if not self.registration.open and await self._users_exist():
+            raise RegistrationDisabledError
+        # The first-ever registration is allowed regardless of the open flag and
+        # becomes the platform admin (#909): a fresh closed-registration deployment
+        # must still be able to create its bootstrap admin without a config flip.
+        # The "no users yet?" decision is race-safe inside persist_new_user's
+        # transaction (no TOCTOU with the open-flag gate), so it is deferred there;
+        # the per-IP cap is an open-registration abuse control, so it is skipped
+        # entirely when registration is closed (a closed endpoint never throttled).
+        if self.registration.open:
+            await self._enforce_ip_limit(ip, now=now)
 
         return await persist_new_user(
             uow=self.uow,
@@ -84,6 +103,7 @@ class RegisterUser:
             email=email,
             password=password,
             now=now,
+            registration_open=self.registration.open,
         )
 
     async def _enforce_ip_limit(self, ip: str | None, *, now: dt.datetime) -> None:
@@ -111,6 +131,19 @@ class RegisterUser:
             raise RegistrationThrottledError
         await self.attempts.record_registration(ip=ip, at=now)
 
+    async def _users_exist(self) -> bool:
+        """Cheap, non-locking "does any user exist?" check for the closed gate.
+
+        Reads ``count_all`` outside the bootstrap advisory lock: the count is
+        monotonic (the last-active-admin guards never let it drop to zero), so a
+        "> 0" answer cannot become stale. The authoritative, race-safe gate stays
+        the locked check in :func:`persist_new_user`; this only short-circuits the
+        common second-and-later closed-registration request.
+        """
+
+        async with self.uow:
+            return await self.uow.users.count_all() > 0
+
 
 async def persist_new_user(
     *,
@@ -121,6 +154,7 @@ async def persist_new_user(
     email: str,
     password: str,
     now: dt.datetime,
+    registration_open: bool = True,
 ) -> User:
     """Validate, build, and atomically persist a new user (no abuse controls).
 
@@ -129,7 +163,20 @@ async def persist_new_user(
     pre-check, hashing, and the atomic insert. Both open registration
     (:class:`RegisterUser`) and the admin creation surface (:class:`AdminCreateUser`)
     reach the database through this; the gating that differs between them
-    (open-flag, per-IP cap) lives in the callers, not here.
+    (per-IP cap) lives in the callers, not here.
+
+    First-user bootstrap (#909): the very first user created on a fresh database
+    becomes the platform admin, replacing the manual ``psql`` step (DEPLOYMENT.md
+    Section 5). The "no users yet?" check and the open-flag gate both run inside
+    the transaction under :meth:`lock_for_bootstrap`'s advisory lock, so concurrent
+    first registrations serialize and exactly one wins the grant, and there is no
+    TOCTOU between the gate and the insert. The grant is on "zero users exist", not
+    "no admin exists", so once any user exists a later registration is never
+    auto-promoted. ``registration_open`` is the open-registration flag; when it is
+    false and a user already exists the open-registration caller's request is
+    refused with :class:`RegistrationDisabledError`. The admin creation path passes
+    ``registration_open=True`` (it is never open-gated) but still bootstraps the
+    first user.
     """
 
     name = Username(username)
@@ -146,10 +193,14 @@ async def persist_new_user(
     )
 
     async with uow:
+        first_user = await uow.users.lock_for_bootstrap() == 0
+        if not first_user and not registration_open:
+            raise RegistrationDisabledError
         if await uow.users.get_by_username(name) is not None:
             raise UsernameAlreadyExistsError(name.value)
         if await uow.users.get_by_email(address) is not None:
             raise EmailAlreadyExistsError(address.value)
+        user.is_platform_admin = first_user
         await uow.users.add(user)
         await uow.commit()
     return user

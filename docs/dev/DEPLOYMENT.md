@@ -268,35 +268,34 @@ docker rm -f swfs-test
 
 ## 6. First-run bootstrap (create the platform admin)
 
-There is no seeded admin. Register the first user over HTTP, then promote it to
-platform admin directly in the database. This `psql` step is the only out-of-band
-bootstrap and is needed **only for the very first admin** — once one platform
-admin exists, all further admin management (granting/revoking the admin flag,
-deactivating/reactivating, deleting, and listing users) is done through the
-authenticated, audited admin API (`PUT /api/users/{id}/platform-admin`,
-`POST /api/users/{id}/deactivate` and friends; issue #278), never `psql`.
+There is no seeded admin and **no manual database step**. The first user
+registered over HTTP on a fresh database automatically becomes the platform
+admin (issue #909); just register it:
 
-1. Register the user:
+```sh
+curl -X POST http://localhost:8000/api/users \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "admin", "email": "admin@example.com", "password": "<a-strong-password>"}'
+```
 
-   ```sh
-   curl -X POST http://localhost:8000/api/users \
-     -H 'Content-Type: application/json' \
-     -d '{"username": "admin", "password": "<a-strong-password>"}'
-   ```
+The response carries `"is_platform_admin": true` for this first account. The
+auto-grant is race-safe (concurrent first registrations produce exactly one
+admin) and recorded in the audit log (a `user:platform_admin_grant` entry). It
+is keyed on *no users existing yet*, not *no admin existing*: once any user
+exists, a later registration is never auto-promoted, so deleting or demoting
+admins cannot silently re-open the bootstrap.
 
-2. Promote it to platform admin (first admin only):
+**Closed registration**: if you run with `auth.registration.open=false` (the
+admin-provisioned posture, CONFIGURATION.md Section 7.4), the *first* registration
+on an empty database is still allowed — it is the only way to create the bootstrap
+admin and shares the same trust model as the old manual step. The open flag is
+enforced normally for every registration after the first user exists.
 
-   ```sh
-   docker compose exec db \
-     psql -U mcsd -d mcsd \
-     -c "UPDATE \"user\" SET is_platform_admin = true WHERE username = 'admin';"
-   ```
-
-   (`user` is a reserved word in SQL, hence the quotes. Use the `POSTGRES_USER` /
-   `POSTGRES_DB` values from your `.env` if you changed them.)
-
-From here on, that admin promotes additional admins through the API rather than
-the database:
+From here on, that admin manages all further accounts through the authenticated,
+audited admin API (granting/revoking the admin flag, deactivating/reactivating,
+deleting, and listing users; `PUT /api/users/{id}/platform-admin`,
+`POST /api/users/{id}/deactivate` and friends; issue #278) — for example,
+promoting an additional admin:
 
 ```sh
 curl -X PUT http://localhost:8000/api/users/<user-id>/platform-admin \

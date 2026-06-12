@@ -14,7 +14,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
-from mc_server_dashboard_api.dependencies import get_register_user
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import Outcome
+from mc_server_dashboard_api.dependencies import get_audit_recorder, get_register_user
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
@@ -28,6 +30,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId,
     Username,
 )
+from tests.audit.fakes import RecordingAuditRecorder
 
 _VALID_PASSWORD = "Wm7!qz#Lp2vT"
 
@@ -48,14 +51,18 @@ class _FakeRegisterUser:
         return self._result
 
 
-def _client(use_case: _FakeRegisterUser) -> Iterator[TestClient]:
+def _client(
+    use_case: _FakeRegisterUser, recorder: RecordingAuditRecorder | None = None
+) -> Iterator[TestClient]:
     app = create_app()
     app.dependency_overrides[get_register_user] = lambda: use_case
+    if recorder is not None:
+        app.dependency_overrides[get_audit_recorder] = lambda: recorder
     with TestClient(app) as client:
         yield client
 
 
-def _user() -> User:
+def _user(*, is_platform_admin: bool = False) -> User:
     now = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
     return User(
         id=UserId.new(),
@@ -64,7 +71,7 @@ def _user() -> User:
         password_hash="argon2-secret-hash",
         created_at=now,
         updated_at=now,
-        is_platform_admin=False,
+        is_platform_admin=is_platform_admin,
     )
 
 
@@ -181,6 +188,50 @@ def test_register_password_over_schema_bound_returns_422() -> None:
     )
     assert resp.status_code == 422
     assert fake.calls == []
+
+
+def test_register_records_only_auth_register_for_non_admin() -> None:
+    # An ordinary (non-first) registration records just the auth:register row.
+    fake = _FakeRegisterUser(result=_user(is_platform_admin=False))
+    recorder = RecordingAuditRecorder()
+    client = next(_client(fake, recorder=recorder))
+    resp = client.post(
+        "/api/users",
+        json={
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": _VALID_PASSWORD,
+        },
+    )
+    assert resp.status_code == 201
+    assert [e.operation for e in recorder.events] == [ops.AUTH_REGISTER]
+
+
+def test_first_user_bootstrap_records_platform_admin_grant() -> None:
+    # The first registrant is auto-granted platform admin (#909): the grant is
+    # audited explicitly, attributed to the new user as both actor and target.
+    user = _user(is_platform_admin=True)
+    fake = _FakeRegisterUser(result=user)
+    recorder = RecordingAuditRecorder()
+    client = next(_client(fake, recorder=recorder))
+    resp = client.post(
+        "/api/users",
+        json={
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": _VALID_PASSWORD,
+        },
+    )
+    assert resp.status_code == 201
+    assert [e.operation for e in recorder.events] == [
+        ops.AUTH_REGISTER,
+        ops.USER_PLATFORM_ADMIN_GRANT,
+    ]
+    grant = recorder.events[1]
+    assert grant.outcome == Outcome.SUCCESS
+    assert grant.actor_id == user.id.value
+    assert grant.target_id == user.id.value
+    assert grant.target_type == ops.TARGET_USER
 
 
 @pytest.mark.parametrize("missing", ["username", "email", "password"])

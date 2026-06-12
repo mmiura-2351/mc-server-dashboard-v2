@@ -305,6 +305,25 @@ def test_admin_create_returns_201_and_user_without_hash_and_audits() -> None:
     assert recorder.events[0].target_id == created.id.value
 
 
+def test_admin_create_bootstrap_grant_is_audited() -> None:
+    # When the admin-created account is the first user, persist_new_user
+    # auto-grants it platform admin (#909). The route must audit that grant the
+    # same way the public registration route does, so a shared future caller does
+    # not inherit an unaudited grant.
+    created = make_user(username="bob", email="bob@example.com", is_platform_admin=True)
+    recorder = RecordingAuditRecorder()
+    fake = _Fake(result=created)
+    client = next(_client(admin_create_user=fake, recorder=recorder))
+    resp = client.post("/api/admin/users", json=_create_payload())
+    assert resp.status_code == 201
+    assert resp.json()["is_platform_admin"] is True
+    assert [e.operation for e in recorder.events] == [
+        ops.USER_CREATE,
+        ops.USER_PLATFORM_ADMIN_GRANT,
+    ]
+    assert recorder.events[1].target_id == created.id.value
+
+
 def test_admin_create_requires_platform_admin() -> None:
     fake = _Fake(result=make_user())
     client = next(_client(platform_admin=False, admin_create_user=fake))

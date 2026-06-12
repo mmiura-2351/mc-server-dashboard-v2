@@ -11,7 +11,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,11 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId,
     Username,
 )
+
+# Fixed 64-bit key for the first-user bootstrap advisory lock (#909). A constant
+# (not a hashed id) because there is a single global bootstrap, not one per
+# resource; an arbitrary but stable value distinct from other subsystems' keys.
+_BOOTSTRAP_LOCK_KEY = 0x6D63_7364_0001
 
 
 def _to_user(row: UserModel) -> User:
@@ -146,6 +151,22 @@ class SqlAlchemyUserRepository(UserRepository):
         return [_to_user(row) for row in rows]
 
     async def count_all(self) -> int:
+        stmt = select(func.count()).select_from(UserModel)
+        return (await self._session.execute(stmt)).scalar_one()
+
+    async def lock_for_bootstrap(self) -> int:
+        # Serialize concurrent first-user bootstraps on a fixed advisory key
+        # (#909). pg_advisory_xact_lock blocks until any other transaction holding
+        # the same key commits/rolls back, and is released automatically at the end
+        # of this transaction -- no explicit unlock. A row lock cannot serialize the
+        # empty-table case (nothing to lock), so the bootstrap decision is gated on
+        # this lock instead. The count is read under the lock so the second racer,
+        # unblocked after the first commits, sees the incremented set.
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)").bindparams(
+                key=_BOOTSTRAP_LOCK_KEY
+            )
+        )
         stmt = select(func.count()).select_from(UserModel)
         return (await self._session.execute(stmt)).scalar_one()
 

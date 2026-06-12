@@ -101,6 +101,11 @@ class FakeUserRepository(UserRepository):
     async def count_all(self) -> int:
         return len(self.by_id)
 
+    async def lock_for_bootstrap(self) -> int:
+        # No real lock in-memory; return the live count so the first-user
+        # bootstrap decision is exercised exactly as against the DB adapter (#909).
+        return len(self.by_id)
+
     async def count_active_platform_admins(self) -> int:
         return sum(
             1 for user in self.by_id.values() if user.is_platform_admin and user.active
