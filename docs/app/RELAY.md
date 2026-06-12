@@ -417,6 +417,11 @@ relay control surface (RelayService, slug display in the UI) is active.
 path still uses it as the container's published loopback port that the Worker
 dials.
 
+**Single-host caveat:** when the relay and the Worker run on the same host, the
+relay's `0.0.0.0:25565` bind conflicts with the default game-port range
+(`25565..25664`); set `ports.range_start` to `25566` (or higher) to avoid the
+collision — see `docs/dev/DEPLOYMENT.md` "Relay — Single-host port collision".
+
 ---
 
 ## 10. Failure modes and blast radius
