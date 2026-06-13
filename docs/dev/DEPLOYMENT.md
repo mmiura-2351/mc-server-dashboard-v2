@@ -741,8 +741,8 @@ The reconciler knobs (`INTERVAL_SECONDS`, `GRACE_SECONDS`, `BACKOFF_BASE_SECONDS
 their defaults and `api/src/mc_server_dashboard_api/config.py` for constraints
 (`backoff_max_seconds` must be ≥ 600 to keep crash-loop damping effective).
 `held_start_grace_seconds` defaults to 90 in the application and is set via
-`MCD_API_RECONCILER__HELD_START_GRACE_SECONDS` (not yet forwarded through
-`compose.yaml`).
+`MCD_API_RECONCILER__HELD_START_GRACE_SECONDS` (forwarded through
+`compose.yaml` like the other reconciler knobs).
 
 ### Direct path vs relay path
 
