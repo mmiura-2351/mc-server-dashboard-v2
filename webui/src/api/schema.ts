@@ -1245,6 +1245,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/meta": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Meta
+         * @description Report deployment-wide UI facts (currently: whether the relay is on).
+         */
+        get: operations["meta_api_meta_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/metrics": {
         parameters: {
             query?: never;
@@ -2066,6 +2086,14 @@ export interface components {
             membership_id: string;
             /** User Id */
             user_id: string;
+        };
+        /**
+         * MetaResponse
+         * @description Deployment facts the Web UI reads before a server exists (issue #1002).
+         */
+        MetaResponse: {
+            /** Relay Enabled */
+            relay_enabled: boolean;
         };
         /** PlatformAdminRequest */
         PlatformAdminRequest: {
@@ -4862,6 +4890,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    meta_api_meta_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetaResponse"];
                 };
             };
         };

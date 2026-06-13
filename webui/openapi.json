@@ -1258,6 +1258,20 @@
         "title": "MembershipResponse",
         "type": "object"
       },
+      "MetaResponse": {
+        "description": "Deployment facts the Web UI reads before a server exists (issue #1002).",
+        "properties": {
+          "relay_enabled": {
+            "title": "Relay Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "relay_enabled"
+        ],
+        "title": "MetaResponse",
+        "type": "object"
+      },
       "PlatformAdminRequest": {
         "properties": {
           "grant": {
@@ -6420,6 +6434,30 @@
           }
         },
         "summary": "Healthz"
+      }
+    },
+    "/api/meta": {
+      "get": {
+        "description": "Report deployment-wide UI facts (currently: whether the relay is on).",
+        "operationId": "meta_api_meta_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetaResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Meta"
       }
     },
     "/api/metrics": {

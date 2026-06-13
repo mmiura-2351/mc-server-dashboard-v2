@@ -236,6 +236,15 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   });
   const catalogTypes = typesQuery.data?.server_types ?? [];
 
+  // In relay mode the game port is hidden and API-managed: players join port-less
+  // via the slug hostname, so the create form surfaces no port control (#1002).
+  // In direct mode the port stays user-editable (a port-forward is needed).
+  const metaQuery = useQuery({
+    queryKey: ["meta"],
+    queryFn: () => api.get("/api/meta"),
+  });
+  const relayEnabled = metaQuery.data?.relay_enabled === true;
+
   const versionsQuery = useQuery({
     queryKey: ["versions", type],
     queryFn: () =>
@@ -260,7 +269,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   // (GET /ports/available, SPEC 6.3) unless the user has already typed one. A
   // failed suggest leaves the field empty — the user can still type a port.
   useEffect(() => {
-    if (step !== 2 || portTouched) {
+    if (step !== 2 || portTouched || relayEnabled) {
       return;
     }
     let cancelled = false;
@@ -279,7 +288,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [step, portTouched]);
+  }, [step, portTouched, relayEnabled]);
 
   const memoryLimitOk = memoryLimitValid(memoryLimit);
   const cpuAllocationOk = cpuAllocationValid(cpuAllocation);
@@ -317,7 +326,11 @@ function NewServerWizard({ communityId }: { communityId: string }) {
             execution_backend: backend,
             config,
             accept_eula: acceptEula,
-            game_port: port === "" ? null : Number(port),
+            // In relay mode the port is hidden and API-allocated, so omit it; in
+            // direct mode send the chosen port (null = auto-assign) (#1002).
+            ...(relayEnabled
+              ? {}
+              : { game_port: port === "" ? null : Number(port) }),
             // Blank slug = omit so the API auto-generates a random one (issue #981).
             ...(slug.trim() !== "" ? { slug: slug.trim() } : {}),
           }),
@@ -437,20 +450,22 @@ function NewServerWizard({ communityId }: { communityId: string }) {
               ))}
             </select>
           </div>
-          <div className="field">
-            <label htmlFor="port-input">{t("serverCreate.portLabel")}</label>
-            <input
-              id="port-input"
-              type="number"
-              value={port}
-              onChange={(e) => {
-                setPortTouched(true);
-                setPort(e.target.value);
-              }}
-              onBlur={() => portCheck.check()}
-            />
-            <PortFeedback state={portCheck.state} />
-          </div>
+          {relayEnabled ? null : (
+            <div className="field">
+              <label htmlFor="port-input">{t("serverCreate.portLabel")}</label>
+              <input
+                id="port-input"
+                type="number"
+                value={port}
+                onChange={(e) => {
+                  setPortTouched(true);
+                  setPort(e.target.value);
+                }}
+                onBlur={() => portCheck.check()}
+              />
+              <PortFeedback state={portCheck.state} />
+            </div>
+          )}
           <div className="wizard-foot">
             <button
               type="button"

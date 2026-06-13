@@ -601,6 +601,60 @@ describe("ServerDetailPage settings", () => {
     expect(screen.getByDisplayValue("hard")).toBeInTheDocument();
   });
 
+  it("hides the game-port control in relay mode (#1002)", async () => {
+    // A non-null join_hostname signals relay mode: players join port-less, so
+    // the port is internal plumbing the API manages and the control is hidden.
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.mc.example.com" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect(
+      screen.queryByLabelText(t("serverDetail.settings.gamePort")),
+    ).toBeNull();
+    // The slug (join address name) control is shown in relay mode.
+    expect(
+      screen.getByLabelText(t("serverDetail.settings.slug")),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the game-port control in direct mode (relay off, #1002)", async () => {
+    mockApi.get.mockResolvedValue(server({ join_hostname: null }));
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect(
+      screen.getByLabelText(t("serverDetail.settings.gamePort")),
+    ).toBeInTheDocument();
+  });
+
+  it("omits game_port from the PATCH body in relay mode (#1002)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        join_hostname: "survival.mc.example.com",
+        config: { motd: "hi" },
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const [, init] = mockApi.patch.mock.calls[0];
+    expect(JSON.parse(init.body).game_port).toBeUndefined();
+  });
+
   it("checks port availability on blur and shows the taken hint", async () => {
     mockApi.get.mockResolvedValueOnce(server({ observed_state: "stopped" }));
     mockApi.get.mockResolvedValueOnce({
