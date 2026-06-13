@@ -942,6 +942,9 @@ func TestStartNoNetworkPublishesRCON(t *testing.T) {
 	if got := d.RconHost("s1"); got != "" {
 		t.Errorf("RconHost = %q, want empty (loopback) when no network", got)
 	}
+	if got := d.GameHost("s1"); got != "" {
+		t.Errorf("GameHost = %q, want empty (loopback) when no network", got)
+	}
 }
 
 // When driver.container.network is set the driver attaches the container to that
@@ -969,6 +972,9 @@ func TestStartWithNetworkDropsRCONPublication(t *testing.T) {
 	}
 	if got := d.RconHost("s1"); got != "mcsd-s1" {
 		t.Errorf("RconHost = %q, want container name mcsd-s1", got)
+	}
+	if got := d.GameHost("s1"); got != "mcsd-s1" {
+		t.Errorf("GameHost = %q, want container name mcsd-s1 (relay tunnel dial, issue #979)", got)
 	}
 }
 
