@@ -210,6 +210,7 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.col.type": "種類 / バージョン",
   "dashboard.col.backend": "バックエンド",
   "dashboard.col.port": "ポート",
+  "dashboard.col.address": "アドレス",
   "dashboard.col.worker": "Worker",
   "dashboard.col.actions": "操作",
   // Observed-state pill labels (WEBUI_SPEC.md 2.3).

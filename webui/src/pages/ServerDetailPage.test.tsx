@@ -1367,6 +1367,51 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
   });
 });
 
+describe("ServerDetailPage header join address display (issue #982)", () => {
+  it("shows hostname only — no port substring — when join_hostname is set", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    );
+    renderPage();
+
+    await screen.findByText(/survival\.relay\.example\.com/);
+    // The port must not appear anywhere in the header when relay is on.
+    expect(screen.queryByText(/:25565/)).not.toBeInTheDocument();
+    expect(screen.queryByText("25565")).not.toBeInTheDocument();
+  });
+
+  it("join address badge carries the 'Join address:' label so it's distinguishable from type/backend badges", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    );
+    renderPage();
+
+    // The badge must include the i18n label so users can tell it apart from
+    // the adjacent type and backend badges.
+    expect(
+      await screen.findByText(
+        `${t("serverDetail.joinHostname")}: survival.relay.example.com`,
+      ),
+    ).toBeInTheDocument();
+    // When relay is off, the label must not appear.
+  });
+
+  it("hostname badge and copy button are siblings — button is not nested inside the badge", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    );
+    renderPage();
+
+    await screen.findByText(/survival\.relay\.example\.com/);
+    const copyBtn = screen.getByRole("button", {
+      name: t("serverDetail.copyJoinHostname"),
+    });
+    const hostnameBadge = screen.getByText(/survival\.relay\.example\.com/);
+    // The copy button must not be inside the badge span.
+    expect(hostnameBadge).not.toContainElement(copyBtn);
+  });
+});
+
 describe("ServerDetailPage settings slug (issue #961)", () => {
   let restoreWs: () => void;
 
