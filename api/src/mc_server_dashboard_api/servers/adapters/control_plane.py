@@ -162,6 +162,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         worker_credential: str | None = None,
         hydrate_timeout_seconds: float | None = None,
         snapshot_timeout_seconds: float | None = None,
+        stop_timeout_seconds: float | None = None,
     ) -> None:
         self._registry = registry
         self._control_plane = control_plane
@@ -181,6 +182,12 @@ class FleetControlPlaneAdapter(ControlPlane):
         # the assignment mid-upload, reopening the stop->re-place race. ``None``
         # keeps the default.
         self._snapshot_timeout_seconds = snapshot_timeout_seconds
+        # The graceful-stop command's worker round-trip gets its own (longer)
+        # command budget (issue #930): the worker's in-container save plus
+        # docker-stop escalation routinely outlasts the general command deadline on
+        # a slow host, and under it the dispatch times out -> 503 -> the assignment
+        # wedges and the stop-leg final snapshot is lost. ``None`` keeps the default.
+        self._stop_timeout_seconds = stop_timeout_seconds
 
     async def place(
         self,
@@ -311,7 +318,10 @@ class FleetControlPlaneAdapter(ControlPlane):
         self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
     ) -> CommandOutcome:
         return await self._dispatch(
-            worker_id, server_id, StopServerCommand(force=force)
+            worker_id,
+            server_id,
+            StopServerCommand(force=force),
+            timeout_override=self._stop_timeout_seconds,
         )
 
     async def restart(

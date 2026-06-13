@@ -1398,6 +1398,7 @@ def get_servers_control_plane(
         worker_credential=settings.control.worker_credential,
         hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
         snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
+        stop_timeout_seconds=settings.control.stop_timeout_seconds,
     )
 
 

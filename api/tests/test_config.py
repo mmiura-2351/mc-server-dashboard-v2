@@ -29,6 +29,10 @@ def test_defaults_apply_when_only_required_supplied(
     assert settings.log.format == "json"
     # JAR-pool GC defaults to daily (issue #293).
     assert settings.jar_gc.interval_seconds == 86400
+    # The graceful-stop worker round-trip gets its own generous budget (#930),
+    # mirroring the hydrate (#822) and final-snapshot (#847) budgets, so a slow
+    # host's stop does not time out under the general 30s command deadline.
+    assert settings.control.stop_timeout_seconds == 600
 
 
 def test_missing_required_database_url_fails_fast(
@@ -259,6 +263,7 @@ def test_token_ttl_must_be_positive(
         ("control", "command_timeout_seconds", 0),
         ("control", "hydrate_timeout_seconds", 0),
         ("control", "snapshot_timeout_seconds", 0),
+        ("control", "stop_timeout_seconds", 0),
         ("storage", "version_retention", -1),
         ("snapshot", "default_interval_seconds", 0),
         ("snapshot", "min_interval_seconds", 0),

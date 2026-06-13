@@ -162,9 +162,31 @@ async def test_snapshot_carries_the_snapshot_timeout_override() -> None:
     assert fleet.last_timeout_override == 600
 
 
-async def test_non_hydrate_commands_use_the_default_timeout() -> None:
-    # Only the hydrate dispatch overrides the deadline; every other command stays
-    # on the default command timeout (override is None).
+async def test_stop_carries_the_stop_timeout_override() -> None:
+    # The graceful stop's worker round-trip dispatches with the longer stop budget
+    # so the worker's in-container save + docker-stop escalation does not time out
+    # under the general command deadline and 503 the user for a stop the worker
+    # actually completes, wedging the assignment and losing the final snapshot
+    # (#930). Mirrors the hydrate (#822) and snapshot (#847) budgets.
+    fleet = _CapturingFleetControlPlane()
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]  # unused by stop
+        control_plane=fleet,
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+        stop_timeout_seconds=600,
+    )
+
+    await adapter.stop(
+        worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4())
+    )
+
+    assert fleet.last_timeout_override == 600
+
+
+async def test_non_budgeted_commands_use_the_default_timeout() -> None:
+    # Only the hydrate/snapshot/stop dispatches override the deadline; every other
+    # command stays on the default command timeout (override is None).
     fleet = _CapturingFleetControlPlane()
     adapter = FleetControlPlaneAdapter(
         registry=None,  # type: ignore[arg-type]
@@ -172,9 +194,11 @@ async def test_non_hydrate_commands_use_the_default_timeout() -> None:
         data_plane_base_url="https://api.example/",
         worker_credential="shhh",
         hydrate_timeout_seconds=600,
+        snapshot_timeout_seconds=600,
+        stop_timeout_seconds=600,
     )
 
-    await adapter.stop(
+    await adapter.restart(
         worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4())
     )
 
