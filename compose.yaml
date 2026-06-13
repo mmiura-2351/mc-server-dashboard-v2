@@ -166,6 +166,14 @@ services:
       MCD_API_RELAY__ENABLED: "${MCD_API_RELAY__ENABLED:-false}"
       MCD_API_RELAY__CREDENTIAL: "${MCD_API_RELAY__CREDENTIAL:-}"
       MCD_API_RELAY__BASE_DOMAIN: "${MCD_API_RELAY__BASE_DOMAIN:-}"
+      # Reconciler tuning (issue #985). Defaults preserve existing behavior; set
+      # MCD_API_RECONCILER__GRACE_SECONDS lower in .env to shorten the window during
+      # which running servers appear unjoinable after an API restart (servers whose
+      # observed state resets to unknown on boot converge once grace lapses).
+      MCD_API_RECONCILER__INTERVAL_SECONDS: "${MCD_API_RECONCILER__INTERVAL_SECONDS:-60}"
+      MCD_API_RECONCILER__GRACE_SECONDS: "${MCD_API_RECONCILER__GRACE_SECONDS:-660}"
+      MCD_API_RECONCILER__BACKOFF_BASE_SECONDS: "${MCD_API_RECONCILER__BACKOFF_BASE_SECONDS:-30}"
+      MCD_API_RECONCILER__BACKOFF_MAX_SECONDS: "${MCD_API_RECONCILER__BACKOFF_MAX_SECONDS:-3600}"
     volumes:
       - api-storage:/data/storage
     ports:

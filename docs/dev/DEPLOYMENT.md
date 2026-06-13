@@ -703,6 +703,31 @@ single host that also runs the relay will fail to publish its game port — even
 **Fix:** shift the allocator range up by setting `MCD_API_PORTS__RANGE_START`
 (e.g. `25566`) in `.env`, or run the relay on a separate host.
 
+### Reconciler grace after an API restart
+
+When the `api` container is recreated (e.g. a UI-only redeploy), the startup
+reset marks all servers `observed=unknown`; the reconciler does not re-dispatch
+a start until that divergence outlasts `reconciler.grace_seconds` (default
+**660 s ≈ 11 min**). During that window the relay maps `observed=unknown` →
+`STOPPED` and players get a "server stopped" MOTD even though the MC containers
+are healthy (issue #985).
+
+On a **single-host** deployment the Worker reconnects in seconds, so you can
+safely lower the grace to match that window. Add to `.env`:
+
+```sh
+MCD_API_RECONCILER__GRACE_SECONDS=60
+```
+
+After the next `docker compose up -d api` the API will converge running servers
+within ~60 s instead of ~11 min. The `:-660` fallback in `compose.yaml`
+preserves the default for operators who do not set this.
+
+The other reconciler knobs (`INTERVAL_SECONDS`, `BACKOFF_BASE_SECONDS`,
+`BACKOFF_MAX_SECONDS`) are also forwarded; see `.env.example` for their
+defaults and `api/src/mc_server_dashboard_api/config.py` for constraints
+(`backoff_max_seconds` must be ≥ 600 to keep crash-loop damping effective).
+
 ### Direct path vs relay path
 
 | | Direct path (today) | Relay path |
