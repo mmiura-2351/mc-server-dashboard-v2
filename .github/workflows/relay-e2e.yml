@@ -30,7 +30,7 @@ on:
       - "scripts/compose.relay-e2e.yaml"
       - ".github/workflows/relay-e2e.yml"
   push:
-    branches: [main, poc/relay-ingress]
+    branches: [main]
     paths:
       - "relay/**"
       - "api/src/mc_server_dashboard_api/fleet/**"
