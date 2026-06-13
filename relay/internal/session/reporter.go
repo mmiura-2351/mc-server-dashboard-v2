@@ -22,9 +22,9 @@ import (
 // pending events or every DefaultFlushInterval, whichever comes first (RELAY.md
 // Section 6).
 const (
-	DefaultFlushInterval     = 5 * time.Second
-	FlushMaxEvents           = 100
-	DefaultShutdownTimeout   = 10 * time.Second
+	DefaultFlushInterval   = 5 * time.Second
+	FlushMaxEvents         = 100
+	DefaultShutdownTimeout = 10 * time.Second
 )
 
 // MaxBufferedEvents caps each pending event slice (starts and ends separately)
