@@ -8,17 +8,20 @@ real RelayService client, so the relay-to-API contract is exercised end to end
 - Register: stores endpoint/CA (last-writer-wins) and returns base_domain;
 - ResolveJoin decision matrix: NOT_FOUND / STOPPED (not running / no worker /
   worker offline) / TUNNEL;
-- on TUNNEL a single-use token is minted and a TunnelDial is dispatched to the
-  assigned worker carrying the registered endpoint/CA;
-- ReportSessions responds UNIMPLEMENTED (issue #957).
+- on TUNNEL a token is minted and a TunnelDial is dispatched to the assigned
+  worker carrying the registered endpoint/CA;
+- ReportSessions persists start/end events through the SessionSink (issue #957);
+- Register closes orphaned sessions absent from the active set (issue #957).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Sequence
 
 import grpc
 import pytest
+from google.protobuf.timestamp_pb2 import Timestamp
 from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
@@ -35,10 +38,33 @@ from mc_server_dashboard_api.fleet.domain.server_route_resolver import (
     ServerRoute,
     ServerRouteResolver,
 )
+from mc_server_dashboard_api.fleet.domain.session_sink import SessionSink, SessionStart
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mcsd.relay.v1 import relay_pb2 as pb
 from mcsd.relay.v1.relay_pb2_grpc import RelayServiceStub
 from tests.fleet.fakes import FakeClock, make_worker
+
+
+class _RecordingSessionSink(SessionSink):
+    """In-memory SessionSink capturing the servicer's calls for assertions."""
+
+    def __init__(self) -> None:
+        self.starts: list[SessionStart] = []
+        self.ends: list[tuple[str, dt.datetime]] = []
+        self.close_absent_calls: list[tuple[list[str], dt.datetime]] = []
+
+    async def record_start(self, start: SessionStart) -> None:
+        self.starts.append(start)
+
+    async def record_end(self, *, session_id: str, ended_at: dt.datetime) -> None:
+        self.ends.append((session_id, ended_at))
+
+    async def close_absent(
+        self, *, active_session_ids: Sequence[str], ended_at: dt.datetime
+    ) -> int:
+        self.close_absent_calls.append((list(active_session_ids), ended_at))
+        return 0
+
 
 _T0 = dt.datetime(2026, 6, 12, 12, 0, tzinfo=dt.timezone.utc)
 _TIMEOUT = dt.timedelta(seconds=30)
@@ -76,14 +102,15 @@ class _Harness:
         control_plane: ControlPlaneState,
         registration: RelayRegistration | None = None,
         token_table: JoinTokenTable | None = None,
+        session_sink: SessionSink | None = None,
     ) -> None:
         self.resolver = resolver
         self.registry = registry
         self.control_plane = control_plane
         self.registration = registration or RelayRegistration()
-        self.token_table = token_table or JoinTokenTable(
-            clock=FakeClock(_T0), ttl=dt.timedelta(seconds=10)
-        )
+        self.token_table = token_table or JoinTokenTable()
+        self.session_sink = session_sink or _RecordingSessionSink()
+        self.clock = FakeClock(_T0)
         self._server: aio.Server | None = None
         self._channels: list[aio.Channel] = []
 
@@ -100,6 +127,8 @@ class _Harness:
             control_plane=GrpcControlPlane(
                 self.control_plane, timeout_seconds=_TIMEOUT.total_seconds()
             ),
+            session_sink=self.session_sink,
+            clock=self.clock,
         )
         port = server.add_insecure_port("127.0.0.1:0")
         await server.start()
@@ -139,6 +168,7 @@ async def _make_harness(
     control_plane: ControlPlaneState | None = None,
     registration: RelayRegistration | None = None,
     token_table: JoinTokenTable | None = None,
+    session_sink: SessionSink | None = None,
 ) -> tuple[_Harness, RelayServiceStub]:
     harness = _Harness(
         resolver=resolver,
@@ -146,6 +176,7 @@ async def _make_harness(
         control_plane=control_plane or ControlPlaneState(),
         registration=registration,
         token_table=token_table,
+        session_sink=session_sink,
     )
     stub = await harness.start()
     return harness, stub
@@ -307,6 +338,56 @@ async def test_resolve_join_stopped_when_worker_offline(
         await harness.stop()
 
 
+async def test_resolve_join_stopped_when_no_relay_registered(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    # The route is TUNNEL-eligible (running, online worker) but no relay has
+    # registered its tunnel endpoint, so a TunnelDial would carry nothing — the
+    # servicer answers STOPPED rather than hanging (relay_server.py STOPPED arm).
+    _register_online_worker(registry)
+    control_plane = ControlPlaneState()
+    control_plane.open_session(WorkerId(_WORKER_ID), session=0)
+    harness, stub = await _make_harness(
+        resolver=FakeResolver({"slug": _running_route()}),
+        registry=registry,
+        control_plane=control_plane,
+        registration=RelayRegistration(),  # never .set(): no registration
+    )
+    try:
+        resp = await stub.ResolveJoin(
+            pb.ResolveJoinRequest(slug="slug"), metadata=_auth()
+        )
+        assert resp.decision == pb.JOIN_DECISION_STOPPED
+        assert resp.display_name == "My Server"
+    finally:
+        await harness.stop()
+
+
+async def test_resolve_join_stopped_when_worker_not_connected(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    # The worker is online in the registry (passes the liveness check) but has no
+    # open outbound session, so dispatch raises WorkerNotConnectedError — the
+    # servicer answers STOPPED in-protocol (relay_server.py WorkerNotConnected arm).
+    _register_online_worker(registry)
+    registration = RelayRegistration()
+    registration.set(endpoint="relay:25665", ca_pem="CA")
+    harness, stub = await _make_harness(
+        resolver=FakeResolver({"slug": _running_route()}),
+        registry=registry,
+        control_plane=ControlPlaneState(),  # no open_session for the worker
+        registration=registration,
+    )
+    try:
+        resp = await stub.ResolveJoin(
+            pb.ResolveJoinRequest(slug="slug"), metadata=_auth()
+        )
+        assert resp.decision == pb.JOIN_DECISION_STOPPED
+        assert resp.display_name == "My Server"
+    finally:
+        await harness.stop()
+
+
 async def test_resolve_join_tunnel_mints_token_and_dispatches(
     registry: InMemoryWorkerRegistry,
 ) -> None:
@@ -344,41 +425,122 @@ async def test_resolve_join_tunnel_mints_token_and_dispatches(
         await harness.stop()
 
 
-async def test_resolve_join_token_is_single_use(
-    registry: InMemoryWorkerRegistry,
-) -> None:
-    _register_online_worker(registry)
-    control_plane = ControlPlaneState()
-    control_plane.open_session(WorkerId(_WORKER_ID), session=0)
-    registration = RelayRegistration()
-    registration.set(endpoint="relay:25665", ca_pem="CA")
-    token_table = JoinTokenTable(clock=FakeClock(_T0), ttl=dt.timedelta(seconds=10))
-    harness, stub = await _make_harness(
-        resolver=FakeResolver({"slug": _running_route()}),
-        registry=registry,
-        control_plane=control_plane,
-        registration=registration,
-        token_table=token_table,
-    )
-    try:
-        resp = await stub.ResolveJoin(
-            pb.ResolveJoinRequest(slug="slug"), metadata=_auth()
-        )
-        # The relay consumes the token on the worker's dial-back; a second consume
-        # (a replay) must fail.
-        assert token_table.consume(resp.token) == _SERVER_ID
-        assert token_table.consume(resp.token) is None
-    finally:
-        await harness.stop()
-
-
-async def test_report_sessions_unimplemented(
+async def test_report_sessions_rejects_missing_credential(
     registry: InMemoryWorkerRegistry,
 ) -> None:
     harness, stub = await _make_harness(resolver=FakeResolver(), registry=registry)
     try:
         with pytest.raises(aio.AioRpcError) as exc:
-            await stub.ReportSessions(pb.ReportSessionsRequest(), metadata=_auth())
-        assert exc.value.code() == grpc.StatusCode.UNIMPLEMENTED
+            await stub.ReportSessions(pb.ReportSessionsRequest())
+        assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
+    finally:
+        await harness.stop()
+
+
+def _timestamp(at: dt.datetime) -> Timestamp:
+    ts = Timestamp()
+    ts.FromDatetime(at)
+    return ts
+
+
+_SESSION_ID = "55555555-5555-5555-5555-555555555555"
+
+
+async def test_report_sessions_persists_start_and_end(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    sink = _RecordingSessionSink()
+    harness, stub = await _make_harness(
+        resolver=FakeResolver(), registry=registry, session_sink=sink
+    )
+    try:
+        await stub.ReportSessions(
+            pb.ReportSessionsRequest(
+                events=[
+                    pb.SessionEvent(
+                        start=pb.SessionStart(
+                            session_id=_SESSION_ID,
+                            server_id=_SERVER_ID,
+                            slug="amber-falcon-42",
+                            player_ip="203.0.113.7",
+                            username="steve",
+                            player_uuid="66666666-6666-6666-6666-666666666666",
+                            started_at=_timestamp(_T0),
+                        )
+                    ),
+                    pb.SessionEvent(
+                        end=pb.SessionEnd(
+                            session_id=_SESSION_ID,
+                            ended_at=_timestamp(_T0 + dt.timedelta(minutes=5)),
+                        )
+                    ),
+                ]
+            ),
+            metadata=_auth(),
+        )
+        assert len(sink.starts) == 1
+        start = sink.starts[0]
+        assert start.session_id == _SESSION_ID
+        assert start.server_id == _SERVER_ID
+        assert start.hostname == "amber-falcon-42"
+        assert start.player_ip == "203.0.113.7"
+        assert start.username == "steve"
+        assert start.player_uuid == "66666666-6666-6666-6666-666666666666"
+        assert start.started_at == _T0
+        assert sink.ends == [(_SESSION_ID, _T0 + dt.timedelta(minutes=5))]
+    finally:
+        await harness.stop()
+
+
+async def test_report_sessions_omits_blank_claimed_identity(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    # An empty proto3 string for username/player_uuid means absent (Login Start
+    # did not carry it) — the seam maps it to None, not "".
+    sink = _RecordingSessionSink()
+    harness, stub = await _make_harness(
+        resolver=FakeResolver(), registry=registry, session_sink=sink
+    )
+    try:
+        await stub.ReportSessions(
+            pb.ReportSessionsRequest(
+                events=[
+                    pb.SessionEvent(
+                        start=pb.SessionStart(
+                            session_id=_SESSION_ID,
+                            server_id=_SERVER_ID,
+                            slug="amber-falcon-42",
+                            player_ip="203.0.113.7",
+                            started_at=_timestamp(_T0),
+                        )
+                    )
+                ]
+            ),
+            metadata=_auth(),
+        )
+        assert sink.starts[0].username is None
+        assert sink.starts[0].player_uuid is None
+    finally:
+        await harness.stop()
+
+
+async def test_register_closes_orphaned_sessions(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    # Register carries the relay's still-active set; the servicer asks the sink to
+    # close every open row absent from it (orphan healing, RELAY.md Sections 6, 10).
+    sink = _RecordingSessionSink()
+    harness, stub = await _make_harness(
+        resolver=FakeResolver(), registry=registry, session_sink=sink
+    )
+    try:
+        await stub.Register(
+            pb.RegisterRequest(
+                tunnel_endpoint="relay:25665",
+                active_session_ids=[_SESSION_ID],
+            ),
+            metadata=_auth(),
+        )
+        assert sink.close_absent_calls == [([_SESSION_ID], _T0)]
     finally:
         await harness.stop()

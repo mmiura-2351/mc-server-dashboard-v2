@@ -56,6 +56,7 @@ def test_community_codes_match_appendix_a() -> None:
         "community:update",
         "community:delete",
         "audit:read",
+        "session:read",
     }
 
 

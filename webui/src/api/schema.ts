@@ -1065,6 +1065,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Sessions
+         * @description List a server's recorded game sessions newest-first (``session:read``).
+         *
+         *     Player IPs are PII, so this is gated by ``session:read`` (community-level)
+         *     rather than ``server:read`` (RELAY.md Section 8). The identity fields are the
+         *     *claimed* pre-auth Login Start values. Paginated by ``limit``/``offset``.
+         */
+        get: operations["list_sessions_api_communities__community_id__servers__server_id__sessions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/start": {
         parameters: {
             query?: never;
@@ -1879,6 +1903,41 @@ export interface components {
             path: string;
             /** Versions */
             versions: string[];
+        };
+        /** GameSessionListResponse */
+        GameSessionListResponse: {
+            /** Sessions */
+            sessions: components["schemas"]["GameSessionResponse"][];
+        };
+        /**
+         * GameSessionResponse
+         * @description One recorded game session (RELAY.md Sections 8, 13, 14).
+         *
+         *     ``username`` / ``player_uuid`` are the identity **claimed** in Login Start —
+         *     pre-authentication values, not a verified identity (RELAY.md Section 8). A
+         *     session of meaningful duration implies the claim survived Mojang auth, but the
+         *     fields themselves are unverified; the UI labels them as claimed. ``hostname``
+         *     / ``player_ip`` / ``started_at`` may be ``null`` on a not-yet-reconciled
+         *     end-before-start placeholder row.
+         */
+        GameSessionResponse: {
+            /** Ended At */
+            ended_at: string | null;
+            /** Hostname */
+            hostname: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Player Ip */
+            player_ip: string | null;
+            /** Player Uuid */
+            player_uuid: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Username */
+            username: string | null;
         };
         /**
          * GrantPermissionsResponse
@@ -4602,6 +4661,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ServerResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_sessions_api_communities__community_id__servers__server_id__sessions_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GameSessionListResponse"];
                 };
             };
             /** @description Validation Error */

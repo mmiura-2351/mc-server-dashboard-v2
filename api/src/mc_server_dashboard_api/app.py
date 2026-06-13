@@ -87,6 +87,9 @@ from mc_server_dashboard_api.servers.adapters.clock import (
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.game_session_prune_loop import (
+    run_game_session_prune_loop,
+)
 from mc_server_dashboard_api.servers.adapters.jar_provisioner import (
     CatalogJarProvisioner,
 )
@@ -103,6 +106,7 @@ from mc_server_dashboard_api.servers.adapters.server_route_resolver import (
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
+from mc_server_dashboard_api.servers.adapters.session_sink import ServersSessionSink
 from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_loop
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
@@ -119,6 +123,7 @@ from mc_server_dashboard_api.servers.application.backup_scheduler import (
     RunBackupScheduleTick,
 )
 from mc_server_dashboard_api.servers.application.backups import CreateBackup
+from mc_server_dashboard_api.servers.application.game_sessions import PruneGameSessions
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
@@ -174,10 +179,10 @@ _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
 # deadline that could kill a transfer the API still considers in flight.
 _TRANSFER_DEADLINE_MARGIN_SECONDS = 60
 
-# TTL of a single-use relay join token (RELAY.md Sections 4, 5): the relay waits
-# at most 10 s for the Worker's dial-back, so a token only needs to outlive that
-# window before it is swept.
-_RELAY_JOIN_TOKEN_TTL = dt.timedelta(seconds=10)
+# How often the game_session retention prune loop wakes (RELAY.md Section 8, issue
+# #957). The window is configured in *days* (relay.session_retention_days), so an
+# hourly resolution is far finer than needed while keeping the table bounded.
+_SESSION_PRUNE_TICK_SECONDS = 3600.0
 
 
 def _resolve_config_file() -> Path | None:
@@ -383,6 +388,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ValueError("relay.credential is required when relay.enabled is true")
         if not settings.relay.base_domain:
             raise ValueError("relay.base_domain is required when relay.enabled is true")
+        # The RelayService is served on the *same* gRPC listener as WorkerService
+        # (RELAY.md Section 6), which only starts when control.enabled. With the
+        # control plane off there is no listener to attach RelayService to, so the
+        # relay would be silently unserved while join_hostname is still exposed
+        # (PR #973 review). Fail fast rather than half-enabling the relay.
+        if not settings.control.enabled:
+            raise ValueError(
+                "relay.enabled requires control.enabled "
+                "(the RelayService shares the control-plane gRPC listener)"
+            )
 
     # The control channel must be authenticated AND encrypted (NFR-SEC-1). The
     # gRPC listener serves over TLS when control.tls.cert_file/key_file are both
@@ -501,6 +516,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         backup_task: asyncio.Task[None] | None = None
         reconciler_task: asyncio.Task[None] | None = None
         jar_gc_task: asyncio.Task[None] | None = None
+        session_prune_task: asyncio.Task[None] | None = None
         # Periodic login_attempt prune (SECURITY.md Section 3). Ungated on the
         # control plane: unlike the snapshot/backup loops it drives only the
         # database, so it must run on every API process to keep the append-only
@@ -556,18 +572,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     credential=settings.relay.credential,
                     base_domain=settings.relay.base_domain,
                     registration=RelayRegistration(),
-                    token_table=JoinTokenTable(
-                        clock=FleetSystemClock(),
-                        ttl=_RELAY_JOIN_TOKEN_TTL,
-                    ),
+                    token_table=JoinTokenTable(),
                     resolver=ServersServerRouteResolver(create_session_factory(engine)),
                     registry=registry,
                     control_plane=app.state.control_plane,
+                    session_sink=ServersSessionSink(create_session_factory(engine)),
+                    clock=FleetSystemClock(),
                 )
                 logging.getLogger(__name__).info(
                     "relay service registered on the gRPC listener",
                     extra={"base_domain": settings.relay.base_domain},
                 )
+                # Game-session retention prune (RELAY.md Section 8, issue #957):
+                # delete game_session rows older than relay.session_retention_days.
+                # Runs only when relay.enabled (the relay is what populates the
+                # table); a fixed hourly resolution is fine for a days-wide window.
+                session_pruner = PruneGameSessions(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    clock=ServersSystemClock(),
+                    retention=dt.timedelta(days=settings.relay.session_retention_days),
+                )
+                session_prune_task = asyncio.create_task(
+                    run_game_session_prune_loop(
+                        session_pruner,
+                        tick_seconds=_SESSION_PRUNE_TICK_SECONDS,
+                    )
+                )
+                logging.getLogger(__name__).info("game_session prune loop started")
             await grpc_server.start()
             app.state.grpc_server = grpc_server
             app.state.grpc_started = True
@@ -744,6 +775,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             prune_attempts_task.cancel()
             with suppress(asyncio.CancelledError):
                 await prune_attempts_task
+            if session_prune_task is not None:
+                session_prune_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await session_prune_task
             if jar_gc_task is not None:
                 jar_gc_task.cancel()
                 with suppress(asyncio.CancelledError):

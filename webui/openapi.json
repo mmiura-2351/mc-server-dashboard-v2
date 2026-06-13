@@ -852,6 +852,112 @@
         "title": "FileVersionsResponse",
         "type": "object"
       },
+      "GameSessionListResponse": {
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/GameSessionResponse"
+            },
+            "title": "Sessions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "title": "GameSessionListResponse",
+        "type": "object"
+      },
+      "GameSessionResponse": {
+        "description": "One recorded game session (RELAY.md Sections 8, 13, 14).\n\n``username`` / ``player_uuid`` are the identity **claimed** in Login Start \u2014\npre-authentication values, not a verified identity (RELAY.md Section 8). A\nsession of meaningful duration implies the claim survived Mojang auth, but the\nfields themselves are unverified; the UI labels them as claimed. ``hostname``\n/ ``player_ip`` / ``started_at`` may be ``null`` on a not-yet-reconciled\nend-before-start placeholder row.",
+        "properties": {
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "hostname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hostname"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "player_ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Ip"
+          },
+          "player_uuid": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Uuid"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "required": [
+          "id",
+          "hostname",
+          "player_ip",
+          "username",
+          "player_uuid",
+          "started_at",
+          "ended_at"
+        ],
+        "title": "GameSessionResponse",
+        "type": "object"
+      },
       "GrantPermissionsResponse": {
         "description": "The caller's own grant on one resource (DATABASE.md Section 6).",
         "properties": {
@@ -5913,6 +6019,85 @@
           }
         ],
         "summary": "Restart Server"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/sessions": {
+      "get": {
+        "description": "List a server's recorded game sessions newest-first (``session:read``).\n\nPlayer IPs are PII, so this is gated by ``session:read`` (community-level)\nrather than ``server:read`` (RELAY.md Section 8). The identity fields are the\n*claimed* pre-auth Login Start values. Paginated by ``limit``/``offset``.",
+        "operationId": "list_sessions_api_communities__community_id__servers__server_id__sessions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameSessionListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Sessions"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/start": {

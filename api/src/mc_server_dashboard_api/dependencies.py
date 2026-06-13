@@ -229,6 +229,9 @@ from mc_server_dashboard_api.servers.application.files import (
     UploadFile,
     WriteFile,
 )
+from mc_server_dashboard_api.servers.application.game_sessions import (
+    ListGameSessions,
+)
 from mc_server_dashboard_api.servers.application.groups import (
     AddPlayer,
     AttachGroup,
@@ -1723,6 +1726,13 @@ def get_list_backups(
     return ListBackups(
         uow=ServersUnitOfWork(session_factory), backup_store=backup_store
     )
+
+
+def get_list_game_sessions(request: Request) -> ListGameSessions:
+    """Assemble the :class:`ListGameSessions` use case (session:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListGameSessions(uow=ServersUnitOfWork(session_factory))
 
 
 def get_restore_backup(
