@@ -242,6 +242,7 @@ export const en = {
   "serverDetail.joinHostname": "Join address",
   "serverDetail.copyJoinHostname": "Copy",
   "serverDetail.copiedJoinHostname": "Copied!",
+  "serverDetail.copyJoinHostnameFailed": "Copy failed",
   // Tabs (WEBUI_SPEC.md 6.4–6.9). Built tabs: Overview, Settings; the rest are
   // placeholders pending later phases.
   "serverDetail.tab.overview": "Overview",
@@ -311,13 +312,14 @@ export const en = {
     "Soft share of CPU for this server, in millicores (1000 = one core). A relative weight under load, not a hard cap — the server can use more when the host is idle. Leave blank for auto.",
   "serverDetail.settings.cpuAllocationRange":
     "Enter a whole number between 100 and 128000 millicores, or leave blank for auto.",
-  // Relay slug rename (issue #961): visible only when relay is enabled.
-  "serverDetail.settings.slug": "URL slug",
+  // Relay join-address name field (issue #961): visible only when relay is enabled.
+  "serverDetail.settings.slug": "Join address name",
   "serverDetail.settings.slugHint":
-    "Lowercase letters, numbers and hyphens only. Cannot start or end with a hyphen.",
+    "Lowercase letters, numbers and hyphens only. Cannot start or end with a hyphen. Leave unchanged to keep the current join address.",
   "serverDetail.settings.slugInvalid":
     "Must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
-  "serverDetail.settings.slugTaken": "This slug is already in use.",
+  "serverDetail.settings.slugTaken":
+    "This join address name is already in use.",
   "serverDetail.settings.save": "Save changes",
   "serverDetail.settings.saved": "Settings saved.",
   "serverDetail.settings.atRestHint":

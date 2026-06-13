@@ -1296,6 +1296,75 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
     // Port badge is hidden when join_hostname is shown.
     expect(screen.queryByText(":25565")).not.toBeInTheDocument();
   });
+
+  it("copy button uses execCommand fallback when navigator.clipboard is unavailable (insecure context)", async () => {
+    // jsdom does not implement navigator.clipboard; this test verifies the
+    // legacy execCommand fallback fires and no unhandled error is thrown.
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "myserver.relay.example.com" }),
+    );
+    renderPage();
+    await screen.findByText(/myserver\.relay\.example\.com/);
+
+    // Confirm navigator.clipboard is absent in jsdom (the environment under
+    // which insecure-context behaviour is exercised).
+    expect((navigator as { clipboard?: unknown }).clipboard).toBeUndefined();
+
+    // jsdom does not define execCommand; define it so vi.spyOn can wrap it.
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+
+    // Clicking must not throw even without the Clipboard API.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
+    );
+
+    expect(execSpy).toHaveBeenCalledWith("copy");
+    // After a successful fallback copy the button shows the "Copied!" label.
+    expect(
+      await screen.findByRole("button", {
+        name: t("serverDetail.copiedJoinHostname"),
+      }),
+    ).toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
+
+  it("copy button shows error state when both Clipboard API and execCommand fail", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "myserver.relay.example.com" }),
+    );
+    renderPage();
+    await screen.findByText(/myserver\.relay\.example\.com/);
+
+    // jsdom does not define execCommand; define it so vi.spyOn can wrap it.
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => false,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(false);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
+    );
+
+    expect(
+      await screen.findByRole("button", {
+        name: t("serverDetail.copyJoinHostnameFailed"),
+      }),
+    ).toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
 });
 
 describe("ServerDetailPage settings slug (issue #961)", () => {

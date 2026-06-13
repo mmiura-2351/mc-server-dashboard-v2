@@ -163,25 +163,64 @@ function Loaded({
 // ── Overview header + lifecycle controls ────────────────────────────────────
 
 // Minimal copy-to-clipboard button: writes text via the Clipboard API and shows
-// a transient "Copied!" confirmation. Falls back silently if the API is absent.
+// a transient "Copied!" confirmation.  Falls back to the legacy execCommand
+// approach in insecure contexts (plain HTTP off-localhost) where
+// navigator.clipboard is undefined.  On total failure shows a brief error state.
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+    };
+  }, []);
+
   const copy = useCallback(() => {
-    navigator.clipboard.writeText(text).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      },
-      () => {
-        /* ignore */
-      },
-    );
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
+
+    const succeed = () => {
+      setCopied(true);
+      setFailed(false);
+      timerRef.current = setTimeout(() => setCopied(false), 1500);
+    };
+    const fail = () => {
+      setFailed(true);
+      timerRef.current = setTimeout(() => setFailed(false), 1500);
+    };
+
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(succeed, fail);
+      return;
+    }
+    // Legacy fallback for insecure (plain HTTP) contexts.
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok) {
+        succeed();
+      } else {
+        fail();
+      }
+    } catch {
+      fail();
+    }
   }, [text]);
+
   return (
     <button type="button" className="btn sm" onClick={copy}>
-      {copied
-        ? t("serverDetail.copiedJoinHostname")
-        : t("serverDetail.copyJoinHostname")}
+      {failed
+        ? t("serverDetail.copyJoinHostnameFailed")
+        : copied
+          ? t("serverDetail.copiedJoinHostname")
+          : t("serverDetail.copyJoinHostname")}
     </button>
   );
 }
@@ -1273,6 +1312,7 @@ function Settings({
             <input
               type="text"
               aria-label={t("serverDetail.settings.slug")}
+              placeholder={server.slug}
               value={slug}
               disabled={!canUpdate}
               onChange={(e) => {

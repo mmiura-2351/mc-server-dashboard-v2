@@ -255,7 +255,7 @@ function SessionsView({
         <p className="sub">{t("sessions.loading")}</p>
       ) : query.isError ? (
         <p className="field-error">{t("sessions.loadError")}</p>
-      ) : sessions.length === 0 && offset === 0 ? (
+      ) : sessions.length === 0 ? (
         <p className="sub">{t("sessions.empty")}</p>
       ) : (
         <>

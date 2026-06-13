@@ -249,6 +249,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.joinHostname": "参加アドレス",
   "serverDetail.copyJoinHostname": "コピー",
   "serverDetail.copiedJoinHostname": "コピーしました！",
+  "serverDetail.copyJoinHostnameFailed": "コピーに失敗しました",
   // Tabs (WEBUI_SPEC.md 6.4–6.9).
   "serverDetail.tab.overview": "概要",
   "serverDetail.tab.console": "コンソール",
@@ -315,13 +316,14 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーへのCPUの割り当て（ミリコア、1000＝1コア）。上限ではなく負荷時の相対的な割り当てで、ホストに余裕があればこれを超えて使用できます。空欄にすると自動になります。",
   "serverDetail.settings.cpuAllocationRange":
     "100〜128000 ミリコアの整数を入力するか、空欄にして自動にしてください。",
-  // Relay slug rename (issue #961).
-  "serverDetail.settings.slug": "URLスラッグ",
+  // Relay 参加アドレス名フィールド (issue #961).
+  "serverDetail.settings.slug": "参加アドレス名",
   "serverDetail.settings.slugHint":
-    "小文字・数字・ハイフンのみ使用できます。先頭と末尾にハイフンは使えません。",
+    "小文字・数字・ハイフンのみ使用できます。先頭と末尾にハイフンは使えません。変更しなければ現在の参加アドレスが維持されます。",
   "serverDetail.settings.slugInvalid":
     "有効なDNSラベルを入力してください: 小文字・数字・ハイフンのみ、先頭と末尾にハイフン不可。",
-  "serverDetail.settings.slugTaken": "このスラッグはすでに使用されています。",
+  "serverDetail.settings.slugTaken":
+    "この参加アドレス名はすでに使用されています。",
   "serverDetail.settings.save": "変更を保存",
   "serverDetail.settings.saved": "設定を保存しました。",
   "serverDetail.settings.atRestHint":
