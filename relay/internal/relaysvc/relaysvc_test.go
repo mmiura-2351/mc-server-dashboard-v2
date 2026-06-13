@@ -23,13 +23,12 @@ type fakeRegistrar struct {
 	// regFn, when set, drives Register: it receives the call's context and
 	// returns the result, overriding baseDomain/regErr. Lets tests model a
 	// black-holed call (block on ctx) or a fail-then-succeed sequence.
-	regFn func(ctx context.Context, call int) (string, error)
+	regFn func(ctx context.Context) (string, error)
 }
 
 func (f *fakeRegistrar) Register(ctx context.Context, _, _ string, active []string) (string, error) {
 	f.mu.Lock()
 	f.regCalls++
-	call := f.regCalls
 	f.lastActive = active
 	fn := f.regFn
 	regErr := f.regErr
@@ -37,7 +36,7 @@ func (f *fakeRegistrar) Register(ctx context.Context, _, _ string, active []stri
 	f.mu.Unlock()
 
 	if fn != nil {
-		return fn(ctx, call)
+		return fn(ctx)
 	}
 	if regErr != nil {
 		return "", regErr
@@ -206,7 +205,7 @@ func TestRunReRegistersPromptlyOnReconnect(t *testing.T) {
 	conn := newFakeConn(connectivity.TransientFailure)
 	succeeded := make(chan struct{})
 	reg := &fakeRegistrar{
-		regFn: func(_ context.Context, call int) (string, error) {
+		regFn: func(_ context.Context) (string, error) {
 			// First call fails (API is down); once the conn is Ready, succeed.
 			if conn.GetState() != connectivity.Ready {
 				return "", errors.New("api down")
@@ -257,7 +256,7 @@ func TestRegisterOnceRespectsDeadline(t *testing.T) {
 	defer func() { registerTimeout = prev }()
 
 	reg := &fakeRegistrar{
-		regFn: func(ctx context.Context, _ int) (string, error) {
+		regFn: func(ctx context.Context) (string, error) {
 			<-ctx.Done() // black hole: block until the call's deadline fires.
 			return "", ctx.Err()
 		},
