@@ -128,6 +128,34 @@ func TestCapOldestDropsFront(t *testing.T) {
 	}
 }
 
+// blockingClient blocks until its context is cancelled, simulating an
+// unreachable API.
+type blockingClient struct{}
+
+func (blockingClient) ReportSessions(ctx context.Context, _ []apiclient.SessionStart, _ []apiclient.SessionEnd) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestReporterShutdownFlushTimesOut(t *testing.T) {
+	r := NewReporter(blockingClient{}, discardLogger(), nil)
+	r.shutdownTimeout = 50 * time.Millisecond
+	r.WithFlushInterval(time.Hour) // prevent periodic flushes
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	cancel()
+
+	select {
+	case <-done:
+		// Run returned; the shutdown flush was bounded.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within the shutdown flush timeout; would hang indefinitely")
+	}
+}
+
 func TestReporterRunFlushesOnShutdown(t *testing.T) {
 	fake := &fakeReportClient{}
 	r := NewReporter(fake, discardLogger(), nil)
