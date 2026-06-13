@@ -132,7 +132,7 @@ func newHarness(t *testing.T) *harness {
 
 	apiClient := apiclient.New(conn, "relay-cred")
 	reporter := session.NewReporter(apiClient, logger, time.Now).WithFlushInterval(50 * time.Millisecond)
-	svc := relaysvc.New(apiClient, reporter, "relay:25665", "", logger)
+	svc := relaysvc.New(apiClient, conn, reporter, "relay:25665", "", logger)
 
 	tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
 	cache := game.NewStatusCache(5*time.Second, time.Now)

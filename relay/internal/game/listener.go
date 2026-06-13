@@ -31,6 +31,10 @@ const dialBackTimeout = 10 * time.Second
 // deadline is already cleared on the login path before this call).
 const resolveJoinTimeout = 5 * time.Second
 
+// disconnectWriteTimeout bounds the Login Disconnect write so a stalled client
+// cannot pin the goroutine (issue #971).
+const disconnectWriteTimeout = 10 * time.Second
+
 // Resolver is the API surface the listener needs. Narrowed to an interface so
 // tests inject a fake.
 type Resolver interface {
@@ -341,8 +345,10 @@ func (l *Listener) awaitTunnel(ctx context.Context, token string) (net.Conn, boo
 }
 
 // disconnect sends a Login Disconnect with reason and closes the connection
-// (RELAY.md Section 7).
+// (RELAY.md Section 7). A short write deadline bounds the write so a stalled
+// client cannot pin the goroutine (issue #971).
 func (l *Listener) disconnect(conn net.Conn, reason string) {
+	_ = conn.SetWriteDeadline(time.Now().Add(disconnectWriteTimeout))
 	_ = writePacket(conn, mc.LoginDisconnectPacket(reason))
 	_ = conn.Close()
 }

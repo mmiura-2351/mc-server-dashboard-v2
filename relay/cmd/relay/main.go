@@ -72,7 +72,7 @@ func run(ctx context.Context) error {
 
 	apiClient := apiclient.New(conn, cfg.API.Credential)
 	reporter := session.NewReporter(apiClient, logger, time.Now)
-	svc := relaysvc.New(apiClient, reporter, cfg.Tunnel.PublicEndpoint, tunnelCAPEM, logger)
+	svc := relaysvc.New(apiClient, conn, reporter, cfg.Tunnel.PublicEndpoint, tunnelCAPEM, logger)
 
 	tokens := tunnel.NewTokenTable(tokenTTL, time.Now)
 	cache := game.NewStatusCache(time.Duration(cfg.Game.StatusCacheSeconds)*time.Second, time.Now)
