@@ -1078,19 +1078,20 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.stopDeadline())
 	defer cancel()
 
-	if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
-		// RCON "stop" succeeded and the process exited: Minecraft's own shutdown
-		// save already flushed dirty chunks to disk, so no pre-fallback flush is
-		// needed. The RCON-success path has zero added latency.
-		return nil
+	// Always flush before stop on the graceful path (#1007/#1008): MC's own
+	// shutdown save (via RCON "stop") does NOT reliably flush dirty region
+	// chunks when a player was connected — observed on MC 26.1.2 with
+	// relay/tunnel connections. The flush (RCON save-all + settleWorkingSet)
+	// ensures chunks are on disk BEFORE the process terminates.
+	// Run on a detached context so it does not consume the stopDeadline.
+	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
+		flushCtx, flushCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 90*time.Second)
+		preFallback[0](flushCtx)
+		flushCancel()
 	}
 
-	// RCON stop failed (or this is a force stop). If the caller supplied a
-	// pre-fallback flush callback, run it now while the MC process is still alive
-	// and RCON may still be reachable — docker stop (SIGTERM→SIGKILL) may not
-	// give MC enough time to complete its shutdown save (#1007).
-	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
-		preFallback[0](stopCtx)
+	if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
+		return nil
 	}
 
 	if err := i.docker.Stop(stopCtx, id, i.stopTimeout); err == nil && i.waitExit(stopCtx, i.stopTimeout) {
@@ -1114,7 +1115,13 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
 	}
 
-	if err := i.docker.Kill(stopCtx, id); err != nil {
+	// Use a detached context for the kill call so it is never starved by
+	// the stopDeadline — a kill MUST reach the daemon even when the prior
+	// RCON + docker-stop phases consumed the entire budget (observed with
+	// MC 26.1.2 shutdown-save hangs under relay/tunnel connections).
+	killCtx, killCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 30*time.Second)
+	defer killCancel()
+	if err := i.docker.Kill(killCtx, id); err != nil {
 		// The kill call itself errored (e.g. a hung or erroring daemon), so this Stop
 		// failed without confirming the container died. Reset the stopping latch (and
 		// restore the pre-stop state) so a retried Stop re-runs the full sequence
