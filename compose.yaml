@@ -166,12 +166,12 @@ services:
       MCD_API_RELAY__ENABLED: "${MCD_API_RELAY__ENABLED:-false}"
       MCD_API_RELAY__CREDENTIAL: "${MCD_API_RELAY__CREDENTIAL:-}"
       MCD_API_RELAY__BASE_DOMAIN: "${MCD_API_RELAY__BASE_DOMAIN:-}"
-      # Reconciler tuning (issue #985). Defaults preserve existing behavior; set
-      # MCD_API_RECONCILER__GRACE_SECONDS lower in .env to shorten the window during
-      # which running servers appear unjoinable after an API restart (servers whose
-      # observed state resets to unknown on boot converge once grace lapses).
+      # Reconciler tuning (issue #985). Defaults preserve existing behavior.
+      # To speed self-heal after an API restart, lower HELD_START_GRACE_SECONDS
+      # (default 90 s) rather than GRACE_SECONDS (which has a ~630 s safety floor).
       MCD_API_RECONCILER__INTERVAL_SECONDS: "${MCD_API_RECONCILER__INTERVAL_SECONDS:-60}"
       MCD_API_RECONCILER__GRACE_SECONDS: "${MCD_API_RECONCILER__GRACE_SECONDS:-660}"
+      MCD_API_RECONCILER__HELD_START_GRACE_SECONDS: "${MCD_API_RECONCILER__HELD_START_GRACE_SECONDS:-90}"
       MCD_API_RECONCILER__BACKOFF_BASE_SECONDS: "${MCD_API_RECONCILER__BACKOFF_BASE_SECONDS:-30}"
       MCD_API_RECONCILER__BACKOFF_MAX_SECONDS: "${MCD_API_RECONCILER__BACKOFF_MAX_SECONDS:-3600}"
       # Game-port auto-assignment range (issue #1002). Defaults match the api's
