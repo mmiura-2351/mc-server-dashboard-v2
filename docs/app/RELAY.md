@@ -590,3 +590,7 @@ for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
 - **Bedrock** (UDP/RakNet) — the application targets Java (epic scope).
 - **SRV-based custom domains** (player-owned domains pointing at the relay)
   — possible later; routing already keys on the full hostname.
+- **Observability / metrics** — the relay exposes no Prometheus metrics or
+  tracing yet; add on demand.
+- **Graceful drain on shutdown** — restart drops in-flight sessions rather
+  than draining them; a drain window is future work.
