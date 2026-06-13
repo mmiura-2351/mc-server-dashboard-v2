@@ -120,3 +120,56 @@ func TestTokenTableCancelAfterDeliver(t *testing.T) {
 		t.Error("delivered conn not on the channel")
 	}
 }
+
+// TestTokenTableSweepExpired verifies that sweepExpired removes waiters whose
+// TTL has elapsed, preventing indefinite map growth when Cancel is never called.
+func TestTokenTableSweepExpired(t *testing.T) {
+	now := time.Unix(0, 0)
+	table := NewTokenTable(10*time.Second, func() time.Time { return now })
+
+	table.Register("alive")
+	table.Register("expired")
+
+	// Advance time past the TTL for "expired" but register "alive" fresh.
+	now = now.Add(11 * time.Second)
+	table.Register("alive") // re-register with a fresh expiry
+
+	table.sweepExpired()
+
+	table.mu.Lock()
+	_, alivePresent := table.waiters["alive"]
+	_, expiredPresent := table.waiters["expired"]
+	table.mu.Unlock()
+
+	if !alivePresent {
+		t.Error("alive entry should survive the sweep")
+	}
+	if expiredPresent {
+		t.Error("expired entry should be removed by the sweep")
+	}
+}
+
+// TestTokenTableSweepLeavesDelivered verifies that sweep does not interfere
+// with entries already consumed by Deliver (they are already deleted).
+func TestTokenTableSweepDeliveredAlreadyGone(t *testing.T) {
+	now := time.Unix(0, 0)
+	table := NewTokenTable(10*time.Second, func() time.Time { return now })
+
+	ch := table.Register("tok")
+	c, _ := net.Pipe()
+	defer func() { _ = c.Close() }()
+
+	if !table.Deliver("tok", c) {
+		t.Fatal("deliver should match")
+	}
+	<-ch // drain
+
+	table.sweepExpired()
+
+	table.mu.Lock()
+	n := len(table.waiters)
+	table.mu.Unlock()
+	if n != 0 {
+		t.Errorf("map should be empty after deliver+sweep, got %d entries", n)
+	}
+}
