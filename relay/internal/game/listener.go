@@ -15,6 +15,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/netutil"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/splice"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
 )
@@ -101,7 +102,7 @@ func (l *Listener) Serve(ctx context.Context) error {
 
 // handle drives one player connection from handshake to splice or drop.
 func (l *Listener) handle(ctx context.Context, conn net.Conn) {
-	ip := hostOf(conn.RemoteAddr())
+	ip := netutil.HostOf(conn.RemoteAddr())
 
 	if !l.caps.Acquire(ip) {
 		_ = conn.Close()
@@ -352,15 +353,6 @@ func (l *Listener) disconnect(conn net.Conn, reason string) {
 	_ = conn.SetWriteDeadline(time.Now().Add(disconnectWriteTimeout))
 	_ = writePacket(conn, mc.LoginDisconnectPacket(reason))
 	_ = conn.Close()
-}
-
-// hostOf extracts the IP (without port) from a remote address.
-func hostOf(addr net.Addr) string {
-	host, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return addr.String()
-	}
-	return host
 }
 
 // writePacket writes a fully-framed Minecraft packet to conn.
