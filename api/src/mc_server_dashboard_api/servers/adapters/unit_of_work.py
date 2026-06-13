@@ -40,6 +40,7 @@ from mc_server_dashboard_api.servers.adapters.repositories import (
 from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     ServerNameAlreadyExistsError,
+    SlugAlreadyTakenError,
 )
 from mc_server_dashboard_api.servers.domain.repositories import ResourceGrantSweeper
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -47,9 +48,11 @@ from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 # Unique constraints mapped to the domain error to raise when a concurrent insert
 # violates one, so the race surfaces as the same error a use-case pre-check would
 # raise. ``uq_server_community_name`` (migration 0005) is the name backstop;
-# ``uq_server_game_port`` (migration 0009) is the game-port backstop.
+# ``uq_server_game_port`` (migration 0009) is the game-port backstop;
+# ``uq_server_slug`` (migration 0016) is the relay slug backstop.
 _SERVER_NAME_CONSTRAINTS = frozenset({"uq_server_community_name"})
 _GAME_PORT_CONSTRAINTS = frozenset({"uq_server_game_port"})
+_SLUG_CONSTRAINTS = frozenset({"uq_server_slug"})
 
 
 class _ResourceGrantSweeperAdapter(ResourceGrantSweeper):
@@ -120,6 +123,8 @@ def _translate_integrity_error(exc: IntegrityError) -> None:
         raise ServerNameAlreadyExistsError(str(constraint)) from exc
     if constraint in _GAME_PORT_CONSTRAINTS:
         raise PortAlreadyTakenError(str(constraint)) from exc
+    if constraint in _SLUG_CONSTRAINTS:
+        raise SlugAlreadyTakenError(str(constraint)) from exc
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:
