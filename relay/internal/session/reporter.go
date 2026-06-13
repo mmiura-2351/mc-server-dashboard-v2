@@ -137,7 +137,23 @@ func (r *Reporter) Run(ctx context.Context) {
 			flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.shutdownTimeout)
 			defer cancel()
 			r.flush(flushCtx)
-			return
+			// Drain events that arrived while the flush above was in flight.
+			// In-flight handle goroutines may call End after the primary flush
+			// drained the buffer; a brief drain loop rescues those stragglers
+			// within the existing shutdown timeout.
+			drainTimer := time.NewTimer(100 * time.Millisecond)
+			defer drainTimer.Stop()
+			for {
+				select {
+				case <-r.flushSignal:
+					r.flush(flushCtx)
+				case <-drainTimer.C:
+					r.flush(flushCtx)
+					return
+				case <-flushCtx.Done():
+					return
+				}
+			}
 		case <-ticker.C:
 			r.flush(ctx)
 		case <-r.flushSignal:

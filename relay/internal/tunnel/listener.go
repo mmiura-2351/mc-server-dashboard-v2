@@ -116,14 +116,14 @@ func readHandshake(conn net.Conn) (string, bool) {
 	r := bufio.NewReaderSize(io.LimitReader(conn, maxHandshakeBytes), maxHandshakeBytes)
 
 	first, err := r.ReadSlice('\n')
-	if err != nil || strings.TrimRight(string(first), "\n") != handshakePrefix {
+	if err != nil || strings.TrimSuffix(string(first), "\n") != handshakePrefix {
 		return "", false
 	}
 	tokenLine, err := r.ReadSlice('\n')
 	if err != nil {
 		return "", false
 	}
-	token := strings.TrimRight(string(tokenLine), "\n")
+	token := strings.TrimSuffix(string(tokenLine), "\n")
 	if token == "" {
 		return "", false
 	}
