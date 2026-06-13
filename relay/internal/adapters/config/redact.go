@@ -32,6 +32,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Group("tunnel",
 			slog.String("listen", c.Tunnel.Listen),
 			slog.String("public_endpoint", c.Tunnel.PublicEndpoint),
+			slog.Uint64("max_conns_per_ip", uint64(c.Tunnel.MaxConnsPerIP)),
 			slog.Group("tls",
 				slog.String("cert_file", c.Tunnel.TLS.CertFile),
 				slog.String("key_file", masked(c.Tunnel.TLS.KeyFile)),

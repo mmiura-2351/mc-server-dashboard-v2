@@ -53,6 +53,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Tunnel.Listen != ":25665" {
 		t.Errorf("tunnel.listen default = %q", cfg.Tunnel.Listen)
 	}
+	if cfg.Tunnel.MaxConnsPerIP != 64 {
+		t.Errorf("tunnel.max_conns_per_ip default = %d", cfg.Tunnel.MaxConnsPerIP)
+	}
 	if cfg.Log.Level != "info" || cfg.Log.Format != "json" {
 		t.Errorf("log defaults = %q/%q", cfg.Log.Level, cfg.Log.Format)
 	}
@@ -65,6 +68,7 @@ func TestLoadEnvOverride(t *testing.T) {
 		"MCD_RELAY_GAME_STATUS_CACHE_SECONDS": "12",
 		"MCD_RELAY_API_CREDENTIAL":            "envsecret",
 		"MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT":    "other:25665",
+		"MCD_RELAY_TUNNEL_MAX_CONNS_PER_IP":   "128",
 	})
 	cfg, err := Load(writeTOML(t, minimalTOML), env)
 	if err != nil {
@@ -84,6 +88,9 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.Tunnel.PublicEndpoint != "other:25665" {
 		t.Errorf("env override public_endpoint = %q", cfg.Tunnel.PublicEndpoint)
+	}
+	if cfg.Tunnel.MaxConnsPerIP != 128 {
+		t.Errorf("env override tunnel.max_conns_per_ip = %d", cfg.Tunnel.MaxConnsPerIP)
 	}
 }
 

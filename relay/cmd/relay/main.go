@@ -24,6 +24,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/config"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/game"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/relaysvc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/session"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
@@ -76,13 +77,14 @@ func run(ctx context.Context) error {
 
 	tokens := tunnel.NewTokenTable(tokenTTL, time.Now)
 	cache := game.NewStatusCache(time.Duration(cfg.Game.StatusCacheSeconds)*time.Second, time.Now)
-	caps := game.NewIPCaps(cfg.Game.MaxConnsPerIP, cfg.Game.JoinsPerIPPerSecond, time.Now)
+	caps := ipcaps.NewIPCaps(cfg.Game.MaxConnsPerIP, cfg.Game.JoinsPerIPPerSecond, time.Now)
+	tunnelCaps := ipcaps.NewIPCaps(cfg.Tunnel.MaxConnsPerIP, 0, time.Now)
 
 	tunnelTLS, err := buildTunnelTLS(cfg.Tunnel.TLS)
 	if err != nil {
 		return err
 	}
-	tunnelLn, err := tunnel.NewListener(cfg.Tunnel.Listen, tunnelTLS, tokens, logger)
+	tunnelLn, err := tunnel.NewListener(cfg.Tunnel.Listen, tunnelTLS, tokens, tunnelCaps, logger)
 	if err != nil {
 		return fmt.Errorf("bind tunnel listener %q: %w", cfg.Tunnel.Listen, err)
 	}

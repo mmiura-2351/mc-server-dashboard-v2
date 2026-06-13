@@ -10,6 +10,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 )
 
 // dialHandshakeDeadline bounds how long a tunnel connection has to send its
@@ -33,16 +35,19 @@ const handshakePrefix = "MCSD-TUNNEL/1"
 type Listener struct {
 	ln     net.Listener
 	tokens *TokenTable
+	caps   *ipcaps.IPCaps
 	logger *slog.Logger
 }
 
-// NewListener binds the tunnel listener on addr with the given TLS config.
-func NewListener(addr string, tlsCfg *tls.Config, tokens *TokenTable, logger *slog.Logger) (*Listener, error) {
+// NewListener binds the tunnel listener on addr with the given TLS config. caps
+// enforces the per-IP concurrent-connection cap (RELAY.md Section 11); only its
+// connection cap is used, since the tunnel has no join concept.
+func NewListener(addr string, tlsCfg *tls.Config, tokens *TokenTable, caps *ipcaps.IPCaps, logger *slog.Logger) (*Listener, error) {
 	ln, err := tls.Listen("tcp", addr, tlsCfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{ln: ln, tokens: tokens, logger: logger}, nil
+	return &Listener{ln: ln, tokens: tokens, caps: caps, logger: logger}, nil
 }
 
 // Addr returns the listener's bound address.
@@ -69,6 +74,20 @@ func (l *Listener) Serve(ctx context.Context) error {
 // handle reads the dial-back handshake and either delivers the connection to a
 // waiting player or closes it without a response (RELAY.md Section 5).
 func (l *Listener) handle(conn net.Conn) {
+	ip := hostOf(conn.RemoteAddr())
+
+	// Per-IP concurrent-connection cap (RELAY.md Section 11): bound how many
+	// unauthenticated handshake windows one source IP can hold. Over the cap is a
+	// silent close, matching the tunnel's bad-token behaviour. The slot is held
+	// only for the pre-auth window — once the handshake either fails or the conn
+	// is delivered to a waiter, the slot is released, since a delivered
+	// connection is authenticated and accounted on the game side.
+	if !l.caps.Acquire(ip) {
+		_ = conn.Close()
+		return
+	}
+	defer l.caps.Release(ip)
+
 	token, ok := readHandshake(conn)
 	if !ok {
 		_ = conn.Close()
@@ -81,6 +100,15 @@ func (l *Listener) handle(conn net.Conn) {
 	}
 	// On a successful Deliver the waiter owns conn and closes it when the splice
 	// ends.
+}
+
+// hostOf extracts the IP (without port) from a remote address.
+func hostOf(addr net.Addr) string {
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
 }
 
 // readHandshake parses the "MCSD-TUNNEL/1\n<token>\n" handshake within the

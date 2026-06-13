@@ -77,6 +77,10 @@ type TunnelConfig struct {
 	// PublicEndpoint is the host:port advertised to Workers via Register →
 	// TunnelDial so they know where to dial back. Required.
 	PublicEndpoint string
+	// MaxConnsPerIP caps concurrent connections from one source IP on the tunnel
+	// listener (default 64), bounding how many pre-auth handshake windows one IP
+	// can hold (RELAY.md Section 11).
+	MaxConnsPerIP uint32
 	// TLS is the tunnel listener TLS material. Required.
 	TLS TunnelTLSConfig
 }
@@ -128,6 +132,7 @@ type fileConfig struct {
 	Tunnel struct {
 		Listen         *string `toml:"listen"`
 		PublicEndpoint *string `toml:"public_endpoint"`
+		MaxConnsPerIP  *uint32 `toml:"max_conns_per_ip"`
 		TLS            struct {
 			CertFile         *string `toml:"cert_file"`
 			KeyFile          *string `toml:"key_file"`
@@ -151,7 +156,8 @@ func defaults() Config {
 			JoinsPerIPPerSecond: 10,
 		},
 		Tunnel: TunnelConfig{
-			Listen: ":25665",
+			Listen:        ":25665",
+			MaxConnsPerIP: 64,
 		},
 		Log: LogConfig{
 			Level:  "info",
@@ -209,6 +215,7 @@ func applyFile(cfg *Config, path string) error {
 	setUint32(&cfg.Game.JoinsPerIPPerSecond, fc.Game.JoinsPerIPPerSecond)
 	setString(&cfg.Tunnel.Listen, fc.Tunnel.Listen)
 	setString(&cfg.Tunnel.PublicEndpoint, fc.Tunnel.PublicEndpoint)
+	setUint32(&cfg.Tunnel.MaxConnsPerIP, fc.Tunnel.MaxConnsPerIP)
 	setString(&cfg.Tunnel.TLS.CertFile, fc.Tunnel.TLS.CertFile)
 	setString(&cfg.Tunnel.TLS.KeyFile, fc.Tunnel.TLS.KeyFile)
 	setString(&cfg.Tunnel.TLS.AdvertisedCAFile, fc.Tunnel.TLS.AdvertisedCAFile)
@@ -243,6 +250,9 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	}
 	setEnvString(&cfg.Tunnel.Listen, getenv, "TUNNEL_LISTEN")
 	setEnvString(&cfg.Tunnel.PublicEndpoint, getenv, "TUNNEL_PUBLIC_ENDPOINT")
+	if err := setEnvUint32(&cfg.Tunnel.MaxConnsPerIP, getenv, "TUNNEL_MAX_CONNS_PER_IP"); err != nil {
+		return err
+	}
 	setEnvString(&cfg.Tunnel.TLS.CertFile, getenv, "TUNNEL_TLS_CERT_FILE")
 	setEnvString(&cfg.Tunnel.TLS.KeyFile, getenv, "TUNNEL_TLS_KEY_FILE")
 	setEnvString(&cfg.Tunnel.TLS.AdvertisedCAFile, getenv, "TUNNEL_TLS_ADVERTISED_CA_FILE")

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/splice"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
@@ -54,13 +55,13 @@ type Listener struct {
 	resolver Resolver
 	tokens   *tunnel.TokenTable
 	cache    *StatusCache
-	caps     *IPCaps
+	caps     *ipcaps.IPCaps
 	sessions SessionRecorder
 	logger   *slog.Logger
 }
 
 // NewListener binds the game listener on addr.
-func NewListener(addr string, resolver Resolver, tokens *tunnel.TokenTable, cache *StatusCache, caps *IPCaps, sessions SessionRecorder, logger *slog.Logger) (*Listener, error) {
+func NewListener(addr string, resolver Resolver, tokens *tunnel.TokenTable, cache *StatusCache, caps *ipcaps.IPCaps, sessions SessionRecorder, logger *slog.Logger) (*Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
