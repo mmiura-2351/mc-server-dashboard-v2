@@ -22,8 +22,9 @@ import (
 // pending events or every DefaultFlushInterval, whichever comes first (RELAY.md
 // Section 6).
 const (
-	DefaultFlushInterval = 5 * time.Second
-	FlushMaxEvents       = 100
+	DefaultFlushInterval     = 5 * time.Second
+	FlushMaxEvents           = 100
+	DefaultShutdownTimeout   = 10 * time.Second
 )
 
 // MaxBufferedEvents caps each pending event slice (starts and ends separately)
@@ -41,10 +42,11 @@ type reportClient interface {
 // Reporter mints session ids, tracks open sessions, and batches lifecycle
 // events to the API. Safe for concurrent use.
 type Reporter struct {
-	client   reportClient
-	logger   *slog.Logger
-	now      func() time.Time
-	interval time.Duration
+	client          reportClient
+	logger          *slog.Logger
+	now             func() time.Time
+	interval        time.Duration
+	shutdownTimeout time.Duration
 
 	mu          sync.Mutex
 	pendStarts  []apiclient.SessionStart
@@ -59,12 +61,13 @@ func NewReporter(client reportClient, logger *slog.Logger, now func() time.Time)
 		now = time.Now
 	}
 	return &Reporter{
-		client:      client,
-		logger:      logger,
-		now:         now,
-		interval:    DefaultFlushInterval,
-		openIDs:     make(map[string]struct{}),
-		flushSignal: make(chan struct{}, 1),
+		client:          client,
+		logger:          logger,
+		now:             now,
+		interval:        DefaultFlushInterval,
+		shutdownTimeout: DefaultShutdownTimeout,
+		openIDs:         make(map[string]struct{}),
+		flushSignal:     make(chan struct{}, 1),
 	}
 }
 
@@ -131,7 +134,9 @@ func (r *Reporter) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			r.flush(context.WithoutCancel(ctx))
+			flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.shutdownTimeout)
+			defer cancel()
+			r.flush(flushCtx)
 			return
 		case <-ticker.C:
 			r.flush(ctx)
