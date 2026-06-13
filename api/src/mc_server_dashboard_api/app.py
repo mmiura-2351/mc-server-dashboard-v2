@@ -334,7 +334,16 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
     arm). With the stock values the duplicate-start bound (630) dominates the
     snapshot bound (600), but an operator who raises ``snapshot_timeout_seconds``
     above ``hydrate + command`` makes the snapshot bound binding — so the floor is
-    ``max(hydrate + command, snapshot_timeout)`` to enforce both constraints.
+    ``max(hydrate + command, snapshot_timeout, stop_timeout)`` to enforce all
+    constraints.
+
+    The stop command's own worker round-trip budget (``stop_timeout_seconds``,
+    issue #930) is the third term. It bounds the FIRST dispatch of a stale stop the
+    reconciler replays (``redispatch_stop`` on an observed=running row): the row
+    stays diverged while that dispatch is in flight, so grace must exceed it or the
+    reconciler re-selects and re-dispatches the same stop before the first settles.
+    With the stock 600 it sits under the duplicate-start bound (630), but an
+    operator who raises it must keep grace above it.
 
     ``held_start_grace_seconds`` (issue #999) is the SHORTER grace for a
     ``redispatch_start`` that will skip hydrate (the assigned Worker is connected and
@@ -348,21 +357,25 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
         settings.control.hydrate_timeout_seconds
         + settings.control.command_timeout_seconds,
         settings.control.snapshot_timeout_seconds,
+        settings.control.stop_timeout_seconds,
     )
     if settings.reconciler.grace_seconds <= floor:
         logging.getLogger(__name__).warning(
             "reconciler.grace_seconds (%d) <= max("
             "control.hydrate_timeout_seconds (%d) + "
             "control.command_timeout_seconds (%d), "
-            "control.snapshot_timeout_seconds (%d)); a slow start re-dispatched by "
+            "control.snapshot_timeout_seconds (%d), "
+            "control.stop_timeout_seconds (%d)); a slow start re-dispatched by "
             "the reconciler before its first round-trip settles can spawn a "
-            "duplicate live instance (issue #822), or the stale-stop arm can clear "
-            "a still-healthy final-snapshot hold mid-upload (issue #847). Raise "
-            "grace_seconds above %d.",
+            "duplicate live instance (issue #822), the stale-stop arm can clear "
+            "a still-healthy final-snapshot hold mid-upload (issue #847), or a "
+            "stale stop can be re-dispatched before its first round-trip settles "
+            "(issue #930). Raise grace_seconds above %d.",
             settings.reconciler.grace_seconds,
             settings.control.hydrate_timeout_seconds,
             settings.control.command_timeout_seconds,
             settings.control.snapshot_timeout_seconds,
+            settings.control.stop_timeout_seconds,
             floor,
         )
     # The held-start short grace (issue #999) only covers a command-only
@@ -702,6 +715,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 worker_credential=settings.control.worker_credential,
                 hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
                 snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
+                stop_timeout_seconds=settings.control.stop_timeout_seconds,
             )
             # Build a fresh StartServer/StopServer (each with its own UnitOfWork)
             # per reconcile action so concurrent actions never share a session

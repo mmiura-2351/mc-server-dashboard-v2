@@ -163,6 +163,20 @@ class ControlSettings(_Section):
     # stop->re-place race the hold exists to close. Mirrors ``hydrate_timeout_seconds``
     # (#822/#868). A zero/negative deadline would fail every final snapshot.
     snapshot_timeout_seconds: int = Field(default=600, gt=0)
+    # Separate, generous deadline for the STOP command's worker round-trip (issue
+    # #930): a graceful stop does an in-container save (RCON save-all) and the
+    # worker's docker-stop escalation (RCON wait -> SIGTERM grace -> SIGKILL,
+    # ~3x the worker stop grace), which on a slow/CPU-starved host or a large
+    # world routinely exceeds the general 30s ``command_timeout_seconds``. Under
+    # the general deadline the dispatch times out and the API returns 503 for a
+    # stop the worker actually completes, wedging the row at (stopped, stopped,
+    # assigned) until the reconciler's stale-stop arm clears it and silently
+    # losing the stop-leg final snapshot. The stop therefore gets its own budget,
+    # mirroring ``hydrate_timeout_seconds`` (#822) and ``snapshot_timeout_seconds``
+    # (#847). Kept below ``reconciler.grace_seconds`` so the stale-stop arm never
+    # fires while a stop is legitimately in flight. A zero/negative deadline would
+    # fail every stop.
+    stop_timeout_seconds: int = Field(default=600, gt=0)
     worker_credential: str | None = None
     tls: ControlTlsSettings = Field(default_factory=ControlTlsSettings)
 
