@@ -63,6 +63,31 @@ func TestReadHandshakeOverLongLine(t *testing.T) {
 	}
 }
 
+// TestReadHandshakeDoubleNewlinePrefix rejects a prefix line with trailing
+// extra newlines. "MCSD-TUNNEL/1\n\n" (two newlines) must not pass: only a
+// single trailing newline is valid per the protocol.
+func TestReadHandshakeDoubleNewlinePrefix(t *testing.T) {
+	_, ok := readHandshakeResult(t, func(c net.Conn) {
+		_, _ = c.Write([]byte(handshakePrefix + "\n\n" + "abc123" + "\n"))
+	})
+	if ok {
+		t.Error("prefix with double newline must be rejected")
+	}
+}
+
+// TestReadHandshakeDoubleNewlineToken rejects a token line with an extra
+// trailing newline. The token "abc123\n\n" has extra data after the handshake,
+// which the Buffered() > 0 guard catches, but with TrimSuffix the token itself
+// is correctly preserved.
+func TestReadHandshakeDoubleNewlineToken(t *testing.T) {
+	_, ok := readHandshakeResult(t, func(c net.Conn) {
+		_, _ = c.Write([]byte(handshakePrefix + "\n" + "abc123" + "\n\n"))
+	})
+	if ok {
+		t.Error("token with trailing extra newline must be rejected")
+	}
+}
+
 // TestReadHandshakeOverLongToken asserts the cap also bounds the token line: a
 // valid prefix followed by a token longer than the remaining cap (no newline)
 // is rejected.

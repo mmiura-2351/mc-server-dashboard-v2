@@ -171,3 +171,48 @@ func TestReporterRunFlushesOnShutdown(t *testing.T) {
 		t.Errorf("shutdown flush should deliver the buffered start, got %d", s)
 	}
 }
+
+// TestReporterRunDrainsPostShutdownEvents verifies that session events arriving
+// after the shutdown signal (but before Run returns) are still flushed, not
+// silently lost.
+func TestReporterRunDrainsPostShutdownEvents(t *testing.T) {
+	// slowClient blocks the first call (the primary shutdown flush) long enough
+	// for a concurrent End to enqueue after shutdown.
+	fake := &slowClient{delay: 50 * time.Millisecond, inner: &fakeReportClient{}}
+	r := NewReporter(fake, discardLogger(), nil)
+	r.shutdownTimeout = 2 * time.Second
+	r.WithFlushInterval(time.Hour) // no periodic flushes
+
+	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	// Trigger shutdown; the primary flush will start draining the Start event.
+	cancel()
+
+	// While the primary flush is in flight (50ms delay), inject an End event.
+	time.Sleep(10 * time.Millisecond)
+	r.End(id)
+
+	<-done
+
+	inner := fake.inner
+	s, e := inner.counts()
+	if s != 1 || e != 1 {
+		t.Errorf("post-shutdown drain: starts=%d ends=%d, want 1/1", s, e)
+	}
+}
+
+// slowClient wraps a fakeReportClient and delays the first call.
+type slowClient struct {
+	delay time.Duration
+	inner *fakeReportClient
+	once  sync.Once
+}
+
+func (s *slowClient) ReportSessions(ctx context.Context, starts []apiclient.SessionStart, ends []apiclient.SessionEnd) error {
+	s.once.Do(func() { time.Sleep(s.delay) })
+	return s.inner.ReportSessions(ctx, starts, ends)
+}
