@@ -26,11 +26,12 @@
 9. [Coexistence with the direct path](#9-coexistence-with-the-direct-path)
 10. [Failure modes and blast radius](#10-failure-modes-and-blast-radius)
 11. [Security posture](#11-security-posture)
-12. [Configuration](#12-configuration)
-13. [Database changes](#13-database-changes)
-14. [HTTP API and Web UI changes](#14-http-api-and-web-ui-changes)
-15. [Decision log](#15-decision-log)
-16. [Out of scope / future work](#16-out-of-scope--future-work)
+12. [Operational requirements](#12-operational-requirements)
+13. [Configuration](#13-configuration)
+14. [Database changes](#14-database-changes)
+15. [HTTP API and Web UI changes](#15-http-api-and-web-ui-changes)
+16. [Decision log](#16-decision-log)
+17. [Out of scope / future work](#17-out-of-scope--future-work)
 
 ---
 
@@ -100,7 +101,7 @@ second credential/config surface. The relay is purpose-built and small.
 | **`api/`** | Control plane and source of truth, as today. Gains a `RelayService` gRPC service (served on the existing gRPC listener), a `TunnelDial` command on the existing Worker stream, the `slug` column, the `game_session` table, and a retention prune loop. |
 | **`worker/`** | Gains one new command handler: `TunnelDial` — dial the relay's tunnel endpoint, present a token, splice to the local game port. No new config, no new persistent connections, stateless as before. |
 
-The relay is a **separate Go service** (owner decision, Section 15): all game
+The relay is a **separate Go service** (owner decision, Section 16): all game
 traffic is a data path, so it must not share a process with the API — an API
 restart must not drop players, and Go matches the Worker toolchain and suits
 a TCP splice engine. In the single-host compose deployment it runs as a new
@@ -375,7 +376,7 @@ requires moderation not to degrade, so the relay becomes the IP-visibility
 point (owner decision: record at the relay and surface in the dashboard; no
 PROXY-protocol passthrough — it is Paper-only and would not cover vanilla).
 
-New table **`game_session`** (see Section 13) populated via
+New table **`game_session`** (see Section 14) populated via
 `ReportSessions`. One row per accepted **login** session (status pings are
 not recorded). `username` / `player_uuid` are the values *claimed* in Login
 Start — pre-authentication. With `online-mode` on, an impostor fails Mojang
@@ -385,7 +386,7 @@ honestly.
 
 **Access control** (owner decision): a new permission **`session:read`**,
 granted to the seeded Owner role by default (DATABASE.md role seeding). The
-sessions endpoint (Section 14) requires it; members with only `server:read`
+sessions endpoint (Section 15) requires it; members with only `server:read`
 do not see session data at all. Player IPs are PII — this keeps them
 role-restricted.
 
@@ -444,7 +445,7 @@ collision — see `docs/dev/DEPLOYMENT.md` "Relay — Single-host port collision
   unknown hostnames and malformed traffic, parse byte/time caps, per-IP
   concurrent-connection cap (default 32) and per-IP join-rate cap (default
   10/s) — both config. This is hygiene, not DDoS protection; volumetric
-  defense is out of scope (Section 16).
+  defense is out of scope (Section 17).
 - **Tunnel listener** is TLS; a connection must present a valid single-use
   128-bit token within 5 s or it is dropped without a response. Tokens are
   minted by the API, bound to one resolve, and expire in 10 s, so the
@@ -465,7 +466,25 @@ collision — see `docs/dev/DEPLOYMENT.md` "Relay — Single-host port collision
 
 ---
 
-## 12. Configuration
+## 12. Operational requirements
+
+**`prevent-proxy-connections=false`** (the default) must remain set in each
+backend server's `server.properties` when running behind the relay.
+
+The relay proxies player connections, so the Minecraft server sees the
+**relay's IP** as every player's source address, not the player's real IP.
+When `prevent-proxy-connections=true`, the server sends that source IP to
+Mojang's `hasJoined` session endpoint for verification; Mojang compares it
+against the IP the client originally authenticated from. Because these two
+IPs differ (relay vs. player), **online-mode authentication fails** and
+players are kicked.
+
+The default value is `false`, so most vanilla servers work out-of-the-box.
+Operators only hit this issue if they have explicitly enabled the property.
+
+---
+
+## 13. Configuration
 
 Follows CONFIGURATION.md conventions: TOML + env override
 (`MCD_RELAY_*` for the new binary), secrets via env, fail-fast on invalid
@@ -504,7 +523,7 @@ precedent, gate it behind a `relay` profile so default bring-up is unchanged.
 
 ---
 
-## 13. Database changes
+## 14. Database changes
 
 Migration `0016_relay_ingress` (shipped with issue #955) adds the slug column.
 `game_session`, permission seeding, and further relay infrastructure arrive in
@@ -533,7 +552,7 @@ a later migration with issue #957.
 
 ---
 
-## 14. HTTP API and Web UI changes
+## 15. HTTP API and Web UI changes
 
 **API surface:**
 
@@ -556,7 +575,7 @@ a later migration with issue #957.
 
 ---
 
-## 15. Decision log
+## 16. Decision log
 
 Owner decisions, 2026-06-12 (issue #659 comments):
 
@@ -577,7 +596,7 @@ join signaling over a persistent relay↔worker channel (keeps the Worker's
 single control connection and zero new Worker config; cost: API must be up
 for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
 
-## 16. Out of scope / future work
+## 17. Out of scope / future work
 
 - **Multiple relays / geo placement** — removes the single-relay blast
   radius and shortens player RTTs. The contract already isolates the relay
