@@ -730,12 +730,9 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 }
 
 // flushBeforeStopWithDriver drives the live world's dirty chunks to disk before
-// a graceful terminate's fallback path (issue #1007). It is called ONLY when the
-// RCON "stop" command failed and the driver falls back to docker stop
-// (SIGTERM→SIGKILL), because SIGTERM/SIGKILL may not give MC enough time to
-// complete its shutdown save. When RCON stop succeeds, Minecraft's own shutdown
-// save already flushed the chunks synchronously, so no flush is needed and the
-// stop has zero added latency.
+// a graceful stop (issue #1007). The driver calls it always before tryRCONStop
+// on the graceful path, because MC's own shutdown save does NOT reliably flush
+// dirty region chunks when a player was connected.
 //
 // It issues a non-blocking save-all (the SAME mechanism quiesceRunning uses —
 // NOT save-all flush, whose synchronous flush parked a tick past max-tick-time
@@ -994,7 +991,7 @@ func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
 	// Capture the driver name BEFORE takeStoppableReserve evicts the instance and
-	// deletes startCmds, so the pre-fallback flush closure can open RCON using it.
+	// deletes startCmds, so the pre-stop flush closure can open RCON using it.
 	driver := m.driverFor(cmd.ServerID)
 	inst, outcome := m.takeStoppableReserve(cmd.ServerID)
 	switch outcome {
@@ -1163,10 +1160,8 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 // takeStoppableReserve / takeRunningReserve evicts the instance and deletes
 // startCmds, so driverFor would return empty after eviction). On a graceful
 // stop, attemptStop passes a pre-fallback flush closure so the driver can flush
-// the live world (save-all + settle) ONLY when RCON stop fails and the driver
-// falls back to docker stop (SIGTERM→SIGKILL). When RCON stop succeeds,
-// Minecraft's own shutdown save already flushed the chunks, so no flush is
-// needed and the stop has zero added latency (#1007).
+// the live world (save-all + settle) before stop — the driver calls it always
+// before tryRCONStop on the graceful path (#1007).
 func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName string) error {
 	var preFallback func(context.Context)
 	if graceful {
