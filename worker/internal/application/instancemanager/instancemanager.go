@@ -729,6 +729,46 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 	}
 }
 
+// flushBeforeStop drives the live world's dirty chunks to disk before a graceful
+// terminate (issue #1007). The graceful stop relies on Minecraft's own shutdown
+// save, which the evidence shows does NOT reliably flush dirty block (region)
+// chunks to r.*.mca before the process exits; the post-stop FINAL snapshot then
+// captures stale region files (while playerdata, written synchronously on
+// disconnect, is current), so a same-Worker start rolls the block edits back. This
+// runs while the instance is still alive and RCON is reachable: it issues a
+// non-blocking save-all (the SAME mechanism quiesceRunning uses — NOT save-all
+// flush, whose synchronous flush parked a tick past max-tick-time and tripped the
+// Server Watchdog into a production crash, #693) and waits for the asynchronous
+// save to settle (settleWorkingSet: the region files' (mtime, size) stop changing)
+// so the chunks have landed on disk before the terminate.
+//
+// It is best-effort and bounded: it does NOT disable auto-save (the process is
+// about to exit, so there is nothing to restore), and any failure — RCON cannot be
+// opened, save-all errors, or the save never settles within the budget — is logged
+// and the stop proceeds anyway. Wedging a stop on a save failure would be strictly
+// worse than the pre-fix behavior; the common path completes the flush. The settle
+// budget (m.settleBudget, default 60s) stays well inside the API's stop dispatch
+// budget (stop_timeout_seconds=600).
+func (m *Manager) flushBeforeStop(ctx context.Context, serverID string) {
+	ctrl, err := m.openControl(ctx, serverID, m.driverFor(serverID))
+	if err != nil {
+		m.logger.Warn("stop flush: open rcon failed; stopping without a final save",
+			"server_id", serverID, "error", err)
+		return
+	}
+	defer func() { _ = ctrl.Close() }()
+
+	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
+		m.logger.Warn("stop flush: save-all failed; stopping without a final save",
+			"server_id", serverID, "error", err)
+		return
+	}
+	if !m.settleWorkingSet(ctx, serverID, filepath.Join(m.scratchDir, serverID)) {
+		m.logger.Warn("stop flush: working set did not settle within budget; stopping anyway",
+			"server_id", serverID)
+	}
+}
+
 // restoreSaveOn re-enables auto-save after a running-server snapshot quiesce.
 // It runs on a context detached from the request's (carrying restoreSaveTimeout)
 // so a cancelled/timed-out snapshot still re-enables auto-save. The save-all/settle
@@ -948,6 +988,20 @@ func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 }
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
+	// Flush the live world to disk BEFORE terminating it (issue #1007): a graceful
+	// stop relies on Minecraft's own shutdown save, which the evidence shows does NOT
+	// reliably write dirty block (region) chunks to r.*.mca before the process exits,
+	// so the post-stop FINAL snapshot captures stale region files and a same-Worker
+	// start rolls the block edits back (player position survives — playerdata is
+	// written synchronously on disconnect — but block changes are lost). save-all +
+	// settle while the instance is still alive and RCON reachable lands the dirty
+	// chunks on disk so the snapshot captures a complete world. It runs while the
+	// instance is still tracked (driverFor resolves; RCON reachable), before
+	// takeStoppableReserve evicts it, and only on the graceful path — a force=true
+	// stop intentionally skips the save so a wedged server can still be killed.
+	if graceful {
+		m.flushBeforeStop(ctx, cmd.ServerID)
+	}
 	inst, outcome := m.takeStoppableReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
@@ -1192,6 +1246,15 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unknown launch mode %q", start.LaunchMode))
 	}
+
+	// Flush the live world to disk before the in-place restart terminates it (issue
+	// #1007), for the same reason as the graceful StopServer path: Minecraft's
+	// shutdown save does not reliably write dirty block (region) chunks before the
+	// process exits, so a restart that relaunches over the same on-disk scratch would
+	// re-read stale region files and roll the block edits back. Run while the instance
+	// is still tracked (driverFor resolves; RCON reachable), before takeRunningReserve
+	// evicts it. A restart is always graceful (RestartServer carries no force flag).
+	m.flushBeforeStop(ctx, cmd.ServerID)
 
 	inst, start, outcome := m.takeRunningReserve(cmd.ServerID)
 	switch outcome {

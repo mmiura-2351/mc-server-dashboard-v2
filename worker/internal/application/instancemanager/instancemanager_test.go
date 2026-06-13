@@ -46,6 +46,9 @@ type fakeInstance struct {
 	events   chan execution.StatusEvent
 	stopped  bool
 	graceful bool
+	// seq, when set, records a "stop" marker on Stop so a test can assert the
+	// terminate ordered against the RCON recorder (the #1007 flush-before-stop).
+	seq *[]string
 }
 
 func newFakeInstance(id string) *fakeInstance {
@@ -59,6 +62,9 @@ func (i *fakeInstance) Stop(_ context.Context, graceful bool) error {
 	i.stopped = true
 	i.graceful = graceful
 	i.state = execution.StateStopped
+	if i.seq != nil {
+		*i.seq = append(*i.seq, "stop")
+	}
 	i.mu.Unlock()
 	i.events <- execution.StatusEvent{ServerID: i.serverID, State: execution.StateStopped}
 	return nil
@@ -138,7 +144,16 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 	t.Helper()
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
-		func(context.Context, string, string) (execution.ServerControl, error) { return ctrl, nil })
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			// The real openControl never yields a nil control without an error (main.go).
+			// Tests that don't wire one exercise RCON-free paths; surface that as a dial
+			// failure so the #1007 stop-flush (and the snapshot quiesce) degrade gracefully
+			// instead of dereferencing a nil control.
+			if ctrl == nil {
+				return nil, fmt.Errorf("test: no rcon control configured")
+			}
+			return ctrl, nil
+		})
 	// Drop the quiesce settle-wait poll interval to zero by default so a running-id
 	// snapshot test does not pay the real 2s poll (#907); tests that exercise the
 	// settle-wait itself override it explicitly.
@@ -358,6 +373,81 @@ func TestStopServerGraceful(t *testing.T) {
 	}
 }
 
+// A graceful stop must flush the live world to disk BEFORE terminating it
+// (#1007): it issues a non-blocking RCON save-all and waits for the working set to
+// settle while the instance is still alive, so the dirty block (region) chunks
+// land in r.*.mca before the process exits and the post-stop FINAL snapshot
+// captures a complete world. Asserting the save-all precedes the terminate is the
+// key evidence — out of order, the snapshot would still capture a stale world.
+func TestStopServerGracefulFlushesWorldBeforeTerminate(t *testing.T) {
+	var seq []string
+	d := &fakeDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success", res)
+	}
+	want := []string{"save-all", "stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (save-all must flush the world before terminate)", seq, want)
+	}
+}
+
+// A force stop (cmd.Force) is the operator's "kill it now" escape hatch and must
+// NOT attempt the graceful save-all flush — it intentionally skips the save so a
+// wedged or unresponsive server can still be terminated (#1007).
+func TestStopServerForceSkipsFlush(t *testing.T) {
+	var seq []string
+	d := &fakeDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer", Force: true})
+	if !res.Success {
+		t.Fatalf("force stop = %+v, want success", res)
+	}
+	if len(ctrl.lines) != 0 {
+		t.Fatalf("force stop issued RCON %v, want none (force skips the graceful flush)", ctrl.lines)
+	}
+	want := []string{"stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (force stop terminates without a save)", seq, want)
+	}
+}
+
+// A failed save-all on the graceful stop path must DEGRADE to terminating the
+// server, not wedge the stop (#1007): the flush is best-effort, and a stop that
+// could not save must still complete (the API gives stop dispatch a bounded budget
+// and an unflushed world is no worse than today's pre-fix behavior).
+func TestStopServerGracefulProceedsWhenSaveFails(t *testing.T) {
+	var seq []string
+	d := &fakeDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq, failLines: map[string]error{"save-all": fmt.Errorf("rcon down")}}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success even when the save-all flush failed", res)
+	}
+	if stopped, graceful := d.inst.wasStopped(); !stopped || !graceful {
+		t.Fatalf("instance not gracefully stopped after failed flush: stopped=%v graceful=%v", stopped, graceful)
+	}
+}
+
 func TestServerCommandForwardsOutput(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "There are 0 players"}
@@ -438,6 +528,30 @@ func TestRestartStopsAndStarts(t *testing.T) {
 	}
 	if d.startCount() != 2 {
 		t.Fatalf("restart started %d times total, want 2", d.startCount())
+	}
+}
+
+// An in-place restart must flush the live world to disk BEFORE terminating it
+// (#1007), like a graceful stop: the relaunch re-reads the same on-disk scratch, so
+// an unflushed dirty chunk would roll the block edits back. The save-all must
+// precede the terminate of the old instance.
+func TestRestartFlushesWorldBeforeTerminate(t *testing.T) {
+	var seq []string
+	d := &fakeDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c5", ServerID: "s1", Kind: "RestartServer"})
+	if !res.Success {
+		t.Fatalf("restart = %+v, want success", res)
+	}
+	want := []string{"save-all", "stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (save-all must flush the world before the restart terminate)", seq, want)
 	}
 }
 
