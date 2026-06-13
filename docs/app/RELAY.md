@@ -448,7 +448,10 @@ collision — see `docs/dev/DEPLOYMENT.md` "Relay — Single-host port collision
 - **Tunnel listener** is TLS; a connection must present a valid single-use
   128-bit token within 5 s or it is dropped without a response. Tokens are
   minted by the API, bound to one resolve, and expire in 10 s, so the
-  listener offers no unauthenticated surface beyond a TLS handshake.
+  listener offers no unauthenticated surface beyond a TLS handshake. It also
+  carries a per-IP concurrent-connection cap (default 64, config) bounding how
+  many pre-auth handshake windows one source IP can hold; over the cap is a
+  silent close.
 - **Relay↔API** matches the Worker posture: server-side TLS on the gRPC
   listener + a dedicated shared secret (`relay.credential`), constant-time
   compared (NFR-SEC-1). mTLS rides the existing deferred plan
@@ -486,6 +489,7 @@ config, wiring at the edge.
 | `game.status_cache_seconds` | `5` | Status-ping cache TTL. |
 | `game.max_conns_per_ip` / `game.joins_per_ip_per_second` | `32` / `10` | Hygiene caps (Section 11). |
 | `tunnel.listen` | `:25665` | Worker dial-back listener (TLS). |
+| `tunnel.max_conns_per_ip` | `64` | Per-IP concurrent-connection cap on the tunnel listener (Section 11). |
 | `tunnel.public_endpoint` | — (required) | `host:port` advertised to Workers via `Register` → `TunnelDial`. |
 | `tunnel.tls.cert_file` / `tunnel.tls.key_file` | — (required) | Tunnel listener TLS material. Self-signed is fine: the matching CA PEM travels `Register` → API → `TunnelDial` → Worker verification. |
 | `tunnel.tls.advertised_ca_file` | — (derive from `cert_file`) | CA bundle advertised to Workers for verifying the tunnel cert. Unset → derive from `cert_file` (self-signed). `system` → advertise empty (Workers use system roots; for a publicly-issued cert). A path → advertise that PEM. |

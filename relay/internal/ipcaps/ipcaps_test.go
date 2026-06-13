@@ -1,4 +1,4 @@
-package game
+package ipcaps
 
 import (
 	"net"
@@ -24,6 +24,25 @@ func TestIPCapsMaxConns(t *testing.T) {
 	caps.Release("1.1.1.1")
 	if !caps.Acquire("1.1.1.1") {
 		t.Error("acquire after release should succeed")
+	}
+}
+
+// TestIPCapsConnsBounded asserts the concurrent-connection map does not retain
+// per-IP entries once their connections close: 1000 distinct IPs each acquire
+// and release a slot, and the conns map collapses back to empty. This is the
+// eviction the tunnel listener relies on so hostile per-IP churn cannot grow the
+// map without bound.
+func TestIPCapsConnsBounded(t *testing.T) {
+	caps := NewIPCaps(4, 0, nil)
+	for i := 0; i < 1000; i++ {
+		ip := uniqueIP(i)
+		if !caps.Acquire(ip) {
+			t.Fatalf("acquire %d should succeed", i)
+		}
+		caps.Release(ip)
+	}
+	if got := len(caps.conns); got != 0 {
+		t.Errorf("after 1000 acquire/release pairs, conns = %d, want 0 (entries evicted)", got)
 	}
 }
 

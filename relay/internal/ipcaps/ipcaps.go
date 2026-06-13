@@ -1,14 +1,20 @@
-package game
+// Package ipcaps provides the per-IP hygiene caps shared by the relay's
+// internet-exposed listeners (RELAY.md Section 11). The game listener uses both
+// the concurrent-connection cap and the join-rate cap; the tunnel listener uses
+// only the concurrent-connection cap (its rate is naturally bounded by token
+// issuance). Sharing the type keeps the connection-cap logic in one place so the
+// two listeners cannot diverge.
+package ipcaps
 
 import (
 	"sync"
 	"time"
 )
 
-// IPCaps enforces the per-IP hygiene limits on the unauthenticated game
-// listener (RELAY.md Section 11): a cap on concurrent connections per source IP
-// and a cap on the join (login) rate per source IP. It is hygiene, not DDoS
-// protection. Safe for concurrent use.
+// IPCaps enforces the per-IP hygiene limits on an unauthenticated listener
+// (RELAY.md Section 11): a cap on concurrent connections per source IP and a cap
+// on the join (login) rate per source IP. It is hygiene, not DDoS protection.
+// Safe for concurrent use.
 type IPCaps struct {
 	maxConns    uint32
 	joinsPerSec uint32
