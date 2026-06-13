@@ -307,8 +307,10 @@ async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:
         ),
         make_stop_server=lambda: StopServer(uow=uow, control_plane=cp, clock=clock),
         control_plane=cp,
+        store_generation=FakeStoreGenerationReader(),
         clock=clock,
         grace_seconds=60,
+        held_start_grace_seconds=90,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )

@@ -165,6 +165,7 @@ marks keys with no default.
 | `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). Must be positive. See the reconciler grace floor below.³ |
 | `control.hydrate_timeout_seconds` | `600` | | Separate, longer deadline for the **hydrate** phase of a start (issue #822): pulling a large world's working set routinely outlasts `command_timeout_seconds`, so the hydrate trigger gets its own budget instead of forcing the global command timeout up (which governs every other command and widens the duplicate-start window). Only the start's hydrate dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. See the reconciler grace floor below.³ |
 | `control.snapshot_timeout_seconds` | `600` | | Separate, longer deadline for the **final snapshot** a graceful stop captures (issue #847). The stop holds the server's assignment until this snapshot settles (closing the stop→re-place generation race), so the dispatch must span a full working-set upload (minutes for a large world); under `command_timeout_seconds` it would time out and release the assignment mid-upload, reopening the race. Only the stop's final-snapshot dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. A snapshot **timeout** holds the assignment (not just a cancel), recovered by the stale-stop arm, so it co-bounds the reconciler grace floor below via `grace_seconds > snapshot_timeout_seconds` — at stock values dominated by the duplicate-start term, but binding when raised above `hydrate_timeout_seconds + command_timeout_seconds`.³ |
+| `control.stop_timeout_seconds` | `600` | | Separate, longer deadline for the **stop** command's worker round-trip (issue #930). A graceful stop does an in-container save (RCON `save-all`) and the worker's docker-stop escalation (RCON wait → SIGTERM grace → SIGKILL), which on a slow/CPU-starved host or a large world routinely outlasts `command_timeout_seconds`; under it the dispatch times out and the API returns **503** for a stop the worker actually completes, wedging the row at `(stopped, stopped, assigned)` until the reconciler's stale-stop arm clears it and silently losing the stop-leg final snapshot. Only the stop dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. Kept below `reconciler.grace_seconds` so the reconciler never replays a stop still legitimately in flight — it is the THIRD term of the grace floor below.³ |
 
 ² `control.tls.cert_file` and `control.tls.key_file` are required **together,
 unless** `control.tls.insecure=true`. With neither the cert/key pair nor
@@ -176,8 +177,8 @@ terminate TLS at a reverse proxy and run the listener `insecure=true` behind it
 required-unless-insecure rule (Section 6.1): the Worker verifies this
 certificate against its `api.tls.ca_file`.
 
-³ **Reconciler grace floor (duplicate-start + stop-hold safety, issue #774/#812/#822/#847).** Keep
-`reconciler.grace_seconds > max(control.hydrate_timeout_seconds + control.command_timeout_seconds, control.snapshot_timeout_seconds)`.
+³ **Reconciler grace floor (duplicate-start + stop-hold safety, issue #774/#812/#822/#847/#930).** Keep
+`reconciler.grace_seconds > max(control.hydrate_timeout_seconds + control.command_timeout_seconds, control.snapshot_timeout_seconds, control.stop_timeout_seconds)`.
 The reconciler must wait out the longest a started server's FIRST dispatch
 round-trip can still be in flight before it re-dispatches; a start's dispatch is
 hydrate-then-start, so that round-trip is bounded by the hydrate budget plus the
@@ -199,6 +200,14 @@ arm rather than releasing the assignment). At stock values the duplicate-start
 bound (630) dominates the snapshot bound (600), but an operator who raises
 `snapshot_timeout_seconds` above `hydrate_timeout_seconds + command_timeout_seconds`
 makes the snapshot bound binding — hence the `max(...)`, which enforces both.
+
+The stop command's own `control.stop_timeout_seconds` (issue #930) is the THIRD
+term. It bounds the FIRST dispatch of a stale stop the reconciler replays
+(`redispatch_stop` on an `observed=running` row): the row stays diverged while that
+dispatch is in flight, so grace must exceed it or the reconciler re-selects and
+re-dispatches the same stop before the first settles. At stock values it sits under
+the duplicate-start bound (630), but an operator who raises it must keep grace above
+it.
 
 > **Upgrade impact (existing dev setups).** This is a behavior change: a dev
 > process with `control.enabled=true` that previously bound plaintext now fails
@@ -292,7 +301,7 @@ channel there is nothing to re-dispatch.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `reconciler.interval_seconds` | `60` | | Loop resolution: how often the reconciler scans for diverged servers. Must be positive. |
-| `reconciler.grace_seconds` | `660` | | How long a divergence must persist (measured from the last Worker report) before it is acted on, so the normal in-flight lifecycle path has time to converge first. Must be positive and `> max(control.hydrate_timeout_seconds + control.command_timeout_seconds, control.snapshot_timeout_seconds)` (the start round-trip budget, and the held stop-snapshot budget); below the floor the reconciler can re-dispatch a first start before it settles (risking a duplicate live instance) or clear a still-healthy final-snapshot hold mid-upload (reopening the #847 race) — a `WARN` fires on boot. The stock default (660) satisfies the stock floor (`max(600 + 30, 600) = 630`). |
+| `reconciler.grace_seconds` | `660` | | How long a divergence must persist (measured from the last Worker report) before it is acted on, so the normal in-flight lifecycle path has time to converge first. Must be positive and `> max(control.hydrate_timeout_seconds + control.command_timeout_seconds, control.snapshot_timeout_seconds, control.stop_timeout_seconds)` (the start round-trip budget, the held stop-snapshot budget, and the stop dispatch budget); below the floor the reconciler can re-dispatch a first start before it settles (risking a duplicate live instance), clear a still-healthy final-snapshot hold mid-upload (reopening the #847 race), or replay a stale stop before its first round-trip settles (#930) — a `WARN` fires on boot. The stock default (660) satisfies the stock floor (`max(600 + 30, 600, 600) = 630`). |
 | `reconciler.backoff_base_seconds` | `30` | | Base of the per-server exponential backoff after a failed re-dispatch; the wait doubles per consecutive failure. Must be positive. |
 | `reconciler.backoff_max_seconds` | `3600` | | Cap on the per-server backoff wait. Also doubles as the slack past `next_eligible_at` that keeps crash-loop damping alive across a slow (modded) boot's `starting` window. Must be positive, `>=` `backoff_base_seconds`, and `>= 600` (a smaller slack lets a still-diverged server expire and reset its failure count, re-arming the boot-crash loop). |
 
@@ -339,6 +348,25 @@ proxies the API).
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `webui.dist_dir` | *unset* | | Directory of the built SPA to serve at `/`. When set, the API mounts it after every router (so API routes and WS endpoints take precedence) and falls back to `index.html` for unmatched paths so deep links/reloads resolve. Must be an existing directory containing `index.html`; otherwise startup fails fast. When unset, nothing is mounted. |
+
+### 5.11 Game-ingress relay
+
+The game-ingress relay (RELAY.md, epic #659) lets players join at
+`<slug>.<base_domain>` with no port. It is **config-selectable and default off**
+(RELAY.md Section 9): with `relay.enabled=false` (the default) single-host
+operators keep the direct path with zero new setup. When enabled, the API serves
+`RelayService` on the existing gRPC listener (`server.grpc_port`) alongside
+`WorkerService`, exposes `join_hostname` on server responses, and (issue #957)
+runs the session prune loop. `relay.credential` and `relay.base_domain` are both
+required when enabled, enforced fail-fast at the edge (a blank value is treated as
+missing, per the secret-blank rule above).
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `relay.enabled` | `false` | | Master switch: serve `RelayService`, expose `join_hostname`, and run the prune loop (RELAY.md Section 9). |
+| `relay.credential` | *required when enabled* | secret | Shared credential the relay must present (`authorization: Bearer <credential>` metadata) to authenticate its gRPC calls (REQUIREMENTS.md NFR-SEC-1). A **separate** credential from `control.worker_credential` so relay and Worker credentials rotate independently (RELAY.md Section 6). |
+| `relay.base_domain` | *required when enabled* | | Routing domain (e.g. `mc.example.com`); used to build `join_hostname` (`<slug>.<base_domain>`) and returned to the relay on `Register` (RELAY.md Sections 3, 6). |
+| `relay.session_retention_days` | `90` | | `game_session` prune window in days (RELAY.md Section 8; consumed by issue #957). Must be positive. |
 
 ---
 

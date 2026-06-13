@@ -591,6 +591,32 @@ async def test_create_auto_assigns_lowest_free_port() -> None:
     ]
 
 
+async def test_create_skips_relay_reserved_port() -> None:
+    # With relay enabled, the relay's game port (25565) is reserved on the
+    # PortRange; auto-assign must skip it even when it is the lowest free port,
+    # so the server never collides with the relay's host bind (issue #1002).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    relay_range = PortRange(start=25565, end=25664, reserved=frozenset({25565, 25665}))
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=relay_range,
+    )(
+        community_id=community,
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={},
+    )
+    assert server.game_port == 25566
+    assert uow.servers.by_id[server.id].game_port == 25566
+
+
 async def test_create_honors_explicit_free_port() -> None:
     uow = FakeUnitOfWork()
     server = await CreateServer(

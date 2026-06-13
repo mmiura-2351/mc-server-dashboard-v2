@@ -10,6 +10,10 @@
 #   worker    — the execution agent; container driver only, talks to the host
 #               Docker daemon via the mounted socket and creates sibling Minecraft
 #               containers.
+#   relay     — the game ingress relay (epic #659, issue #960); gated behind the
+#               `relay` compose profile (opt-in). Accepts player TCP on :25565,
+#               and the Worker dial-back on :25665 (TLS). Requires a wildcard DNS
+#               record and TLS material — see docs/dev/DEPLOYMENT.md "Relay".
 #
 # Storage backend (issue #702): the shipped default is the `object` backend on the
 # SeaweedFS service below (STORAGE.md Section 7.3). To run the fs backend instead,
@@ -156,6 +160,26 @@ services:
       # blank-key identities file when the `object` profile is active (#702).
       MCD_API_STORAGE__OBJECT__ACCESS_KEY: "${MCD_API_STORAGE__OBJECT__ACCESS_KEY:-}"
       MCD_API_STORAGE__OBJECT__SECRET_KEY: "${MCD_API_STORAGE__OBJECT__SECRET_KEY:-}"
+      # Relay API-side settings (lands with #956). `:-` defaults so default
+      # bring-up is unchanged: ENABLED defaults to `false` and the credential /
+      # base domain to empty, leaving the relay off unless explicitly configured.
+      MCD_API_RELAY__ENABLED: "${MCD_API_RELAY__ENABLED:-false}"
+      MCD_API_RELAY__CREDENTIAL: "${MCD_API_RELAY__CREDENTIAL:-}"
+      MCD_API_RELAY__BASE_DOMAIN: "${MCD_API_RELAY__BASE_DOMAIN:-}"
+      # Reconciler tuning (issue #985). Defaults preserve existing behavior; set
+      # MCD_API_RECONCILER__GRACE_SECONDS lower in .env to shorten the window during
+      # which running servers appear unjoinable after an API restart (servers whose
+      # observed state resets to unknown on boot converge once grace lapses).
+      MCD_API_RECONCILER__INTERVAL_SECONDS: "${MCD_API_RECONCILER__INTERVAL_SECONDS:-60}"
+      MCD_API_RECONCILER__GRACE_SECONDS: "${MCD_API_RECONCILER__GRACE_SECONDS:-660}"
+      MCD_API_RECONCILER__BACKOFF_BASE_SECONDS: "${MCD_API_RECONCILER__BACKOFF_BASE_SECONDS:-30}"
+      MCD_API_RECONCILER__BACKOFF_MAX_SECONDS: "${MCD_API_RECONCILER__BACKOFF_MAX_SECONDS:-3600}"
+      # Game-port auto-assignment range (issue #1002). Defaults match the api's
+      # built-in window (25565..25664); set these in .env to shift the range as a
+      # fallback (e.g. off the relay's host binds). In relay mode the api already
+      # excludes the relay game/tunnel ports from this range automatically.
+      MCD_API_PORTS__RANGE_START: "${MCD_API_PORTS__RANGE_START:-25565}"
+      MCD_API_PORTS__RANGE_END: "${MCD_API_PORTS__RANGE_END:-25664}"
     volumes:
       - api-storage:/data/storage
     ports:
@@ -196,7 +220,9 @@ services:
       # from outside the host (the code default is 127.0.0.1, loopback-only). The
       # host firewall governs which game ports are actually reachable. RCON always
       # stays on loopback regardless of this value.
-      MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP: "0.0.0.0"
+      # Set MCD_WORKER_GAME_BIND_IP=127.0.0.1 in .env when the relay is enabled
+      # (relay path: Worker dials its own loopback, no inbound game-port range needed).
+      MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP: "${MCD_WORKER_GAME_BIND_IP:-0.0.0.0}"
       # Attach the MC containers the worker creates to the compose network (pinned
       # to "mcsd" below) so RCON is reached over the docker network at the
       # container's name, never the host loopback. Inside this containerized worker
@@ -221,6 +247,46 @@ services:
     # (e.g. processes re-parented from Forge installer forks) that exec.Cmd.Wait
     # cannot reap because the worker itself runs as PID 1 without an init.
     init: true
+    depends_on:
+      - api
+
+  relay:
+    build: ./relay
+    image: mcsd-relay:dev
+    restart: unless-stopped
+    # Gated behind the `relay` compose profile so default bring-up is unchanged
+    # (issue #960, epic #659). Add `relay` to COMPOSE_PROFILES in .env to enable
+    # it, then configure the required relay keys in .env (see .env.example and
+    # docs/dev/DEPLOYMENT.md "Relay").
+    profiles: ["relay"]
+    environment:
+      MCD_RELAY_API_GRPC_ENDPOINT: api:50051
+      # `:-` (empty default), NOT `:?`: compose interpolates a service's env even
+      # when its profile is inactive, so a `:?` here would break plain
+      # `docker compose config` / `up` when the relay profile is off (same
+      # reason as the seaweedfs object keys, issue #940). The blank-credential
+      # fail-fast for this service is the relay binary's own config validation,
+      # which refuses an empty api.credential at startup. Only runs under the
+      # `relay` profile, so reaching here with a blank key is a real
+      # misconfiguration — the relay exits immediately with a clear error.
+      MCD_RELAY_API_CREDENTIAL: "${MCD_API_RELAY__CREDENTIAL:-}"
+      # Plaintext control dial on the private compose network (same posture as
+      # the worker; the gRPC port is not published to the host).
+      MCD_RELAY_API_TLS_INSECURE: "true"
+      MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT: "${MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT:-}"
+      # Tunnel TLS material (cert + key) are bind-mounted by the operator into
+      # /etc/mcsd/; self-signed is fine — the CA travels in-band to Workers.
+      MCD_RELAY_TUNNEL_TLS_CERT_FILE: /etc/mcsd/tunnel-cert.pem
+      MCD_RELAY_TUNNEL_TLS_KEY_FILE: /etc/mcsd/tunnel-key.pem
+    volumes:
+      # Mount the tunnel TLS material (self-signed or CA-issued) from the host.
+      # Generate once: see docs/dev/DEPLOYMENT.md "Relay — TLS material".
+      # The operator sets MCD_RELAY_TLS_DIR in .env to the host directory that
+      # contains tunnel-cert.pem and tunnel-key.pem.
+      - "${MCD_RELAY_TLS_DIR:-/etc/mcsd/relay}:/etc/mcsd:ro"
+    ports:
+      - "25565:25565"    # game listener (players join here)
+      - "25665:25665"    # tunnel listener (Workers dial back here)
     depends_on:
       - api
 

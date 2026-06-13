@@ -215,6 +215,11 @@ message ApiCommand {
     // ListFiles browses a directory in a running server's live working set
     // (Section 6.9, Section 7.2).
     ListFiles list_files = 11;
+    // TunnelDial instructs the Worker to open a dial-back tunnel to the relay
+    // for one player session (RELAY.md Section 5). Bypasses the slow-lane
+    // concurrency cap (like ServerCommand) so a join does not queue behind a
+    // hydrate.
+    TunnelDial tunnel_dial = 12;
   }
 }
 
@@ -336,6 +341,34 @@ message ListFiles {
   // path is the directory relative to the server's working-set root; "." (or
   // empty) lists the root itself.
   string path = 1;
+}
+
+// TunnelDial instructs the Worker to dial back the relay's tunnel listener for
+// one player session (RELAY.md Section 5). Everything the Worker needs arrives
+// in-band so it requires zero new configuration. Bypasses the slow-lane
+// concurrency cap (like ServerCommand) — a join must not queue behind a hydrate.
+message TunnelDial {
+  // server_id identifies the local server whose game port the Worker splices
+  // to. The Worker resolves it to the running instance's published loopback
+  // game port; if the server is not running locally it returns a
+  // CommandResult error. RELAY.md Section 5.
+  string server_id = 1;
+
+  // endpoint is the relay tunnel endpoint to dial, in host:port form. Taken
+  // from the relay's Register call so the API is the single config source.
+  // RELAY.md Section 5.
+  string endpoint = 2;
+
+  // token is the single-use session token the Worker presents to the relay
+  // after the TLS handshake. The relay matches it to the waiting player
+  // connection and then starts the splice. RELAY.md Section 5.
+  string token = 3;
+
+  // tls_ca_pem is the optional PEM-encoded CA bundle the Worker uses to
+  // verify the relay's tunnel certificate. Empty means system roots (public
+  // CA). Delivered in-band so the Worker needs zero new configuration.
+  // RELAY.md Section 5.
+  string tls_ca_pem = 4;
 }
 
 // ---------------------------------------------------------------------------

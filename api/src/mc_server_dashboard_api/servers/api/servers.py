@@ -16,6 +16,7 @@ serialises the result. Domain errors are translated to HTTP codes here.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import (
@@ -36,6 +37,7 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 # ``Permission`` is community-context-owned (the catalog lives there); the servers
 # routes reference the ``server:*`` codes through it, as the community routes do.
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
+from mc_server_dashboard_api.config import Settings
 from mc_server_dashboard_api.dependencies import (
     ServerUpdateAuthz,
     get_audit_recorder,
@@ -43,10 +45,12 @@ from mc_server_dashboard_api.dependencies import (
     get_delete_server,
     get_export_server,
     get_import_server,
+    get_list_game_sessions,
     get_list_servers,
     get_read_server,
     get_restart_server,
     get_send_server_command,
+    get_settings,
     get_start_server,
     get_stop_server,
     get_update_server,
@@ -60,6 +64,7 @@ from mc_server_dashboard_api.servers.application.export_import import (
     ImportServer,
 )
 from mc_server_dashboard_api.servers.application.files import MAX_UPLOAD_BYTES
+from mc_server_dashboard_api.servers.application.game_sessions import ListGameSessions
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     SendServerCommand,
@@ -96,6 +101,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
     InvalidMemoryLimitError,
     InvalidServerNameError,
+    InvalidSlugError,
     InvalidSnapshotIntervalError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
@@ -110,11 +116,14 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotRunningError,
     ServerNotStoppedError,
+    SlugAlreadyTakenError,
+    SlugExhaustedError,
     UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
 )
+from mc_server_dashboard_api.servers.domain.game_session import GameSession
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     memory_limit_from_config,
@@ -158,6 +167,10 @@ class CreateServerRequest(BaseModel):
     # (422 out of range) and the taken set (409 taken). Schema bounds it to a valid
     # TCP port so a wildly invalid value is a 422 at parse time.
     game_port: int | None = Field(default=None, gt=0, le=65535)
+    # Optional explicit slug (issue #981). Omitted/blank lets create auto-generate a
+    # 6-char random slug; supplied, it is validated (422 invalid/reserved) and
+    # checked for global uniqueness (409 taken). Blank string is treated as omitted.
+    slug: str | None = None
 
 
 class UpdateServerRequest(BaseModel):
@@ -170,6 +183,12 @@ class UpdateServerRequest(BaseModel):
     # server.properties. Schema-bounded to a valid TCP port so a wildly invalid
     # value is a 422 at parse time.
     game_port: int | None = Field(default=None, gt=0, le=65535)
+    # Optional slug rename (issue #955). Omitted (None) leaves the slug unchanged;
+    # supplied, it is validated (422 invalid/reserved) and checked for global
+    # uniqueness (409 taken). The rename is allowed regardless of run state (the
+    # at-rest gate was removed in PR #966); released slugs are immediately reusable
+    # (owner decision, RELAY.md Section 16).
+    slug: str | None = None
 
 
 class ServerCommandRequest(BaseModel):
@@ -178,6 +197,35 @@ class ServerCommandRequest(BaseModel):
 
 class ServerCommandResponse(BaseModel):
     output: str
+
+
+@dataclass(frozen=True)
+class JoinHostnameConfig:
+    """Relay config needed to build a server's ``join_hostname`` (issue #956).
+
+    ``<slug>.<base_domain>`` when the relay is enabled, else ``None`` — the UI's
+    display switch (RELAY.md Section 15). Resolved from the ``[relay]`` settings at
+    the edge so the response builder stays free of the config loader.
+    """
+
+    enabled: bool
+    base_domain: str | None
+
+    def for_slug(self, slug: str) -> str | None:
+        if not self.enabled or not self.base_domain:
+            return None
+        return f"{slug}.{self.base_domain}"
+
+
+def get_join_hostname_config(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> JoinHostnameConfig:
+    """Resolve the relay ``join_hostname`` config from settings (issue #956)."""
+
+    return JoinHostnameConfig(
+        enabled=settings.relay.enabled,
+        base_domain=settings.relay.base_domain,
+    )
 
 
 class ServerResponse(BaseModel):
@@ -203,13 +251,20 @@ class ServerResponse(BaseModel):
     # not a hard cap (owner decision).
     cpu_millis: int | None
     game_port: int | None
+    # The relay slug (issue #955): auto-assigned at create, renameable via PATCH.
+    slug: str
+    # The player join hostname ``<slug>.<base_domain>`` when the relay is enabled,
+    # else ``None`` — the UI's display switch (issue #956, RELAY.md Section 15).
+    join_hostname: str | None
     desired_state: str
     observed_state: str
     observed_at: UtcDatetime | None
     assigned_worker_id: str | None
 
     @classmethod
-    def from_entity(cls, server: Server) -> "ServerResponse":
+    def from_entity(
+        cls, server: Server, join_hostname_config: JoinHostnameConfig
+    ) -> "ServerResponse":
         return cls(
             id=str(server.id.value),
             community_id=str(server.community_id.value),
@@ -222,6 +277,8 @@ class ServerResponse(BaseModel):
             memory_limit_mb=memory_limit_from_config(server.config),
             cpu_millis=cpu_allocation_from_config(server.config),
             game_port=server.game_port,
+            slug=server.slug,
+            join_hostname=join_hostname_config.for_slug(server.slug),
             desired_state=server.desired_state.value,
             observed_state=server.observed_state.value,
             observed_at=server.observed_at,
@@ -245,6 +302,7 @@ async def create_server(
     ],
     use_case: Annotated[CreateServer, Depends(get_create_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     config = _validated_config(body.config)
     try:
@@ -258,6 +316,7 @@ async def create_server(
             config=config,
             accept_eula=body.accept_eula,
             game_port=body.game_port,
+            slug=body.slug,
         )
     except UnsupportedEditionError as exc:
         # The catalog is Java-only at M1 (FR-VER-1): a non-java edition is rejected
@@ -306,6 +365,19 @@ async def create_server(
         raise _service_unavailable("port_range_exhausted") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except InvalidSlugError as exc:
+        # An explicit slug at create time failed the DNS-label format check or is a
+        # reserved word (issue #981).
+        raise _unprocessable("invalid_slug") from exc
+    except SlugAlreadyTakenError as exc:
+        # An explicit slug at create time is already held by another server (issue
+        # #981).
+        raise _conflict("slug_taken") from exc
+    except SlugExhaustedError as exc:
+        # Auto-generation could not find a unique slug within the retry budget
+        # (extremely unlikely in practice); a transient capacity condition (issue
+        # #955). Surface 503 so the caller can retry.
+        raise _service_unavailable("slug_exhausted") from exc
     except WorkingSetSeedFailedError as exc:
         # The row committed but seeding the working set failed (issue #243). The
         # server is left in a degraded-but-repairable state (the files API can
@@ -315,7 +387,7 @@ async def create_server(
     await _record(
         recorder, ops.SERVER_CREATE, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.post(
@@ -332,6 +404,7 @@ async def import_server(
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     name: Annotated[str, Form(min_length=1)],
     execution_backend: Annotated[str, Form(min_length=1)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     """Import a whole server from a ZIP export (server:create, issue #274).
 
@@ -393,7 +466,7 @@ async def import_server(
     await _record(
         recorder, ops.SERVER_IMPORT, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.get("/communities/{community_id}/servers")
@@ -403,9 +476,10 @@ async def list_servers(
         object, Depends(require_permission(Permission("server:read")))
     ],
     use_case: Annotated[ListServers, Depends(get_list_servers)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> list[ServerResponse]:
     servers = await use_case(community_id=CommunityId(community_id))
-    return [ServerResponse.from_entity(server) for server in servers]
+    return [ServerResponse.from_entity(server, join_config) for server in servers]
 
 
 @router.get("/communities/{community_id}/servers/{server_id}")
@@ -423,6 +497,7 @@ async def read_server(
         ),
     ],
     use_case: Annotated[ReadServer, Depends(get_read_server)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -431,7 +506,78 @@ async def read_server(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
+
+
+class GameSessionResponse(BaseModel):
+    """One recorded game session (RELAY.md Sections 8, 14, 15).
+
+    ``username`` / ``player_uuid`` are the identity **claimed** in Login Start —
+    pre-authentication values, not a verified identity (RELAY.md Section 8). A
+    session of meaningful duration implies the claim survived Mojang auth, but the
+    fields themselves are unverified; the UI labels them as claimed. ``hostname``
+    / ``player_ip`` / ``started_at`` may be ``null`` on a not-yet-reconciled
+    end-before-start placeholder row.
+    """
+
+    id: uuid.UUID
+    # The slug the player joined on, recorded at join time (slugs are renameable).
+    hostname: str | None
+    # The player's source address as the relay saw it (PII; session:read-gated).
+    player_ip: str | None
+    # Claimed (pre-auth) Login Start identity — see the class docstring.
+    username: str | None
+    player_uuid: uuid.UUID | None
+    started_at: UtcDatetime | None
+    ended_at: UtcDatetime | None
+
+    @classmethod
+    def from_entity(cls, session: GameSession) -> "GameSessionResponse":
+        return cls(
+            id=session.id,
+            hostname=session.hostname,
+            player_ip=session.player_ip,
+            username=session.username,
+            player_uuid=session.player_uuid,
+            started_at=session.started_at,
+            ended_at=session.ended_at,
+        )
+
+
+class GameSessionListResponse(BaseModel):
+    sessions: list[GameSessionResponse]
+
+
+@router.get("/communities/{community_id}/servers/{server_id}/sessions")
+async def list_sessions(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object, Depends(require_permission(Permission("session:read")))
+    ],
+    use_case: Annotated[ListGameSessions, Depends(get_list_game_sessions)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> GameSessionListResponse:
+    """List a server's recorded game sessions newest-first (``session:read``).
+
+    Player IPs are PII, so this is gated by ``session:read`` (community-level)
+    rather than ``server:read`` (RELAY.md Section 8). The identity fields are the
+    *claimed* pre-auth Login Start values. Paginated by ``limit``/``offset``.
+    """
+
+    try:
+        sessions = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            limit=limit,
+            offset=offset,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    return GameSessionListResponse(
+        sessions=[GameSessionResponse.from_entity(s) for s in sessions]
+    )
 
 
 @router.get("/communities/{community_id}/servers/{server_id}/export")
@@ -493,6 +639,7 @@ async def update_server(
     ],
     use_case: Annotated[UpdateServer, Depends(get_update_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     """Edit a server's name/config/game port.
 
@@ -540,6 +687,7 @@ async def update_server(
             config=config,
             execution_backend=body.execution_backend,
             game_port=body.game_port,
+            slug=body.slug,
             authorize=authz.authorize,
         )
     except PermissionDeniedError as exc:
@@ -576,6 +724,12 @@ async def update_server(
         raise _conflict("port_taken") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except InvalidSlugError as exc:
+        # Slug failed the DNS-label format check or is a reserved word (issue #955).
+        raise _unprocessable("invalid_slug") from exc
+    except SlugAlreadyTakenError as exc:
+        # Slug is already held by another server (issue #955).
+        raise _conflict("slug_taken") from exc
     except WorkingSetSeedFailedError as exc:
         # Rewriting server.properties for the port change failed; the row was not
         # committed (no DB/file drift), surfaced as a mapped 503 (issue #311).
@@ -583,7 +737,7 @@ async def update_server(
     await _record(
         recorder, ops.SERVER_UPDATE, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.delete(
@@ -638,6 +792,7 @@ async def start_server(
     ],
     use_case: Annotated[StartServer, Depends(get_start_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -652,7 +807,7 @@ async def start_server(
         )
         raise _lifecycle_http_error(exc) from exc
     await _record(recorder, ops.SERVER_START, authorized, community_id, server.id.value)
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/stop")
@@ -671,6 +826,7 @@ async def stop_server(
     ],
     use_case: Annotated[StopServer, Depends(get_stop_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
     # Default false = today's graceful stop; ?force=true skips the Worker's
     # graceful path and kills the process immediately (issue #270).
     force: Annotated[bool, Query()] = False,
@@ -689,7 +845,7 @@ async def stop_server(
         )
         raise _lifecycle_http_error(exc) from exc
     await _record(recorder, ops.SERVER_STOP, authorized, community_id, server.id.value)
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/restart")
@@ -708,6 +864,7 @@ async def restart_server(
     ],
     use_case: Annotated[RestartServer, Depends(get_restart_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -724,7 +881,7 @@ async def restart_server(
     await _record(
         recorder, ops.SERVER_RESTART, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server)
+    return ServerResponse.from_entity(server, join_config)
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/command")

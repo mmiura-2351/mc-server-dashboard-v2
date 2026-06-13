@@ -1,0 +1,35 @@
+# Compose override for the relay protocol-level E2E harness (issue #962).
+#
+# The base compose.yaml pins the default network's name to a fixed `mcsd` so the
+# worker can attach the sibling MC containers it creates to that named network
+# (RCON by container name). That fixed name makes a second compose project
+# collide with a developer's or a live deployment's already-running `mcsd`
+# network. This override renames the harness's default network to a
+# project-scoped name and points the worker's container-network at the same name,
+# so the E2E stack is fully isolated and can run alongside the live stack.
+#
+# Port remapping: the base compose.yaml hard-codes 25565:25565 and 25665:25665 for
+# the relay service. This override replaces those bindings with parameterized
+# values so that MCD_RELAY_E2E_GAME_PORT / MCD_RELAY_E2E_TUNNEL_PORT (written
+# into the env file by run_relay_e2e.sh) actually remap what the relay publishes
+# on the host — allowing the harness to run alongside a live relay-profile stack
+# without colliding on those ports.
+#
+# `ports` is a sequence, and Compose merges sequences ADDITIVELY (it keys on
+# target:published:protocol and unions the two lists) rather than replacing them.
+# A plain override would therefore keep the base 25565/25665 entries AND add the
+# parameterized ones, so the relay would still bind the defaults and collide.
+# The `!override` tag makes this list REPLACE the base list instead of merging,
+# so only the parameterized entries are published. Requires Compose v2.24+.
+services:
+  worker:
+    environment:
+      MCD_WORKER_DRIVER_CONTAINER_NETWORK: mcsd-relay-e2e
+  relay:
+    ports: !override
+      - "${MCD_RELAY_E2E_GAME_PORT:-25565}:25565"    # game listener (players join here)
+      - "${MCD_RELAY_E2E_TUNNEL_PORT:-25665}:25665"  # tunnel listener (Workers dial back here)
+
+networks:
+  default:
+    name: mcsd-relay-e2e

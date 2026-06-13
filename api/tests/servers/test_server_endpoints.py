@@ -46,6 +46,10 @@ from mc_server_dashboard_api.dependencies import (
     get_read_server,
     get_update_server,
 )
+from mc_server_dashboard_api.servers.api.servers import (
+    JoinHostnameConfig,
+    get_join_hostname_config,
+)
 from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
@@ -149,6 +153,7 @@ def _server_entity(
     name: str = "survival",
     desired: DesiredState = DesiredState.STOPPED,
     observed: ObservedState = ObservedState.STOPPED,
+    slug: str = "amber-falcon-42",
 ) -> Server:
     return Server(
         id=ServerId(server_id or uuid.uuid4()),
@@ -165,6 +170,7 @@ def _server_entity(
         assigned_worker_id=None,
         created_at=_NOW,
         updated_at=_NOW,
+        slug=slug,
     )
 
 
@@ -177,6 +183,7 @@ def _app(
     list_: _FakeUseCase | None = None,
     update: _FakeUseCase | UpdateServer | None = None,
     delete: _FakeUseCase | None = None,
+    join_config: JoinHostnameConfig | None = None,
 ) -> object:
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: make_user()
@@ -194,6 +201,8 @@ def _app(
         app.dependency_overrides[get_update_server] = lambda: update
     if delete is not None:
         app.dependency_overrides[get_delete_server] = lambda: delete
+    if join_config is not None:
+        app.dependency_overrides[get_join_hostname_config] = lambda: join_config
     return app
 
 
@@ -1099,3 +1108,38 @@ def test_server_in_community_a_is_invisible_through_community_b() -> None:
     # Through A's route the user is a non-member -> 404 (no existence signal).
     resp = client.get(f"/api/communities/{community_a}/servers/{server_in_a}")
     assert resp.status_code == 404
+
+
+# --- join_hostname (issue #956) --------------------------------------------
+
+
+def test_read_server_join_hostname_when_relay_enabled() -> None:
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community, slug="amber-falcon-42")
+    use_case = _FakeUseCase(result=server)
+    app = _app(
+        member=True,
+        allow=True,
+        read=use_case,
+        join_config=JoinHostnameConfig(enabled=True, base_domain="mc.example.com"),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    assert resp.json()["join_hostname"] == "amber-falcon-42.mc.example.com"
+
+
+def test_read_server_join_hostname_null_when_relay_disabled() -> None:
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community, slug="amber-falcon-42")
+    use_case = _FakeUseCase(result=server)
+    app = _app(
+        member=True,
+        allow=True,
+        read=use_case,
+        join_config=JoinHostnameConfig(enabled=False, base_domain=None),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    assert resp.json()["join_hostname"] is None

@@ -232,6 +232,7 @@ running-server file access.
 | `ReadFile` | Read a path from a running server's live working set. | `file_content` | Section 6.9, Section 7.2 |
 | `EditFile` | Write a path in a running server's live working set. | none | Section 6.9, Section 7.2 |
 | `ListFiles` | List a directory in a running server's live working set (read-only). | `file_listing` | Section 6.9, Section 7.2 |
+| `TunnelDial` | Dial back the relay's tunnel listener for one player session and splice it to the running server's loopback game port. Carries `endpoint`, single-use `token`, and optional `tls_ca_pem` (everything in-band — no new Worker config). | none | RELAY.md Section 5 |
 
 Notes:
 
@@ -261,6 +262,14 @@ Notes:
   server is stop-then-delete, and config edits on a running server go through the
   `ReadFile` / `EditFile` file-access commands above (ARCHITECTURE.md
   Section 7.2).
+- **`TunnelDial` is a quick command and bypasses the slow-lane concurrency cap**
+  (like `ServerCommand`) so a player join never queues behind a hydrate. Its
+  `CommandResult` reports only that the dial-back + token handshake succeeded and
+  the splice is established; the long-lived splice then runs on the Worker's own
+  goroutines, off the command lane, and is torn down on Worker shutdown. A
+  not-running server returns `server_not_found`; a dial/handshake failure returns
+  `internal`. The dial-back is outbound (NAT-safe) and stateless — no reconnect;
+  the relay/client recovers by rejoining (RELAY.md Section 5).
 
 ### 5.1 Trigger completion semantics
 

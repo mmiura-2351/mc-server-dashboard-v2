@@ -198,8 +198,10 @@ async def _reconciler_tick(
         make_start_server=lambda: _start_server_use_case(engine, control_plane, clock),
         make_stop_server=lambda: _stop_server_use_case(engine, control_plane, clock),
         control_plane=control_plane,
+        store_generation=FakeStoreGenerationReader(),
         clock=clock,
         grace_seconds=0,
+        held_start_grace_seconds=0,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     ).tick()

@@ -35,7 +35,7 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_session_factory,
 )
 from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
-from mc_server_dashboard_api.core.api import health, metrics, readiness
+from mc_server_dashboard_api.core.api import health, meta, metrics, readiness
 from mc_server_dashboard_api.dataplane.api import transfers
 from mc_server_dashboard_api.dependencies import (
     build_brute_force_config,
@@ -51,6 +51,11 @@ from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.adapters.relay_server import register_relay_service
+from mc_server_dashboard_api.fleet.adapters.relay_state import (
+    JoinTokenTable,
+    RelayRegistration,
+)
 from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
 from mc_server_dashboard_api.http_problem import install_problem_handlers
@@ -82,6 +87,9 @@ from mc_server_dashboard_api.servers.adapters.clock import (
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.game_session_prune_loop import (
+    run_game_session_prune_loop,
+)
 from mc_server_dashboard_api.servers.adapters.jar_provisioner import (
     CatalogJarProvisioner,
 )
@@ -92,9 +100,13 @@ from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleL
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
     run_reconciler_loop,
 )
+from mc_server_dashboard_api.servers.adapters.server_route_resolver import (
+    ServersServerRouteResolver,
+)
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
+from mc_server_dashboard_api.servers.adapters.session_sink import ServersSessionSink
 from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_loop
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
@@ -111,6 +123,7 @@ from mc_server_dashboard_api.servers.application.backup_scheduler import (
     RunBackupScheduleTick,
 )
 from mc_server_dashboard_api.servers.application.backups import CreateBackup
+from mc_server_dashboard_api.servers.application.game_sessions import PruneGameSessions
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
@@ -165,6 +178,11 @@ _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
 # fires first and the Worker bound stays a cleanup backstop, never the primary
 # deadline that could kill a transfer the API still considers in flight.
 _TRANSFER_DEADLINE_MARGIN_SECONDS = 60
+
+# How often the game_session retention prune loop wakes (RELAY.md Section 8, issue
+# #957). The window is configured in *days* (relay.session_retention_days), so an
+# hourly resolution is far finer than needed while keeping the table bounded.
+_SESSION_PRUNE_TICK_SECONDS = 3600.0
 
 
 def _resolve_config_file() -> Path | None:
@@ -316,29 +334,65 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
     arm). With the stock values the duplicate-start bound (630) dominates the
     snapshot bound (600), but an operator who raises ``snapshot_timeout_seconds``
     above ``hydrate + command`` makes the snapshot bound binding — so the floor is
-    ``max(hydrate + command, snapshot_timeout)`` to enforce both constraints.
+    ``max(hydrate + command, snapshot_timeout, stop_timeout)`` to enforce all
+    constraints.
+
+    The stop command's own worker round-trip budget (``stop_timeout_seconds``,
+    issue #930) is the third term. It bounds the FIRST dispatch of a stale stop the
+    reconciler replays (``redispatch_stop`` on an observed=running row): the row
+    stays diverged while that dispatch is in flight, so grace must exceed it or the
+    reconciler re-selects and re-dispatches the same stop before the first settles.
+    With the stock 600 it sits under the duplicate-start bound (630), but an
+    operator who raises it must keep grace above it.
+
+    ``held_start_grace_seconds`` (issue #999) is the SHORTER grace for a
+    ``redispatch_start`` that will skip hydrate (the assigned Worker is connected and
+    holds a fresh working set), so it is bounded only by the start COMMAND deadline,
+    not the hydrate budget: its floor is ``> command_timeout_seconds``. The full
+    ``grace_seconds`` floor above is unchanged — every hydrating start and every
+    stop-side action still waits it out, so the #822/#847 safety is intact.
     """
 
     floor = max(
         settings.control.hydrate_timeout_seconds
         + settings.control.command_timeout_seconds,
         settings.control.snapshot_timeout_seconds,
+        settings.control.stop_timeout_seconds,
     )
     if settings.reconciler.grace_seconds <= floor:
         logging.getLogger(__name__).warning(
             "reconciler.grace_seconds (%d) <= max("
             "control.hydrate_timeout_seconds (%d) + "
             "control.command_timeout_seconds (%d), "
-            "control.snapshot_timeout_seconds (%d)); a slow start re-dispatched by "
+            "control.snapshot_timeout_seconds (%d), "
+            "control.stop_timeout_seconds (%d)); a slow start re-dispatched by "
             "the reconciler before its first round-trip settles can spawn a "
-            "duplicate live instance (issue #822), or the stale-stop arm can clear "
-            "a still-healthy final-snapshot hold mid-upload (issue #847). Raise "
-            "grace_seconds above %d.",
+            "duplicate live instance (issue #822), the stale-stop arm can clear "
+            "a still-healthy final-snapshot hold mid-upload (issue #847), or a "
+            "stale stop can be re-dispatched before its first round-trip settles "
+            "(issue #930). Raise grace_seconds above %d.",
             settings.reconciler.grace_seconds,
             settings.control.hydrate_timeout_seconds,
             settings.control.command_timeout_seconds,
             settings.control.snapshot_timeout_seconds,
+            settings.control.stop_timeout_seconds,
             floor,
+        )
+    # The held-start short grace (issue #999) only covers a command-only
+    # redispatch_start (hydrate skipped), so its floor is the start COMMAND deadline,
+    # not the hydrate budget. The full grace_seconds floor above is unchanged.
+    if (
+        settings.reconciler.held_start_grace_seconds
+        <= settings.control.command_timeout_seconds
+    ):
+        logging.getLogger(__name__).warning(
+            "reconciler.held_start_grace_seconds (%d) <= "
+            "control.command_timeout_seconds (%d); a held-server start re-dispatched "
+            "by the reconciler before its command round-trip settles can race the "
+            "in-flight start (issue #999). Raise held_start_grace_seconds above %d.",
+            settings.reconciler.held_start_grace_seconds,
+            settings.control.command_timeout_seconds,
+            settings.control.command_timeout_seconds,
         )
 
 
@@ -359,6 +413,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raise ValueError(
             "control.worker_credential is required when control.enabled is true"
         )
+
+    # The relay credential and base domain are required whenever the game-ingress
+    # relay is enabled (RELAY.md Section 13); fail fast rather than serving a
+    # RelayService that would admit any relay (NFR-SEC-1) or building a
+    # ``join_hostname`` with no base domain. Mirrors the Worker-credential guard,
+    # and ``not <secret>`` treats a blank-collapsed-to-None as missing (#943).
+    if settings.relay.enabled:
+        if not settings.relay.credential:
+            raise ValueError("relay.credential is required when relay.enabled is true")
+        if not settings.relay.base_domain:
+            raise ValueError("relay.base_domain is required when relay.enabled is true")
+        # The RelayService is served on the *same* gRPC listener as WorkerService
+        # (RELAY.md Section 6), which only starts when control.enabled. With the
+        # control plane off there is no listener to attach RelayService to, so the
+        # relay would be silently unserved while join_hostname is still exposed
+        # (PR #973 review). Fail fast rather than half-enabling the relay.
+        if not settings.control.enabled:
+            raise ValueError(
+                "relay.enabled requires control.enabled "
+                "(the RelayService shares the control-plane gRPC listener)"
+            )
 
     # The control channel must be authenticated AND encrypted (NFR-SEC-1). The
     # gRPC listener serves over TLS when control.tls.cert_file/key_file are both
@@ -477,6 +552,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         backup_task: asyncio.Task[None] | None = None
         reconciler_task: asyncio.Task[None] | None = None
         jar_gc_task: asyncio.Task[None] | None = None
+        session_prune_task: asyncio.Task[None] | None = None
         # Periodic login_attempt prune (SECURITY.md Section 3). Ungated on the
         # control plane: unlike the snapshot/backup loops it drives only the
         # database, so it must run on every API process to keep the append-only
@@ -516,6 +592,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 key_file=settings.control.tls.key_file,
                 insecure=settings.control.tls.insecure,
             )
+            # Game-ingress relay control surface (RELAY.md Sections 4, 6, 13,
+            # issue #956): served on the SAME gRPC listener as WorkerService, only
+            # when relay.enabled. The relay dispatches TunnelDial over the existing
+            # Worker stream, so it shares the control plane and registry built
+            # above; its registration + join-token state are process-local
+            # in-memory adapters like the rest of the control plane. The
+            # required-when-enabled credential/base_domain are validated at the top
+            # of the factory.
+            if settings.relay.enabled:
+                assert settings.relay.credential is not None
+                assert settings.relay.base_domain is not None
+                register_relay_service(
+                    grpc_server,
+                    credential=settings.relay.credential,
+                    base_domain=settings.relay.base_domain,
+                    registration=RelayRegistration(),
+                    token_table=JoinTokenTable(),
+                    resolver=ServersServerRouteResolver(create_session_factory(engine)),
+                    registry=registry,
+                    control_plane=app.state.control_plane,
+                    session_sink=ServersSessionSink(create_session_factory(engine)),
+                    clock=FleetSystemClock(),
+                )
+                logging.getLogger(__name__).info(
+                    "relay service registered on the gRPC listener",
+                    extra={"base_domain": settings.relay.base_domain},
+                )
+                # Game-session retention prune (RELAY.md Section 8, issue #957):
+                # delete game_session rows older than relay.session_retention_days.
+                # Runs only when relay.enabled (the relay is what populates the
+                # table); a fixed hourly resolution is fine for a days-wide window.
+                session_pruner = PruneGameSessions(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    clock=ServersSystemClock(),
+                    retention=dt.timedelta(days=settings.relay.session_retention_days),
+                )
+                session_prune_task = asyncio.create_task(
+                    run_game_session_prune_loop(
+                        session_pruner,
+                        tick_seconds=_SESSION_PRUNE_TICK_SECONDS,
+                    )
+                )
+                logging.getLogger(__name__).info("game_session prune loop started")
             await grpc_server.start()
             app.state.grpc_server = grpc_server
             app.state.grpc_started = True
@@ -596,6 +715,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 worker_credential=settings.control.worker_credential,
                 hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
                 snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
+                stop_timeout_seconds=settings.control.stop_timeout_seconds,
             )
             # Build a fresh StartServer/StopServer (each with its own UnitOfWork)
             # per reconcile action so concurrent actions never share a session
@@ -626,8 +746,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     clock=ServersSystemClock(),
                 ),
                 control_plane=reconciler_control_plane,
+                store_generation=StorageGenerationReader(storage=storage),
                 clock=ServersSystemClock(),
                 grace_seconds=settings.reconciler.grace_seconds,
+                held_start_grace_seconds=settings.reconciler.held_start_grace_seconds,
                 backoff_base_seconds=settings.reconciler.backoff_base_seconds,
                 backoff_max_seconds=settings.reconciler.backoff_max_seconds,
             )
@@ -692,6 +814,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             prune_attempts_task.cancel()
             with suppress(asyncio.CancelledError):
                 await prune_attempts_task
+            if session_prune_task is not None:
+                session_prune_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await session_prune_task
             if jar_gc_task is not None:
                 jar_gc_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -749,6 +875,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(health.router)
     api_router.include_router(readiness.router)
     api_router.include_router(metrics.router)
+    api_router.include_router(meta.router)
     api_router.include_router(users.router)
     api_router.include_router(admin_users.router)
     api_router.include_router(auth.router)

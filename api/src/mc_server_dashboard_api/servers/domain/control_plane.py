@@ -209,6 +209,26 @@ class ControlPlane(abc.ABC):
         """
 
     @abc.abstractmethod
+    def holds_fresh_working_set(
+        self, *, worker_id: WorkerId, server_id: ServerId, store_generation: int
+    ) -> bool:
+        """Return whether ``worker_id`` holds a working set a start may skip-hydrate.
+
+        ``True`` exactly when the SAME ``held_generation >= store_generation`` test
+        the lifecycle layer uses to skip the destructive hydrate on a same-worker
+        restart (issue #763) holds — i.e. the Worker reports holding a generation at
+        least as fresh as the authoritative store, so the start is command-only (no
+        hydrate). ``False`` when nothing is held (``held_generation`` is ``None``) or
+        the held generation is stale.
+
+        The reconciler consults this to pick the SHORT held-start grace for a
+        ``redispatch_start`` that will skip hydrate, versus the full grace for one
+        that will hydrate (issue #999). It does not re-check connectivity — the
+        caller has already confirmed the Worker is connected via
+        :meth:`is_worker_connected`.
+        """
+
+    @abc.abstractmethod
     def increment_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
         """Confirm ``server_id``'s reservation as a committed placement (#778).
 

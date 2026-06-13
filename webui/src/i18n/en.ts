@@ -203,6 +203,7 @@ export const en = {
   "dashboard.col.type": "Type / version",
   "dashboard.col.backend": "Backend",
   "dashboard.col.port": "Port",
+  "dashboard.col.address": "Address",
   "dashboard.col.worker": "Worker",
   "dashboard.col.actions": "Actions",
   // Observed-state pill labels (WEBUI_SPEC.md 2.3).
@@ -238,6 +239,11 @@ export const en = {
   "serverDetail.noWorker": "no worker assigned",
   "serverDetail.worker": "Worker",
   "serverDetail.noPort": "no port",
+  // Relay join hostname (issue #961): shown in the header when the relay is enabled.
+  "serverDetail.joinHostname": "Join address",
+  "serverDetail.copyJoinHostname": "Copy",
+  "serverDetail.copiedJoinHostname": "Copied!",
+  "serverDetail.copyJoinHostnameFailed": "Copy failed",
   // Tabs (WEBUI_SPEC.md 6.4–6.9). Built tabs: Overview, Settings; the rest are
   // placeholders pending later phases.
   "serverDetail.tab.overview": "Overview",
@@ -307,6 +313,14 @@ export const en = {
     "Soft share of CPU for this server, in millicores (1000 = one core). A relative weight under load, not a hard cap — the server can use more when the host is idle. Leave blank for auto.",
   "serverDetail.settings.cpuAllocationRange":
     "Enter a whole number between 100 and 128000 millicores, or leave blank for auto.",
+  // Relay join-address name field (issue #961): visible only when relay is enabled.
+  "serverDetail.settings.slug": "Join address name",
+  "serverDetail.settings.slugHint":
+    "Lowercase letters, numbers and hyphens only. Cannot start or end with a hyphen. Leave unchanged to keep the current join address.",
+  "serverDetail.settings.slugInvalid":
+    "Must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
+  "serverDetail.settings.slugTaken":
+    "This join address name is already in use.",
   "serverDetail.settings.save": "Save changes",
   "serverDetail.settings.saved": "Settings saved.",
   "serverDetail.settings.atRestHint":
@@ -349,6 +363,10 @@ export const en = {
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverDetail.error.invalidCpuAllocation":
     "The CPU allocation must be a whole number between 100 and 128000 millicores.",
+  // Relay join address name errors (issue #961).
+  "serverDetail.error.invalidSlug":
+    "The join address name must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
+  "serverDetail.error.slugTaken": "That join address name is already in use.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
 
   // Backups tab (WEBUI_SPEC.md 6.7). One contiguous block to keep merge
@@ -529,6 +547,24 @@ export const en = {
   "players.manageLink": "Community settings",
   "players.error.generic": "Something went wrong. Please try again.",
 
+  // Sessions view — relay game session history (issue #961).
+  // Rendered only for members holding session:read; identity columns are
+  // the claimed Login Start values (unverified).
+  "sessions.heading": "Sessions",
+  "sessions.loading": "Loading sessions…",
+  "sessions.loadError": "Could not load sessions. Try refreshing.",
+  "sessions.empty": "No sessions recorded yet.",
+  "sessions.col.hostname": "Hostname",
+  "sessions.col.playerIp": "IP (claimed)",
+  "sessions.col.username": "Username (claimed)",
+  "sessions.col.start": "Start",
+  "sessions.col.end": "End",
+  "sessions.valueUnknown": "—",
+  "sessions.active": "active",
+  // Pagination controls.
+  "sessions.prev": "Previous",
+  "sessions.next": "Next",
+
   // Server create wizard (WEBUI_SPEC.md 6.3). One contiguous block to keep
   // merge conflicts with sibling i18n PRs minimal.
   "serverCreate.subtitle": "Provision a new Minecraft server.",
@@ -591,6 +627,13 @@ export const en = {
     "Soft share of CPU for this server, in millicores (1000 = one core). A relative weight under load, not a hard cap — the server can use more when the host is idle. Leave blank for auto.",
   "serverCreate.cpuAllocationRange":
     "Enter a whole number between 100 and 128000 millicores, or leave blank for auto.",
+  // Optional join address name (slug) at create time (issue #981).
+  "serverCreate.slugLabel": "Join address name (optional)",
+  "serverCreate.slugPlaceholder": "e.g. myserver",
+  "serverCreate.slugHint":
+    "Lowercase letters, numbers and hyphens only. Leave blank to generate a random address.",
+  "serverCreate.slugInvalid":
+    "Must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
   "serverCreate.propsHeading": "server.properties overrides",
   "serverCreate.propsHint":
     "Optional. Keys written into server.properties on first boot.",
@@ -617,6 +660,10 @@ export const en = {
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverCreate.error.invalid_cpu_allocation":
     "The CPU allocation must be a whole number between 100 and 128000 millicores.",
+  "serverCreate.error.invalid_slug":
+    "That join address name is not valid. Use lowercase letters, digits and hyphens only.",
+  "serverCreate.error.slug_taken":
+    "That join address name is already in use. Choose another.",
   "serverCreate.genericError": "Could not create the server. Please try again.",
   // Import tab.
   "serverCreate.import.heading": "Import from a ZIP export",
@@ -822,6 +869,8 @@ export const en = {
   "communitySettings.roles.family.group": "Groups",
   "communitySettings.roles.family.community": "Community",
   "communitySettings.roles.family.audit": "Audit log",
+  // Session family (issue #961): relay game session history.
+  "communitySettings.roles.family.session": "Sessions",
   // Permission code labels (the action within each family).
   "communitySettings.roles.code.server:create": "Create",
   "communitySettings.roles.code.server:read": "Read",
@@ -853,6 +902,8 @@ export const en = {
   "communitySettings.roles.code.community:update": "Update",
   "communitySettings.roles.code.community:delete": "Delete",
   "communitySettings.roles.code.audit:read": "Read",
+  // Session permission code label (issue #961).
+  "communitySettings.roles.code.session:read": "Read",
 
   // Grants tab (WEBUI_SPEC.md 6.10): per-server permission grants.
   "communitySettings.grants.heading": "Grants",

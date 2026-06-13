@@ -215,12 +215,17 @@ async def test_downgrade_remaps_uploaded_rows_before_narrowing_check() -> None:
             await conn.execute(
                 text(
                     "INSERT INTO server (id, community_id, name, mc_edition, "
-                    "mc_version, server_type, execution_backend, config, "
+                    "mc_version, server_type, execution_backend, config, slug, "
                     "desired_state, observed_state, created_at, updated_at) VALUES "
                     "(:id, :community_id, :name, 'java', '1.21.1', 'vanilla', "
-                    "'container', '{}', 'stopped', 'unknown', now(), now())"
+                    "'container', '{}', :slug, 'stopped', 'unknown', now(), now())"
                 ),
-                {"id": server_id, "community_id": community_id, "name": "survival"},
+                {
+                    "id": server_id,
+                    "community_id": community_id,
+                    "name": "survival",
+                    "slug": f"survival-{str(server_id)[:8]}-00",
+                },
             )
             await conn.execute(
                 text(

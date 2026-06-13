@@ -1,16 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
+import { useState } from "react";
 import { Link } from "react-router";
 import { api } from "../api/client.ts";
 import { attachmentsKeys, groupsKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { useToast } from "../components/Toast.tsx";
+import { formatDateTime } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 
 type GroupResponse = components["schemas"]["GroupResponse"];
+type GameSessionResponse = components["schemas"]["GameSessionResponse"];
+
+const SESSIONS_PAGE_SIZE = 20;
 
 // `kind` is a free-form string on the wire; only op/whitelist have a localized
 // label, anything else falls back to its raw value.
@@ -197,7 +202,118 @@ export function ServerPlayersTab({
           {t("players.manageLink")}
         </Link>
       </p>
+
+      {can("session:read") && (
+        <SessionsView communityId={communityId} serverId={serverId} />
+      )}
     </section>
+  );
+}
+
+function sessionsKey(communityId: string, serverId: string, offset: number) {
+  return ["sessions", communityId, serverId, offset] as const;
+}
+
+function sessionsUrl(
+  communityId: string,
+  serverId: string,
+  offset: number,
+): "/api/communities/{community_id}/servers/{server_id}/sessions" {
+  const base = apiPath(
+    "/api/communities/{community_id}/servers/{server_id}/sessions",
+    { community_id: communityId, server_id: serverId },
+  );
+  const params = new URLSearchParams({
+    limit: String(SESSIONS_PAGE_SIZE),
+    offset: String(offset),
+  });
+  return `${base}?${params.toString()}` as "/api/communities/{community_id}/servers/{server_id}/sessions";
+}
+
+function SessionsView({
+  communityId,
+  serverId,
+}: {
+  communityId: string;
+  serverId: string;
+}) {
+  const [offset, setOffset] = useState(0);
+
+  const query = useQuery({
+    queryKey: sessionsKey(communityId, serverId, offset),
+    queryFn: () => api.get(sessionsUrl(communityId, serverId, offset)),
+  });
+
+  const sessions: GameSessionResponse[] = query.data?.sessions ?? [];
+  const hasPrev = offset > 0;
+  const hasNext = sessions.length === SESSIONS_PAGE_SIZE;
+
+  return (
+    <div className="card">
+      <h2>{t("sessions.heading")}</h2>
+      {query.isPending ? (
+        <p className="sub">{t("sessions.loading")}</p>
+      ) : query.isError ? (
+        <p className="field-error">{t("sessions.loadError")}</p>
+      ) : sessions.length === 0 ? (
+        <p className="sub">{t("sessions.empty")}</p>
+      ) : (
+        <>
+          <table className="sessions-table">
+            <thead>
+              <tr>
+                <th>{t("sessions.col.hostname")}</th>
+                <th>{t("sessions.col.playerIp")}</th>
+                <th>{t("sessions.col.username")}</th>
+                <th>{t("sessions.col.start")}</th>
+                <th>{t("sessions.col.end")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sessions.map((s) => (
+                <tr key={s.id}>
+                  <td>{s.hostname ?? t("sessions.valueUnknown")}</td>
+                  <td>{s.player_ip ?? t("sessions.valueUnknown")}</td>
+                  <td>{s.username ?? t("sessions.valueUnknown")}</td>
+                  <td>
+                    {s.started_at !== null
+                      ? formatDateTime(s.started_at)
+                      : t("sessions.valueUnknown")}
+                  </td>
+                  <td>
+                    {s.ended_at !== null
+                      ? formatDateTime(s.ended_at)
+                      : t("sessions.active")}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {(hasPrev || hasNext) && (
+            <div className="pagination">
+              <button
+                type="button"
+                className="btn sm"
+                disabled={!hasPrev || query.isFetching}
+                onClick={() =>
+                  setOffset(Math.max(0, offset - SESSIONS_PAGE_SIZE))
+                }
+              >
+                {t("sessions.prev")}
+              </button>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={!hasNext || query.isFetching}
+                onClick={() => setOffset(offset + SESSIONS_PAGE_SIZE)}
+              >
+                {t("sessions.next")}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

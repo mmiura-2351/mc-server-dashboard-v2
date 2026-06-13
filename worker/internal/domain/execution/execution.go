@@ -194,7 +194,12 @@ type Instance interface {
 	// Stop ends the instance. A graceful stop tries the in-band shutdown (RCON
 	// "stop") and falls back to signals; a non-graceful stop forces termination.
 	// It returns once the process has exited or the stop deadline elapsed.
-	Stop(ctx context.Context, graceful bool) error
+	//
+	// preFallback, when supplied, is called always before stop on the graceful
+	// path (before tryRCONStop and before docker stop) so the caller can flush
+	// the live world to disk while the process is still alive. It is NOT called
+	// on a force stop (graceful=false). At most one callback is accepted.
+	Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error
 	// Status reports the last observed state.
 	Status() ServerState
 	// Events streams state transitions for this instance until it terminates.

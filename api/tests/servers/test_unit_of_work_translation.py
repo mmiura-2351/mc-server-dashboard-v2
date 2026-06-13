@@ -1,11 +1,12 @@
 """Unit tests for the servers UnitOfWork integrity-error translation (no DB).
 
-A duplicate server name or game port that races past the use-case pre-check
-surfaces as an IntegrityError at commit time; the adapter must translate the
-unique-violation to the matching domain error (``uq_server_community_name`` ->
-:class:`ServerNameAlreadyExistsError`, ``uq_server_game_port`` ->
-:class:`PortAlreadyTakenError`) so the API returns 409, not 500. An unrelated
-violation is re-raised untranslated.
+A duplicate server name, game port, or slug that races past the use-case
+pre-check surfaces as an IntegrityError at commit time; the adapter must
+translate the unique-violation to the matching domain error
+(``uq_server_community_name`` -> :class:`ServerNameAlreadyExistsError`,
+``uq_server_game_port`` -> :class:`PortAlreadyTakenError`, ``uq_server_slug``
+-> :class:`SlugAlreadyTakenError`) so the API returns 409, not 500. An
+unrelated violation is re-raised untranslated.
 
 The asyncpg/SQLAlchemy stack is faked: a session whose ``commit`` raises a
 prebuilt IntegrityError carrying the violated constraint name, mirroring the
@@ -21,6 +22,7 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnit
 from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     ServerNameAlreadyExistsError,
+    SlugAlreadyTakenError,
 )
 
 
@@ -73,6 +75,13 @@ async def test_commit_translates_server_name_violation() -> None:
 async def test_commit_translates_game_port_violation() -> None:
     uow, session = _uow_with_commit_error("uq_server_game_port")
     with pytest.raises(PortAlreadyTakenError):
+        await uow.commit()
+    assert session.rolled_back is True
+
+
+async def test_commit_translates_slug_violation() -> None:
+    uow, session = _uow_with_commit_error("uq_server_slug")
+    with pytest.raises(SlugAlreadyTakenError):
         await uow.commit()
     assert session.rolled_back is True
 

@@ -232,6 +232,24 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 // container-name DNS resolves it, so RCON is reached over the network rather than
 // the unreachable host loopback (issue #218).
 func (d *Driver) RconHost(serverID string) string {
+	return d.networkHost(serverID)
+}
+
+// GameHost returns the host the relay tunnel dials serverID's game port at. Like
+// RconHost it is empty when no network is configured (the tunnel falls back to the
+// published-port loopback) and the container name when a user-defined network is
+// configured: the worker process is itself a container on that network, so the
+// server's game port is reachable at the container name over the network, not at
+// the worker's own loopback where the host publication does not exist (issue #979).
+func (d *Driver) GameHost(serverID string) string {
+	return d.networkHost(serverID)
+}
+
+// networkHost is the single decision RconHost and GameHost share: empty with no
+// network (caller dials the host loopback), the container name over the
+// user-defined network otherwise, so the RCON and tunnel dial hosts can never
+// drift (issues #218, #979).
+func (d *Driver) networkHost(serverID string) string {
 	if d.network == "" {
 		return ""
 	}
@@ -1020,7 +1038,7 @@ func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) 
 // (which SIGTERMs then SIGKILLs after stopTimeout inside the daemon), then a
 // direct `docker kill`; a forced stop skips the RCON step. Any terminal state
 // makes Stop a prompt no-op success.
-func (i *instance) Stop(ctx context.Context, graceful bool) error {
+func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
 	i.mu.Lock()
 	if i.stopping || isTerminal(i.state) {
 		i.mu.Unlock()
@@ -1060,6 +1078,18 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.stopDeadline())
 	defer cancel()
 
+	// Always flush before stop on the graceful path (#1007/#1008): MC's own
+	// shutdown save (via RCON "stop") does NOT reliably flush dirty region
+	// chunks when a player was connected — observed on MC 26.1.2 with
+	// relay/tunnel connections. The flush (RCON save-all + settleWorkingSet)
+	// ensures chunks are on disk BEFORE the process terminates.
+	// Run on a detached context so it does not consume the stopDeadline.
+	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
+		flushCtx, flushCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 90*time.Second)
+		preFallback[0](flushCtx)
+		flushCancel()
+	}
+
 	if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
 		return nil
 	}
@@ -1085,7 +1115,13 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
 	}
 
-	if err := i.docker.Kill(stopCtx, id); err != nil {
+	// Use a detached context for the kill call so it is never starved by
+	// the stopDeadline — a kill MUST reach the daemon even when the prior
+	// RCON + docker-stop phases consumed the entire budget (observed with
+	// MC 26.1.2 shutdown-save hangs under relay/tunnel connections).
+	killCtx, killCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 30*time.Second)
+	defer killCancel()
+	if err := i.docker.Kill(killCtx, id); err != nil {
 		// The kill call itself errored (e.g. a hung or erroring daemon), so this Stop
 		// failed without confirming the container died. Reset the stopping latch (and
 		// restore the pre-stop state) so a retried Stop re-runs the full sequence
@@ -1417,7 +1453,8 @@ var (
 // ports reads the server's game and RCON ports from its working-dir
 // server.properties, falling back to the Minecraft defaults when the file is
 // absent or a key is unset. Start publishes the game port on the configured host
-// interface and RCON on loopback.
+// interface and RCON on loopback. Keep the game-port resolution in sync with
+// tunnel.gamePort (adapters/tunnel/tunnel.go), which dials the published port.
 func ports(workingDir string) (game, rcon string) {
 	props := readProperties(filepath.Join(workingDir, "server.properties"))
 	game = props["server-port"]

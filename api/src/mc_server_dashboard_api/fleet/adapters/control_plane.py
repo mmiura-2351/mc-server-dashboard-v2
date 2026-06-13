@@ -43,6 +43,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     SnapshotCommand,
     StartServerCommand,
     StopServerCommand,
+    TunnelDialCommand,
     WorkerNotConnectedError,
 )
 from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
@@ -388,6 +389,15 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
         api.edit_file.CopyFrom(pb.EditFile(path=command.path, content=command.content))
     elif isinstance(command, ListFilesCommand):
         api.list_files.CopyFrom(pb.ListFiles(path=command.path))
+    elif isinstance(command, TunnelDialCommand):
+        api.tunnel_dial.CopyFrom(
+            pb.TunnelDial(
+                server_id=server_id,
+                endpoint=command.endpoint,
+                token=command.token,
+                tls_ca_pem=command.tls_ca_pem,
+            )
+        )
     else:  # pragma: no cover - exhaustive over the Command union
         raise TypeError(f"unsupported command type: {type(command)!r}")
     return api
@@ -476,3 +486,69 @@ class GrpcControlPlane(ControlPlane):
             self._state.discard_pending(command_id)
             raise CommandTimedOutError(command_id) from exc
         return _to_result(result)
+
+    async def dispatch_fire_and_forget(
+        self, *, worker_id: WorkerId, server_id: str, command: Command
+    ) -> None:
+        """Send ``command`` without awaiting its ``CommandResult`` (RELAY.md 4).
+
+        The relay's TUNNEL decision dispatches a ``TunnelDial`` as a side effect:
+        the Worker's real "result" is the dial-back arriving at the relay, so the
+        ResolveJoin response must return immediately rather than blocking on the
+        ``CommandResult``. The result is still correlated and logged for
+        diagnostics by a detached task, which also discards the pending entry on
+        timeout so the correlation map stays bounded.
+
+        Raises :class:`WorkerNotConnectedError` synchronously when the Worker has
+        no live session — the caller maps that to a STOPPED decision.
+        """
+
+        queue = self._state.outbound_for(worker_id)
+        if queue is None:
+            raise WorkerNotConnectedError(worker_id.value)
+        command_id = str(uuid.uuid4())
+        future = self._state.register_pending(command_id, worker_id)
+        api_command = _to_api_command(command_id, server_id, command)
+        await queue.put(
+            pb.ApiMessage(correlation_id=command_id, api_command=api_command)
+        )
+        # Fire-and-forget: the result is not awaited here. The bare ensure_future
+        # is GC-safe because the pending-map (register_pending above) keeps the
+        # future referenced until the result resolves it or it times out, and the
+        # logging coroutine holds command_id/server_id; the task is not collected
+        # mid-flight despite no local reference being kept.
+        asyncio.ensure_future(
+            self._log_fire_and_forget_result(command_id, server_id, future)
+        )
+
+    async def _log_fire_and_forget_result(
+        self,
+        command_id: str,
+        server_id: str,
+        future: asyncio.Future[pb.CommandResult],
+    ) -> None:
+        try:
+            result = await asyncio.wait_for(future, timeout=self._timeout)
+        except (TimeoutError, WorkerNotConnectedError):
+            # The dial-back never arriving is a relay-side timeout (RELAY.md
+            # Section 10), recovered there; the API only notes the missing result.
+            self._state.discard_pending(command_id)
+            _LOG.info(
+                "no CommandResult for fire-and-forget command",
+                extra={"command_id": command_id, "server_id": server_id},
+            )
+            return
+        if result.success:
+            _LOG.debug(
+                "fire-and-forget command acknowledged",
+                extra={"command_id": command_id, "server_id": server_id},
+            )
+        else:
+            _LOG.warning(
+                "fire-and-forget command failed",
+                extra={
+                    "command_id": command_id,
+                    "server_id": server_id,
+                    "error": result.error.message,
+                },
+            )

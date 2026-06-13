@@ -29,7 +29,7 @@ type orphanInstance struct {
 	stopping  bool
 }
 
-func (i *orphanInstance) Stop(ctx context.Context, graceful bool) error {
+func (i *orphanInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
 	i.mu.Lock()
 	// Mirror the driver entry guard: a Stop while already stopping is a no-op nil.
 	if i.stopping {
@@ -48,7 +48,7 @@ func (i *orphanInstance) Stop(ctx context.Context, graceful bool) error {
 		return errors.New("driver: process survived kill")
 	}
 	// Confirmed termination: keep stopping latched and finalize via the base fake.
-	return i.fakeInstance.Stop(ctx, graceful)
+	return i.fakeInstance.Stop(ctx, graceful, preFallback...)
 }
 
 func (i *orphanInstance) stopCount() int {

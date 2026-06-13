@@ -772,6 +772,52 @@ func TestQuickCommandBypassesSaturatedCap(t *testing.T) {
 	<-done
 }
 
+// A TunnelDial (a player join) must also bypass the saturated cap: a join must
+// not queue behind a hydrate (issue #958, RELAY.md Section 5). This mirrors the
+// ServerCommand bypass with a TunnelDial as the quick command.
+func TestTunnelDialBypassesSaturatedCap(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newGateHandler("HydrateTrigger")
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// Saturate the cap with one slow hydrate per distinct server.
+	for i := 0; i < maxConcurrentLanes; i++ {
+		id := fmt.Sprintf("slow-%d", i)
+		transport.commands <- Command{CommandID: id, ServerID: id, Kind: "HydrateTrigger"}
+	}
+	waitFor(t, func() bool { return handler.inflightCount() == maxConcurrentLanes })
+
+	// A join (TunnelDial) for a different, idle server must still complete while all
+	// slow lanes hold the cap.
+	transport.commands <- Command{CommandID: "join", ServerID: "join-server", Kind: "TunnelDial"}
+
+	waitFor(t, func() bool {
+		for _, res := range transport.resultsCopy() {
+			if res.CommandID == "join" && res.Success {
+				return true
+			}
+		}
+		return false
+	})
+
+	for _, res := range transport.resultsCopy() {
+		if res.CommandID != "join" {
+			t.Fatalf("slow op %q answered before release; cap was not actually saturated", res.CommandID)
+		}
+	}
+
+	close(handler.release)
+	cancel()
+	<-done
+}
+
 // The bypass must not break per-server FIFO/safety: a ServerCommand queued behind
 // a same-server long-running op must still wait for that op, never racing ahead
 // of it (issue #169). A command must not run against a server mid-hydrate.
@@ -960,6 +1006,88 @@ func TestRegisterAckTransferDeadlinePlumbedToHandler(t *testing.T) {
 	got, _ := handler.transferDeadlineCopy()
 	if got != 11*time.Minute {
 		t.Fatalf("pushed transfer deadline = %v, want 11m", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// After a (re-)register the session asks a handler that implements the optional
+// StatusResyncer to re-emit its live instances' state (issue #985), and those
+// re-emitted events are forwarded as StatusChange on the freshly registered
+// stream — so an API restart moves a still-running server out of observed=unknown
+// within seconds instead of over the reconciler grace window.
+func TestRegisterTriggersStatusResyncOnNewStream(t *testing.T) {
+	first := newFakeTransport(acceptedAck())
+	second := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{first, second}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{})
+	// The handler re-emits a running server on every resync, modeling a live
+	// instance the worker still holds across the control-plane reconnect.
+	handler.resyncEmit = []StatusEvent{{ServerID: "srv-1", State: "running"}}
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(),
+		WithCommandHandler(handler), WithRandFloat(func() float64 { return 0 }))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// First register fires the resync; the re-emitted running status is forwarded
+	// on the first stream.
+	waitFor(t, func() bool { return first.registerCount() == 1 })
+	waitFor(t, func() bool { return len(first.statusesCopy()) == 1 })
+	if got := first.statusesCopy()[0]; got.ServerID != "srv-1" || got.State != "running" {
+		t.Fatalf("resync status on first stream = %+v, want srv-1 running", got)
+	}
+
+	// Drop the first stream; the worker reconnects and re-registers, and the
+	// resync re-emits the running status onto the SECOND (new) stream.
+	close(first.commands)
+	waitFor(t, func() bool {
+		clock.fireNext()
+		return second.registerCount() == 1
+	})
+	waitFor(t, func() bool { return len(second.statusesCopy()) == 1 })
+	if got := second.statusesCopy()[0]; got.ServerID != "srv-1" || got.State != "running" {
+		t.Fatalf("resync status on second stream = %+v, want srv-1 running", got)
+	}
+	if calls := handler.resyncCallsCopy(); calls != 2 {
+		t.Fatalf("ResyncStatus calls = %d, want 2 (one per register)", calls)
+	}
+
+	cancel()
+	<-done
+}
+
+// A handler that re-emits nothing on resync (the empty-instance-map case, e.g. a
+// fresh worker process) produces no spurious StatusChange after register.
+func TestRegisterStatusResyncEmptyEmitsNothing(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{}) // resyncEmit is nil: a no-op resync
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool { return handler.resyncCallsCopy() == 1 })
+
+	// Drive a heartbeat so the serve loop has demonstrably run past register; no
+	// status should have been forwarded.
+	var timer *fakeTimer
+	waitFor(t, func() bool {
+		timer = clock.firstTimer()
+		return timer != nil
+	})
+	timer.fire()
+	waitFor(t, func() bool { return transport.heartbeatCount() >= 1 })
+	if n := len(transport.statusesCopy()); n != 0 {
+		t.Fatalf("statuses forwarded = %d, want 0 (empty resync is a no-op)", n)
 	}
 
 	cancel()

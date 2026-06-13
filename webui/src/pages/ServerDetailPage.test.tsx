@@ -81,6 +81,8 @@ function server(overrides: Record<string, unknown> = {}) {
     observed_at: null,
     assigned_worker_id: "worker-a",
     config: {},
+    slug: "survival",
+    join_hostname: null,
     ...overrides,
   };
 }
@@ -597,6 +599,60 @@ describe("ServerDetailPage settings", () => {
     expect(backend).toBeDisabled();
     expect(screen.getByDisplayValue("max-players")).toBeInTheDocument();
     expect(screen.getByDisplayValue("hard")).toBeInTheDocument();
+  });
+
+  it("hides the game-port control in relay mode (#1002)", async () => {
+    // A non-null join_hostname signals relay mode: players join port-less, so
+    // the port is internal plumbing the API manages and the control is hidden.
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.mc.example.com" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect(
+      screen.queryByLabelText(t("serverDetail.settings.gamePort")),
+    ).toBeNull();
+    // The slug (join address name) control is shown in relay mode.
+    expect(
+      screen.getByLabelText(t("serverDetail.settings.slug")),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the game-port control in direct mode (relay off, #1002)", async () => {
+    mockApi.get.mockResolvedValue(server({ join_hostname: null }));
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect(
+      screen.getByLabelText(t("serverDetail.settings.gamePort")),
+    ).toBeInTheDocument();
+  });
+
+  it("omits game_port from the PATCH body in relay mode (#1002)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        join_hostname: "survival.mc.example.com",
+        config: { motd: "hi" },
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const [, init] = mockApi.patch.mock.calls[0];
+    expect(JSON.parse(init.body).game_port).toBeUndefined();
   });
 
   it("checks port availability on blur and shows the taken hint", async () => {
@@ -1262,6 +1318,386 @@ describe("ServerDetailPage settings CPU allocation", () => {
 
     expect(
       await screen.findByText(t("serverDetail.error.invalidCpuAllocation")),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("ServerDetailPage header join_hostname (issue #961)", () => {
+  it("shows the port badge when join_hostname is null", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: null, game_port: 25565 }),
+    );
+    renderPage();
+
+    expect(await screen.findByText(":25565")).toBeInTheDocument();
+    expect(
+      screen.queryByText(new RegExp(t("serverDetail.joinHostname"))),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows join_hostname with a copy button when non-null", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "myserver.relay.example.com", game_port: 25565 }),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByText(/myserver\.relay\.example\.com/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
+    ).toBeInTheDocument();
+    // Port badge is hidden when join_hostname is shown.
+    expect(screen.queryByText(":25565")).not.toBeInTheDocument();
+  });
+
+  it("copy button uses execCommand fallback when navigator.clipboard is unavailable (insecure context)", async () => {
+    // jsdom does not implement navigator.clipboard; this test verifies the
+    // legacy execCommand fallback fires and no unhandled error is thrown.
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "myserver.relay.example.com" }),
+    );
+    renderPage();
+    await screen.findByText(/myserver\.relay\.example\.com/);
+
+    // Confirm navigator.clipboard is absent in jsdom (the environment under
+    // which insecure-context behaviour is exercised).
+    expect((navigator as { clipboard?: unknown }).clipboard).toBeUndefined();
+
+    // jsdom does not define execCommand; define it so vi.spyOn can wrap it.
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+
+    // Clicking must not throw even without the Clipboard API.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
+    );
+
+    expect(execSpy).toHaveBeenCalledWith("copy");
+    // After a successful fallback copy the button shows the "Copied!" label.
+    expect(
+      await screen.findByRole("button", {
+        name: t("serverDetail.copiedJoinHostname"),
+      }),
+    ).toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
+
+  it("copy button shows error state when both Clipboard API and execCommand fail", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "myserver.relay.example.com" }),
+    );
+    renderPage();
+    await screen.findByText(/myserver\.relay\.example\.com/);
+
+    // jsdom does not define execCommand; define it so vi.spyOn can wrap it.
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => false,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(false);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
+    );
+
+    expect(
+      await screen.findByRole("button", {
+        name: t("serverDetail.copyJoinHostnameFailed"),
+      }),
+    ).toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
+
+  it("copy button does not stick on Copied! when a failure fires while Copied! is shown (issue #976)", async () => {
+    // Simulate: first click succeeds (copied=true), second click fails before
+    // the 1.5 s timer clears — fail() must reset copied so the button doesn't
+    // stay on "Copied!" after the error label clears.
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "myserver.relay.example.com" }),
+    );
+    renderPage();
+    await screen.findByText(/myserver\.relay\.example\.com/);
+
+    // jsdom does not define execCommand; define it so we can toggle it.
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+
+    // First click: execCommand returns true → succeed()
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: t("serverDetail.copiedJoinHostname"),
+      }),
+    ).toBeInTheDocument();
+
+    // Second click before timer fires: execCommand returns false → fail()
+    execSpy.mockReturnValue(false);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("serverDetail.copiedJoinHostname"),
+      }),
+    );
+
+    // The button must now be in the error state, not stuck on "Copied!".
+    expect(
+      await screen.findByRole("button", {
+        name: t("serverDetail.copyJoinHostnameFailed"),
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: t("serverDetail.copiedJoinHostname"),
+      }),
+    ).not.toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
+});
+
+describe("ServerDetailPage header join address display (issue #982)", () => {
+  it("shows hostname only — no port substring — when join_hostname is set", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    );
+    renderPage();
+
+    await screen.findByText(/survival\.relay\.example\.com/);
+    // The port must not appear anywhere in the header when relay is on.
+    expect(screen.queryByText(/:25565/)).not.toBeInTheDocument();
+    expect(screen.queryByText("25565")).not.toBeInTheDocument();
+  });
+
+  it("join address badge carries the 'Join address:' label so it's distinguishable from type/backend badges", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    );
+    renderPage();
+
+    // The badge must include the i18n label so users can tell it apart from
+    // the adjacent type and backend badges.
+    expect(
+      await screen.findByText(
+        `${t("serverDetail.joinHostname")}: survival.relay.example.com`,
+      ),
+    ).toBeInTheDocument();
+    // When relay is off, the label must not appear.
+  });
+
+  it("hostname badge and copy button are siblings — button is not nested inside the badge", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    );
+    renderPage();
+
+    await screen.findByText(/survival\.relay\.example\.com/);
+    const copyBtn = screen.getByRole("button", {
+      name: t("serverDetail.copyJoinHostname"),
+    });
+    const hostnameBadge = screen.getByText(/survival\.relay\.example\.com/);
+    // The copy button must not be inside the badge span.
+    expect(hostnameBadge).not.toContainElement(copyBtn);
+  });
+});
+
+describe("ServerDetailPage settings slug (issue #961)", () => {
+  let restoreWs: () => void;
+
+  beforeEach(() => {
+    restoreWs = installMockWebSocket();
+  });
+  afterEach(() => {
+    restoreWs();
+  });
+
+  function openSettings() {
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    );
+  }
+
+  it("hides the slug field when relay is disabled (join_hostname null)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: null, slug: "survival" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    // The slug field is aria-labelled; when relay is off it must not appear.
+    expect(
+      screen.queryByLabelText(t("serverDetail.settings.slug")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the slug field when relay is enabled (join_hostname non-null)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", slug: "survival" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    expect(
+      screen.getByLabelText(t("serverDetail.settings.slug")),
+    ).toBeInTheDocument();
+  });
+
+  it("shows inline error for invalid slug format", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", slug: "survival" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    const slugInput = screen.getByLabelText(t("serverDetail.settings.slug"));
+    fireEvent.change(slugInput, { target: { value: "-bad-slug" } });
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.slugInvalid")),
+    ).toBeInTheDocument();
+  });
+
+  it("disables save button when slug is invalid", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", slug: "survival" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    const slugInput = screen.getByLabelText(t("serverDetail.settings.slug"));
+    fireEvent.change(slugInput, { target: { value: "-bad" } });
+
+    const saveBtn = screen.getByRole("button", {
+      name: t("serverDetail.settings.save"),
+    });
+    expect(saveBtn).toBeDisabled();
+  });
+
+  it("includes slug in PATCH when changed", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        join_hostname: "survival.relay.example.com",
+        slug: "survival",
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    const slugInput = screen.getByLabelText(t("serverDetail.settings.slug"));
+    fireEvent.change(slugInput, { target: { value: "new-slug" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const body = JSON.parse(mockApi.patch.mock.calls[0][1].body);
+    expect(body.slug).toBe("new-slug");
+  });
+
+  it("omits slug from PATCH when unchanged", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        join_hostname: "survival.relay.example.com",
+        slug: "survival",
+      }),
+    );
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    // Do not change the slug field; just save.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const body = JSON.parse(mockApi.patch.mock.calls[0][1].body);
+    expect(body.slug).toBeUndefined();
+  });
+
+  it("surfaces a 409 slug_taken error inline on save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        join_hostname: "survival.relay.example.com",
+        slug: "survival",
+      }),
+    );
+    mockApi.patch.mockRejectedValue(
+      new ApiError(409, { reason: "slug_taken" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    const slugInput = screen.getByLabelText(t("serverDetail.settings.slug"));
+    fireEvent.change(slugInput, { target: { value: "taken-slug" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.slugTaken")),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a 422 invalid_slug error inline on save", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        join_hostname: "survival.relay.example.com",
+        slug: "survival",
+      }),
+    );
+    mockApi.patch.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_slug" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+
+    const slugInput = screen.getByLabelText(t("serverDetail.settings.slug"));
+    fireEvent.change(slugInput, { target: { value: "reserved" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.slugInvalid")),
     ).toBeInTheDocument();
   });
 });
