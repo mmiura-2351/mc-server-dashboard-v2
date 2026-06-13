@@ -78,7 +78,11 @@ def main() -> None:
     community_id = community["id"]
 
     # Create a vanilla server and leave it STOPPED (never start it). The version
-    # is catalog-validated at create (no JAR download — that is deferred to start).
+    # is catalog-validated at create time against Mojang's live version manifest
+    # (https://launchermeta.mojang.com/mc/game/version_manifest_v2.json), so the
+    # API container needs outbound HTTPS access to Mojang's CDN. On network-isolated
+    # runners (no egress) seeding will fail at this call with a catalog fetch error.
+    # No JAR download happens here — that is deferred to the first server start.
     status, server = _request(
         "POST",
         f"/api/communities/{community_id}/servers",
