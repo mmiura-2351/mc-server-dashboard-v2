@@ -297,6 +297,42 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
     ).toBeInTheDocument();
   });
 
+  it("hides the port control while /api/meta is still loading (#1006)", async () => {
+    // Stall meta so it never resolves during the test.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === "/api/meta") {
+        return new Promise(() => {});
+      }
+      return defaultGet(path);
+    });
+    renderPage();
+    await pickTypeAndVersion();
+    fireEvent.click(screen.getByText(t("serverCreate.next")));
+    expect(
+      await screen.findByLabelText(t("serverCreate.backendLabel")),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText(t("serverCreate.portLabel"))).toBeNull();
+  });
+
+  it("hides the port control when /api/meta fails (#1006)", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === "/api/meta") {
+        return Promise.reject(new Error("network error"));
+      }
+      return defaultGet(path);
+    });
+    renderPage();
+    await pickTypeAndVersion();
+    fireEvent.click(screen.getByText(t("serverCreate.next")));
+    expect(
+      await screen.findByLabelText(t("serverCreate.backendLabel")),
+    ).toBeInTheDocument();
+    // Wait for the error state to settle.
+    await waitFor(() =>
+      expect(screen.queryByLabelText(t("serverCreate.portLabel"))).toBeNull(),
+    );
+  });
+
   it("hides the port control in relay mode and never queries /ports/available", async () => {
     mockApi.get.mockImplementation(relayGet);
     renderPage();
@@ -566,8 +602,17 @@ describe("create error surfacing", () => {
   });
 });
 
-describe("Step 3 — join address name (slug) field (issue #981)", () => {
-  it("renders the optional slug field on step 3", async () => {
+describe("Step 3 — join address name (slug) field (issue #981, gated on relay #1006)", () => {
+  // The slug field is only shown when relay is enabled (#1006).
+  function relayGet(path: string) {
+    if (path === "/api/meta") {
+      return Promise.resolve({ relay_enabled: true });
+    }
+    return defaultGet(path);
+  }
+
+  it("renders the optional slug field on step 3 in relay mode", async () => {
+    mockApi.get.mockImplementation(relayGet);
     renderPage();
     await reachConfigStep();
     expect(
@@ -577,7 +622,14 @@ describe("Step 3 — join address name (slug) field (issue #981)", () => {
     expect(screen.getByText(t("serverCreate.slugHint"))).toBeInTheDocument();
   });
 
+  it("hides the slug field in direct mode (relay off)", async () => {
+    renderPage();
+    await reachConfigStep();
+    expect(screen.queryByLabelText(t("serverCreate.slugLabel"))).toBeNull();
+  });
+
   it("sends the slug when explicitly set", async () => {
+    mockApi.get.mockImplementation(relayGet);
     mockApi.post.mockResolvedValue({ id: "s-new" });
     renderPage();
     await reachConfigStep();
@@ -593,6 +645,7 @@ describe("Step 3 — join address name (slug) field (issue #981)", () => {
   });
 
   it("omits slug from the body when the field is left blank", async () => {
+    mockApi.get.mockImplementation(relayGet);
     mockApi.post.mockResolvedValue({ id: "s-new" });
     renderPage();
     await reachConfigStep();
@@ -606,6 +659,7 @@ describe("Step 3 — join address name (slug) field (issue #981)", () => {
   });
 
   it("shows inline error for an invalid slug", async () => {
+    mockApi.get.mockImplementation(relayGet);
     renderPage();
     await reachConfigStep();
     fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
@@ -615,6 +669,7 @@ describe("Step 3 — join address name (slug) field (issue #981)", () => {
   });
 
   it("blocks submit while the slug is invalid", async () => {
+    mockApi.get.mockImplementation(relayGet);
     renderPage();
     await reachConfigStep();
     fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
@@ -626,6 +681,7 @@ describe("Step 3 — join address name (slug) field (issue #981)", () => {
   });
 
   it("surfaces 422 invalid_slug inline on the slug field", async () => {
+    mockApi.get.mockImplementation(relayGet);
     mockApi.post.mockRejectedValue(
       new ApiError(422, { reason: "invalid_slug" }),
     );
@@ -644,6 +700,7 @@ describe("Step 3 — join address name (slug) field (issue #981)", () => {
   });
 
   it("surfaces 409 slug_taken inline on the slug field", async () => {
+    mockApi.get.mockImplementation(relayGet);
     mockApi.post.mockRejectedValue(new ApiError(409, { reason: "slug_taken" }));
     renderPage();
     await reachConfigStep();
@@ -660,6 +717,7 @@ describe("Step 3 — join address name (slug) field (issue #981)", () => {
   });
 
   it("clears the API slug error when the user edits the field", async () => {
+    mockApi.get.mockImplementation(relayGet);
     mockApi.post.mockRejectedValue(new ApiError(409, { reason: "slug_taken" }));
     renderPage();
     await reachConfigStep();
