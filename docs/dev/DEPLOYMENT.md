@@ -658,6 +658,10 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
   -days 3650 -nodes \
   -subj "/CN=mcsd-relay-tunnel" \
   -addext "subjectAltName=DNS:<tunnel-host>"
+# The relay container runs as non-root (uid 10001), so the key must be
+# world-readable. The key is self-signed and scoped to intra-cluster tunnel
+# traffic, so 644 is acceptable.
+chmod 644 /etc/mcsd/relay/tunnel-key.pem
 ```
 
 The cert and key are bind-mounted read-only into the relay container at
