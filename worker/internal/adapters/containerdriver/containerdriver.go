@@ -1038,7 +1038,7 @@ func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) 
 // (which SIGTERMs then SIGKILLs after stopTimeout inside the daemon), then a
 // direct `docker kill`; a forced stop skips the RCON step. Any terminal state
 // makes Stop a prompt no-op success.
-func (i *instance) Stop(ctx context.Context, graceful bool) error {
+func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
 	i.mu.Lock()
 	if i.stopping || isTerminal(i.state) {
 		i.mu.Unlock()
@@ -1079,7 +1079,18 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	defer cancel()
 
 	if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
+		// RCON "stop" succeeded and the process exited: Minecraft's own shutdown
+		// save already flushed dirty chunks to disk, so no pre-fallback flush is
+		// needed. The RCON-success path has zero added latency.
 		return nil
+	}
+
+	// RCON stop failed (or this is a force stop). If the caller supplied a
+	// pre-fallback flush callback, run it now while the MC process is still alive
+	// and RCON may still be reachable — docker stop (SIGTERM→SIGKILL) may not
+	// give MC enough time to complete its shutdown save (#1007).
+	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
+		preFallback[0](stopCtx)
 	}
 
 	if err := i.docker.Stop(stopCtx, id, i.stopTimeout); err == nil && i.waitExit(stopCtx, i.stopTimeout) {

@@ -729,18 +729,23 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 	}
 }
 
-// flushBeforeStop drives the live world's dirty chunks to disk before a graceful
-// terminate (issue #1007). The graceful stop relies on Minecraft's own shutdown
-// save, which the evidence shows does NOT reliably flush dirty block (region)
-// chunks to r.*.mca before the process exits; the post-stop FINAL snapshot then
-// captures stale region files (while playerdata, written synchronously on
-// disconnect, is current), so a same-Worker start rolls the block edits back. This
-// runs while the instance is still alive and RCON is reachable: it issues a
-// non-blocking save-all (the SAME mechanism quiesceRunning uses — NOT save-all
-// flush, whose synchronous flush parked a tick past max-tick-time and tripped the
-// Server Watchdog into a production crash, #693) and waits for the asynchronous
-// save to settle (settleWorkingSet: the region files' (mtime, size) stop changing)
-// so the chunks have landed on disk before the terminate.
+// flushBeforeStopWithDriver drives the live world's dirty chunks to disk before
+// a graceful terminate's fallback path (issue #1007). It is called ONLY when the
+// RCON "stop" command failed and the driver falls back to docker stop
+// (SIGTERM→SIGKILL), because SIGTERM/SIGKILL may not give MC enough time to
+// complete its shutdown save. When RCON stop succeeds, Minecraft's own shutdown
+// save already flushed the chunks synchronously, so no flush is needed and the
+// stop has zero added latency.
+//
+// It issues a non-blocking save-all (the SAME mechanism quiesceRunning uses —
+// NOT save-all flush, whose synchronous flush parked a tick past max-tick-time
+// and tripped the Server Watchdog into a production crash, #693) and waits for
+// the asynchronous save to settle (settleWorkingSet: the region files' (mtime,
+// size) stop changing) so the chunks have landed on disk before the terminate.
+//
+// driverName is the driver that runs this server, captured before the instance
+// was evicted from the manager's map (driverFor would return empty after
+// eviction).
 //
 // It is best-effort and bounded: it does NOT disable auto-save (the process is
 // about to exit, so there is nothing to restore), and any failure — RCON cannot be
@@ -749,8 +754,8 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // worse than the pre-fix behavior; the common path completes the flush. The settle
 // budget (m.settleBudget, default 60s) stays well inside the API's stop dispatch
 // budget (stop_timeout_seconds=600).
-func (m *Manager) flushBeforeStop(ctx context.Context, serverID string) {
-	ctrl, err := m.openControl(ctx, serverID, m.driverFor(serverID))
+func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName string) {
+	ctrl, err := m.openControl(ctx, serverID, driverName)
 	if err != nil {
 		m.logger.Warn("stop flush: open rcon failed; stopping without a final save",
 			"server_id", serverID, "error", err)
@@ -988,20 +993,9 @@ func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 }
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
-	// Flush the live world to disk BEFORE terminating it (issue #1007): a graceful
-	// stop relies on Minecraft's own shutdown save, which the evidence shows does NOT
-	// reliably write dirty block (region) chunks to r.*.mca before the process exits,
-	// so the post-stop FINAL snapshot captures stale region files and a same-Worker
-	// start rolls the block edits back (player position survives — playerdata is
-	// written synchronously on disconnect — but block changes are lost). save-all +
-	// settle while the instance is still alive and RCON reachable lands the dirty
-	// chunks on disk so the snapshot captures a complete world. It runs while the
-	// instance is still tracked (driverFor resolves; RCON reachable), before
-	// takeStoppableReserve evicts it, and only on the graceful path — a force=true
-	// stop intentionally skips the save so a wedged server can still be killed.
-	if graceful {
-		m.flushBeforeStop(ctx, cmd.ServerID)
-	}
+	// Capture the driver name BEFORE takeStoppableReserve evicts the instance and
+	// deletes startCmds, so the pre-fallback flush closure can open RCON using it.
+	driver := m.driverFor(cmd.ServerID)
 	inst, outcome := m.takeStoppableReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
@@ -1024,7 +1018,7 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 	// The id is now reserved across the eviction -> stop-confirmed window so the
 	// detached stop is the sole writer; released on every return below (issue #780).
 	defer m.release(cmd.ServerID)
-	if err := m.attemptStop(ctx, cmd.ServerID, inst, graceful); err != nil {
+	if err := m.attemptStop(ctx, cmd.ServerID, inst, graceful, driver); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: stop: %v", err))
 	}
@@ -1164,8 +1158,23 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 // records the instance as a failed-stop orphan so a retry can re-attempt
 // termination against the same handle rather than returning SERVER_NOT_FOUND; on
 // success it forgets any orphan record for the id (issue #251).
-func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool) error {
-	if err := inst.Stop(ctx, graceful); err != nil {
+//
+// driverName is the driver that runs this server (captured BEFORE
+// takeStoppableReserve / takeRunningReserve evicts the instance and deletes
+// startCmds, so driverFor would return empty after eviction). On a graceful
+// stop, attemptStop passes a pre-fallback flush closure so the driver can flush
+// the live world (save-all + settle) ONLY when RCON stop fails and the driver
+// falls back to docker stop (SIGTERM→SIGKILL). When RCON stop succeeds,
+// Minecraft's own shutdown save already flushed the chunks, so no flush is
+// needed and the stop has zero added latency (#1007).
+func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName string) error {
+	var preFallback func(context.Context)
+	if graceful {
+		preFallback = func(flushCtx context.Context) {
+			m.flushBeforeStopWithDriver(flushCtx, serverID, driverName)
+		}
+	}
+	if err := inst.Stop(ctx, graceful, preFallback); err != nil {
 		m.mu.Lock()
 		m.orphans[serverID] = inst
 		m.mu.Unlock()
@@ -1247,15 +1256,6 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 			fmt.Sprintf("instancemanager: unknown launch mode %q", start.LaunchMode))
 	}
 
-	// Flush the live world to disk before the in-place restart terminates it (issue
-	// #1007), for the same reason as the graceful StopServer path: Minecraft's
-	// shutdown save does not reliably write dirty block (region) chunks before the
-	// process exits, so a restart that relaunches over the same on-disk scratch would
-	// re-read stale region files and roll the block edits back. Run while the instance
-	// is still tracked (driverFor resolves; RCON reachable), before takeRunningReserve
-	// evicts it. A restart is always graceful (RestartServer carries no force flag).
-	m.flushBeforeStop(ctx, cmd.ServerID)
-
 	inst, start, outcome := m.takeRunningReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
@@ -1278,7 +1278,7 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	// orphan as a plain StopServer would, so the reconciler's retry path can still
 	// terminate it rather than double-instancing over it (issue #251). The reservation
 	// is dropped on this failure path; the orphan record then guards the id instead.
-	if err := m.attemptStop(ctx, cmd.ServerID, inst, true); err != nil {
+	if err := m.attemptStop(ctx, cmd.ServerID, inst, true, start.Driver); err != nil {
 		m.release(cmd.ServerID)
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: restart stop: %v", err))
