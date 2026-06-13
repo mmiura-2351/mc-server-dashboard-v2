@@ -229,6 +229,7 @@ class CreateServer:
         config: dict[str, Any],
         accept_eula: bool = False,
         game_port: int | None = None,
+        slug: str | None = None,
     ) -> Server:
         if mc_edition != _SUPPORTED_EDITION:
             # The catalog is Java-only at M1 (FR-VER-1); reject other editions
@@ -270,12 +271,20 @@ class CreateServer:
                 assigned_port = validate_explicit_port(
                     game_port, self.port_range, taken=taken
                 )
-            # Auto-assign the relay slug (issue #955): pick a fresh unique slug
-            # inside the same transaction that inserts the server row so the
-            # taken-set read and insert are consistent; the UNIQUE constraint
-            # backstops a concurrent racer.
+            # Assign the relay slug (issue #955, #981): if the caller supplied an
+            # explicit non-blank slug, validate it (422 invalid, 409 taken) and use
+            # it; otherwise auto-generate a 6-char random slug. Both paths run
+            # inside the same transaction that inserts the row so the taken-set read
+            # and insert are consistent; the UNIQUE constraint backstops a racer.
             taken_slugs = await self.uow.servers.list_slugs()
-            assigned_slug = generate_slug(taken=taken_slugs)
+            explicit_slug = slug.strip() if slug is not None and slug.strip() else None
+            if explicit_slug is not None:
+                validate_slug(explicit_slug)
+                if explicit_slug in taken_slugs:
+                    raise SlugAlreadyTakenError(explicit_slug)
+                assigned_slug = explicit_slug
+            else:
+                assigned_slug = generate_slug(taken=taken_slugs)
             server = Server(
                 id=ServerId.new(),
                 community_id=community_id,

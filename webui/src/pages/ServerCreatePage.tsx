@@ -79,6 +79,15 @@ function cpuAllocationValid(value: string): boolean {
   );
 }
 
+// DNS-label regex for slug inline validation — mirrors the API rule (issue #981).
+const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+// A slug input is valid when it matches the DNS-label regex; blank is also
+// allowed (leave field empty → auto-generate a random slug).
+function slugCreateValid(value: string): boolean {
+  return value.trim() === "" || SLUG_RE.test(value.trim());
+}
+
 // Create-path problem reasons that map to a specific inline/toast message. A
 // 409 `port_taken` is surfaced specifically (issue requirement); everything else
 // falls back to the generic toast.
@@ -91,6 +100,8 @@ const CREATE_ERROR_KEY: Record<string, TranslationKey> = {
   unknown_version: "serverCreate.error.unknown_version",
   invalid_memory_limit: "serverCreate.error.invalid_memory_limit",
   invalid_cpu_allocation: "serverCreate.error.invalid_cpu_allocation",
+  invalid_slug: "serverCreate.error.invalid_slug",
+  slug_taken: "serverCreate.error.slug_taken",
 };
 
 export function ServerCreatePage() {
@@ -207,6 +218,8 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   // Once the user edits the port, the auto-suggest must never overwrite it.
   const [portTouched, setPortTouched] = useState(false);
   const [name, setName] = useState("");
+  // Optional join address name (slug, issue #981). Blank = auto-generate.
+  const [slug, setSlug] = useState("");
   const [props, setProps] = useState<PropOverride[]>([]);
   // Empty string ↔ unset (driver default / auto); a number ↔ the value (MiB /
   // millicores). Mirrors the Settings tab's optional resource fields (#715).
@@ -215,6 +228,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   const [acceptEula, setAcceptEula] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [nameError, setNameError] = useState<string | undefined>();
+  const [slugError, setSlugError] = useState<string | undefined>();
 
   const typesQuery = useQuery({
     queryKey: ["versions"],
@@ -269,10 +283,12 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 
   const memoryLimitOk = memoryLimitValid(memoryLimit);
   const cpuAllocationOk = cpuAllocationValid(cpuAllocation);
+  const slugOk = slugCreateValid(slug);
 
   async function onCreate() {
     setSubmitting(true);
     setNameError(undefined);
+    setSlugError(undefined);
     const config: Record<string, string | number> = {};
     for (const { key, value } of props) {
       if (key.trim() !== "") {
@@ -302,12 +318,14 @@ function NewServerWizard({ communityId }: { communityId: string }) {
             config,
             accept_eula: acceptEula,
             game_port: port === "" ? null : Number(port),
+            // Blank slug = omit so the API auto-generates a random one (issue #981).
+            ...(slug.trim() !== "" ? { slug: slug.trim() } : {}),
           }),
         },
       );
       navigate(`${dashboardPath(communityId)}/servers/${server.id}`);
     } catch (err) {
-      if (!handleCreateError(err, showToast, setNameError)) {
+      if (!handleCreateError(err, showToast, setNameError, setSlugError)) {
         showToast(t("serverCreate.genericError"), "error");
       }
       setSubmitting(false);
@@ -471,6 +489,31 @@ function NewServerWizard({ communityId }: { communityId: string }) {
           </div>
 
           <div className="field">
+            <label htmlFor="slug-input">{t("serverCreate.slugLabel")}</label>
+            <input
+              id="slug-input"
+              type="text"
+              value={slug}
+              placeholder={t("serverCreate.slugPlaceholder")}
+              onChange={(e) => {
+                setSlug(e.target.value);
+                setSlugError(undefined);
+              }}
+            />
+            {slugError !== undefined ? (
+              <div className="error" role="alert">
+                {slugError}
+              </div>
+            ) : !slugOk ? (
+              <div className="error" role="alert">
+                {t("serverCreate.slugInvalid")}
+              </div>
+            ) : (
+              <div className="hint">{t("serverCreate.slugHint")}</div>
+            )}
+          </div>
+
+          <div className="field">
             <label htmlFor="memory-limit-input">
               {t("serverCreate.memoryLimitLabel")}
             </label>
@@ -543,7 +586,8 @@ function NewServerWizard({ communityId }: { communityId: string }) {
                 submitting ||
                 name.trim() === "" ||
                 !memoryLimitOk ||
-                !cpuAllocationOk
+                !cpuAllocationOk ||
+                !slugOk
               }
               onClick={onCreate}
             >
@@ -813,13 +857,16 @@ function ImportForm({ communityId }: { communityId: string }) {
 // Shared error surfacing
 // ---------------------------------------------------------------------------
 
-// Surface a create failure. A mapped reason (incl. the 409 `port_taken`) becomes
-// a specific toast; `invalid_server_name` and a structural validation_error on
-// `name` go inline against the name field. Returns whether it was handled.
+// Surface a create failure. A mapped reason becomes a specific inline error or
+// toast: `invalid_server_name` and a structural validation_error on `name` go
+// inline against the name field; `invalid_slug`/`slug_taken` go inline against
+// the slug field; all other mapped reasons become toasts.
+// Returns whether it was handled.
 function handleCreateError(
   err: unknown,
   showToast: (m: string, k: "error") => void,
   setNameError: (m: string) => void,
+  setSlugError: (m: string) => void,
 ): boolean {
   if (!(err instanceof ApiError)) {
     return false;
@@ -827,6 +874,14 @@ function handleCreateError(
   if (err.reason !== undefined) {
     if (err.reason === "invalid_server_name") {
       setNameError(t("serverCreate.error.invalid_server_name"));
+      return true;
+    }
+    if (err.reason === "invalid_slug") {
+      setSlugError(t("serverCreate.error.invalid_slug"));
+      return true;
+    }
+    if (err.reason === "slug_taken") {
+      setSlugError(t("serverCreate.error.slug_taken"));
       return true;
     }
     const key = CREATE_ERROR_KEY[err.reason];
@@ -846,7 +901,8 @@ function handleCreateError(
 }
 
 // Import-specific surfacing: a bad archive / oversize upload, plus the create
-// reasons it shares (spigot, name conflict, …).
+// reasons it shares (spigot, name conflict, …). Import has no slug field, so
+// slug errors (not reachable from import) fall back to the generic toast path.
 function handleImportError(
   err: unknown,
   showToast: (m: string, k: "error") => void,
@@ -863,5 +919,5 @@ function handleImportError(
     showToast(t("serverCreate.import.error.invalid_export_metadata"), "error");
     return true;
   }
-  return handleCreateError(err, showToast, setNameError);
+  return handleCreateError(err, showToast, setNameError, () => {});
 }
