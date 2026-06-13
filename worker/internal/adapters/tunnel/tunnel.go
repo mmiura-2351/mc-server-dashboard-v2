@@ -58,7 +58,15 @@ type Dialer struct {
 	// 0.0.0.0 (loopback still reaches an all-interfaces bind) and the configured
 	// IP otherwise (RELAY.md Section 5).
 	gameBindIP string
-	logger     *slog.Logger
+	// gameHost resolves the per-server dial host for the game port. It returns a
+	// non-empty container name when the container driver runs on a user-defined
+	// network — the worker is itself a container on that network, so the server's
+	// game port is reachable at the container name, not the worker's own loopback
+	// where the host publication does not exist (issue #979). It returns empty for
+	// the no-network / non-container case, where dialHost falls back to the
+	// gameBindIP-derived loopback. Never nil: New installs a stub returning empty.
+	gameHost func(serverID string) string
+	logger   *slog.Logger
 	// tlsDial opens a TLS connection to addr verifying against cfg; injectable so
 	// tests drive a fake relay listener without real certificate plumbing.
 	tlsDial func(ctx context.Context, addr string, cfg *tls.Config) (net.Conn, error)
@@ -88,14 +96,21 @@ type Spec struct {
 }
 
 // New builds a Dialer. baseCtx bounds every splice (cancel it to tear down all
-// live tunnels on Worker shutdown); gameBindIP is driver.container.game_bind_ip.
-func New(baseCtx context.Context, gameBindIP string, logger *slog.Logger) *Dialer {
+// live tunnels on Worker shutdown); gameBindIP is driver.container.game_bind_ip;
+// gameHost resolves the per-server game dial host (the container name over a
+// user-defined network, else empty for the gameBindIP loopback fallback — issue
+// #979). A nil gameHost is treated as the no-network case (always loopback).
+func New(baseCtx context.Context, gameBindIP string, gameHost func(serverID string) string, logger *slog.Logger) *Dialer {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if gameHost == nil {
+		gameHost = func(string) string { return "" }
 	}
 	d := &Dialer{
 		baseCtx:    baseCtx,
 		gameBindIP: gameBindIP,
+		gameHost:   gameHost,
 		logger:     logger,
 		conns:      map[net.Conn]struct{}{},
 	}
@@ -141,7 +156,7 @@ func (d *Dialer) Dial(ctx context.Context, spec Spec) error {
 		return err
 	}
 
-	gameAddr := net.JoinHostPort(d.dialHost(), gamePort(spec.WorkingDir))
+	gameAddr := net.JoinHostPort(d.dialHost(spec.ServerID), gamePort(spec.WorkingDir))
 	// Dial under setupCtx so a blackholing non-loopback game_bind_ip fails fast
 	// (within the 5 s setup budget) instead of stalling the lane for the kernel
 	// connect timeout while the relay's player window has already expired.
@@ -170,11 +185,18 @@ func (d *Dialer) tlsConfig(caPEM string) (*tls.Config, error) {
 	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}, nil
 }
 
-// dialHost picks the host to dial the game port at: loopback when the game bind
-// IP is unset or an any-address — IPv4 0.0.0.0 or IPv6 :: / [::] — since loopback
-// reaches an all-interfaces publish; the configured IP otherwise (RELAY.md
-// Section 5).
-func (d *Dialer) dialHost() string {
+// dialHost picks the host to dial serverID's game port at. When the container
+// driver runs on a user-defined network it returns the server's container name,
+// reached over that network (the worker is itself a container there, so the
+// host-published port is not on the worker's loopback — issue #979); this mirrors
+// the RCON dial-host resolution so the two cannot drift. Otherwise it falls back
+// to the published-port host: loopback when the game bind IP is unset or an
+// any-address — IPv4 0.0.0.0 or IPv6 :: / [::] — since loopback reaches an
+// all-interfaces publish; the configured IP otherwise (RELAY.md Section 5).
+func (d *Dialer) dialHost(serverID string) string {
+	if host := d.gameHost(serverID); host != "" {
+		return host
+	}
 	switch d.gameBindIP {
 	case "", "0.0.0.0", "::", "[::]":
 		return "127.0.0.1"

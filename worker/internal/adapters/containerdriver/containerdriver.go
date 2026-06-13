@@ -232,6 +232,24 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 // container-name DNS resolves it, so RCON is reached over the network rather than
 // the unreachable host loopback (issue #218).
 func (d *Driver) RconHost(serverID string) string {
+	return d.networkHost(serverID)
+}
+
+// GameHost returns the host the relay tunnel dials serverID's game port at. Like
+// RconHost it is empty when no network is configured (the tunnel falls back to the
+// published-port loopback) and the container name when a user-defined network is
+// configured: the worker process is itself a container on that network, so the
+// server's game port is reachable at the container name over the network, not at
+// the worker's own loopback where the host publication does not exist (issue #979).
+func (d *Driver) GameHost(serverID string) string {
+	return d.networkHost(serverID)
+}
+
+// networkHost is the single decision RconHost and GameHost share: empty with no
+// network (caller dials the host loopback), the container name over the
+// user-defined network otherwise, so the RCON and tunnel dial hosts can never
+// drift (issues #218, #979).
+func (d *Driver) networkHost(serverID string) string {
 	if d.network == "" {
 		return ""
 	}

@@ -138,6 +138,12 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	// which case it returns the MC container's name so RCON is reached over the
 	// docker network rather than the unreachable host loopback (issue #218).
 	containerRconHost := func(string) string { return "" }
+	// containerGameHost resolves the relay tunnel's game dial host for a server,
+	// the same way containerRconHost resolves the RCON host: empty (loopback)
+	// unless a container driver with a configured network is built, then the MC
+	// container's name so the tunnel reaches the game port over the docker network
+	// rather than the worker's own unreachable loopback (issue #979).
+	containerGameHost := func(string) string { return "" }
 
 	drivers := map[string]execution.ExecutionDriver{}
 	for _, name := range wc.Drivers {
@@ -160,6 +166,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second, GameBindIP: cfg.Driver.Container.GameBindIP, Network: cfg.Driver.Container.Network, Logger: logger},
 			)
 			containerRconHost = cd.RconHost
+			containerGameHost = cd.GameHost
 			// The sweep force-removes every container labelled for this Worker,
 			// including ones still running: a graceful restart while servers are up
 			// kills those live servers. That is the deliberate M1 stateless-worker
@@ -184,13 +191,16 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host)
 	}
 	// The relay dial-back dialer (RELAY.md Section 5) splices a player session to
-	// the server's published loopback game port. ctx here is the signal-cancelled
-	// context (run() passes sigCtx), so the splice goroutines are torn down when the
-	// Worker receives SIGINT/SIGTERM; the game bind IP picks the dial host (loopback
-	// when 0.0.0.0). tunnelDialerAdapter bridges the application-layer TunnelSpec to
-	// the adapter's own Spec, keeping the adapter free of an application-layer import
-	// (ARCHITECTURE.md Section 2).
-	tunnelDialer := tunnel.New(ctx, cfg.Driver.Container.GameBindIP, logger)
+	// the server's game port. ctx here is the signal-cancelled context (run()
+	// passes sigCtx), so the splice goroutines are torn down when the Worker
+	// receives SIGINT/SIGTERM. The dial host is resolved per server the same way
+	// RCON is: containerGameHost returns the container name when a user-defined
+	// network is configured (reached over that network — the worker is itself a
+	// container there, issue #979), otherwise the game bind IP picks the loopback
+	// (when 0.0.0.0). tunnelDialerAdapter bridges the application-layer TunnelSpec
+	// to the adapter's own Spec, keeping the adapter free of an application-layer
+	// import (ARCHITECTURE.md Section 2).
+	tunnelDialer := tunnel.New(ctx, cfg.Driver.Container.GameBindIP, containerGameHost, logger)
 	return instancemanager.New(drivers, wc.ScratchDir, openControl).
 		WithLogger(logger).
 		WithWorkerID(wc.ID).

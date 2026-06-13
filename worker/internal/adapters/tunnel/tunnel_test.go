@@ -186,7 +186,7 @@ func newDialerForTest(ctx context.Context, t *testing.T, game *fakeGame) (*Diale
 	t.Helper()
 	workingDir := t.TempDir()
 	writeServerPort(t, workingDir, game.port())
-	d := New(ctx, "0.0.0.0", discardLogger(t))
+	d := New(ctx, "0.0.0.0", nil, discardLogger(t))
 	return d, workingDir
 }
 
@@ -232,6 +232,83 @@ func TestDialSplicesBothDirections(t *testing.T) {
 	}
 	if got := readN(t, relayConn, len("hi-player")); got != "hi-player" {
 		t.Fatalf("relay received %q, want %q", got, "hi-player")
+	}
+}
+
+// TestDialUsesContainerHostOverNetwork: when a gameHost resolver returns a
+// container name (the container driver runs on a user-defined network), the Dialer
+// targets containerName(serverID):<gamePort> over the network — not the worker's
+// own loopback, which has no host-published port (issue #979).
+func TestDialUsesContainerHostOverNetwork(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, "tok")
+	game := newFakeGame(t)
+	workingDir := t.TempDir()
+	writeServerPort(t, workingDir, game.port())
+
+	// gameHost returns the container name for the server, mirroring the container
+	// driver's GameHost over a configured network.
+	d := New(ctx, "0.0.0.0", func(serverID string) string {
+		return "mcsd-" + serverID
+	}, discardLogger(t))
+
+	// Capture the address the game dial targets, then route the connection to the
+	// fake game listener so the splice still establishes (the container name does
+	// not resolve in the test host).
+	gotAddr := make(chan string, 1)
+	d.gameDial = func(dctx context.Context, addr string) (net.Conn, error) {
+		gotAddr <- addr
+		var dialer net.Dialer
+		return dialer.DialContext(dctx, "tcp", game.ln.Addr().String())
+	}
+
+	if err := d.Dial(ctx, Spec{
+		ServerID: "s1", WorkingDir: workingDir,
+		Endpoint: relay.addr(), Token: "tok", CAPEM: relay.caPEM,
+	}); err != nil {
+		t.Fatalf("Dial = %v, want nil", err)
+	}
+
+	want := net.JoinHostPort("mcsd-s1", game.port())
+	if got := <-gotAddr; got != want {
+		t.Fatalf("game dial target = %q, want %q", got, want)
+	}
+}
+
+// TestDialUsesLoopbackWithoutNetwork: with no network configured (the gameHost
+// resolver returns empty), the Dialer keeps targeting the published-port loopback
+// (issue #979 preserves the no-network path).
+func TestDialUsesLoopbackWithoutNetwork(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, "tok")
+	game := newFakeGame(t)
+	workingDir := t.TempDir()
+	writeServerPort(t, workingDir, game.port())
+
+	// gameBindIP 0.0.0.0 and an empty gameHost: dialHost must resolve to loopback.
+	d := New(ctx, "0.0.0.0", func(string) string { return "" }, discardLogger(t))
+
+	gotAddr := make(chan string, 1)
+	d.gameDial = func(dctx context.Context, addr string) (net.Conn, error) {
+		gotAddr <- addr
+		var dialer net.Dialer
+		return dialer.DialContext(dctx, "tcp", game.ln.Addr().String())
+	}
+
+	if err := d.Dial(ctx, Spec{
+		ServerID: "s1", WorkingDir: workingDir,
+		Endpoint: relay.addr(), Token: "tok", CAPEM: relay.caPEM,
+	}); err != nil {
+		t.Fatalf("Dial = %v, want nil", err)
+	}
+
+	want := net.JoinHostPort("127.0.0.1", game.port())
+	if got := <-gotAddr; got != want {
+		t.Fatalf("game dial target = %q, want %q", got, want)
 	}
 }
 
