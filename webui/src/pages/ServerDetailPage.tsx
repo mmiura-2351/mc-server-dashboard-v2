@@ -186,6 +186,7 @@ function CopyButton({ text }: { text: string }) {
       timerRef.current = setTimeout(() => setCopied(false), 1500);
     };
     const fail = () => {
+      setCopied(false);
       setFailed(true);
       timerRef.current = setTimeout(() => setFailed(false), 1500);
     };

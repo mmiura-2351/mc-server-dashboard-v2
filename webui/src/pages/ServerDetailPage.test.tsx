@@ -1365,6 +1365,59 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
 
     execSpy.mockRestore();
   });
+
+  it("copy button does not stick on Copied! when a failure fires while Copied! is shown (issue #976)", async () => {
+    // Simulate: first click succeeds (copied=true), second click fails before
+    // the 1.5 s timer clears — fail() must reset copied so the button doesn't
+    // stay on "Copied!" after the error label clears.
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "myserver.relay.example.com" }),
+    );
+    renderPage();
+    await screen.findByText(/myserver\.relay\.example\.com/);
+
+    // jsdom does not define execCommand; define it so we can toggle it.
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+
+    // First click: execCommand returns true → succeed()
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: t("serverDetail.copiedJoinHostname"),
+      }),
+    ).toBeInTheDocument();
+
+    // Second click before timer fires: execCommand returns false → fail()
+    execSpy.mockReturnValue(false);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("serverDetail.copiedJoinHostname"),
+      }),
+    );
+
+    // The button must now be in the error state, not stuck on "Copied!".
+    expect(
+      await screen.findByRole("button", {
+        name: t("serverDetail.copyJoinHostnameFailed"),
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: t("serverDetail.copiedJoinHostname"),
+      }),
+    ).not.toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
 });
 
 describe("ServerDetailPage header join address display (issue #982)", () => {

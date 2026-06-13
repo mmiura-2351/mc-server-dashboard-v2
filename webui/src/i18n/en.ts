@@ -363,10 +363,10 @@ export const en = {
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverDetail.error.invalidCpuAllocation":
     "The CPU allocation must be a whole number between 100 and 128000 millicores.",
-  // Relay slug rename errors (issue #961).
+  // Relay join address name errors (issue #961).
   "serverDetail.error.invalidSlug":
-    "The slug must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
-  "serverDetail.error.slugTaken": "That slug is already in use.",
+    "The join address name must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
+  "serverDetail.error.slugTaken": "That join address name is already in use.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
 
   // Backups tab (WEBUI_SPEC.md 6.7). One contiguous block to keep merge
