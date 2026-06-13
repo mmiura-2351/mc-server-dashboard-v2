@@ -317,7 +317,7 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーへのCPUの割り当て（ミリコア、1000＝1コア）。上限ではなく負荷時の相対的な割り当てで、ホストに余裕があればこれを超えて使用できます。空欄にすると自動になります。",
   "serverDetail.settings.cpuAllocationRange":
     "100〜128000 ミリコアの整数を入力するか、空欄にして自動にしてください。",
-  // Relay 参加アドレス名フィールド (issue #961).
+  // Relay join address name field (issue #961).
   "serverDetail.settings.slug": "参加アドレス名",
   "serverDetail.settings.slugHint":
     "小文字・数字・ハイフンのみ使用できます。先頭と末尾にハイフンは使えません。変更しなければ現在の参加アドレスが維持されます。",
@@ -368,10 +368,11 @@ export const ja: Record<TranslationKey, string> = {
     "メモリ上限は 512〜1048576 MiB の整数である必要があります。",
   "serverDetail.error.invalidCpuAllocation":
     "CPU割り当ては 100〜128000 ミリコアの整数である必要があります。",
-  // Relay slug rename errors (issue #961).
+  // Relay join address name errors (issue #961).
   "serverDetail.error.invalidSlug":
-    "スラッグは有効なDNSラベルである必要があります: 小文字・数字・ハイフンのみ、先頭と末尾にハイフン不可。",
-  "serverDetail.error.slugTaken": "そのスラッグはすでに使用されています。",
+    "参加アドレス名は有効なDNSラベルである必要があります: 小文字・数字・ハイフンのみ、先頭と末尾にハイフン不可。",
+  "serverDetail.error.slugTaken":
+    "その参加アドレス名はすでに使用されています。",
   "serverDetail.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Backups tab (WEBUI_SPEC.md 6.7).
