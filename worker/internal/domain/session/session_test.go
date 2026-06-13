@@ -1011,3 +1011,85 @@ func TestRegisterAckTransferDeadlinePlumbedToHandler(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// After a (re-)register the session asks a handler that implements the optional
+// StatusResyncer to re-emit its live instances' state (issue #985), and those
+// re-emitted events are forwarded as StatusChange on the freshly registered
+// stream — so an API restart moves a still-running server out of observed=unknown
+// within seconds instead of over the reconciler grace window.
+func TestRegisterTriggersStatusResyncOnNewStream(t *testing.T) {
+	first := newFakeTransport(acceptedAck())
+	second := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{first, second}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{})
+	// The handler re-emits a running server on every resync, modeling a live
+	// instance the worker still holds across the control-plane reconnect.
+	handler.resyncEmit = []StatusEvent{{ServerID: "srv-1", State: "running"}}
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(),
+		WithCommandHandler(handler), WithRandFloat(func() float64 { return 0 }))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// First register fires the resync; the re-emitted running status is forwarded
+	// on the first stream.
+	waitFor(t, func() bool { return first.registerCount() == 1 })
+	waitFor(t, func() bool { return len(first.statusesCopy()) == 1 })
+	if got := first.statusesCopy()[0]; got.ServerID != "srv-1" || got.State != "running" {
+		t.Fatalf("resync status on first stream = %+v, want srv-1 running", got)
+	}
+
+	// Drop the first stream; the worker reconnects and re-registers, and the
+	// resync re-emits the running status onto the SECOND (new) stream.
+	close(first.commands)
+	waitFor(t, func() bool {
+		clock.fireNext()
+		return second.registerCount() == 1
+	})
+	waitFor(t, func() bool { return len(second.statusesCopy()) == 1 })
+	if got := second.statusesCopy()[0]; got.ServerID != "srv-1" || got.State != "running" {
+		t.Fatalf("resync status on second stream = %+v, want srv-1 running", got)
+	}
+	if calls := handler.resyncCallsCopy(); calls != 2 {
+		t.Fatalf("ResyncStatus calls = %d, want 2 (one per register)", calls)
+	}
+
+	cancel()
+	<-done
+}
+
+// A handler that re-emits nothing on resync (the empty-instance-map case, e.g. a
+// fresh worker process) produces no spurious StatusChange after register.
+func TestRegisterStatusResyncEmptyEmitsNothing(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{}) // resyncEmit is nil: a no-op resync
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool { return handler.resyncCallsCopy() == 1 })
+
+	// Drive a heartbeat so the serve loop has demonstrably run past register; no
+	// status should have been forwarded.
+	var timer *fakeTimer
+	waitFor(t, func() bool {
+		timer = clock.firstTimer()
+		return timer != nil
+	})
+	timer.fire()
+	waitFor(t, func() bool { return transport.heartbeatCount() >= 1 })
+	if n := len(transport.statusesCopy()); n != 0 {
+		t.Fatalf("statuses forwarded = %d, want 0 (empty resync is a no-op)", n)
+	}
+
+	cancel()
+	<-done
+}

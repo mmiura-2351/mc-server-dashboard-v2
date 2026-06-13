@@ -315,6 +315,20 @@ type TransferDeadlineSetter interface {
 	SetTransferDeadline(d time.Duration)
 }
 
+// StatusResyncer is an optional CommandHandler capability: after a successful
+// (re-)register the session asks the handler to re-emit the current state of
+// every instance it still holds (issue #985). On an API restart the worker
+// process stays alive with its servers running, but the API resets their
+// observed state to unknown on boot; without this re-emit they sit at unknown
+// for the full reconciler grace window and the relay treats them as stopped.
+// Re-emitting moves them out of unknown within seconds. A handler that does not
+// implement it simply skips the resync (the prior behavior).
+type StatusResyncer interface {
+	// ResyncStatus re-emits a StatusChange for each currently-held instance. It
+	// must be a no-op when the handler holds no instances (e.g. a fresh process).
+	ResyncStatus()
+}
+
 // Transport is the Port over a single live control-plane stream. One Transport
 // value corresponds to one open Session stream; the run loop discards it on any
 // error and dials a fresh one to reconnect (CONTROL_PLANE.md Section 4.4). The

@@ -1758,6 +1758,35 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) {
 	}
 }
 
+// ResyncStatus re-emits a StatusChange for every instance the manager still
+// holds, so a control-plane (re-)register moves those servers out of the API's
+// post-restart observed=unknown state within seconds instead of waiting out the
+// reconciler grace window (issue #985). The instance manager persists across
+// control-plane reconnects, so its instances map still names the live servers;
+// re-emitting their current Status() reflects reality (running/starting/etc.).
+// On a fresh process the map is empty (the orphan sweep removed leftovers and no
+// instances are re-created), so this is a harmless no-op.
+//
+// The instances are snapshotted under the lock, which is then RELEASED before any
+// emit: sendStatus can coalesce and wake the dispatcher, so it must never run
+// while m.mu is held.
+func (m *Manager) ResyncStatus() {
+	m.mu.Lock()
+	type snap struct {
+		serverID string
+		state    execution.ServerState
+	}
+	snaps := make([]snap, 0, len(m.instances))
+	for serverID, inst := range m.instances {
+		snaps = append(snaps, snap{serverID: serverID, state: inst.Status()})
+	}
+	m.mu.Unlock()
+
+	for _, s := range snaps {
+		m.sendStatus(session.StatusEvent{ServerID: s.serverID, State: s.state.String()})
+	}
+}
+
 // sendStatus forwards a status event with latest-state-wins coalescing under
 // backpressure (issue #96). The fast path is a non-blocking send onto events,
 // which preserves order and every transition while the sink has room. When the
