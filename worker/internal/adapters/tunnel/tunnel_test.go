@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -350,9 +351,36 @@ func TestHalfClosePropagates(t *testing.T) {
 	}
 }
 
+// closeRecordingConn wraps a net.Conn and records whether Close has been called.
+// CloseWrite is forwarded to the underlying conn so the clean-EOF splice path
+// still works; Close increments the counter and delegates to the underlying conn.
+type closeRecordingConn struct {
+	net.Conn
+	closed atomic.Int32
+}
+
+func (c *closeRecordingConn) Close() error {
+	c.closed.Add(1)
+	return c.Conn.Close()
+}
+
+// CloseWrite forwards to the underlying conn so half-close still works.
+func (c *closeRecordingConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
+func (c *closeRecordingConn) wasClosed() bool { return c.closed.Load() > 0 }
+
 // TestSpliceClosesBothConnsOnCleanEOF: after a clean EOF in both directions the
 // splice must fully close both conns (not just CloseWrite), so their fds are
 // released deterministically rather than waiting on the netFD finalizer.
+//
+// The test injects close-recording wrappers for both the relay conn (via
+// tlsDial) and the game conn (via gameDial) and asserts that both wrappers
+// observed a Close() call — not just a CloseWrite — after the clean-EOF splice.
 func TestSpliceClosesBothConnsOnCleanEOF(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -360,6 +388,29 @@ func TestSpliceClosesBothConnsOnCleanEOF(t *testing.T) {
 	relay := newFakeRelay(t, "tok")
 	game := newFakeGame(t)
 	d, workingDir := newDialerForTest(ctx, t, game)
+
+	// Inject close-recording wrappers so the test can assert Close() was called
+	// on each conn by splice(), not just CloseWrite().
+	var wrappedRelay, wrappedGame closeRecordingConn
+
+	origTLSDial := d.tlsDial
+	d.tlsDial = func(dctx context.Context, addr string, cfg *tls.Config) (net.Conn, error) {
+		conn, err := origTLSDial(dctx, addr, cfg)
+		if err != nil {
+			return nil, err
+		}
+		wrappedRelay.Conn = conn
+		return &wrappedRelay, nil
+	}
+	d.gameDial = func(dctx context.Context, _ string) (net.Conn, error) {
+		var dialer net.Dialer
+		conn, err := dialer.DialContext(dctx, "tcp", game.ln.Addr().String())
+		if err != nil {
+			return nil, err
+		}
+		wrappedGame.Conn = conn
+		return &wrappedGame, nil
+	}
 
 	if err := d.Dial(ctx, Spec{ServerID: "s1", WorkingDir: workingDir, Endpoint: relay.addr(), Token: "tok", CAPEM: relay.caPEM}); err != nil {
 		t.Fatalf("Dial = %v", err)
@@ -376,9 +427,8 @@ func TestSpliceClosesBothConnsOnCleanEOF(t *testing.T) {
 	assertReadClosed(t, relayConn)
 	assertReadClosed(t, gameConn)
 
-	// splice runs in a goroutine: poll until it has finished the full Close +
-	// deregister. An empty registry proves splice completed past wg.Wait() and ran
-	// the explicit Close on both conns (the only path that reaches deregister).
+	// Wait for splice to finish. The deregister step only runs after the explicit
+	// Close calls, so an empty registry confirms splice ran past wg.Wait().
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		d.mu.Lock()
@@ -391,6 +441,16 @@ func TestSpliceClosesBothConnsOnCleanEOF(t *testing.T) {
 			t.Fatalf("Dialer still tracks %d conns after clean EOF, want 0", remaining)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The close-recording wrappers must have seen Close(), not just CloseWrite().
+	// Without the explicit relayConn.Close() / gameConn.Close() in splice() these
+	// assertions fail — that is the fix this test pins.
+	if !wrappedRelay.wasClosed() {
+		t.Error("splice did not call Close() on the relay conn after clean EOF")
+	}
+	if !wrappedGame.wasClosed() {
+		t.Error("splice did not call Close() on the game conn after clean EOF")
 	}
 }
 
