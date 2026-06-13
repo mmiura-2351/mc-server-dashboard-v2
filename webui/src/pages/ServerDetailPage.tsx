@@ -277,8 +277,8 @@ function Header({
           <span className="badge">{server.execution_backend}</span>
           {server.join_hostname !== null ? (
             <>
-              <span className="badge join-hostname">
-                {server.join_hostname}
+              <span className="badge">
+                {t("serverDetail.joinHostname")}: {server.join_hostname}
               </span>
               <CopyButton text={server.join_hostname} />
             </>

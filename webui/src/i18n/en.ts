@@ -203,6 +203,7 @@ export const en = {
   "dashboard.col.type": "Type / version",
   "dashboard.col.backend": "Backend",
   "dashboard.col.port": "Port",
+  "dashboard.col.address": "Address",
   "dashboard.col.worker": "Worker",
   "dashboard.col.actions": "Actions",
   // Observed-state pill labels (WEBUI_SPEC.md 2.3).

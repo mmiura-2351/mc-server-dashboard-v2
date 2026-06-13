@@ -353,7 +353,7 @@ function ServerTable({
             <th>{t("dashboard.col.state")}</th>
             <th>{t("dashboard.col.type")}</th>
             <th>{t("dashboard.col.backend")}</th>
-            <th className="num">{t("dashboard.col.port")}</th>
+            <th>{t("dashboard.col.address")}</th>
             <th>{t("dashboard.col.worker")}</th>
             <th>{t("dashboard.col.actions")}</th>
           </tr>
@@ -390,7 +390,7 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
         {server.server_type} {server.mc_version}
       </td>
       <td>{server.execution_backend}</td>
-      <td className="num">
+      <td>
         {server.join_hostname !== null
           ? server.join_hostname
           : (server.game_port ?? "—")}

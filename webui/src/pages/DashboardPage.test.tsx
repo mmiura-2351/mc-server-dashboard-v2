@@ -57,7 +57,6 @@ function server(overrides: Record<string, unknown> = {}) {
     observed_at: null,
     assigned_worker_id: "worker-a",
     config: {},
-    slug: "survival",
     join_hostname: null,
     ...overrides,
   };
@@ -447,6 +446,19 @@ describe("DashboardPage join address in server list (issue #982)", () => {
     ).toBeInTheDocument();
     // Port badge must be hidden when relay is active.
     expect(screen.queryByText(":25565")).not.toBeInTheDocument();
+  });
+
+  it("table column header is 'Address', not 'Port'", async () => {
+    mockApi.get.mockResolvedValue([server()]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    expect(screen.getByText(t("dashboard.col.address"))).toBeInTheDocument();
+    expect(screen.queryByText(t("dashboard.col.port"))).not.toBeInTheDocument();
   });
 
   it("shows port in the address cell when join_hostname is null (table view)", async () => {

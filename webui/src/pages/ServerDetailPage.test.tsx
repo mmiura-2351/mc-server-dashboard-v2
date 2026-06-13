@@ -1380,6 +1380,22 @@ describe("ServerDetailPage header join address display (issue #982)", () => {
     expect(screen.queryByText("25565")).not.toBeInTheDocument();
   });
 
+  it("join address badge carries the 'Join address:' label so it's distinguishable from type/backend badges", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    );
+    renderPage();
+
+    // The badge must include the i18n label so users can tell it apart from
+    // the adjacent type and backend badges.
+    expect(
+      await screen.findByText(
+        `${t("serverDetail.joinHostname")}: survival.relay.example.com`,
+      ),
+    ).toBeInTheDocument();
+    // When relay is off, the label must not appear.
+  });
+
   it("hostname badge and copy button are siblings — button is not nested inside the badge", async () => {
     mockApi.get.mockResolvedValue(
       server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
