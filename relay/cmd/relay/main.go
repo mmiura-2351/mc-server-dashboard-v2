@@ -193,5 +193,5 @@ func buildTunnelTLS(t config.TunnelTLSConfig) (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load tunnel TLS cert/key: %w", err)
 	}
-	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
+	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}, nil
 }

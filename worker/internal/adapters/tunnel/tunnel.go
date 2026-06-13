@@ -176,13 +176,13 @@ func (d *Dialer) Dial(ctx context.Context, spec Spec) error {
 // non-empty, otherwise system roots (a public CA). RELAY.md Section 5.
 func (d *Dialer) tlsConfig(caPEM string) (*tls.Config, error) {
 	if caPEM == "" {
-		return &tls.Config{MinVersion: tls.VersionTLS12}, nil
+		return &tls.Config{MinVersion: tls.VersionTLS13}, nil
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM([]byte(caPEM)) {
 		return nil, fmt.Errorf("tunnel: tls_ca_pem contained no usable certificate")
 	}
-	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}, nil
+	return &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool}, nil
 }
 
 // dialHost picks the host to dial serverID's game port at. When the container
