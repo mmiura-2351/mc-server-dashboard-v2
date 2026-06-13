@@ -415,7 +415,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     # The relay credential and base domain are required whenever the game-ingress
-    # relay is enabled (RELAY.md Section 12); fail fast rather than serving a
+    # relay is enabled (RELAY.md Section 13); fail fast rather than serving a
     # RelayService that would admit any relay (NFR-SEC-1) or building a
     # ``join_hostname`` with no base domain. Mirrors the Worker-credential guard,
     # and ``not <secret>`` treats a blank-collapsed-to-None as missing (#943).
@@ -592,7 +592,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 key_file=settings.control.tls.key_file,
                 insecure=settings.control.tls.insecure,
             )
-            # Game-ingress relay control surface (RELAY.md Sections 4, 6, 12,
+            # Game-ingress relay control surface (RELAY.md Sections 4, 6, 13,
             # issue #956): served on the SAME gRPC listener as WorkerService, only
             # when relay.enabled. The relay dispatches TunnelDial over the existing
             # Worker stream, so it shares the control plane and registry built

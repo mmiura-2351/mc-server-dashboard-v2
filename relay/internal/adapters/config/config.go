@@ -1,7 +1,7 @@
 // Package config loads the relay's runtime configuration. It mirrors the
 // Worker's config adapter (worker/internal/adapters/config): reading
 // configuration is an edge concern, so the wiring layer (cmd/relay) reads it
-// and injects already-constructed values inward (docs/app/RELAY.md Section 12,
+// and injects already-constructed values inward (docs/app/RELAY.md Section 13,
 // docs/app/CONFIGURATION.md Section 1).
 //
 // Precedence matches the Worker and CONFIGURATION.md Section 2:
@@ -25,10 +25,10 @@ import (
 )
 
 // EnvPrefix is the environment-variable prefix for every relay key
-// (RELAY.md Section 12).
+// (RELAY.md Section 13).
 const EnvPrefix = "MCD_RELAY_"
 
-// Config is the relay's resolved configuration (RELAY.md Section 12).
+// Config is the relay's resolved configuration (RELAY.md Section 13).
 type Config struct {
 	API    APIConfig
 	Game   GameConfig
@@ -37,7 +37,7 @@ type Config struct {
 }
 
 // APIConfig is the API connection and authentication surface. Same shape as the
-// Worker's API connection config (RELAY.md Section 12).
+// Worker's API connection config (RELAY.md Section 13).
 type APIConfig struct {
 	// GRPCEndpoint is the API control-plane gRPC address the relay dials.
 	GRPCEndpoint string
@@ -57,7 +57,7 @@ type TLSConfig struct {
 	Insecure bool
 }
 
-// GameConfig is the public player listener surface (RELAY.md Sections 11, 12).
+// GameConfig is the public player listener surface (RELAY.md Sections 11, 13).
 type GameConfig struct {
 	// Listen is the public player listener address (default :25565).
 	Listen string
@@ -264,7 +264,7 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 
 // validate enforces the required keys with no default and the documented value
 // sets. Transport security is required unless explicitly opted out, mirroring
-// the Worker (RELAY.md Section 12).
+// the Worker (RELAY.md Section 13).
 func (c Config) validate() error {
 	var missing []string
 	if c.API.GRPCEndpoint == "" {

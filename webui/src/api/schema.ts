@@ -1933,7 +1933,7 @@ export interface components {
         };
         /**
          * GameSessionResponse
-         * @description One recorded game session (RELAY.md Sections 8, 13, 14).
+         * @description One recorded game session (RELAY.md Sections 8, 14, 15).
          *
          *     ``username`` / ``player_uuid`` are the identity **claimed** in Login Start —
          *     pre-authentication values, not a verified identity (RELAY.md Section 8). A

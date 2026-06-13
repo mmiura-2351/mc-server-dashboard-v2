@@ -3,7 +3,7 @@
 Currently a single flag — whether the game-ingress relay is enabled. The create
 form uses it to decide whether to surface the game-port control: in relay mode
 the port is internal plumbing the API auto-allocates and players join port-less
-via ``<slug>.<base_domain>`` (issue #1002, RELAY.md Section 12), so the control
+via ``<slug>.<base_domain>`` (issue #1002, RELAY.md Section 13), so the control
 is hidden. Per-server responses already carry ``join_hostname`` for the same
 signal once a server exists; this endpoint covers the create flow, which has no
 server yet.

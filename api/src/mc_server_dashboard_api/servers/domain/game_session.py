@@ -1,4 +1,4 @@
-"""Entity for a recorded game session (RELAY.md Sections 8, 13; issue #957).
+"""Entity for a recorded game session (RELAY.md Sections 8, 14; issue #957).
 
 A :class:`GameSession` is one accepted **login** session as seen by the relay:
 the player's source IP, the slug they joined on, and the identity *claimed* in
@@ -23,7 +23,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 @dataclass(frozen=True)
 class GameSession:
-    """One recorded login session (DATABASE.md / RELAY.md Section 13).
+    """One recorded login session (DATABASE.md / RELAY.md Section 14).
 
     ``username`` / ``player_uuid`` are the *claimed* Login Start values and may be
     absent. ``ended_at`` is ``None`` while the session is open (or until orphan

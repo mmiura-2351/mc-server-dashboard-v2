@@ -970,7 +970,7 @@ const SYSTEM_MANAGED_CONFIG_KEYS = new Set(["resolved_jar_sha256"]);
 // key (unit: MiB), but it has a dedicated field rather than a raw override row,
 // so it is hidden from the overrides editor and merged back explicitly on save.
 const MEMORY_LIMIT_KEY = "memory_limit_mb";
-// Relay slug validation — mirror the API rule (RELAY.md Section 14):
+// Relay slug validation — mirror the API rule (RELAY.md Section 15):
 // a lowercase DNS label: starts/ends with [a-z0-9], up to 63 chars total,
 // internal chars may include hyphens.
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
