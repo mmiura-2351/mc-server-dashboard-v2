@@ -141,9 +141,10 @@ describe("CommunityRolesTab", () => {
     await openEditor([]);
 
     // Every family has a select-all checkbox labelled from its family label,
-    // and every one of the 30 catalog codes renders as a checkbox.
+    // and every one of the catalog codes renders as a checkbox.
+    // Count tracks the catalog size; update when new families are added.
     const total = ALL_CODES.length;
-    expect(total).toBe(30);
+    expect(total).toBe(31); // 30 original + session:read (#961)
     const checkboxes = await screen.findAllByRole("checkbox");
     // One per code + one select-all per family.
     expect(checkboxes).toHaveLength(

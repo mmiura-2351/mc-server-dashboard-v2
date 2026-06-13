@@ -54,6 +54,8 @@ function serverResponse() {
     observed_at: null,
     assigned_worker_id: "worker-a",
     config: {},
+    slug: "survival",
+    join_hostname: null,
   };
 }
 
@@ -69,13 +71,17 @@ function group(over: Record<string, unknown> = {}) {
 }
 
 // Route `api.get` by path: the detail page reads the server object, the Players
-// tab reads the two group lists.
+// tab reads the two group lists, and optionally the sessions list.
 function routeGet(opts: {
   attached?: unknown[];
   community?: unknown[];
   attachedError?: unknown;
+  sessions?: unknown[];
 }) {
   mockApi.get.mockImplementation((path: string) => {
+    if (path.includes(`/servers/${SID}/sessions`)) {
+      return Promise.resolve({ sessions: opts.sessions ?? [] });
+    }
     if (path.endsWith(`/servers/${SID}/groups`)) {
       if (opts.attachedError !== undefined) {
         return Promise.reject(opts.attachedError);
@@ -318,5 +324,97 @@ describe("ServerPlayersTab", () => {
     expect(
       await screen.findByText(`${t("permissions.deniedNamed")}group:manage`),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ServerPlayersTab Sessions view (issue #961)", () => {
+  let restoreWs: () => void;
+
+  beforeEach(() => {
+    restoreWs = installMockWebSocket();
+    setAccessToken("tok-1");
+    mockCan = () => true;
+    mockApi.get.mockReset();
+    mockApi.put.mockReset();
+    mockApi.delete.mockReset();
+  });
+
+  afterEach(() => {
+    restoreWs();
+    vi.clearAllMocks();
+  });
+
+  function session(over: Record<string, unknown> = {}) {
+    return {
+      id: "sess-1",
+      hostname: "survival.relay.example.com",
+      player_ip: "1.2.3.4",
+      username: "Alice",
+      player_uuid: "uuid-1",
+      started_at: "2026-06-13T10:00:00Z",
+      ended_at: "2026-06-13T10:30:00Z",
+      ...over,
+    };
+  }
+
+  it("renders the sessions heading and table rows when session:read is granted", async () => {
+    routeGet({ sessions: [session()] });
+    renderTab();
+    await openPlayers();
+
+    expect(await screen.findByText(t("sessions.heading"))).toBeInTheDocument();
+    expect(
+      await screen.findByText("survival.relay.example.com"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1.2.3.4")).toBeInTheDocument();
+    expect(screen.getByText("Alice")).toBeInTheDocument();
+  });
+
+  it("hides the sessions view when session:read is not granted", async () => {
+    mockCan = (code: string) => code !== "session:read";
+    routeGet({ sessions: [session()] });
+    renderTab();
+    await openPlayers();
+
+    // Wait for groups to render so the tab is fully settled.
+    await screen.findByText(t("players.heading"));
+    expect(screen.queryByText(t("sessions.heading"))).not.toBeInTheDocument();
+  });
+
+  it("shows the empty state when there are no sessions", async () => {
+    routeGet({ sessions: [] });
+    renderTab();
+    await openPlayers();
+
+    expect(await screen.findByText(t("sessions.empty"))).toBeInTheDocument();
+  });
+
+  it("shows active for a session without an end time", async () => {
+    routeGet({ sessions: [session({ ended_at: null })] });
+    renderTab();
+    await openPlayers();
+
+    expect(await screen.findByText(t("sessions.active"))).toBeInTheDocument();
+  });
+
+  it("shows the unknown placeholder for null identity fields", async () => {
+    routeGet({
+      sessions: [
+        session({
+          hostname: null,
+          player_ip: null,
+          username: null,
+          started_at: null,
+        }),
+      ],
+    });
+    renderTab();
+    await openPlayers();
+
+    // The unknown placeholder appears at least three times (hostname, IP, username).
+    // Wait for the sessions data to render (not just the loading state).
+    await screen.findByText(t("sessions.col.hostname"));
+    const unknowns = screen.getAllByText(t("sessions.valueUnknown"));
+    expect(unknowns.length).toBeGreaterThanOrEqual(3);
   });
 });

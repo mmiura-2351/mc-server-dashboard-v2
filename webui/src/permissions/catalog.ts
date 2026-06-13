@@ -71,6 +71,10 @@ export const COMMUNITY_PERMISSION_FAMILIES = [
     family: "audit",
     codes: ["audit:read"],
   },
+  {
+    family: "session",
+    codes: ["session:read"],
+  },
 ] as const;
 
 /** Community-axis codes (30) — the role/grant editor's source of truth. */
@@ -124,4 +128,5 @@ export const COMMUNITY_PERMISSION_CODES: readonly CommunityPermissionCode[] = [
   "community:update",
   "community:delete",
   "audit:read",
+  "session:read",
 ];

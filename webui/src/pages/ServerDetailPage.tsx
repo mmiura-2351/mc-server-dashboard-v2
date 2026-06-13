@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type KeyboardEvent,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -161,6 +162,30 @@ function Loaded({
 
 // ── Overview header + lifecycle controls ────────────────────────────────────
 
+// Minimal copy-to-clipboard button: writes text via the Clipboard API and shows
+// a transient "Copied!" confirmation. Falls back silently if the API is absent.
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(() => {
+    navigator.clipboard.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => {
+        /* ignore */
+      },
+    );
+  }, [text]);
+  return (
+    <button type="button" className="btn sm" onClick={copy}>
+      {copied
+        ? t("serverDetail.copiedJoinHostname")
+        : t("serverDetail.copyJoinHostname")}
+    </button>
+  );
+}
+
 function Header({
   server,
   communityId,
@@ -211,11 +236,18 @@ function Header({
             {server.server_type} {server.mc_version}
           </span>
           <span className="badge">{server.execution_backend}</span>
-          <span className="badge">
-            {server.game_port !== null
-              ? `:${server.game_port}`
-              : t("serverDetail.noPort")}
-          </span>
+          {server.join_hostname !== null ? (
+            <span className="badge join-hostname">
+              {t("serverDetail.joinHostname")}: {server.join_hostname}
+              <CopyButton text={server.join_hostname} />
+            </span>
+          ) : (
+            <span className="badge">
+              {server.game_port !== null
+                ? `:${server.game_port}`
+                : t("serverDetail.noPort")}
+            </span>
+          )}
           <span
             className="badge"
             title={server.assigned_worker_id ?? undefined}
@@ -896,6 +928,17 @@ const SYSTEM_MANAGED_CONFIG_KEYS = new Set(["resolved_jar_sha256"]);
 // key (unit: MiB), but it has a dedicated field rather than a raw override row,
 // so it is hidden from the overrides editor and merged back explicitly on save.
 const MEMORY_LIMIT_KEY = "memory_limit_mb";
+// Relay slug validation — mirror the API rule (RELAY.md Section 14):
+// a lowercase DNS label: starts/ends with [a-z0-9], up to 63 chars total,
+// internal chars may include hyphens.
+const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+// A slug input is valid when it matches the DNS-label regex; blank is also
+// allowed (leave field empty → keep the current slug by omitting it from PATCH).
+function slugValid(value: string): boolean {
+  return value.trim() === "" || SLUG_RE.test(value.trim());
+}
+
 // Mirror the API validator (servers/domain/memory_limit.py): a whole number in
 // [512, 1 TiB] MiB; the API rejects out-of-range values as `invalid_memory_limit`.
 const MEMORY_LIMIT_FLOOR_MIB = 512;
@@ -1036,6 +1079,10 @@ function settingsErrorMessage(error: unknown): TranslationKey {
         return "serverDetail.error.invalidMemoryLimit";
       case "invalid_cpu_allocation":
         return "serverDetail.error.invalidCpuAllocation";
+      case "invalid_slug":
+        return "serverDetail.error.invalidSlug";
+      case "slug_taken":
+        return "serverDetail.error.slugTaken";
     }
   }
   return "serverDetail.error.generic";
@@ -1056,6 +1103,8 @@ function Settings({
   const navigate = useNavigate();
 
   const [name, setName] = useState(server.name);
+  const [slug, setSlug] = useState(server.slug);
+  const [slugError, setSlugError] = useState<string | null>(null);
   const [port, setPort] = useState(
     server.game_port !== null ? String(server.game_port) : "",
   );
@@ -1078,12 +1127,24 @@ function Settings({
   const canUpdate = can("server:update", { serverId: server.id });
   const memoryLimitOk = memoryLimitValid(memoryLimit);
   const cpuAllocationOk = cpuAllocationValid(cpuAllocation);
+  const slugOk = slugValid(slug);
   const canDelete = can("server:delete", { serverId: server.id });
   const canExport = can("file:read", { serverId: server.id });
 
   const onError = (error: unknown) => {
     if (onForbidden(error)) {
       return;
+    }
+    // Surface slug-specific errors inline on the field rather than as toasts.
+    if (error instanceof ApiError) {
+      if (error.reason === "invalid_slug" || error.reason === "slug_taken") {
+        setSlugError(
+          error.reason === "slug_taken"
+            ? t("serverDetail.settings.slugTaken")
+            : t("serverDetail.settings.slugInvalid"),
+        );
+        return;
+      }
     }
     showToast(t(settingsErrorMessage(error)), "error");
   };
@@ -1099,6 +1160,11 @@ function Settings({
           body: JSON.stringify({
             name,
             game_port: port === "" ? null : Number(port),
+            // Include slug rename only when the field is non-empty and differs
+            // from the current value; omit otherwise so the API keeps the slug.
+            ...(slug.trim() !== "" && slug.trim() !== server.slug
+              ? { slug: slug.trim() }
+              : {}),
             // Re-merge the hidden system-managed keys (issue #645) so the full
             // config replace doesn't drop them, then layer the memory limit
             // (issue #709) and CPU allocation (issue #726): a number when set,
@@ -1118,6 +1184,7 @@ function Settings({
         },
       ),
     onSuccess: () => {
+      setSlugError(null);
       showToast(t("serverDetail.settings.saved"), "success");
       queryClient.invalidateQueries({
         queryKey: serverKey(communityId, server.id),
@@ -1200,6 +1267,32 @@ function Settings({
             onChange={(e) => setName(e.target.value)}
           />
         </label>
+        {server.join_hostname !== null && (
+          <label className="field">
+            {t("serverDetail.settings.slug")}
+            <input
+              type="text"
+              aria-label={t("serverDetail.settings.slug")}
+              value={slug}
+              disabled={!canUpdate}
+              onChange={(e) => {
+                setSlug(e.target.value);
+                setSlugError(null);
+              }}
+            />
+            {slugError !== null ? (
+              <span className="field-error">{slugError}</span>
+            ) : !slugOk ? (
+              <span className="field-error">
+                {t("serverDetail.settings.slugInvalid")}
+              </span>
+            ) : (
+              <span className="field-hint">
+                {t("serverDetail.settings.slugHint")}
+              </span>
+            )}
+          </label>
+        )}
         <div className="form-row">
           <label className="field">
             {t("serverDetail.settings.gamePort")}
@@ -1277,7 +1370,11 @@ function Settings({
           type="button"
           className="btn primary"
           disabled={
-            !canUpdate || !memoryLimitOk || !cpuAllocationOk || save.isPending
+            !canUpdate ||
+            !memoryLimitOk ||
+            !cpuAllocationOk ||
+            !slugOk ||
+            save.isPending
           }
           onClick={() => save.mutate()}
         >
