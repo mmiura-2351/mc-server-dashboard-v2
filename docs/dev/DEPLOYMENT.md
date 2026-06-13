@@ -741,7 +741,11 @@ defaults and `api/src/mc_server_dashboard_api/config.py` for constraints
 When the relay is enabled, set `MCD_WORKER_GAME_BIND_IP=127.0.0.1` in `.env`
 so game ports bind only on loopback — the Worker dials its own loopback game
 port into the tunnel, and no inbound game-port range is needed on the worker
-host. The relay takes all inbound player traffic on port 25565.
+host. The relay takes all inbound player traffic on port 25565. On a single
+host the loopback bind still allocates from `25565..`, so the first server's
+`127.0.0.1:25565` publish collides with the relay's `0.0.0.0:25565` bind; shift
+the allocator range as described under
+[Single-host port collision](#single-host-port-collision).
 
 The two paths are not mutually exclusive at the protocol level (a server is
 reachable both ways during migration); `relay.enabled` governs whether the
