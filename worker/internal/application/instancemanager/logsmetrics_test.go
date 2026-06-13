@@ -2,6 +2,7 @@ package instancemanager
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -109,7 +110,12 @@ func (c *fakeClock) tick() {
 func newRichManager(t *testing.T, d *richDriver, clk session.Clock) *Manager {
 	t.Helper()
 	return New(map[string]execution.ExecutionDriver{"host-process": d}, t.TempDir(),
-		func(context.Context, string, string) (execution.ServerControl, error) { return nil, nil }).
+		// No RCON wired: surface a dial failure (the real openControl never yields a nil
+		// control without an error) so the #1007 stop-flush degrades gracefully instead
+		// of dereferencing a nil control.
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			return nil, fmt.Errorf("test: no rcon control configured")
+		}).
 		WithMetrics(clk, time.Hour)
 }
 
@@ -174,7 +180,9 @@ func TestManagerEmitsUpOnlyMetricsWithoutStatsSource(t *testing.T) {
 	d := &fakeDriver{} // fakeInstance implements neither LogSource nor StatsSource
 	clk := &fakeClock{}
 	m := New(map[string]execution.ExecutionDriver{"host-process": d}, t.TempDir(),
-		func(context.Context, string, string) (execution.ServerControl, error) { return nil, nil }).
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			return nil, fmt.Errorf("test: no rcon control configured")
+		}).
 		WithMetrics(clk, time.Hour)
 
 	res := m.Handle(context.Background(), startCmd())
@@ -288,7 +296,9 @@ func TestMetricsSampleCancelledOnTeardown(t *testing.T) {
 	d := &blockingDriver{}
 	clk := &fakeClock{}
 	m := New(map[string]execution.ExecutionDriver{"host-process": d}, t.TempDir(),
-		func(context.Context, string, string) (execution.ServerControl, error) { return nil, nil }).
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			return nil, fmt.Errorf("test: no rcon control configured")
+		}).
 		WithMetrics(clk, time.Hour)
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
