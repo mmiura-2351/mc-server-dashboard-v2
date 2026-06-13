@@ -12,7 +12,7 @@
 .PHONY: all check lint format test docs-check \
 	api-env-check api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race worker-e2e-compile \
-	relay-lint relay-format relay-test relay-test-race \
+	relay-lint relay-format relay-test relay-test-race relay-e2e relay-e2e-compile \
 	webui-lint webui-format webui-test webui-build webui-e2e \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
@@ -49,7 +49,7 @@ lint: api-lint worker-lint relay-lint webui-lint proto-lint
 
 format: api-format worker-format relay-format webui-format
 
-test: api-test worker-test worker-e2e-compile relay-test webui-test hooks-test
+test: api-test worker-test worker-e2e-compile relay-test relay-e2e-compile webui-test hooks-test
 
 # docs/ convention gate (docs/README.md Conventions): relative links resolve,
 # no section-mark glyph, no 'v1' versioning term. Pure stdlib python3, no deps.
@@ -151,6 +151,23 @@ relay-format:
 
 relay-test:
 	cd relay && go test ./...
+
+# Compile-only check of the `-tags e2e` relay sources (relay/test/e2e/,
+# //go:build e2e). The relay protocol-level e2e suite (issue #962) needs the live
+# compose stack with the `relay` profile, so `make check` must NOT run it — but
+# the file builds with `-tags e2e` and is excluded from the plain pass, so a
+# compile break in it would otherwise slip past the local gate and only fail in
+# CI. Mirrors worker-e2e-compile.
+relay-e2e-compile:
+	cd relay && go vet -tags e2e ./test/e2e/...
+
+# The relay protocol-level e2e suite against the real compose stack with the
+# `relay` profile (issue #962). Deliberately NOT part of `make check` — it builds
+# images, boots Postgres + the API + the worker + the relay (Docker), and drives a
+# protocol-level client. The orchestration script brings the stack up and tears it
+# down. See scripts/run_relay_e2e.sh and docs/dev/DEPLOYMENT.md "Relay".
+relay-e2e:
+	scripts/run_relay_e2e.sh
 
 # Relay test suite under the race detector (the relay is concurrency-heavy:
 # splice goroutines, the token rendezvous, the batched reporter). Mirrors

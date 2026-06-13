@@ -50,7 +50,23 @@ make relay-format       # gofmt -w
 make relay-lint         # gofmt check + go vet + golangci-lint
 make relay-test         # go test ./...
 make relay-test-race    # go test -race ./... (CI gate)
+make relay-e2e          # protocol-level E2E vs the real compose stack (issue #962)
 ```
+
+`make relay-e2e` runs the protocol-level acceptance suite (issue #962): it brings
+up the real compose stack with the `relay` profile, seeds a stopped server, and
+drives a minimal Java-edition client (handshake/status/login packets only)
+against the real relay's player listener, asserting the stopped and unknown-slug
+paths end to end through the real API's RelayService and a real Postgres. It needs
+a working Docker daemon and is deliberately outside `make check` (the slow,
+whole-stack path); orchestration lives in `scripts/run_relay_e2e.sh`.
+
+The status-running, status-cache, and login `game_session` paths need a server
+the Worker has actually booted (a real Minecraft launch behind the tunnel — the
+API start path has no stub-JAR seam), which is too heavy for the default E2E
+budget; the relay's running-server protocol logic (status cache, login splice,
+session recording) is covered in-process against the real relay components by
+[`test/integration_test.go`](test/integration_test.go).
 
 ## Configuration
 
