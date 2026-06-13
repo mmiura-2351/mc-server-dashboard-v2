@@ -167,6 +167,10 @@ class CreateServerRequest(BaseModel):
     # (422 out of range) and the taken set (409 taken). Schema bounds it to a valid
     # TCP port so a wildly invalid value is a 422 at parse time.
     game_port: int | None = Field(default=None, gt=0, le=65535)
+    # Optional explicit slug (issue #981). Omitted/blank lets create auto-generate a
+    # 6-char random slug; supplied, it is validated (422 invalid/reserved) and
+    # checked for global uniqueness (409 taken). Blank string is treated as omitted.
+    slug: str | None = None
 
 
 class UpdateServerRequest(BaseModel):
@@ -312,6 +316,7 @@ async def create_server(
             config=config,
             accept_eula=body.accept_eula,
             game_port=body.game_port,
+            slug=body.slug,
         )
     except UnsupportedEditionError as exc:
         # The catalog is Java-only at M1 (FR-VER-1): a non-java edition is rejected
@@ -360,6 +365,14 @@ async def create_server(
         raise _service_unavailable("port_range_exhausted") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except InvalidSlugError as exc:
+        # An explicit slug at create time failed the DNS-label format check or is a
+        # reserved word (issue #981).
+        raise _unprocessable("invalid_slug") from exc
+    except SlugAlreadyTakenError as exc:
+        # An explicit slug at create time is already held by another server (issue
+        # #981).
+        raise _conflict("slug_taken") from exc
     except SlugExhaustedError as exc:
         # Auto-generation could not find a unique slug within the retry budget
         # (extremely unlikely in practice); a transient capacity condition (issue

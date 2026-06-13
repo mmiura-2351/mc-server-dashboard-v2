@@ -1845,6 +1845,8 @@ export interface components {
             name: string;
             /** Server Type */
             server_type: string;
+            /** Slug */
+            slug?: string | null;
         };
         /** DeleteAccountRequest */
         DeleteAccountRequest: {

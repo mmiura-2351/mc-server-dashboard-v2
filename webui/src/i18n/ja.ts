@@ -629,6 +629,13 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーへのCPUの割り当て（ミリコア、1000＝1コア）。上限ではなく負荷時の相対的な割り当てで、ホストに余裕があればこれを超えて使用できます。空欄にすると自動になります。",
   "serverCreate.cpuAllocationRange":
     "100〜128000 ミリコアの整数を入力するか、空欄にして自動にしてください。",
+  // Optional join address name (slug) at create time (issue #981).
+  "serverCreate.slugLabel": "参加アドレス名（任意）",
+  "serverCreate.slugPlaceholder": "例: myserver",
+  "serverCreate.slugHint":
+    "小文字・数字・ハイフンのみ使用できます。空欄にするとランダムなアドレスが生成されます。",
+  "serverCreate.slugInvalid":
+    "有効なDNSラベルを入力してください：小文字・数字・ハイフンのみ、先頭・末尾にハイフン不可。",
   "serverCreate.propsHeading": "server.properties の上書き",
   "serverCreate.propsHint":
     "任意。初回起動時に server.properties に書き込まれるキー。",
@@ -655,6 +662,10 @@ export const ja: Record<TranslationKey, string> = {
     "メモリ上限は 512〜1048576 MiB の整数で指定してください。",
   "serverCreate.error.invalid_cpu_allocation":
     "CPU割り当ては 100〜128000 ミリコアの整数で指定してください。",
+  "serverCreate.error.invalid_slug":
+    "その参加アドレス名は無効です。小文字・数字・ハイフンのみ使用できます。",
+  "serverCreate.error.slug_taken":
+    "その参加アドレス名はすでに使用されています。別の名前を選択してください。",
   "serverCreate.genericError":
     "サーバーを作成できませんでした。もう一度お試しください。",
   // Import tab.

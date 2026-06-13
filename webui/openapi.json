@@ -699,6 +699,17 @@
             "minLength": 1,
             "title": "Server Type",
             "type": "string"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
           }
         },
         "required": [

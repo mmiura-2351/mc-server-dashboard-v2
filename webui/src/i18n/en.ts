@@ -626,6 +626,13 @@ export const en = {
     "Soft share of CPU for this server, in millicores (1000 = one core). A relative weight under load, not a hard cap — the server can use more when the host is idle. Leave blank for auto.",
   "serverCreate.cpuAllocationRange":
     "Enter a whole number between 100 and 128000 millicores, or leave blank for auto.",
+  // Optional join address name (slug) at create time (issue #981).
+  "serverCreate.slugLabel": "Join address name (optional)",
+  "serverCreate.slugPlaceholder": "e.g. myserver",
+  "serverCreate.slugHint":
+    "Lowercase letters, numbers and hyphens only. Leave blank to generate a random address.",
+  "serverCreate.slugInvalid":
+    "Must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
   "serverCreate.propsHeading": "server.properties overrides",
   "serverCreate.propsHint":
     "Optional. Keys written into server.properties on first boot.",
@@ -652,6 +659,10 @@ export const en = {
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverCreate.error.invalid_cpu_allocation":
     "The CPU allocation must be a whole number between 100 and 128000 millicores.",
+  "serverCreate.error.invalid_slug":
+    "That join address name is not valid. Use lowercase letters, digits and hyphens only.",
+  "serverCreate.error.slug_taken":
+    "That join address name is already in use. Choose another.",
   "serverCreate.genericError": "Could not create the server. Please try again.",
   // Import tab.
   "serverCreate.import.heading": "Import from a ZIP export",

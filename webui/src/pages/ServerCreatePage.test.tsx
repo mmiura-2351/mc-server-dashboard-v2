@@ -518,6 +518,119 @@ describe("create error surfacing", () => {
   });
 });
 
+describe("Step 3 — join address name (slug) field (issue #981)", () => {
+  it("renders the optional slug field on step 3", async () => {
+    renderPage();
+    await reachConfigStep();
+    expect(
+      screen.getByLabelText(t("serverCreate.slugLabel")),
+    ).toBeInTheDocument();
+    // Hint is shown when the field is blank (valid).
+    expect(screen.getByText(t("serverCreate.slugHint"))).toBeInTheDocument();
+  });
+
+  it("sends the slug when explicitly set", async () => {
+    mockApi.post.mockResolvedValue({ id: "s-new" });
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
+      target: { value: "myslug" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    const body = JSON.parse(mockApi.post.mock.calls[0][1].body);
+    expect(body.slug).toBe("myslug");
+  });
+
+  it("omits slug from the body when the field is left blank", async () => {
+    mockApi.post.mockResolvedValue({ id: "s-new" });
+    renderPage();
+    await reachConfigStep();
+    // Leave slug blank.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    const body = JSON.parse(mockApi.post.mock.calls[0][1].body);
+    expect(body.slug).toBeUndefined();
+  });
+
+  it("shows inline error for an invalid slug", async () => {
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
+      target: { value: "INVALID-UPPER" },
+    });
+    expect(screen.getByText(t("serverCreate.slugInvalid"))).toBeInTheDocument();
+  });
+
+  it("blocks submit while the slug is invalid", async () => {
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
+      target: { value: "-bad-start" },
+    });
+    expect(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    ).toBeDisabled();
+  });
+
+  it("surfaces 422 invalid_slug inline on the slug field", async () => {
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_slug" }),
+    );
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
+      target: { value: "myslug" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    expect(
+      await screen.findByText(t("serverCreate.error.invalid_slug")),
+    ).toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  it("surfaces 409 slug_taken inline on the slug field", async () => {
+    mockApi.post.mockRejectedValue(new ApiError(409, { reason: "slug_taken" }));
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
+      target: { value: "taken" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    expect(
+      await screen.findByText(t("serverCreate.error.slug_taken")),
+    ).toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  it("clears the API slug error when the user edits the field", async () => {
+    mockApi.post.mockRejectedValue(new ApiError(409, { reason: "slug_taken" }));
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
+      target: { value: "taken" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    await screen.findByText(t("serverCreate.error.slug_taken"));
+
+    // Editing the field clears the API error.
+    fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
+      target: { value: "different" },
+    });
+    expect(screen.queryByText(t("serverCreate.error.slug_taken"))).toBeNull();
+  });
+});
+
 describe("import tab", () => {
   it("imports a ZIP and navigates to the new server", async () => {
     mockApi.postForm.mockResolvedValue({ id: "s-imported" });
