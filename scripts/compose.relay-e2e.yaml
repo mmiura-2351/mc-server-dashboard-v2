@@ -1,0 +1,17 @@
+# Compose override for the relay protocol-level E2E harness (issue #962).
+#
+# The base compose.yaml pins the default network's name to a fixed `mcsd` so the
+# worker can attach the sibling MC containers it creates to that named network
+# (RCON by container name). That fixed name makes a second compose project
+# collide with a developer's or a live deployment's already-running `mcsd`
+# network. This override renames the harness's default network to a
+# project-scoped name and points the worker's container-network at the same name,
+# so the E2E stack is fully isolated and can run alongside the live stack.
+services:
+  worker:
+    environment:
+      MCD_WORKER_DRIVER_CONTAINER_NETWORK: mcsd-relay-e2e
+
+networks:
+  default:
+    name: mcsd-relay-e2e
