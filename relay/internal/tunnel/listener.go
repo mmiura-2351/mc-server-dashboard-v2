@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/netutil"
 )
 
 // dialHandshakeDeadline bounds how long a tunnel connection has to send its
@@ -74,7 +75,7 @@ func (l *Listener) Serve(ctx context.Context) error {
 // handle reads the dial-back handshake and either delivers the connection to a
 // waiting player or closes it without a response (RELAY.md Section 5).
 func (l *Listener) handle(conn net.Conn) {
-	ip := hostOf(conn.RemoteAddr())
+	ip := netutil.HostOf(conn.RemoteAddr())
 
 	// Per-IP concurrent-connection cap (RELAY.md Section 11): bound how many
 	// unauthenticated handshake windows one source IP can hold. Over the cap is a
@@ -100,15 +101,6 @@ func (l *Listener) handle(conn net.Conn) {
 	}
 	// On a successful Deliver the waiter owns conn and closes it when the splice
 	// ends.
-}
-
-// hostOf extracts the IP (without port) from a remote address.
-func hostOf(addr net.Addr) string {
-	host, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return addr.String()
-	}
-	return host
 }
 
 // readHandshake parses the "MCSD-TUNNEL/1\n<token>\n" handshake within the

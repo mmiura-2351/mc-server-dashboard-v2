@@ -20,8 +20,7 @@
 # A plain override would therefore keep the base 25565/25665 entries AND add the
 # parameterized ones, so the relay would still bind the defaults and collide.
 # The `!override` tag makes this list REPLACE the base list instead of merging,
-# so only the parameterized entries are published. Requires Compose v2.24+
-# (CI runs v5.x).
+# so only the parameterized entries are published. Requires Compose v2.24+.
 services:
   worker:
     environment:
