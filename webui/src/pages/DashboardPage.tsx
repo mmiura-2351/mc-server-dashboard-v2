@@ -303,8 +303,12 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
           {server.server_type} {server.mc_version}
         </span>
         <span className="badge">{server.execution_backend}</span>
-        {server.game_port !== null && (
-          <span className="badge">:{server.game_port}</span>
+        {server.join_hostname !== null ? (
+          <span className="badge">{server.join_hostname}</span>
+        ) : (
+          server.game_port !== null && (
+            <span className="badge">:{server.game_port}</span>
+          )
         )}
       </div>
       <div className="foot">
@@ -386,7 +390,11 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
         {server.server_type} {server.mc_version}
       </td>
       <td>{server.execution_backend}</td>
-      <td className="num">{server.game_port ?? "—"}</td>
+      <td className="num">
+        {server.join_hostname !== null
+          ? server.join_hostname
+          : (server.game_port ?? "—")}
+      </td>
       <td className="dim" title={server.assigned_worker_id ?? undefined}>
         {server.assigned_worker_id !== null
           ? shortId(server.assigned_worker_id)
