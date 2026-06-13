@@ -59,3 +59,40 @@ func TestAwaitTunnelExpiredDialBackDoesNotHang(t *testing.T) {
 		t.Fatal("awaitTunnel hung on an expired dial-back (goroutine/conn leak)")
 	}
 }
+
+// deadlineConn records the write deadline set on it and discards writes, so the
+// disconnect-path deadline (issue #971) is observable.
+type deadlineConn struct {
+	net.Conn
+	writeDeadline atomic.Pointer[time.Time]
+	closed        atomic.Bool
+}
+
+func (c *deadlineConn) Write(b []byte) (int, error) { return len(b), nil }
+func (c *deadlineConn) Close() error                { c.closed.Store(true); return nil }
+func (c *deadlineConn) SetWriteDeadline(t time.Time) error {
+	c.writeDeadline.Store(&t)
+	return nil
+}
+
+// TestDisconnectSetsWriteDeadline proves disconnect bounds the Login Disconnect
+// write so a stalled client cannot pin the goroutine (issue #971).
+func TestDisconnectSetsWriteDeadline(t *testing.T) {
+	l := &Listener{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	conn := &deadlineConn{}
+
+	before := time.Now()
+	l.disconnect(conn, "go away")
+	after := time.Now()
+
+	d := conn.writeDeadline.Load()
+	if d == nil {
+		t.Fatal("disconnect did not set a write deadline")
+	}
+	if d.Before(before.Add(disconnectWriteTimeout)) || d.After(after.Add(disconnectWriteTimeout)) {
+		t.Errorf("write deadline %v not within [now+%v]", *d, disconnectWriteTimeout)
+	}
+	if !conn.closed.Load() {
+		t.Error("disconnect must close the connection")
+	}
+}
