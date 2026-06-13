@@ -120,3 +120,89 @@ func TestTokenTableCancelAfterDeliver(t *testing.T) {
 		t.Error("delivered conn not on the channel")
 	}
 }
+
+// TestTokenTableSweepExpired verifies that sweepExpired removes waiters whose
+// TTL has elapsed, preventing indefinite map growth when Cancel is never called.
+func TestTokenTableSweepExpired(t *testing.T) {
+	now := time.Unix(0, 0)
+	table := NewTokenTable(10*time.Second, func() time.Time { return now })
+
+	table.Register("alive")
+	table.Register("expired")
+
+	// Advance time past the TTL for "expired" but register "alive" fresh.
+	now = now.Add(11 * time.Second)
+	table.Register("alive") // re-register with a fresh expiry
+
+	table.sweepExpired()
+
+	table.mu.Lock()
+	_, alivePresent := table.waiters["alive"]
+	_, expiredPresent := table.waiters["expired"]
+	table.mu.Unlock()
+
+	if !alivePresent {
+		t.Error("alive entry should survive the sweep")
+	}
+	if expiredPresent {
+		t.Error("expired entry should be removed by the sweep")
+	}
+}
+
+// TestTokenTableSweepLeavesDelivered verifies that sweep does not interfere
+// with entries already consumed by Deliver (they are already deleted).
+func TestTokenTableSweepDeliveredAlreadyGone(t *testing.T) {
+	now := time.Unix(0, 0)
+	table := NewTokenTable(10*time.Second, func() time.Time { return now })
+
+	ch := table.Register("tok")
+	c, _ := net.Pipe()
+	defer func() { _ = c.Close() }()
+
+	if !table.Deliver("tok", c) {
+		t.Fatal("deliver should match")
+	}
+	<-ch // drain
+
+	table.sweepExpired()
+
+	table.mu.Lock()
+	n := len(table.waiters)
+	table.mu.Unlock()
+	if n != 0 {
+		t.Errorf("map should be empty after deliver+sweep, got %d entries", n)
+	}
+}
+
+// TestTokenTableSweepThenCancel verifies that the Cancel invariant is preserved
+// when sweepExpired removes an expired entry before the waiter calls Cancel.
+// Before the fix, Cancel would return false (entry gone) and the waiter would
+// block forever on <-ch because nothing was sent and the channel was not closed.
+// With the fix, sweepExpired closes the channel before deleting, so <-ch
+// immediately yields nil.
+func TestTokenTableSweepThenCancel(t *testing.T) {
+	now := time.Unix(0, 0)
+	table := NewTokenTable(10*time.Second, func() time.Time { return now })
+
+	ch := table.Register("tok")
+
+	// Advance past TTL and sweep the expired entry.
+	now = now.Add(11 * time.Second)
+	table.sweepExpired()
+
+	// Cancel finds the entry gone (sweep already deleted it) — returns false.
+	if table.Cancel("tok") {
+		t.Error("Cancel after sweep should report removed=false")
+	}
+
+	// The channel must be closed (yield nil), not block. A blocking <-ch would
+	// hang the waiter forever — the exact bug this test guards against.
+	select {
+	case conn := <-ch:
+		if conn != nil {
+			t.Error("closed channel should yield nil, got non-nil conn")
+		}
+	default:
+		t.Fatal("<-ch must not block after sweep closes the channel")
+	}
+}

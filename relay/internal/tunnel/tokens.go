@@ -10,10 +10,14 @@
 package tunnel
 
 import (
+	"context"
 	"net"
 	"sync"
 	"time"
 )
+
+// tokenSweepInterval is how often the background sweep checks for expired waiters.
+const tokenSweepInterval = 30 * time.Second
 
 // TokenTable is the rendezvous between waiting player connections and Worker
 // dial-backs. Tokens are single-use and expire; a reused, unknown, or expired
@@ -94,4 +98,42 @@ func (t *TokenTable) Deliver(token string, conn net.Conn) bool {
 	}
 	t.mu.Unlock()
 	return false
+}
+
+// StartSweep runs a background goroutine that periodically removes waiters
+// whose TTL has elapsed. This is defense-in-depth: normally the waiter calls
+// Cancel, but if Cancel is never called (e.g. API reconnect race) the entry
+// would leak without the sweep. The goroutine exits when ctx is cancelled.
+func (t *TokenTable) StartSweep(ctx context.Context) {
+	go t.sweepLoop(ctx)
+}
+
+func (t *TokenTable) sweepLoop(ctx context.Context) {
+	ticker := time.NewTicker(tokenSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.sweepExpired()
+		}
+	}
+}
+
+// sweepExpired removes all waiters whose expiry has passed. Before deleting an
+// entry, it closes the waiter's channel so any pending <-ch unblocks with the
+// zero value (nil). This preserves the Cancel invariant: if Cancel runs after
+// the sweep and finds the entry gone (returns false), the waiter receives nil
+// from the closed channel instead of blocking forever.
+func (t *TokenTable) sweepExpired() {
+	now := t.now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for token, w := range t.waiters {
+		if !now.Before(w.expires) {
+			close(w.ch)
+			delete(t.waiters, token)
+		}
+	}
 }

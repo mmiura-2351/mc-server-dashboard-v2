@@ -96,6 +96,11 @@ func run(ctx context.Context) error {
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Start background eviction for in-memory caches (defense-in-depth
+	// against leaked entries — see #1016).
+	tokens.StartSweep(sigCtx)
+	cache.StartSweep(sigCtx)
+
 	logger.Info("relay starting", "game_listen", cfg.Game.Listen, "tunnel_listen", cfg.Tunnel.Listen)
 
 	var wg sync.WaitGroup
