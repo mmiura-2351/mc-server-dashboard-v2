@@ -764,6 +764,12 @@ class FakeControlPlane(ControlPlane):
     ) -> int | None:
         return self._held.get((worker_id, server_id))
 
+    def holds_fresh_working_set(
+        self, *, worker_id: WorkerId, server_id: ServerId, store_generation: int
+    ) -> bool:
+        held = self._held.get((worker_id, server_id))
+        return held is not None and held >= store_generation
+
     def increment_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
         self.incremented.append(worker_id)
 

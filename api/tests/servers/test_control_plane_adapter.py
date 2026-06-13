@@ -581,6 +581,38 @@ def test_held_generation_reflects_reported_servers() -> None:
     )
 
 
+def test_holds_fresh_working_set_mirrors_held_store_comparison() -> None:
+    # holds_fresh_working_set is True exactly when held >= store (the #763
+    # skip-hydrate predicate the reconciler reuses for its short grace, #999).
+    worker_uuid = uuid.uuid4()
+    server_uuid = uuid.uuid4()
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    registry.register(
+        make_worker(worker_id=str(worker_uuid), at=_T0),
+        held_servers={str(server_uuid): 5},
+    )
+    adapter = _registry_adapter(registry)
+    worker_id = WorkerId(worker_uuid)
+    server_id = ServerId(server_uuid)
+
+    # held(5) >= store(5) and >= store(4): fresh enough -> skip hydrate.
+    assert adapter.holds_fresh_working_set(
+        worker_id=worker_id, server_id=server_id, store_generation=5
+    )
+    assert adapter.holds_fresh_working_set(
+        worker_id=worker_id, server_id=server_id, store_generation=4
+    )
+    # held(5) < store(6): stale -> must hydrate.
+    assert not adapter.holds_fresh_working_set(
+        worker_id=worker_id, server_id=server_id, store_generation=6
+    )
+    # Nothing held for an unknown server -> must hydrate.
+    assert not adapter.holds_fresh_working_set(
+        worker_id=worker_id, server_id=ServerId(uuid.uuid4()), store_generation=0
+    )
+
+
 # --- resource-aware placement folds committed accounting in (#710) -----------
 
 # A 4 GiB host: 4096 MiB capacity, reserve max(1024, 410) = 1024 -> 3072 usable.

@@ -163,3 +163,32 @@ def test_stock_defaults_do_not_warn_reconciler_grace_floor(
     with caplog.at_level("WARNING"):
         create_app()
     assert not any("grace_seconds" in r.message for r in caplog.records)
+
+
+def test_create_app_warns_when_held_start_grace_below_command_floor(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The held-start short grace (issue #999) only covers a command-only
+    # redispatch_start, so its floor is command_timeout. At/below it, create_app
+    # warns: 20 <= 30. The full grace stays comfortably above its own floor so this
+    # warning is the only one — proving the held floor is enforced independently.
+    _enable_control(monkeypatch)
+    monkeypatch.setenv("MCD_API_CONTROL__COMMAND_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("MCD_API_RECONCILER__HELD_START_GRACE_SECONDS", "20")
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert any("held_start_grace_seconds" in r.message for r in caplog.records)
+
+
+def test_stock_held_start_grace_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Stock held_start_grace_seconds=90 is comfortably above command_timeout=30, so
+    # the #999 held floor warning must not fire by default. The full #822/#847 floor
+    # behavior is unchanged (stock grace=660 still satisfies its floor).
+    _enable_control(monkeypatch)
+    monkeypatch.delenv("MCD_API_RECONCILER__HELD_START_GRACE_SECONDS", raising=False)
+    monkeypatch.delenv("MCD_API_CONTROL__COMMAND_TIMEOUT_SECONDS", raising=False)
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert not any("held_start_grace_seconds" in r.message for r in caplog.records)

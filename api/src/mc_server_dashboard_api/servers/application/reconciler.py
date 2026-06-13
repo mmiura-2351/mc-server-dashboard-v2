@@ -37,12 +37,20 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   is gone, and the reconnect assignment rebuild owns that case (FR-WRK-4). The
   orphan path has no assigned Worker, so it is unaffected by this skip.
 
-Grace window — a divergence is acted on only once it has persisted past
-``grace_seconds`` (measured from ``max(updated_at, observed_at or updated_at)`` —
-the later of the last intent commit and the last Worker report). This gives the
-normal in-flight path time to converge
-(a start that is mid-launch reports ``starting``, not a divergence) before the
-reconciler intervenes.
+Grace window — a divergence is acted on only once it has persisted past a grace
+(measured from ``max(updated_at, observed_at or updated_at)`` — the later of the
+last intent commit and the last Worker report). This gives the normal in-flight
+path time to converge (a start that is mid-launch reports ``starting``, not a
+divergence) before the reconciler intervenes. The grace is per-action (issue
+#999): a ``redispatch_start`` whose assigned Worker is connected AND already holds
+a fresh-enough working set will SKIP hydrate (the same ``held >= store`` predicate
+the lifecycle uses, #763), so it is command-only and gets the short
+``held_start_grace_seconds`` — the full hydrate-based grace is pure dead waiting
+there, and the cross-worker duplicate-live-instance race the long grace guards
+cannot occur on a re-dispatch to the SAME connected Worker. Every other path
+(``place_and_start``, a non-held ``redispatch_start`` that will hydrate, and both
+stop-side actions) keeps the full ``grace_seconds``, preserving the #822
+duplicate-start and #847 stale-snapshot floors.
 
 Per-server exponential backoff — a failed action is not retried until a growing
 window (``backoff_base_seconds`` doubled per consecutive failure, capped at
@@ -97,6 +105,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.store_generation import (
+    StoreGenerationReader,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
@@ -145,8 +156,10 @@ class RunReconcilerTick:
     make_start_server: Callable[[], StartServer]
     make_stop_server: Callable[[], StopServer]
     control_plane: ControlPlane
+    store_generation: StoreGenerationReader
     clock: Clock
     grace_seconds: int
+    held_start_grace_seconds: int
     backoff_base_seconds: int
     backoff_max_seconds: int
     _attempts: dict[ServerId, _Backoff] = field(default_factory=dict)
@@ -207,23 +220,49 @@ class RunReconcilerTick:
             del self._attempts[server_id]
 
     async def _consider(self, server: Server, now: dt.datetime) -> None:
-        if self._within_grace(server, now):
+        action = self._action_for(server)
+        if action is None:
+            return
+        grace = await self._grace_for(server, action)
+        if self._within_grace(server, now, grace):
             return
         attempt = self._attempts.get(server.id)
         if attempt is not None and now < attempt.next_eligible_at:
             return
-        action = self._action_for(server)
-        if action is None:
-            return
         await self._run(server, action, now)
 
-    def _within_grace(self, server: Server, now: dt.datetime) -> bool:
+    async def _grace_for(self, server: Server, action: str) -> int:
+        # Select the grace per action and held state (issue #999). A
+        # ``redispatch_start`` whose assigned Worker is connected (already true here —
+        # ``_action_for`` only returns it for a connected Worker) AND already holds a
+        # fresh-enough working set will SKIP hydrate, so the start is command-only:
+        # the full hydrate-based grace would be pure dead waiting, and the
+        # cross-worker duplicate-live-instance race the long grace guards cannot occur
+        # on a re-dispatch to the SAME connected Worker (its double-start guard
+        # rejects a second live start). Use the short held-start grace there. Every
+        # other path — ``place_and_start`` (may place elsewhere, always hydrates), a
+        # non-held ``redispatch_start`` (hydrate will run), and the stop-side actions —
+        # keeps the full grace, preserving the #822/#847 safety floors.
+        if action != "redispatch_start" or server.assigned_worker_id is None:
+            return self.grace_seconds
+        store_generation = await self.store_generation.current_generation(
+            community_id=server.community_id, server_id=server.id
+        )
+        if self.control_plane.holds_fresh_working_set(
+            worker_id=server.assigned_worker_id,
+            server_id=server.id,
+            store_generation=store_generation,
+        ):
+            return self.held_start_grace_seconds
+        return self.grace_seconds
+
+    def _within_grace(self, server: Server, now: dt.datetime, grace: int) -> bool:
         # Measure from the most recent of observed_at (last Worker report) and
         # updated_at (last intent commit). update_lifecycle refreshes updated_at
         # but NOT observed_at, so a fresh start on a long-stale server would
         # otherwise get zero grace and race the in-flight start (#774).
         since = max(server.updated_at, server.observed_at or server.updated_at)
-        return (now - since) < dt.timedelta(seconds=self.grace_seconds)
+        return (now - since) < dt.timedelta(seconds=grace)
 
     def _action_for(self, server: Server) -> str | None:
         """Map a candidate to its reconciling action, or ``None`` to skip."""

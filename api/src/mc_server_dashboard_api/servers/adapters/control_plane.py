@@ -257,6 +257,16 @@ class FleetControlPlaneAdapter(ControlPlane):
             _fleet_worker(worker_id), str(server_id.value)
         )
 
+    def holds_fresh_working_set(
+        self, *, worker_id: WorkerId, server_id: ServerId, store_generation: int
+    ) -> bool:
+        # Reuse the SAME held >= store predicate the lifecycle skip-hydrate decision
+        # uses (issue #763), so the reconciler's short-grace choice (issue #999) and
+        # the actual hydrate-skip can never diverge. None (nothing held) or a stale
+        # held generation -> hydrate runs -> full grace.
+        held_generation = self.held_generation(worker_id=worker_id, server_id=server_id)
+        return held_generation is not None and held_generation >= store_generation
+
     def increment_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
         self._registry.increment_assignment(
             _fleet_worker(worker_id), str(server_id.value)
