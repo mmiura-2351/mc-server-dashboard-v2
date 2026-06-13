@@ -36,4 +36,9 @@ RUN apt-get update \
 
 COPY --from=builder /out/relay /usr/local/bin/relay
 
+# Run as an unprivileged user. The relay only does TCP/gRPC networking on
+# ports > 1024 — no Docker socket or privileged resources needed.
+RUN useradd --no-create-home --uid 10001 --shell /usr/sbin/nologin app
+USER app
+
 ENTRYPOINT ["/usr/local/bin/relay"]
