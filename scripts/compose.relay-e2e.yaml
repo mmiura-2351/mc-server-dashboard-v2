@@ -14,12 +14,20 @@
 # into the env file by run_relay_e2e.sh) actually remap what the relay publishes
 # on the host — allowing the harness to run alongside a live relay-profile stack
 # without colliding on those ports.
+#
+# `ports` is a sequence, and Compose merges sequences ADDITIVELY (it keys on
+# target:published:protocol and unions the two lists) rather than replacing them.
+# A plain override would therefore keep the base 25565/25665 entries AND add the
+# parameterized ones, so the relay would still bind the defaults and collide.
+# The `!override` tag makes this list REPLACE the base list instead of merging,
+# so only the parameterized entries are published. Requires Compose v2.24+
+# (CI runs v5.x).
 services:
   worker:
     environment:
       MCD_WORKER_DRIVER_CONTAINER_NETWORK: mcsd-relay-e2e
   relay:
-    ports:
+    ports: !override
       - "${MCD_RELAY_E2E_GAME_PORT:-25565}:25565"    # game listener (players join here)
       - "${MCD_RELAY_E2E_TUNNEL_PORT:-25665}:25665"  # tunnel listener (Workers dial back here)
 

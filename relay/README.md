@@ -71,7 +71,8 @@ session recording) is covered in-process against the real relay components by
 **Network requirement:** `scripts/seed_relay_e2e.py` creates a vanilla 1.21.1
 server, and the API validates the version against Mojang's live manifest
 (`https://launchermeta.mojang.com/mc/game/version_manifest_v2.json`) at create
-time. The API container therefore needs outbound HTTPS access to Mojang's CDN.
+time. The API container therefore needs outbound HTTPS access to Mojang's
+version manifest host.
 This is fine on GitHub-hosted runners but will fail on network-isolated CI
 environments.
 
