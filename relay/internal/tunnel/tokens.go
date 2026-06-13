@@ -16,8 +16,8 @@ import (
 	"time"
 )
 
-// sweepInterval is how often the background sweep checks for expired waiters.
-const sweepInterval = 30 * time.Second
+// tokenSweepInterval is how often the background sweep checks for expired waiters.
+const tokenSweepInterval = 30 * time.Second
 
 // TokenTable is the rendezvous between waiting player connections and Worker
 // dial-backs. Tokens are single-use and expire; a reused, unknown, or expired
@@ -109,7 +109,7 @@ func (t *TokenTable) StartSweep(ctx context.Context) {
 }
 
 func (t *TokenTable) sweepLoop(ctx context.Context) {
-	ticker := time.NewTicker(sweepInterval)
+	ticker := time.NewTicker(tokenSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -121,13 +121,18 @@ func (t *TokenTable) sweepLoop(ctx context.Context) {
 	}
 }
 
-// sweepExpired removes all waiters whose expiry has passed.
+// sweepExpired removes all waiters whose expiry has passed. Before deleting an
+// entry, it closes the waiter's channel so any pending <-ch unblocks with the
+// zero value (nil). This preserves the Cancel invariant: if Cancel runs after
+// the sweep and finds the entry gone (returns false), the waiter receives nil
+// from the closed channel instead of blocking forever.
 func (t *TokenTable) sweepExpired() {
 	now := t.now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for token, w := range t.waiters {
 		if !now.Before(w.expires) {
+			close(w.ch)
 			delete(t.waiters, token)
 		}
 	}
