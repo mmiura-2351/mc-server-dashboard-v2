@@ -163,6 +163,17 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 		setter.SetTransferDeadline(ack.TransferDeadline)
 	}
 
+	// Re-emit the current state of every still-held instance so the API moves
+	// them out of its post-restart observed=unknown state within seconds rather
+	// than over the reconciler grace window (issue #985). These events flow
+	// through the handler's Events() channel, which serve() begins draining onto
+	// this fresh stream below; the handler's coalesce/pending buffer absorbs them
+	// if they are emitted before serve() starts draining, so none are lost. On a
+	// fresh process the handler holds no instances and this is a no-op.
+	if resyncer, ok := r.handler.(StatusResyncer); ok {
+		resyncer.ResyncStatus()
+	}
+
 	return true, r.serve(ctx, transport, interval)
 }
 
