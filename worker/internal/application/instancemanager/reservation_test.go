@@ -168,10 +168,10 @@ func newGatedStopInstance(id string) *gatedStopInstance {
 	}
 }
 
-func (i *gatedStopInstance) Stop(ctx context.Context, graceful bool) error {
+func (i *gatedStopInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
 	i.stopEntered <- struct{}{}
 	<-i.stopRelease
-	return i.fakeInstance.Stop(ctx, graceful)
+	return i.fakeInstance.Stop(ctx, graceful, preFallback...)
 }
 
 // gatedStopDriver hands out a single gatedStopInstance so a test can hold the
@@ -282,7 +282,7 @@ func newGatedOrphanInstance(id string) *gatedOrphanInstance {
 	}
 }
 
-func (i *gatedOrphanInstance) Stop(ctx context.Context, graceful bool) error {
+func (i *gatedOrphanInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
 	i.mu.Lock()
 	i.stopCalls++
 	call := i.stopCalls
@@ -294,7 +294,7 @@ func (i *gatedOrphanInstance) Stop(ctx context.Context, graceful bool) error {
 	// Retry stop: block so it stays in flight (reserved held, orphan still recorded).
 	i.stopEntered <- struct{}{}
 	<-i.stopRelease
-	return i.fakeInstance.Stop(ctx, graceful)
+	return i.fakeInstance.Stop(ctx, graceful, preFallback...)
 }
 
 func (i *gatedOrphanInstance) stopCount() int {
