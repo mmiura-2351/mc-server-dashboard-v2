@@ -43,8 +43,13 @@ COMPOSE=(docker compose -p "$PROJECT"
   -f "$REPO_ROOT/scripts/compose.relay-e2e.yaml"
   --profile relay)
 
-# Host ports the suite connects to. Overridable so the harness can run alongside a
-# live deployment that already binds the defaults.
+# Host ports the suite binds/connects to. All three are overridable so the harness
+# can run alongside a live relay-profile deployment that already holds the defaults.
+# MCD_RELAY_E2E_GAME_PORT and MCD_RELAY_E2E_TUNNEL_PORT are written into the compose
+# env file; scripts/compose.relay-e2e.yaml picks them up to remap the relay's host
+# publish ports (overriding the hard-coded 25565:25565 / 25665:25665 in the base
+# compose.yaml). The Go test client reads MCD_RELAY_E2E_GAME_ADDR, which is built
+# from RELAY_GAME_PORT below, so all three variables affect the same port.
 API_PORT="${MCD_RELAY_E2E_API_PORT:-8081}"
 RELAY_GAME_PORT="${MCD_RELAY_E2E_GAME_PORT:-25565}"
 RELAY_TUNNEL_PORT="${MCD_RELAY_E2E_TUNNEL_PORT:-25665}"
@@ -99,6 +104,8 @@ MCD_API_RELAY__BASE_DOMAIN=${BASE_DOMAIN}
 MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT=relay:${RELAY_TUNNEL_PORT}
 MCD_RELAY_TLS_DIR=${TLS_DIR}
 API_HTTP_PORT=${API_PORT}
+MCD_RELAY_E2E_GAME_PORT=${RELAY_GAME_PORT}
+MCD_RELAY_E2E_TUNNEL_PORT=${RELAY_TUNNEL_PORT}
 EOF
 
 echo "==> building and bringing up the stack (db, api, worker, relay)"

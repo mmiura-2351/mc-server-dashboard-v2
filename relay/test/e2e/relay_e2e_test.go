@@ -34,6 +34,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -267,6 +268,9 @@ func readStatusResponse(r *bufio.Reader) (string, error) {
 		return "", err
 	}
 	// body = id (0x00) + VarInt-string JSON.
+	if len(body) < 1 {
+		return "", fmt.Errorf("status response body is empty")
+	}
 	return readVarIntString(body[1:])
 }
 
@@ -276,6 +280,9 @@ func readLoginDisconnect(r *bufio.Reader) (string, error) {
 	body, err := readPacketBody(r)
 	if err != nil {
 		return "", err
+	}
+	if len(body) < 1 {
+		return "", fmt.Errorf("login disconnect body is empty")
 	}
 	jsonStr, err := readVarIntString(body[1:])
 	if err != nil {
