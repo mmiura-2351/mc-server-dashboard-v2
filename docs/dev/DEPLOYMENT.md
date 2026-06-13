@@ -705,28 +705,44 @@ single host that also runs the relay will fail to publish its game port — even
 
 ### Reconciler grace after an API restart
 
-When the `api` container is recreated (e.g. a UI-only redeploy), the startup
-reset marks all servers `observed=unknown`; the reconciler does not re-dispatch
-a start until that divergence outlasts `reconciler.grace_seconds` (default
-**660 s ≈ 11 min**). During that window the relay maps `observed=unknown` →
-`STOPPED` and players get a "server stopped" MOTD even though the MC containers
-are healthy (issue #985).
+When a worker or the `api` container is recreated (e.g. a UI-only redeploy), the
+startup reset / worker orphan sweep marks the bounced servers `observed=unknown`;
+the reconciler then waits for the divergence to outlast a **grace window** before
+re-dispatching the start. The grace is per-action (issue #999):
 
-On a **single-host** deployment the Worker reconnects in seconds, so you can
-safely lower the grace to match that window. Add to `.env`:
+- **Fast held-restart path** — a same-worker restart where the worker is back
+  online **and** still holds a fresh-enough working set (its persistent scratch is
+  at least as new as the last published snapshot) skips the destructive hydrate, so
+  the re-dispatched start is command-only. This is the common single-host worker/API
+  restart, and it recovers after the **short** `reconciler.held_start_grace_seconds`
+  (default **90 s**): worker-reconnect (seconds) + ~90 s ≈ under 2 min.
+- **Slow hydrate / cross-worker path** — a `place_and_start` (orphan, may land on a
+  different worker, always hydrates) or a same-worker start whose worker does *not*
+  hold a fresh working set (hydrate will run) waits the full
+  `reconciler.grace_seconds` (default **660 s ≈ 11 min**). That long grace is
+  dominated by the hydrate budget and keeps the reconciler from racing an in-flight
+  first dispatch and spawning a duplicate live instance on another worker (#822), so
+  it is **not** safe to shorten on these paths.
 
-```sh
-MCD_API_RECONCILER__GRACE_SECONDS=60
-```
+During the grace window the relay maps `observed=unknown` → `STOPPED` and players
+get a "server stopped" MOTD even though the MC containers are healthy (issue #985);
+the fast held path keeps that window short for routine single-host restarts without
+the operator lowering `grace_seconds` below its safety floor.
 
-After the next `docker compose up -d api` the API will converge running servers
-within ~60 s instead of ~11 min. The `:-660` fallback in `compose.yaml`
-preserves the default for operators who do not set this.
+Both knobs have boot-time safety floors (a warning, not fatal): `grace_seconds`
+must exceed `max(hydrate_timeout + command_timeout, snapshot_timeout)` (#822/#847),
+and `held_start_grace_seconds` must exceed `command_timeout_seconds` (it only covers
+a command-only start). Lowering `grace_seconds` below its floor reopens the
+duplicate-start / stale-snapshot races; prefer the (already short by default) held
+path over shrinking the full grace.
 
-The other reconciler knobs (`INTERVAL_SECONDS`, `BACKOFF_BASE_SECONDS`,
-`BACKOFF_MAX_SECONDS`) are also forwarded; see `.env.example` for their
-defaults and `api/src/mc_server_dashboard_api/config.py` for constraints
+The reconciler knobs (`INTERVAL_SECONDS`, `GRACE_SECONDS`, `BACKOFF_BASE_SECONDS`,
+`BACKOFF_MAX_SECONDS`) are forwarded via `compose.yaml`; see `.env.example` for
+their defaults and `api/src/mc_server_dashboard_api/config.py` for constraints
 (`backoff_max_seconds` must be ≥ 600 to keep crash-loop damping effective).
+`held_start_grace_seconds` defaults to 90 in the application and is set via
+`MCD_API_RECONCILER__HELD_START_GRACE_SECONDS` (not yet forwarded through
+`compose.yaml`).
 
 ### Direct path vs relay path
 

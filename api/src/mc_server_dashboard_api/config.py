@@ -294,13 +294,23 @@ class ReconcilerSettings(_Section):
     diverged servers. ``grace_seconds`` is how long a divergence must persist
     before it is acted on, giving the normal in-flight lifecycle path time to
     converge (a mid-launch start reports ``starting``, not a divergence) before the
-    reconciler intervenes. ``backoff_base_seconds`` / ``backoff_max_seconds`` bound
-    the per-server exponential backoff that prevents a persistently failing server
-    from being retried every tick.
+    reconciler intervenes. It is dominated by the hydrate budget because a start
+    re-dispatch is hydrate-then-start and must not race an in-flight original
+    dispatch (#822/#847). ``held_start_grace_seconds`` is the SHORTER grace applied
+    only to a ``redispatch_start`` whose assigned Worker is connected AND already
+    holds a fresh-enough working set, so the start skips hydrate and is command-only
+    (issue #999): the long hydrate-based grace is pure dead waiting there, and the
+    cross-worker duplicate-live-instance race the long grace guards cannot occur on
+    a re-dispatch to the same already-connected Worker (its double-start guard
+    rejects a second live start). All other paths keep the full ``grace_seconds``.
+    ``backoff_base_seconds`` / ``backoff_max_seconds`` bound the per-server
+    exponential backoff that prevents a persistently failing server from being
+    retried every tick.
     """
 
     interval_seconds: int = Field(default=60, gt=0)
     grace_seconds: int = Field(default=660, gt=0)
+    held_start_grace_seconds: int = Field(default=90, gt=0)
     backoff_base_seconds: int = Field(default=30, gt=0)
     backoff_max_seconds: int = Field(default=3600, gt=0)
 

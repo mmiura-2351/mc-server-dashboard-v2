@@ -335,6 +335,13 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
     snapshot bound (600), but an operator who raises ``snapshot_timeout_seconds``
     above ``hydrate + command`` makes the snapshot bound binding — so the floor is
     ``max(hydrate + command, snapshot_timeout)`` to enforce both constraints.
+
+    ``held_start_grace_seconds`` (issue #999) is the SHORTER grace for a
+    ``redispatch_start`` that will skip hydrate (the assigned Worker is connected and
+    holds a fresh working set), so it is bounded only by the start COMMAND deadline,
+    not the hydrate budget: its floor is ``> command_timeout_seconds``. The full
+    ``grace_seconds`` floor above is unchanged — every hydrating start and every
+    stop-side action still waits it out, so the #822/#847 safety is intact.
     """
 
     floor = max(
@@ -357,6 +364,22 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
             settings.control.command_timeout_seconds,
             settings.control.snapshot_timeout_seconds,
             floor,
+        )
+    # The held-start short grace (issue #999) only covers a command-only
+    # redispatch_start (hydrate skipped), so its floor is the start COMMAND deadline,
+    # not the hydrate budget. The full grace_seconds floor above is unchanged.
+    if (
+        settings.reconciler.held_start_grace_seconds
+        <= settings.control.command_timeout_seconds
+    ):
+        logging.getLogger(__name__).warning(
+            "reconciler.held_start_grace_seconds (%d) <= "
+            "control.command_timeout_seconds (%d); a held-server start re-dispatched "
+            "by the reconciler before its command round-trip settles can race the "
+            "in-flight start (issue #999). Raise held_start_grace_seconds above %d.",
+            settings.reconciler.held_start_grace_seconds,
+            settings.control.command_timeout_seconds,
+            settings.control.command_timeout_seconds,
         )
 
 
@@ -709,8 +732,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     clock=ServersSystemClock(),
                 ),
                 control_plane=reconciler_control_plane,
+                store_generation=StorageGenerationReader(storage=storage),
                 clock=ServersSystemClock(),
                 grace_seconds=settings.reconciler.grace_seconds,
+                held_start_grace_seconds=settings.reconciler.held_start_grace_seconds,
                 backoff_base_seconds=settings.reconciler.backoff_base_seconds,
                 backoff_max_seconds=settings.reconciler.backoff_max_seconds,
             )
