@@ -2,7 +2,7 @@
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). Asserts the ``game_session`` table is
-created with the documented shape (RELAY.md Section 13) and dropped on downgrade,
+created with the documented shape (RELAY.md Section 14) and dropped on downgrade,
 and that ``session:read`` is appended to preset Owner roles only (mirroring the
 0008 backfill round-trip), idempotently and reversibly (issue #957).
 """

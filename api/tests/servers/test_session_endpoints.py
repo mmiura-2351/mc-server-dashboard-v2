@@ -1,4 +1,4 @@
-"""Endpoint tests for the server game-sessions route (RELAY.md Sections 8, 14).
+"""Endpoint tests for the server game-sessions route (RELAY.md Sections 8, 15).
 
 The HTTP boundary is exercised in-process via FastAPI's TestClient with the use
 case and authorization Ports faked (NFR-TEST-1, no database). Verifies:

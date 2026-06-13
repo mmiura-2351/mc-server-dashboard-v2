@@ -392,7 +392,7 @@ class PortsSettings(_Section):
 
 
 class RelaySettings(_Section):
-    """Game-ingress relay control surface (CONFIGURATION.md, RELAY.md Section 12).
+    """Game-ingress relay control surface (CONFIGURATION.md, RELAY.md Section 13).
 
     ``enabled`` is the master switch (default off, RELAY.md Section 9): it gates
     serving ``RelayService`` on the gRPC listener, exposing ``join_hostname`` on
@@ -407,7 +407,7 @@ class RelaySettings(_Section):
     issue #957; it is parsed and validated here only.
 
     ``game_port`` / ``tunnel_port`` are the relay container's published host
-    binds (RELAY.md Section 12): the game listener (players join here, fixed at
+    binds (RELAY.md Section 13): the game listener (players join here, fixed at
     25565 to keep joins port-less) and the Worker dial-back tunnel (25665). When
     ``enabled``, the allocator excludes any of these that fall inside the
     assignable game-port range so a server is never assigned a port the relay

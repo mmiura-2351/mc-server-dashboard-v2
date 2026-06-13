@@ -1,7 +1,7 @@
 // Command relay is the entry point (the edge / wiring layer) of the game
 // ingress relay. It loads configuration, dials the API's RelayService, binds
 // the public game listener and the TLS tunnel listener, and runs them until
-// SIGINT/SIGTERM triggers a clean shutdown (docs/app/RELAY.md Sections 2–7, 12;
+// SIGINT/SIGTERM triggers a clean shutdown (docs/app/RELAY.md Sections 2–7, 13;
 // CONFIGURATION.md Section 1 keeps config reading at the edge).
 package main
 
@@ -139,7 +139,7 @@ func newLogger(cfg config.LogConfig) *slog.Logger {
 // dial opens the gRPC client connection to the API. A configured CA file
 // verifies the API's TLS; api.tls.insecure=true selects a plaintext dial for
 // local/dev with a loud warning. Config validation guarantees exactly one is set
-// (mirrors the Worker, RELAY.md Section 12).
+// (mirrors the Worker, RELAY.md Section 13).
 func dial(api config.APIConfig, logger *slog.Logger) (*grpc.ClientConn, error) {
 	var creds credentials.TransportCredentials
 	if api.TLS.CAFile == "" {

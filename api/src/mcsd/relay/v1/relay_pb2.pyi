@@ -353,7 +353,7 @@ Global___SessionEvent: _TypeAlias = SessionEvent  # noqa: Y015
 @_typing.final
 class SessionStart(_message.Message):
     """SessionStart records the opening of a player session. Fields mirror the
-    game_session table columns (RELAY.md Section 13).
+    game_session table columns (RELAY.md Section 14).
     """
 
     DESCRIPTOR: _descriptor.Descriptor
@@ -371,7 +371,7 @@ class SessionStart(_message.Message):
     """server_id is the API's identifier for the server the player joined."""
     slug: _builtins.str
     """slug is the hostname label used at join time (historical value; slugs are
-    renameable so this captures what the player typed). RELAY.md Section 13.
+    renameable so this captures what the player typed). RELAY.md Section 14.
     """
     player_ip: _builtins.str
     """player_ip is the player's source address as seen by the relay (PII).
@@ -381,14 +381,14 @@ class SessionStart(_message.Message):
     """username is the name claimed in the Minecraft Login Start packet.
     Pre-authentication; with online-mode on, a meaningful-duration session
     implies a verified identity. Empty string means absent or unparseable
-    (maps to NULL in the game_session table — RELAY.md Sections 7 and 13).
+    (maps to NULL in the game_session table — RELAY.md Sections 7 and 14).
     RELAY.md Section 8.
     """
     player_uuid: _builtins.str
     """player_uuid is the UUID claimed in the Login Start packet (present on
     protocols that send it; absent on older protocol versions). Empty string
     means absent or unparseable (maps to NULL in the game_session table —
-    RELAY.md Sections 7 and 13).
+    RELAY.md Sections 7 and 14).
     """
     @_builtins.property
     def started_at(self) -> _timestamp_pb2.Timestamp:

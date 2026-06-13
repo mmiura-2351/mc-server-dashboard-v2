@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM model for the ``game_session`` table (RELAY.md Section 13).
+"""SQLAlchemy ORM model for the ``game_session`` table (RELAY.md Section 14).
 
 Maps the ``game_session`` table: one row per accepted login session recorded by
 the relay (issue #957). The ``id`` is the relay-minted UUID (the idempotency key
@@ -34,7 +34,7 @@ from mc_server_dashboard_api.core.adapters.database import Base
 
 
 class GameSessionModel(Base):
-    """Row of the ``game_session`` table (RELAY.md Section 13)."""
+    """Row of the ``game_session`` table (RELAY.md Section 14)."""
 
     __tablename__ = "game_session"
     __table_args__ = (

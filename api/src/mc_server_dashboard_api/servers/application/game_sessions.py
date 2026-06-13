@@ -1,4 +1,4 @@
-"""Use cases over recorded game sessions (RELAY.md Sections 8, 14; issue #957).
+"""Use cases over recorded game sessions (RELAY.md Sections 8, 15; issue #957).
 
 - :class:`ListGameSessions` — the ``session:read`` listing: a server's sessions
   newest-first, windowed by ``limit``/``offset``. Community-scoped (a session

@@ -79,7 +79,7 @@ environments.
 ## Configuration
 
 TOML file (path via `MCD_RELAY_CONFIG`) plus `MCD_RELAY_*` env overrides; see
-[`docs/app/RELAY.md`](../docs/app/RELAY.md) Section 12 and the example below.
+[`docs/app/RELAY.md`](../docs/app/RELAY.md) Section 13 and the example below.
 Secrets come from the environment; invalid config fails fast at startup.
 
 ```toml

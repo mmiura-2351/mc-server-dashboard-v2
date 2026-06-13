@@ -1,4 +1,4 @@
-"""Persistence Port for game-session records (RELAY.md Section 13; issue #957).
+"""Persistence Port for game-session records (RELAY.md Section 14; issue #957).
 
 The read endpoint and the retention prune loop depend on this Port; an
 async-SQLAlchemy adapter implements it on the unit-of-work's session. Ingestion

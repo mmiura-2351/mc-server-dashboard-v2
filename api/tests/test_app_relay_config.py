@@ -1,7 +1,7 @@
 """The app factory must fail fast on an incomplete ``[relay]`` config (issue #956).
 
 ``relay.credential`` and ``relay.base_domain`` are required secrets/values when
-``relay.enabled`` is true (RELAY.md Section 12); ``create_app`` raises at boot
+``relay.enabled`` is true (RELAY.md Section 13); ``create_app`` raises at boot
 rather than serving a RelayService that would admit any relay (NFR-SEC-1) or
 build a ``join_hostname`` with no base domain. Mirrors the Worker-credential
 required-when-enabled guard.

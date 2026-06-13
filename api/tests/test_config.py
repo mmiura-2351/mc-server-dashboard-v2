@@ -840,7 +840,7 @@ def test_database_max_overflow_from_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.database.max_overflow == 15
 
 
-# --- [relay] section (issue #956, RELAY.md Section 12) ---
+# --- [relay] section (issue #956, RELAY.md Section 13) ---
 
 
 def test_relay_defaults_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

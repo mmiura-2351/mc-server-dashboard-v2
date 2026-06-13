@@ -1,6 +1,6 @@
 """relay ingress: game_session table + session:read permission
 
-Adds the ``game_session`` table (RELAY.md Section 13, issue #957): one row per
+Adds the ``game_session`` table (RELAY.md Section 14, issue #957): one row per
 accepted login session recorded by the relay, keyed on the relay-minted ``id``
 (the ``ReportSessions`` idempotency key). ``player_ip`` is a PostgreSQL ``INET``;
 ``server_id`` FKs ``server`` (``ON DELETE CASCADE``) and is indexed with

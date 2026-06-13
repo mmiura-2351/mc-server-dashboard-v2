@@ -5,7 +5,7 @@ skipped otherwise (TESTING.md Section 5). The schema is created/torn down per
 test via the real migrations. Exercises the ``ServersSessionSink`` ingestion
 (idempotent start/end, end-before-start, orphan healing) and the
 ``GameSessionRepository`` read/prune (newest-first pagination, retention window),
-plus the server-delete cascade (issue #957, RELAY.md Sections 6, 8, 13).
+plus the server-delete cascade (issue #957, RELAY.md Sections 6, 8, 14).
 """
 
 from __future__ import annotations

@@ -187,7 +187,7 @@ class UpdateServerRequest(BaseModel):
     # supplied, it is validated (422 invalid/reserved) and checked for global
     # uniqueness (409 taken). The rename is allowed regardless of run state (the
     # at-rest gate was removed in PR #966); released slugs are immediately reusable
-    # (owner decision, RELAY.md Section 15).
+    # (owner decision, RELAY.md Section 16).
     slug: str | None = None
 
 
@@ -204,7 +204,7 @@ class JoinHostnameConfig:
     """Relay config needed to build a server's ``join_hostname`` (issue #956).
 
     ``<slug>.<base_domain>`` when the relay is enabled, else ``None`` — the UI's
-    display switch (RELAY.md Section 14). Resolved from the ``[relay]`` settings at
+    display switch (RELAY.md Section 15). Resolved from the ``[relay]`` settings at
     the edge so the response builder stays free of the config loader.
     """
 
@@ -254,7 +254,7 @@ class ServerResponse(BaseModel):
     # The relay slug (issue #955): auto-assigned at create, renameable via PATCH.
     slug: str
     # The player join hostname ``<slug>.<base_domain>`` when the relay is enabled,
-    # else ``None`` — the UI's display switch (issue #956, RELAY.md Section 14).
+    # else ``None`` — the UI's display switch (issue #956, RELAY.md Section 15).
     join_hostname: str | None
     desired_state: str
     observed_state: str
@@ -510,7 +510,7 @@ async def read_server(
 
 
 class GameSessionResponse(BaseModel):
-    """One recorded game session (RELAY.md Sections 8, 13, 14).
+    """One recorded game session (RELAY.md Sections 8, 14, 15).
 
     ``username`` / ``player_uuid`` are the identity **claimed** in Login Start —
     pre-authentication values, not a verified identity (RELAY.md Section 8). A

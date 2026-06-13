@@ -880,7 +880,7 @@
         "type": "object"
       },
       "GameSessionResponse": {
-        "description": "One recorded game session (RELAY.md Sections 8, 13, 14).\n\n``username`` / ``player_uuid`` are the identity **claimed** in Login Start \u2014\npre-authentication values, not a verified identity (RELAY.md Section 8). A\nsession of meaningful duration implies the claim survived Mojang auth, but the\nfields themselves are unverified; the UI labels them as claimed. ``hostname``\n/ ``player_ip`` / ``started_at`` may be ``null`` on a not-yet-reconciled\nend-before-start placeholder row.",
+        "description": "One recorded game session (RELAY.md Sections 8, 14, 15).\n\n``username`` / ``player_uuid`` are the identity **claimed** in Login Start \u2014\npre-authentication values, not a verified identity (RELAY.md Section 8). A\nsession of meaningful duration implies the claim survived Mojang auth, but the\nfields themselves are unverified; the UI labels them as claimed. ``hostname``\n/ ``player_ip`` / ``started_at`` may be ``null`` on a not-yet-reconciled\nend-before-start placeholder row.",
         "properties": {
           "ended_at": {
             "anyOf": [

@@ -591,7 +591,7 @@ func (*SessionEvent_Start) isSessionEvent_Event() {}
 func (*SessionEvent_End) isSessionEvent_Event() {}
 
 // SessionStart records the opening of a player session. Fields mirror the
-// game_session table columns (RELAY.md Section 13).
+// game_session table columns (RELAY.md Section 14).
 type SessionStart struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// session_id is the relay-minted UUID, the idempotency key for upserts.
@@ -599,7 +599,7 @@ type SessionStart struct {
 	// server_id is the API's identifier for the server the player joined.
 	ServerId string `protobuf:"bytes,2,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
 	// slug is the hostname label used at join time (historical value; slugs are
-	// renameable so this captures what the player typed). RELAY.md Section 13.
+	// renameable so this captures what the player typed). RELAY.md Section 14.
 	Slug string `protobuf:"bytes,3,opt,name=slug,proto3" json:"slug,omitempty"`
 	// player_ip is the player's source address as seen by the relay (PII).
 	// RELAY.md Section 8.
@@ -607,13 +607,13 @@ type SessionStart struct {
 	// username is the name claimed in the Minecraft Login Start packet.
 	// Pre-authentication; with online-mode on, a meaningful-duration session
 	// implies a verified identity. Empty string means absent or unparseable
-	// (maps to NULL in the game_session table — RELAY.md Sections 7 and 13).
+	// (maps to NULL in the game_session table — RELAY.md Sections 7 and 14).
 	// RELAY.md Section 8.
 	Username string `protobuf:"bytes,5,opt,name=username,proto3" json:"username,omitempty"`
 	// player_uuid is the UUID claimed in the Login Start packet (present on
 	// protocols that send it; absent on older protocol versions). Empty string
 	// means absent or unparseable (maps to NULL in the game_session table —
-	// RELAY.md Sections 7 and 13).
+	// RELAY.md Sections 7 and 14).
 	PlayerUuid string `protobuf:"bytes,6,opt,name=player_uuid,json=playerUuid,proto3" json:"player_uuid,omitempty"`
 	// started_at is when the relay accepted the session (relay clock).
 	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
