@@ -174,6 +174,12 @@ services:
       MCD_API_RECONCILER__GRACE_SECONDS: "${MCD_API_RECONCILER__GRACE_SECONDS:-660}"
       MCD_API_RECONCILER__BACKOFF_BASE_SECONDS: "${MCD_API_RECONCILER__BACKOFF_BASE_SECONDS:-30}"
       MCD_API_RECONCILER__BACKOFF_MAX_SECONDS: "${MCD_API_RECONCILER__BACKOFF_MAX_SECONDS:-3600}"
+      # Game-port auto-assignment range (issue #1002). Defaults match the api's
+      # built-in window (25565..25664); set these in .env to shift the range as a
+      # fallback (e.g. off the relay's host binds). In relay mode the api already
+      # excludes the relay game/tunnel ports from this range automatically.
+      MCD_API_PORTS__RANGE_START: "${MCD_API_PORTS__RANGE_START:-25565}"
+      MCD_API_PORTS__RANGE_END: "${MCD_API_PORTS__RANGE_END:-25664}"
     volumes:
       - api-storage:/data/storage
     ports:

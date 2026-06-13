@@ -1166,6 +1166,10 @@ function Settings({
   const [portHint, setPortHint] = useState<TranslationKey | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
+  // Relay mode is signalled by a non-null join_hostname (the API exposes it only
+  // when relay.enabled). In relay mode the game port is hidden and API-managed
+  // (#1002); in direct mode it stays editable.
+  const relayEnabled = server.join_hostname !== null;
   const canUpdate = can("server:update", { serverId: server.id });
   const memoryLimitOk = memoryLimitValid(memoryLimit);
   const cpuAllocationOk = cpuAllocationValid(cpuAllocation);
@@ -1201,7 +1205,11 @@ function Settings({
         {
           body: JSON.stringify({
             name,
-            game_port: port === "" ? null : Number(port),
+            // In relay mode the port is hidden and API-managed, so omit it from
+            // the PATCH; in direct mode send the edited value (#1002).
+            ...(relayEnabled
+              ? {}
+              : { game_port: port === "" ? null : Number(port) }),
             // Include slug rename only when the field is non-empty and differs
             // from the current value; omit otherwise so the API keeps the slug.
             ...(slug.trim() !== "" && slug.trim() !== server.slug
@@ -1337,28 +1345,33 @@ function Settings({
           </label>
         )}
         <div className="form-row">
-          <label className="field">
-            {t("serverDetail.settings.gamePort")}
-            <input
-              type="number"
-              value={port}
-              disabled={!canUpdate}
-              onChange={(e) => setPort(e.target.value)}
-              onBlur={() => void checkPort()}
-            />
-            {portHint !== null && (
-              <span
-                className={
-                  portHint === "serverDetail.port.available" ||
-                  portHint === "serverDetail.port.current"
-                    ? "field-hint ok"
-                    : "field-error"
-                }
-              >
-                {t(portHint)}
-              </span>
-            )}
-          </label>
+          {/* In relay mode players join via the slug hostname (port-less); the
+              game port is internal plumbing the API auto-allocates, so hide the
+              control. Direct mode still needs a port-forward, so keep it (#1002). */}
+          {relayEnabled ? null : (
+            <label className="field">
+              {t("serverDetail.settings.gamePort")}
+              <input
+                type="number"
+                value={port}
+                disabled={!canUpdate}
+                onChange={(e) => setPort(e.target.value)}
+                onBlur={() => void checkPort()}
+              />
+              {portHint !== null && (
+                <span
+                  className={
+                    portHint === "serverDetail.port.available" ||
+                    portHint === "serverDetail.port.current"
+                      ? "field-hint ok"
+                      : "field-error"
+                  }
+                >
+                  {t(portHint)}
+                </span>
+              )}
+            </label>
+          )}
           <label className="field">
             {t("serverDetail.settings.executionBackend")}
             <input type="text" value={server.execution_backend} disabled />

@@ -50,6 +50,10 @@ function defaultGet(path: string) {
   if (path === "/api/ports/available") {
     return Promise.resolve({ ports: [25570] });
   }
+  if (path === "/api/meta") {
+    // Default to direct mode (relay off): the port control stays visible.
+    return Promise.resolve({ relay_enabled: false });
+  }
   return Promise.reject(new Error(`unexpected GET ${path}`));
 }
 
@@ -273,6 +277,50 @@ describe("Step 2 — runtime port check", () => {
     expect(
       await screen.findByText(t("serverCreate.portTaken")),
     ).toBeInTheDocument();
+  });
+});
+
+describe("Step 2 — port control gated on relay mode (#1002)", () => {
+  function relayGet(path: string) {
+    if (path === "/api/meta") {
+      return Promise.resolve({ relay_enabled: true });
+    }
+    return defaultGet(path);
+  }
+
+  it("shows the port control in direct mode (relay off)", async () => {
+    renderPage();
+    await pickTypeAndVersion();
+    fireEvent.click(screen.getByText(t("serverCreate.next")));
+    expect(
+      await screen.findByLabelText(t("serverCreate.portLabel")),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the port control in relay mode and never queries /ports/available", async () => {
+    mockApi.get.mockImplementation(relayGet);
+    renderPage();
+    await pickTypeAndVersion();
+    fireEvent.click(screen.getByText(t("serverCreate.next")));
+    // Advancing to runtime resolves; the backend select renders but no port field.
+    expect(
+      await screen.findByLabelText(t("serverCreate.backendLabel")),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText(t("serverCreate.portLabel"))).toBeNull();
+    expect(mockApi.get).not.toHaveBeenCalledWith("/api/ports/available");
+  });
+
+  it("omits game_port from the create body in relay mode", async () => {
+    mockApi.get.mockImplementation(relayGet);
+    mockApi.post.mockResolvedValue({ id: "s-new" });
+    renderPage();
+    await reachConfigStep();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    const body = JSON.parse(mockApi.post.mock.calls[0][1].body);
+    expect(body.game_port).toBeUndefined();
   });
 });
 

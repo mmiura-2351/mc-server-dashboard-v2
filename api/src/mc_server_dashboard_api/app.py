@@ -35,7 +35,7 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_session_factory,
 )
 from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
-from mc_server_dashboard_api.core.api import health, metrics, readiness
+from mc_server_dashboard_api.core.api import health, meta, metrics, readiness
 from mc_server_dashboard_api.dataplane.api import transfers
 from mc_server_dashboard_api.dependencies import (
     build_brute_force_config,
@@ -861,6 +861,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(health.router)
     api_router.include_router(readiness.router)
     api_router.include_router(metrics.router)
+    api_router.include_router(meta.router)
     api_router.include_router(users.router)
     api_router.include_router(admin_users.router)
     api_router.include_router(auth.router)

@@ -1195,13 +1195,12 @@ def get_create_server(
     """
 
     session_factory = create_session_factory(get_engine(request))
-    ports = get_settings(request).ports
     return CreateServer(
         uow=ServersUnitOfWork(session_factory),
         clock=ServersSystemClock(),
         version_validator=CatalogVersionValidator(catalog=catalog),
         file_store=file_store,
-        port_range=PortRange(start=ports.range_start, end=ports.range_end),
+        port_range=_port_range(request),
     )
 
 
@@ -1236,12 +1235,11 @@ def get_update_server(
     """
 
     session_factory = create_session_factory(get_engine(request))
-    ports = get_settings(request).ports
     return UpdateServer(
         uow=ServersUnitOfWork(session_factory),
         clock=ServersSystemClock(),
         file_store=file_store,
-        port_range=PortRange(start=ports.range_start, end=ports.range_end),
+        port_range=_port_range(request),
         # The per-server snapshot-interval override carried on config is validated
         # against the configured floor here (CONFIGURATION.md Section 5.4).
         min_interval_seconds=get_settings(request).snapshot.min_interval_seconds,
@@ -1346,8 +1344,19 @@ def get_list_server_groups(request: Request) -> ListServerGroups:
 
 
 def _port_range(request: Request) -> PortRange:
-    ports = get_settings(request).ports
-    return PortRange(start=ports.range_start, end=ports.range_end)
+    settings = get_settings(request)
+    ports = settings.ports
+    relay = settings.relay
+    # When relay is enabled, exclude its published host binds (game/tunnel) from
+    # the assignable range so a server is never assigned a port the relay already
+    # holds on the host (issue #1002). ``PortRange`` ignores out-of-range entries,
+    # so the tunnel port is inert unless it falls inside [range_start, range_end].
+    reserved = (
+        frozenset({relay.game_port, relay.tunnel_port})
+        if relay.enabled
+        else frozenset()
+    )
+    return PortRange(start=ports.range_start, end=ports.range_end, reserved=reserved)
 
 
 def get_check_port(request: Request) -> CheckPort:

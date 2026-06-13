@@ -391,11 +391,20 @@ class RelaySettings(_Section):
     deployment that leaves the relay off need not supply them.
     ``session_retention_days`` is the ``game_session`` prune window consumed by
     issue #957; it is parsed and validated here only.
+
+    ``game_port`` / ``tunnel_port`` are the relay container's published host
+    binds (RELAY.md Section 12): the game listener (players join here, fixed at
+    25565 to keep joins port-less) and the Worker dial-back tunnel (25665). When
+    ``enabled``, the allocator excludes any of these that fall inside the
+    assignable game-port range so a server is never assigned a port the relay
+    already holds on the host (issue #1002); they are otherwise unused here.
     """
 
     enabled: bool = False
     credential: str | None = None
     base_domain: str | None = None
+    game_port: int = Field(default=25565, gt=0, le=65535)
+    tunnel_port: int = Field(default=25665, gt=0, le=65535)
     # The prune window for game_session rows (RELAY.md Section 8); consumed by
     # issue #957. A zero/negative window is meaningless (it would prune every row
     # or none); require a positive number of days.
