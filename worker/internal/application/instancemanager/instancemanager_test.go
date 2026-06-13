@@ -141,10 +141,9 @@ func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) 
 func (c *fakeControl) Close() error { return nil }
 
 // rconFailInstance models a driver instance whose RCON "stop" fails, causing
-// the driver to fall back to docker stop. On the fallback path the preFallback
-// hook is invoked (if supplied) so the caller can flush the live world before
-// SIGTERM/SIGKILL. This lets the instancemanager tests verify the #1007 flush
-// runs only on the RCON-failure path, not the RCON-success path.
+// the driver to fall back to docker stop. The preFallback hook is invoked (if
+// supplied) on the graceful path, just as the real driver does (#1007). This
+// lets the instancemanager tests verify the flush wiring.
 type rconFailInstance struct {
 	*fakeInstance
 }
@@ -154,8 +153,8 @@ func newRconFailInstance(id string) *rconFailInstance {
 }
 
 func (i *rconFailInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
-	// Simulate RCON stop failure: call the pre-fallback hook (the flush) before
-	// the fallback terminate, just as the real containerdriver does.
+	// Call the pre-fallback hook (the flush) before terminate, just as the real
+	// containerdriver does on the graceful path.
 	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
 		preFallback[0](ctx)
 	}
@@ -408,9 +407,9 @@ func TestStopServerGraceful(t *testing.T) {
 	}
 }
 
-// A graceful stop whose RCON "stop" succeeds must NOT issue a save-all: Minecraft's
-// own shutdown save already flushed the dirty chunks to disk synchronously, so the
-// post-stop snapshot captures a complete world with zero added latency (#1007).
+// A graceful stop whose RCON "stop" succeeds: the fakeInstance does not call the
+// preFallback hook (it is a minimal fake), so no save-all appears in the sequence.
+// The real driver calls preFallback always before stop on the graceful path (#1007).
 func TestStopServerGracefulRCONSuccessSkipsFlush(t *testing.T) {
 	var seq []string
 	d := &fakeDriver{}
@@ -425,18 +424,18 @@ func TestStopServerGracefulRCONSuccessSkipsFlush(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
-	// The fakeInstance models a successful RCON stop: Stop completes without calling
-	// the preFallback hook. No save-all should appear in the sequence.
+	// The fakeInstance does not call the preFallback hook (minimal fake), so no
+	// save-all appears. The real driver calls preFallback always before stop.
 	want := []string{"stop"}
 	if !equalLines(seq, want) {
-		t.Fatalf("operation order = %v, want %v (RCON-success stop must not issue save-all — zero latency)", seq, want)
+		t.Fatalf("operation order = %v, want %v (fakeInstance does not exercise preFallback)", seq, want)
 	}
 }
 
-// When RCON "stop" fails and the driver falls back to docker stop
-// (SIGTERM→SIGKILL), the pre-fallback flush must run: save-all + settle lands
-// the dirty chunks on disk before the process is killed (#1007). The
-// rconFailInstance models this path by calling the preFallback hook.
+// When the driver calls the preFallback hook on the graceful path, the flush
+// must run: save-all + settle lands the dirty chunks on disk before the process
+// is terminated (#1007). The rconFailInstance models this by calling the
+// preFallback hook.
 func TestStopServerGracefulRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	var seq []string
 	d := &rconFailDriver{}
@@ -453,7 +452,7 @@ func TestStopServerGracefulRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	}
 	want := []string{"save-all", "stop"}
 	if !equalLines(seq, want) {
-		t.Fatalf("operation order = %v, want %v (RCON-failure stop must flush before terminate)", seq, want)
+		t.Fatalf("operation order = %v, want %v (graceful stop must flush before terminate)", seq, want)
 	}
 }
 
@@ -483,12 +482,12 @@ func TestStopServerForceSkipsFlush(t *testing.T) {
 	}
 }
 
-// A failed save-all on the RCON-failure fallback path must DEGRADE to
-// terminating the server, not wedge the stop (#1007): the flush is best-effort,
-// and a stop that could not save must still complete (the API gives stop dispatch
-// a bounded budget and an unflushed world is no worse than today's pre-fix
-// behavior). Uses rconFailDriver so the preFallback hook fires and exercises the
-// save-all code path.
+// A failed save-all on the graceful-stop flush must DEGRADE to terminating the
+// server, not wedge the stop (#1007): the flush is best-effort, and a stop that
+// could not save must still complete (the API gives stop dispatch a bounded
+// budget and an unflushed world is no worse than today's pre-fix behavior). Uses
+// rconFailDriver so the preFallback hook fires and exercises the save-all code
+// path.
 func TestStopServerGracefulProceedsWhenSaveFails(t *testing.T) {
 	var seq []string
 	d := &rconFailDriver{}
@@ -591,9 +590,9 @@ func TestRestartStopsAndStarts(t *testing.T) {
 	}
 }
 
-// An in-place restart whose RCON stop succeeds must NOT issue a pre-fallback
-// save-all: Minecraft's shutdown save already flushed the dirty chunks, so the
-// relaunch re-reads a complete on-disk scratch with zero added latency (#1007).
+// An in-place restart with fakeInstance (which does not call preFallback): no
+// save-all appears in the sequence. The real driver calls preFallback always
+// before stop on the graceful path (#1007).
 func TestRestartRCONSuccessSkipsFlush(t *testing.T) {
 	var seq []string
 	d := &fakeDriver{}
@@ -610,13 +609,13 @@ func TestRestartRCONSuccessSkipsFlush(t *testing.T) {
 	}
 	want := []string{"stop"}
 	if !equalLines(seq, want) {
-		t.Fatalf("operation order = %v, want %v (RCON-success restart must not issue save-all)", seq, want)
+		t.Fatalf("operation order = %v, want %v (fakeInstance does not exercise preFallback)", seq, want)
 	}
 }
 
-// When a restart's RCON stop fails and falls back to docker stop, the
-// pre-fallback flush must run: the relaunch re-reads the same on-disk scratch,
-// so unflushed dirty chunks would roll the block edits back (#1007).
+// When a restart uses rconFailInstance (which calls preFallback), the flush
+// must run: the relaunch re-reads the same on-disk scratch, so unflushed dirty
+// chunks would roll the block edits back (#1007).
 func TestRestartRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	var seq []string
 	d := &rconFailDriver{}
@@ -633,7 +632,7 @@ func TestRestartRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	}
 	want := []string{"save-all", "stop"}
 	if !equalLines(seq, want) {
-		t.Fatalf("operation order = %v, want %v (RCON-failure restart must flush before terminate)", seq, want)
+		t.Fatalf("operation order = %v, want %v (graceful restart must flush before terminate)", seq, want)
 	}
 }
 
