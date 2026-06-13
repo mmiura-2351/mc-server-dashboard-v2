@@ -243,7 +243,13 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     queryKey: ["meta"],
     queryFn: () => api.get("/api/meta"),
   });
-  const relayEnabled = metaQuery.data?.relay_enabled === true;
+  // While loading or on error, default to hiding the port control (treat as
+  // relay-enabled) so a relay deployment doesn't briefly flash a game-port
+  // field before the meta response arrives (#1006).
+  const relayEnabled =
+    metaQuery.isLoading || metaQuery.isError
+      ? true
+      : metaQuery.data?.relay_enabled === true;
 
   const versionsQuery = useQuery({
     queryKey: ["versions", type],
@@ -503,30 +509,32 @@ function NewServerWizard({ communityId }: { communityId: string }) {
             )}
           </div>
 
-          <div className="field">
-            <label htmlFor="slug-input">{t("serverCreate.slugLabel")}</label>
-            <input
-              id="slug-input"
-              type="text"
-              value={slug}
-              placeholder={t("serverCreate.slugPlaceholder")}
-              onChange={(e) => {
-                setSlug(e.target.value);
-                setSlugError(undefined);
-              }}
-            />
-            {slugError !== undefined ? (
-              <div className="error" role="alert">
-                {slugError}
-              </div>
-            ) : !slugOk ? (
-              <div className="error" role="alert">
-                {t("serverCreate.slugInvalid")}
-              </div>
-            ) : (
-              <div className="hint">{t("serverCreate.slugHint")}</div>
-            )}
-          </div>
+          {relayEnabled && (
+            <div className="field">
+              <label htmlFor="slug-input">{t("serverCreate.slugLabel")}</label>
+              <input
+                id="slug-input"
+                type="text"
+                value={slug}
+                placeholder={t("serverCreate.slugPlaceholder")}
+                onChange={(e) => {
+                  setSlug(e.target.value);
+                  setSlugError(undefined);
+                }}
+              />
+              {slugError !== undefined ? (
+                <div className="error" role="alert">
+                  {slugError}
+                </div>
+              ) : !slugOk ? (
+                <div className="error" role="alert">
+                  {t("serverCreate.slugInvalid")}
+                </div>
+              ) : (
+                <div className="hint">{t("serverCreate.slugHint")}</div>
+              )}
+            </div>
+          )}
 
           <div className="field">
             <label htmlFor="memory-limit-input">
