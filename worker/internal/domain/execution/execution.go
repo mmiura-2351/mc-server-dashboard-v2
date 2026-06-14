@@ -199,7 +199,11 @@ type Instance interface {
 	// path (before tryRCONStop and before docker stop) so the caller can flush
 	// the live world to disk while the process is still alive. It is NOT called
 	// on a force stop (graceful=false). At most one callback is accepted.
-	Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error
+	// When the callback returns true the world data is fully flushed; Stop then
+	// skips RCON "stop" and SIGTERM (both trigger MC's own shutdown save, which
+	// can overwrite the flushed data if killed mid-write) and terminates the
+	// process with SIGKILL so the flushed region files stay intact.
+	Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error
 	// Status reports the last observed state.
 	Status() ServerState
 	// Events streams state transitions for this instance until it terminates.

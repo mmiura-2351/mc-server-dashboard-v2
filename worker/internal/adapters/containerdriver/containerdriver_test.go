@@ -1076,6 +1076,79 @@ func TestGracefulStopViaRCON(t *testing.T) {
 	}
 }
 
+// When the preFallback flush returns true, the driver skips RCON stop and docker
+// stop entirely and issues a direct SIGKILL. The container must reach stopped, and
+// the log must say "flush succeeded" (not "timed out").
+func TestGracefulStopFlushTrueSkipsRCONAndDockerStop(t *testing.T) {
+	var buf syncBuffer
+	docker := newFakeDocker()
+	ctrl := &fakeControl{onStop: func() { docker.exit(0, nil) }}
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return ctrl, nil
+	}, Options{
+		WorkerID:         "w1",
+		StopTimeout:      50 * time.Millisecond,
+		GameBindIP:       "0.0.0.0",
+		ReadinessTimeout: 20 * time.Millisecond,
+		Logger:           slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	flush := func(context.Context) bool { return true }
+	if err := inst.Stop(context.Background(), true, flush); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if ctrl.stopCalled {
+		t.Fatal("RCON stop must be skipped when flush returns true")
+	}
+	if docker.stopWasCalled() {
+		t.Fatal("docker stop must be skipped when flush returns true")
+	}
+	if !docker.killWasCalled() {
+		t.Fatal("expected docker kill (direct SIGKILL) after flush success")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "flush succeeded; terminating container") {
+		t.Fatalf("expected 'flush succeeded' info log; got %q", logged)
+	}
+	if strings.Contains(logged, "graceful stop timed out") {
+		t.Fatalf("flush-success path must not log 'graceful stop timed out'; got %q", logged)
+	}
+}
+
+// When the preFallback flush returns false, the driver falls back to the normal
+// graceful shutdown: RCON stop, then docker stop, then kill — same as if no
+// preFallback was supplied.
+func TestGracefulStopFlushFalseFallsBackToRCON(t *testing.T) {
+	docker := newFakeDocker()
+	ctrl := &fakeControl{onStop: func() { docker.exit(0, nil) }}
+	d := newTestDriver(docker, ctrl, nil)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	flush := func(context.Context) bool { return false }
+	if err := inst.Stop(context.Background(), true, flush); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if !ctrl.stopCalled {
+		t.Fatal("RCON stop must be called when flush returns false")
+	}
+	if docker.stopWasCalled() {
+		t.Fatal("docker stop should not be called when RCON stop succeeds")
+	}
+}
+
 // A container that exits mid-graceful-stop releases the Stop wait via
 // close(exited) rather than timing out. The stop is already in flight, so
 // supervise records the terminal state as stopped, and the driver never escalates

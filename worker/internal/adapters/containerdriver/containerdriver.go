@@ -1038,7 +1038,7 @@ func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) 
 // (which SIGTERMs then SIGKILLs after stopTimeout inside the daemon), then a
 // direct `docker kill`; a forced stop skips the RCON step. Any terminal state
 // makes Stop a prompt no-op success.
-func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
+func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
 	i.mu.Lock()
 	if i.stopping || isTerminal(i.state) {
 		i.mu.Unlock()
@@ -1084,18 +1084,29 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// relay/tunnel connections. The flush (RCON save-all + settleWorkingSet)
 	// ensures chunks are on disk BEFORE the process terminates.
 	// Run on a detached context so it does not consume the stopDeadline.
+	//
+	// When the flush succeeds (returns true), RCON "stop" and docker stop
+	// (SIGTERM) are SKIPPED: both trigger MC's own shutdown save, which
+	// re-writes ALL loaded region files. If that save is interrupted by a kill
+	// (the MC 26.1.2 shutdown-hang observed with relay/tunnel connections), the
+	// half-written regions overwrite the safely-flushed data and corrupt the
+	// post-stop snapshot — the root cause of the world-rollback bug. SIGKILL
+	// cannot be intercepted, so the flushed files stay intact.
+	flushed := false
 	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
 		flushCtx, flushCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 90*time.Second)
-		preFallback[0](flushCtx)
+		flushed = preFallback[0](flushCtx)
 		flushCancel()
 	}
 
-	if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
-		return nil
-	}
+	if !flushed {
+		if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
+			return nil
+		}
 
-	if err := i.docker.Stop(stopCtx, id, i.stopTimeout); err == nil && i.waitExit(stopCtx, i.stopTimeout) {
-		return nil
+		if err := i.docker.Stop(stopCtx, id, i.stopTimeout); err == nil && i.waitExit(stopCtx, i.stopTimeout) {
+			return nil
+		}
 	}
 
 	// The stop did not confirm the container's exit within the stop timeout, so it is
@@ -1107,7 +1118,10 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// graceful path actually attempted (and timed out) a clean shutdown, while a
 	// forced stop (graceful=false) skips RCON/docker-stop by design and kills
 	// directly, so "graceful stop timed out" would misdescribe it.
-	if graceful {
+	if flushed {
+		i.logger.Info("flush succeeded; terminating container",
+			"server_id", i.spec.ServerID)
+	} else if graceful {
 		i.logger.Warn("graceful stop timed out; escalating to kill",
 			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
 	} else {

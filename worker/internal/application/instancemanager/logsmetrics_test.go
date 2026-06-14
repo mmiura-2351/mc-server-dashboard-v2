@@ -34,7 +34,7 @@ func newRichInstance(id string) *richInstance {
 	return i
 }
 
-func (i *richInstance) Stop(_ context.Context, _ bool, _ ...func(context.Context)) error {
+func (i *richInstance) Stop(_ context.Context, _ bool, _ ...func(context.Context) bool) error {
 	i.events <- execution.StatusEvent{ServerID: i.serverID, State: execution.StateStopped}
 	// Terminal: close the streams so the pumps tear down (drivers do this in
 	// supervise after the process/container exits).

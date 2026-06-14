@@ -29,7 +29,7 @@ type orphanInstance struct {
 	stopping  bool
 }
 
-func (i *orphanInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
+func (i *orphanInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
 	i.mu.Lock()
 	// Mirror the driver entry guard: a Stop while already stopping is a no-op nil.
 	if i.stopping {
