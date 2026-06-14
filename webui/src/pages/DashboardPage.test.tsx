@@ -305,6 +305,56 @@ describe("DashboardPage lifecycle actions", () => {
       await screen.findByText(t("dashboard.actionFailed")),
     ).toBeInTheDocument();
   });
+
+  it("optimistically shows the transitional pill immediately on start", async () => {
+    // The mutation never resolves during this test — the pill must already
+    // show "Starting" before the API responds.
+    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.post.mockReturnValue(new Promise(() => {}));
+    renderPage();
+
+    await screen.findByText(t("dashboard.state.stopped"));
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
+
+    expect(
+      await screen.findByText(t("dashboard.state.starting")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("dashboard.state.stopped")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("optimistically shows the transitional pill immediately on stop", async () => {
+    mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
+    mockApi.post.mockReturnValue(new Promise(() => {}));
+    renderPage();
+
+    await screen.findByText(t("dashboard.state.running"));
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.stop") }));
+
+    expect(
+      await screen.findByText(t("dashboard.state.stopping")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("dashboard.state.running")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reverts the pill to the previous state on error", async () => {
+    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "port_conflict" }),
+    );
+    renderPage();
+
+    await screen.findByText(t("dashboard.state.stopped"));
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
+
+    // After the error, the pill reverts to "Stopped".
+    expect(
+      await screen.findByText(t("dashboard.state.stopped")),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("DashboardPage live status", () => {

@@ -274,11 +274,29 @@ function useLifecycle(server: ServerResponse, communityId: string) {
           },
         ),
       ),
+    // Optimistically patch the server's observed_state in the list cache so
+    // the pill transitions instantly, before the API responds (#1071).
+    onMutate: (action: LifecycleAction) => {
+      const key = serversKey(communityId);
+      const previous = queryClient.getQueryData<ServerResponse[]>(key);
+      queryClient.setQueryData<ServerResponse[]>(key, (old) =>
+        old?.map((s) =>
+          s.id === server.id
+            ? { ...s, observed_state: requestedState(action) }
+            : s,
+        ),
+      );
+      return { previous };
+    },
     // Always re-fetch the list once the request settles (no polling loop here).
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
     },
-    onError: (error) => {
+    onError: (error, _action, context) => {
+      // Rollback the optimistic cache update before showing the error toast.
+      if (context?.previous) {
+        queryClient.setQueryData(serversKey(communityId), context.previous);
+      }
       // 403 → the permission glue (toast + capability refetch). Everything
       // else → the shared lifecycle mapping: known non-race 409 reasons get a
       // specific toast, other 409s the "state changed — refresh" treatment

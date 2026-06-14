@@ -327,8 +327,37 @@ function Controls({
 
   const lifecycle = useMutation({
     mutationFn: (path: string) => api.post(path as never),
+    onMutate: (path: string) => {
+      // Optimistically set the observed_state to the transitional state so
+      // the pill transitions instantly, before the API responds (#1071).
+      const action = path.split("/").pop()?.replace(/\?.*/, "") ?? "";
+      const transitional =
+        action === "stop"
+          ? "stopping"
+          : action === "restart"
+            ? "restarting"
+            : "starting";
+      const key = serverKey(communityId, server.id);
+      const previous = queryClient.getQueryData<ServerResponse>(key);
+      queryClient.setQueryData<ServerResponse>(key, (old) =>
+        old ? { ...old, observed_state: transitional } : old,
+      );
+      return { previous };
+    },
     onSettled: invalidate,
-    onError,
+    onError: (error, _path, context) => {
+      // Rollback the optimistic cache update before showing the error toast.
+      if (context?.previous) {
+        queryClient.setQueryData(
+          serverKey(communityId, server.id),
+          context.previous,
+        );
+      }
+      if (onForbidden(error)) {
+        return;
+      }
+      showToast(t(lifecycleErrorMessage(error)), "error");
+    },
   });
 
   const exportMutation = useMutation({

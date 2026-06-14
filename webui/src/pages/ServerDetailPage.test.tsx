@@ -577,6 +577,68 @@ describe("ServerDetailPage lifecycle controls", () => {
       await screen.findByText(t("dashboard.stateChanged")),
     ).toBeInTheDocument();
   });
+
+  describe("optimistic state transition (#1071)", () => {
+    let restoreWs: () => void;
+    beforeEach(() => {
+      restoreWs = installMockWebSocket();
+    });
+    afterEach(() => restoreWs());
+
+    function statePill(): string | null {
+      const pills = document.querySelectorAll(".detail-title .pill");
+      return pills[0]?.textContent ?? null;
+    }
+
+    it("optimistically shows the starting pill immediately on start", async () => {
+      mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+      mockApi.post.mockReturnValue(new Promise(() => {}));
+      renderPage();
+
+      await screen.findByText("survival");
+      fireEvent.click(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      );
+
+      await waitFor(() =>
+        expect(statePill()).toBe(t("dashboard.state.starting")),
+      );
+    });
+
+    it("optimistically shows the stopping pill on stop", async () => {
+      mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+      mockApi.post.mockReturnValue(new Promise(() => {}));
+      renderPage();
+
+      await screen.findByText("survival");
+      fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+      fireEvent.click(
+        screen.getByRole("menuitem", { name: t("serverDetail.stopGraceful") }),
+      );
+
+      await waitFor(() =>
+        expect(statePill()).toBe(t("dashboard.state.stopping")),
+      );
+    });
+
+    it("reverts the pill to the previous state on lifecycle error", async () => {
+      mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+      mockApi.post.mockRejectedValue(
+        new ApiError(409, { reason: "port_conflict" }),
+      );
+      renderPage();
+
+      await screen.findByText("survival");
+      fireEvent.click(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      );
+
+      // After the error, the pill reverts to "Stopped".
+      await waitFor(() =>
+        expect(statePill()).toBe(t("dashboard.state.stopped")),
+      );
+    });
+  });
 });
 
 describe("ServerDetailPage export", () => {
