@@ -294,7 +294,7 @@ describe("ServerDetailPage lifecycle controls", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("force-stops via the dropdown with ?force=true", async () => {
+  it("force-stops via the dropdown with ?force=true after confirmation", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
     mockApi.post.mockResolvedValue(server({ observed_state: "stopping" }));
     renderPage();
@@ -305,11 +305,50 @@ describe("ServerDetailPage lifecycle controls", () => {
       screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
     );
 
+    // The confirmation dialog should appear.
+    expect(
+      screen.getByText(t("serverDetail.forceStop.dialogBody")),
+    ).toBeInTheDocument();
+    // The API must NOT have been called yet.
+    expect(mockApi.post).not.toHaveBeenCalled();
+
+    // Confirm the force stop.
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("serverDetail.forceStop.confirm"),
+      }),
+    );
+
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
         `/api/communities/${CID}/servers/${SID}/stop?force=true`,
       ),
     );
+  });
+
+  it("cancelling the force-stop confirmation does not send the request", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
+    );
+
+    // Dialog is open.
+    expect(
+      screen.getByText(t("serverDetail.forceStop.dialogBody")),
+    ).toBeInTheDocument();
+
+    // Cancel.
+    fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
+
+    // Dialog closes, no API call.
+    expect(
+      screen.queryByText(t("serverDetail.forceStop.dialogBody")),
+    ).not.toBeInTheDocument();
+    expect(mockApi.post).not.toHaveBeenCalled();
   });
 
   it("graceful-stops via the dropdown without the force flag", async () => {
@@ -438,9 +477,18 @@ describe("ServerDetailPage lifecycle controls", () => {
       expect(graceful).toHaveFocus();
     });
 
-    it("Enter activates the focused item", async () => {
+    it("Enter activates the focused item (force requires confirmation)", async () => {
       await openWith("ArrowUp"); // focuses Force stop
       fireEvent.keyDown(items()[1], { key: "Enter" });
+      // Force stop opens the confirmation dialog instead of firing immediately.
+      expect(
+        screen.getByText(t("serverDetail.forceStop.dialogBody")),
+      ).toBeInTheDocument();
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: t("serverDetail.forceStop.confirm"),
+        }),
+      );
       await waitFor(() =>
         expect(mockApi.post).toHaveBeenCalledWith(
           `/api/communities/${CID}/servers/${SID}/stop?force=true`,
@@ -469,7 +517,7 @@ describe("ServerDetailPage lifecycle controls", () => {
       expect(trigger).toHaveFocus();
     });
 
-    it("returns focus to the trigger after keyboard activation (APG)", async () => {
+    it("returns focus to the trigger after keyboard activation of graceful (APG)", async () => {
       const trigger = await openWith("Enter");
       fireEvent.keyDown(items()[0], { key: "Enter" });
       expect(
@@ -478,12 +526,19 @@ describe("ServerDetailPage lifecycle controls", () => {
       expect(trigger).toHaveFocus();
     });
 
-    it("returns focus to the trigger after click activation (APG)", async () => {
+    it("returns focus to the trigger after click activation of force via confirm (APG)", async () => {
       const trigger = await openWith("Enter");
       fireEvent.click(items()[1]);
+      // Force opens the confirm dialog; the menu closes.
       expect(
         screen.queryByRole("menuitem", { name: t("serverDetail.stopForce") }),
       ).not.toBeInTheDocument();
+      // Confirm the force stop; focus returns to the trigger.
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: t("serverDetail.forceStop.confirm"),
+        }),
+      );
       expect(trigger).toHaveFocus();
     });
   });

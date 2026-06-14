@@ -280,6 +280,10 @@ export const en = {
   "serverDetail.stop": "Stop",
   "serverDetail.stopGraceful": "Stop (graceful)",
   "serverDetail.stopForce": "Force stop",
+  "serverDetail.forceStop.dialogTitle": "Force stop server?",
+  "serverDetail.forceStop.dialogBody":
+    "Force stop kills the server process immediately without a graceful shutdown. Unsaved data (chunks, player progress) may be lost.",
+  "serverDetail.forceStop.confirm": "Force Stop",
   "serverDetail.restart": "Restart",
   "serverDetail.export": "Export",
   "serverDetail.delete": "Delete",

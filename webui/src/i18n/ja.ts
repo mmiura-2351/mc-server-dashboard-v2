@@ -286,6 +286,10 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.stop": "停止",
   "serverDetail.stopGraceful": "停止（通常）",
   "serverDetail.stopForce": "強制停止",
+  "serverDetail.forceStop.dialogTitle": "サーバーを強制停止しますか？",
+  "serverDetail.forceStop.dialogBody":
+    "強制停止はサーバープロセスを即座に終了します。グレースフルシャットダウンは行われず、未保存のデータ（チャンク、プレイヤーの進行状況）が失われる可能性があります。",
+  "serverDetail.forceStop.confirm": "強制停止",
   "serverDetail.restart": "再起動",
   "serverDetail.export": "エクスポート",
   "serverDetail.delete": "削除",
