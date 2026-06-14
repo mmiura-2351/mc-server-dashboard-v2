@@ -17,7 +17,7 @@
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
 	bootstrap hooks-install hooks-check hooks-test \
-	update
+	update deploy
 
 # golangci-lint is not part of the Go distribution; it is installed into a
 # module-local, gitignored ./.bin (see worker/README.md).
@@ -363,3 +363,8 @@ $(PROTOC_GEN_GO_GRPC):
 # rebuild all unconditionally. See scripts/update.sh for details.
 update:
 	FORCE=$(FORCE) scripts/update.sh
+
+# First-time deployment with interactive .env setup. If .env already exists,
+# skips setup and does a full rebuild + deploy. See scripts/deploy.sh.
+deploy:
+	scripts/deploy.sh
