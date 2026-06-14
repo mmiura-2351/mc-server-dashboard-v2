@@ -506,7 +506,6 @@ describe("DashboardPage join address in server list (issue #982)", () => {
     expect(badge).toBeInTheDocument();
     expect(badge.tagName).toBe("BUTTON");
     expect(badge).toHaveAttribute("title", "survival.relay.example.com");
-    expect(badge).toHaveStyle({ cursor: "pointer" });
   });
 
   it("clicking hostname badge copies via execCommand and shows Copied! (cards view)", async () => {

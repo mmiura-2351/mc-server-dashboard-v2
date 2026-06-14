@@ -498,6 +498,13 @@ body.col-resizing {
 .badge.health-unknown {
   color: var(--text-faint);
 }
+.badge.copyable {
+  font: inherit;
+  cursor: pointer;
+  border: none;
+  background: inherit;
+  padding: inherit;
+}
 
 /* Observed-state pills (color tokens from #399). */
 .pill {

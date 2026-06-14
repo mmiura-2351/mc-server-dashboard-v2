@@ -1343,7 +1343,6 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
     });
     expect(badge).toBeInTheDocument();
     expect(badge).toHaveAttribute("title", "myserver.relay.example.com");
-    expect(badge).toHaveStyle({ cursor: "pointer" });
     // Port badge is hidden when join_hostname is shown.
     expect(screen.queryByText(":25565")).not.toBeInTheDocument();
   });
@@ -1407,6 +1406,42 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
 
     // On failure the badge stays showing the hostname (no error state).
     expect(screen.getByText("myserver.relay.example.com")).toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
+
+  it("Copied! does not stick permanently when a re-click fails (issue #976)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "myserver.relay.example.com" }),
+    );
+    renderPage();
+    await screen.findByText("myserver.relay.example.com");
+
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+
+    // Click 1 succeeds — badge shows "Copied!".
+    fireEvent.click(screen.getByText("myserver.relay.example.com"));
+    expect(
+      await screen.findByText(t("serverDetail.copiedJoinHostname")),
+    ).toBeInTheDocument();
+
+    // Click 2 fails while "Copied!" is still showing.
+    execSpy.mockReturnValue(false);
+    fireEvent.click(
+      screen.getByText(t("serverDetail.copiedJoinHostname")),
+    );
+
+    // The badge must revert to the hostname (not stay stuck on "Copied!").
+    expect(
+      await screen.findByText("myserver.relay.example.com"),
+    ).toBeInTheDocument();
 
     execSpy.mockRestore();
   });

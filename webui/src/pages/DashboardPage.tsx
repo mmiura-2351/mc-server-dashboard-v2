@@ -337,7 +337,7 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
         copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
       },
       () => {
-        // Silently ignore — the badge text stays as the hostname.
+        setCopied(false);
       },
     );
   }, [server.join_hostname]);
@@ -362,7 +362,6 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
             type="button"
             className="badge copyable"
             title={server.join_hostname}
-            style={{ cursor: "pointer" }}
             onClick={handleCopy}
           >
             {copied ? t("dashboard.copiedJoinHostname") : server.join_hostname}
@@ -455,7 +454,7 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
         copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
       },
       () => {
-        // Silently ignore — the text stays as the hostname.
+        setCopied(false);
       },
     );
   }, [server.join_hostname]);

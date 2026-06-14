@@ -225,7 +225,7 @@ function Header({
         copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
       },
       () => {
-        // Silently ignore — the badge text stays as the hostname.
+        setCopied(false);
       },
     );
   }, [server.join_hostname]);
@@ -267,7 +267,6 @@ function Header({
               type="button"
               className="badge copyable"
               title={server.join_hostname}
-              style={{ cursor: "pointer" }}
               onClick={handleCopy}
             >
               {copied
