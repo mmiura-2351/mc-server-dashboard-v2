@@ -891,3 +891,88 @@ def test_relay_credential_masked_in_dump(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("MCD_API_RELAY__CREDENTIAL", "relay-secret")
     settings = load_settings(config_file=None)
     assert settings.masked_dump()["relay"]["credential"] == "***"
+
+
+# --- [memory_limit] section (issue #1069) ---
+
+
+def test_memory_limit_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.memory_limit.default_mb is None
+    assert settings.memory_limit.max_mb is None
+
+
+def test_memory_limit_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_MEMORY_LIMIT__DEFAULT_MB", "2048")
+    monkeypatch.setenv("MCD_API_MEMORY_LIMIT__MAX_MB", "8192")
+    settings = load_settings(config_file=None)
+    assert settings.memory_limit.default_mb == 2048
+    assert settings.memory_limit.max_mb == 8192
+
+
+def test_memory_limit_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[memory_limit]\ndefault_mb = 4096\nmax_mb = 16384\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.memory_limit.default_mb == 4096
+    assert settings.memory_limit.max_mb == 16384
+
+
+def test_memory_limit_default_below_floor_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[memory_limit]\ndefault_mb = 256\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+def test_memory_limit_max_below_floor_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[memory_limit]\nmax_mb = 256\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+def test_memory_limit_default_above_max_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[memory_limit]\ndefault_mb = 8192\nmax_mb = 4096\n",
+    )
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+def test_memory_limit_default_above_ceiling_without_max_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """default_mb above the 1 TiB ceiling with max_mb unset must fail at startup."""
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[memory_limit]\ndefault_mb = 1048577\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
+def test_memory_limit_default_equal_to_max_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[memory_limit]\ndefault_mb = 4096\nmax_mb = 4096\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.memory_limit.default_mb == 4096
+    assert settings.memory_limit.max_mb == 4096

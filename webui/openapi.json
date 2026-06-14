@@ -1261,13 +1261,37 @@
       "MetaResponse": {
         "description": "Deployment facts the Web UI reads before a server exists (issue #1002).",
         "properties": {
+          "default_memory_limit_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Memory Limit Mb"
+          },
+          "max_memory_limit_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Memory Limit Mb"
+          },
           "relay_enabled": {
             "title": "Relay Enabled",
             "type": "boolean"
           }
         },
         "required": [
-          "relay_enabled"
+          "relay_enabled",
+          "default_memory_limit_mb",
+          "max_memory_limit_mb"
         ],
         "title": "MetaResponse",
         "type": "object"

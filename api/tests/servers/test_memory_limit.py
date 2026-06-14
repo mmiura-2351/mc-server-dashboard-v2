@@ -66,3 +66,38 @@ def test_round_trip_through_config_blob() -> None:
     config = {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 4096}
     assert memory_limit_from_config(config) == 4096
     assert config[MEMORY_LIMIT_CONFIG_KEY] == 4096
+
+
+# --- Configurable ceiling (issue #1069) ---
+
+
+def test_custom_ceiling_accepts_value_at_ceiling() -> None:
+    """A value equal to a custom ceiling is accepted."""
+    assert (
+        memory_limit_from_config({MEMORY_LIMIT_CONFIG_KEY: 8192}, ceiling_mb=8192)
+        == 8192
+    )
+
+
+def test_custom_ceiling_rejects_value_above() -> None:
+    """A value above the custom ceiling is rejected."""
+    with pytest.raises(InvalidMemoryLimitError):
+        memory_limit_from_config({MEMORY_LIMIT_CONFIG_KEY: 8193}, ceiling_mb=8192)
+
+
+def test_custom_ceiling_does_not_affect_floor() -> None:
+    """A custom ceiling does not change the floor check."""
+    with pytest.raises(InvalidMemoryLimitError):
+        memory_limit_from_config(
+            {MEMORY_LIMIT_CONFIG_KEY: MEMORY_LIMIT_FLOOR_MB - 1}, ceiling_mb=8192
+        )
+
+
+def test_default_ceiling_unchanged_when_none() -> None:
+    """Passing ceiling_mb=None keeps the hardcoded 1 TiB ceiling."""
+    assert (
+        memory_limit_from_config(
+            {MEMORY_LIMIT_CONFIG_KEY: MEMORY_LIMIT_CEILING_MB}, ceiling_mb=None
+        )
+        == MEMORY_LIMIT_CEILING_MB
+    )

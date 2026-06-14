@@ -657,6 +657,13 @@ describe("ServerDetailPage settings", () => {
 
   it("checks port availability on blur and shows the taken hint", async () => {
     mockApi.get.mockResolvedValueOnce(server({ observed_state: "stopped" }));
+    // The Settings tab fetches /api/meta for the memory-limit ceiling (#1069);
+    // supply a response so it does not consume the port-check mock below.
+    mockApi.get.mockResolvedValueOnce({
+      relay_enabled: false,
+      default_memory_limit_mb: null,
+      max_memory_limit_mb: null,
+    });
     mockApi.get.mockResolvedValueOnce({
       port: 25570,
       in_range: true,

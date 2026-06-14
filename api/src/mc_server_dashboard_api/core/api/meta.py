@@ -31,6 +31,10 @@ class MetaResponse(BaseModel):
     """Deployment facts the Web UI reads before a server exists (issue #1002)."""
 
     relay_enabled: bool
+    # Operator-configurable memory-limit knobs (issue #1069). ``None`` means the
+    # operator has not set them and the hardcoded defaults apply.
+    default_memory_limit_mb: int | None
+    max_memory_limit_mb: int | None
 
 
 @router.get("/meta")
@@ -40,4 +44,8 @@ async def meta(
 ) -> MetaResponse:
     """Report deployment-wide UI facts (currently: whether the relay is on)."""
 
-    return MetaResponse(relay_enabled=settings.relay.enabled)
+    return MetaResponse(
+        relay_enabled=settings.relay.enabled,
+        default_memory_limit_mb=settings.memory_limit.default_mb,
+        max_memory_limit_mb=settings.memory_limit.max_mb,
+    )
