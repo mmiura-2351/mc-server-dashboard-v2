@@ -249,10 +249,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.worker": "Worker",
   "serverDetail.noPort": "ポートなし",
   // Relay join hostname (issue #961).
-  "serverDetail.joinHostname": "参加アドレス",
-  "serverDetail.copyJoinHostname": "コピー",
   "serverDetail.copiedJoinHostname": "コピーしました！",
-  "serverDetail.copyJoinHostnameFailed": "コピーに失敗しました",
   // Tabs (WEBUI_SPEC.md 6.4–6.9).
   "serverDetail.tab.overview": "概要",
   "serverDetail.tab.console": "コンソール",

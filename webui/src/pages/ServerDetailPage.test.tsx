@@ -1330,39 +1330,41 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
     renderPage();
 
     expect(await screen.findByText(":25565")).toBeInTheDocument();
-    expect(
-      screen.queryByText(new RegExp(t("serverDetail.joinHostname"))),
-    ).not.toBeInTheDocument();
   });
 
-  it("shows join_hostname with a copy button when non-null", async () => {
+  it("shows join_hostname as a clickable badge when non-null", async () => {
     mockApi.get.mockResolvedValue(
       server({ join_hostname: "myserver.relay.example.com", game_port: 25565 }),
     );
     renderPage();
 
-    expect(
-      await screen.findByText(/myserver\.relay\.example\.com/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
-    ).toBeInTheDocument();
+    const badge = await screen.findByRole("button", {
+      name: "myserver.relay.example.com",
+    });
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute("title", "myserver.relay.example.com");
     // Port badge is hidden when join_hostname is shown.
     expect(screen.queryByText(":25565")).not.toBeInTheDocument();
   });
 
-  it("copy button uses execCommand fallback when navigator.clipboard is unavailable (insecure context)", async () => {
-    // jsdom does not implement navigator.clipboard; this test verifies the
-    // legacy execCommand fallback fires and no unhandled error is thrown.
+  it("badge shows hostname without a label prefix", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    );
+    renderPage();
+
+    // The badge must show just the hostname, not "Join address: hostname".
+    const badge = await screen.findByText("survival.relay.example.com");
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).toBe("survival.relay.example.com");
+  });
+
+  it("clicking the badge copies via execCommand fallback and shows Copied!", async () => {
     mockApi.get.mockResolvedValue(
       server({ join_hostname: "myserver.relay.example.com" }),
     );
     renderPage();
-    await screen.findByText(/myserver\.relay\.example\.com/);
-
-    // Confirm navigator.clipboard is absent in jsdom (the environment under
-    // which insecure-context behaviour is exercised).
-    expect((navigator as { clipboard?: unknown }).clipboard).toBeUndefined();
+    await screen.findByText("myserver.relay.example.com");
 
     // jsdom does not define execCommand; define it so vi.spyOn can wrap it.
     if (!("execCommand" in document)) {
@@ -1374,30 +1376,23 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
     }
     const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
 
-    // Clicking must not throw even without the Clipboard API.
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
-    );
+    fireEvent.click(screen.getByText("myserver.relay.example.com"));
 
     expect(execSpy).toHaveBeenCalledWith("copy");
-    // After a successful fallback copy the button shows the "Copied!" label.
     expect(
-      await screen.findByRole("button", {
-        name: t("serverDetail.copiedJoinHostname"),
-      }),
+      await screen.findByText(t("serverDetail.copiedJoinHostname")),
     ).toBeInTheDocument();
 
     execSpy.mockRestore();
   });
 
-  it("copy button shows error state when both Clipboard API and execCommand fail", async () => {
+  it("badge reverts to hostname when copy fails (no error state)", async () => {
     mockApi.get.mockResolvedValue(
       server({ join_hostname: "myserver.relay.example.com" }),
     );
     renderPage();
-    await screen.findByText(/myserver\.relay\.example\.com/);
+    await screen.findByText("myserver.relay.example.com");
 
-    // jsdom does not define execCommand; define it so vi.spyOn can wrap it.
     if (!("execCommand" in document)) {
       Object.defineProperty(document, "execCommand", {
         value: () => false,
@@ -1407,30 +1402,21 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
     }
     const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(false);
 
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
-    );
+    fireEvent.click(screen.getByText("myserver.relay.example.com"));
 
-    expect(
-      await screen.findByRole("button", {
-        name: t("serverDetail.copyJoinHostnameFailed"),
-      }),
-    ).toBeInTheDocument();
+    // On failure the badge stays showing the hostname (no error state).
+    expect(screen.getByText("myserver.relay.example.com")).toBeInTheDocument();
 
     execSpy.mockRestore();
   });
 
-  it("copy button does not stick on Copied! when a failure fires while Copied! is shown (issue #976)", async () => {
-    // Simulate: first click succeeds (copied=true), second click fails before
-    // the 1.5 s timer clears — fail() must reset copied so the button doesn't
-    // stay on "Copied!" after the error label clears.
+  it("Copied! does not stick permanently when a re-click fails (issue #976)", async () => {
     mockApi.get.mockResolvedValue(
       server({ join_hostname: "myserver.relay.example.com" }),
     );
     renderPage();
-    await screen.findByText(/myserver\.relay\.example\.com/);
+    await screen.findByText("myserver.relay.example.com");
 
-    // jsdom does not define execCommand; define it so we can toggle it.
     if (!("execCommand" in document)) {
       Object.defineProperty(document, "execCommand", {
         value: () => true,
@@ -1438,39 +1424,37 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
         configurable: true,
       });
     }
-
-    // First click: execCommand returns true → succeed()
     const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.copyJoinHostname") }),
-    );
+
+    // Click 1 succeeds — badge shows "Copied!".
+    fireEvent.click(screen.getByText("myserver.relay.example.com"));
     expect(
-      await screen.findByRole("button", {
-        name: t("serverDetail.copiedJoinHostname"),
-      }),
+      await screen.findByText(t("serverDetail.copiedJoinHostname")),
     ).toBeInTheDocument();
 
-    // Second click before timer fires: execCommand returns false → fail()
+    // Click 2 fails while "Copied!" is still showing.
     execSpy.mockReturnValue(false);
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: t("serverDetail.copiedJoinHostname"),
-      }),
-    );
+    fireEvent.click(screen.getByText(t("serverDetail.copiedJoinHostname")));
 
-    // The button must now be in the error state, not stuck on "Copied!".
+    // The badge must revert to the hostname (not stay stuck on "Copied!").
     expect(
-      await screen.findByRole("button", {
-        name: t("serverDetail.copyJoinHostnameFailed"),
-      }),
+      await screen.findByText("myserver.relay.example.com"),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", {
-        name: t("serverDetail.copiedJoinHostname"),
-      }),
-    ).not.toBeInTheDocument();
 
     execSpy.mockRestore();
+  });
+
+  it("badge is keyboard-accessible (native button)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ join_hostname: "myserver.relay.example.com" }),
+    );
+    renderPage();
+
+    // A <button> is natively focusable and activates on Enter/Space.
+    const badge = await screen.findByRole("button", {
+      name: "myserver.relay.example.com",
+    });
+    expect(badge.tagName).toBe("BUTTON");
   });
 });
 
@@ -1481,41 +1465,10 @@ describe("ServerDetailPage header join address display (issue #982)", () => {
     );
     renderPage();
 
-    await screen.findByText(/survival\.relay\.example\.com/);
+    await screen.findByText("survival.relay.example.com");
     // The port must not appear anywhere in the header when relay is on.
     expect(screen.queryByText(/:25565/)).not.toBeInTheDocument();
     expect(screen.queryByText("25565")).not.toBeInTheDocument();
-  });
-
-  it("join address badge carries the 'Join address:' label so it's distinguishable from type/backend badges", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
-    );
-    renderPage();
-
-    // The badge must include the i18n label so users can tell it apart from
-    // the adjacent type and backend badges.
-    expect(
-      await screen.findByText(
-        `${t("serverDetail.joinHostname")}: survival.relay.example.com`,
-      ),
-    ).toBeInTheDocument();
-    // When relay is off, the label must not appear.
-  });
-
-  it("hostname badge and copy button are siblings — button is not nested inside the badge", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
-    );
-    renderPage();
-
-    await screen.findByText(/survival\.relay\.example\.com/);
-    const copyBtn = screen.getByRole("button", {
-      name: t("serverDetail.copyJoinHostname"),
-    });
-    const hostnameBadge = screen.getByText(/survival\.relay\.example\.com/);
-    // The copy button must not be inside the badge span.
-    expect(hostnameBadge).not.toContainElement(copyBtn);
   });
 });
 

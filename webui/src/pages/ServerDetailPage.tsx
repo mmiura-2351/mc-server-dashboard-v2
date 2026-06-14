@@ -162,40 +162,12 @@ function Loaded({
 
 // ── Overview header + lifecycle controls ────────────────────────────────────
 
-// Minimal copy-to-clipboard button: writes text via the Clipboard API and shows
-// a transient "Copied!" confirmation.  Falls back to the legacy execCommand
-// approach in insecure contexts (plain HTTP off-localhost) where
-// navigator.clipboard is undefined.  On total failure shows a brief error state.
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) clearTimeout(timerRef.current);
-    };
-  }, []);
-
-  const copy = useCallback(() => {
-    if (timerRef.current !== null) clearTimeout(timerRef.current);
-
-    const succeed = () => {
-      setCopied(true);
-      setFailed(false);
-      timerRef.current = setTimeout(() => setCopied(false), 1500);
-    };
-    const fail = () => {
-      setCopied(false);
-      setFailed(true);
-      timerRef.current = setTimeout(() => setFailed(false), 1500);
-    };
-
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(text).then(succeed, fail);
-      return;
-    }
-    // Legacy fallback for insecure (plain HTTP) contexts.
+// Copy text to clipboard with an execCommand fallback for insecure contexts.
+function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
     try {
       const ta = document.createElement("textarea");
       ta.value = text;
@@ -206,24 +178,14 @@ function CopyButton({ text }: { text: string }) {
       const ok = document.execCommand("copy");
       document.body.removeChild(ta);
       if (ok) {
-        succeed();
+        resolve();
       } else {
-        fail();
+        reject();
       }
     } catch {
-      fail();
+      reject();
     }
-  }, [text]);
-
-  return (
-    <button type="button" className="btn sm" onClick={copy}>
-      {failed
-        ? t("serverDetail.copyJoinHostnameFailed")
-        : copied
-          ? t("serverDetail.copiedJoinHostname")
-          : t("serverDetail.copyJoinHostname")}
-    </button>
-  );
+  });
 }
 
 function Header({
@@ -243,6 +205,30 @@ function Header({
   // The reconciler has not yet converged when desired ≠ observed; show a
   // settling hint (WEBUI_SPEC.md 6.4).
   const drifting = server.desired_state !== server.observed_state;
+
+  // Clickable-copy state for the join-hostname badge.
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  const handleCopy = useCallback(() => {
+    if (server.join_hostname === null) return;
+    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+    copyToClipboard(server.join_hostname).then(
+      () => {
+        setCopied(true);
+        copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
+      },
+      () => {
+        setCopied(false);
+      },
+    );
+  }, [server.join_hostname]);
 
   return (
     <div className="page-head">
@@ -277,12 +263,16 @@ function Header({
           </span>
           <span className="badge">{server.execution_backend}</span>
           {server.join_hostname !== null ? (
-            <>
-              <span className="badge">
-                {t("serverDetail.joinHostname")}: {server.join_hostname}
-              </span>
-              <CopyButton text={server.join_hostname} />
-            </>
+            <button
+              type="button"
+              className="badge copyable"
+              title={server.join_hostname}
+              onClick={handleCopy}
+            >
+              {copied
+                ? t("serverDetail.copiedJoinHostname")
+                : server.join_hostname}
+            </button>
           ) : (
             <span className="badge">
               {server.game_port !== null
