@@ -76,7 +76,7 @@ func run(ctx context.Context) error {
 	svc := relaysvc.New(apiClient, conn, reporter, cfg.Tunnel.PublicEndpoint, tunnelCAPEM, logger)
 
 	tokens := tunnel.NewTokenTable(tokenTTL, time.Now)
-	cache := game.NewStatusCache(time.Duration(cfg.Game.StatusCacheSeconds)*time.Second, time.Now)
+	cache := game.NewStatusCache(time.Duration(cfg.Game.StatusCacheSeconds)*time.Second, int(cfg.Game.StatusCacheMaxEntries), time.Now)
 	caps := ipcaps.NewIPCaps(cfg.Game.MaxConnsPerIP, cfg.Game.JoinsPerIPPerSecond, time.Now)
 	tunnelCaps := ipcaps.NewIPCaps(cfg.Tunnel.MaxConnsPerIP, 0, time.Now)
 
