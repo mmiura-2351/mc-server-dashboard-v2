@@ -1434,9 +1434,7 @@ describe("ServerDetailPage header join_hostname (issue #961)", () => {
 
     // Click 2 fails while "Copied!" is still showing.
     execSpy.mockReturnValue(false);
-    fireEvent.click(
-      screen.getByText(t("serverDetail.copiedJoinHostname")),
-    );
+    fireEvent.click(screen.getByText(t("serverDetail.copiedJoinHostname")));
 
     // The badge must revert to the hostname (not stay stuck on "Copied!").
     expect(
