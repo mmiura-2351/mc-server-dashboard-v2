@@ -5,6 +5,7 @@ on:
     paths:
       - "worker/**"
       - "proto/contract/**"
+      - "proto/mcsd/**"
       - "Makefile"
       - ".github/workflows/worker.yml"
   push:
@@ -12,6 +13,7 @@ on:
     paths:
       - "worker/**"
       - "proto/contract/**"
+      - "proto/mcsd/**"
       - "Makefile"
       - ".github/workflows/worker.yml"
 
