@@ -168,7 +168,7 @@ func newGatedStopInstance(id string) *gatedStopInstance {
 	}
 }
 
-func (i *gatedStopInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
+func (i *gatedStopInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
 	i.stopEntered <- struct{}{}
 	<-i.stopRelease
 	return i.fakeInstance.Stop(ctx, graceful, preFallback...)
@@ -282,7 +282,7 @@ func newGatedOrphanInstance(id string) *gatedOrphanInstance {
 	}
 }
 
-func (i *gatedOrphanInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
+func (i *gatedOrphanInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
 	i.mu.Lock()
 	i.stopCalls++
 	call := i.stopCalls

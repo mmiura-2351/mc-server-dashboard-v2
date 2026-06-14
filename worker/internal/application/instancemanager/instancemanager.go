@@ -797,12 +797,12 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // settleWorkingSet never converges within the budget. save-on is NOT sent — the
 // server is about to be stopped, so there is nothing to restore, and re-enabling
 // writes during the settle window would reintroduce the convergence problem.
-func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName string) {
+func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName string) bool {
 	raw, err := m.openControl(ctx, serverID, driverName)
 	if err != nil {
 		m.logger.Warn("stop flush: open rcon failed; stopping without a final save",
 			"server_id", serverID, "error", err)
-		return
+		return false
 	}
 	// Wrap in resilientControl (#919/#1040): a save-off failure poisons the rcon
 	// connection, so save-all on the same client returns ErrConnBroken instantly.
@@ -829,12 +829,14 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
 		m.logger.Warn("stop flush: save-all failed; stopping without a final save",
 			"server_id", serverID, "error", err)
-		return
+		return false
 	}
 	if !m.settleWorkingSet(ctx, serverID, filepath.Join(m.scratchDir, serverID)) {
 		m.logger.Warn("stop flush: working set did not settle within budget; stopping anyway",
 			"server_id", serverID)
+		return false
 	}
+	return true
 }
 
 // restoreSaveOn re-enables auto-save after a running-server snapshot quiesce.
@@ -1229,10 +1231,10 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 // the live world (save-all + settle) before stop — the driver calls it always
 // before tryRCONStop on the graceful path (#1007).
 func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName string) error {
-	var preFallback func(context.Context)
+	var preFallback func(context.Context) bool
 	if graceful {
-		preFallback = func(flushCtx context.Context) {
-			m.flushBeforeStopWithDriver(flushCtx, serverID, driverName)
+		preFallback = func(flushCtx context.Context) bool {
+			return m.flushBeforeStopWithDriver(flushCtx, serverID, driverName)
 		}
 	}
 	if err := inst.Stop(ctx, graceful, preFallback); err != nil {

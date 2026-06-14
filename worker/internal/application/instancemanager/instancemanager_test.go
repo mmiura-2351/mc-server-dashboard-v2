@@ -57,7 +57,7 @@ func newFakeInstance(id string) *fakeInstance {
 	return i
 }
 
-func (i *fakeInstance) Stop(_ context.Context, graceful bool, _ ...func(context.Context)) error {
+func (i *fakeInstance) Stop(_ context.Context, graceful bool, _ ...func(context.Context) bool) error {
 	i.mu.Lock()
 	i.stopped = true
 	i.graceful = graceful
@@ -152,7 +152,7 @@ func newRconFailInstance(id string) *rconFailInstance {
 	return &rconFailInstance{fakeInstance: newFakeInstance(id)}
 }
 
-func (i *rconFailInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context)) error {
+func (i *rconFailInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
 	// Call the pre-fallback hook (the flush) before terminate, just as the real
 	// containerdriver does on the graceful path.
 	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
