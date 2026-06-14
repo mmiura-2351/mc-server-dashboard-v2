@@ -9,7 +9,7 @@
 # ---------------------------------------------------------------------------
 # Builder: compile a static binary.
 # ---------------------------------------------------------------------------
-FROM golang:1.26 AS builder
+FROM golang:1.26.4 AS builder
 
 WORKDIR /src
 
@@ -28,7 +28,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/relay ./cmd/relay
 # deployment dials the API in plaintext, so these are unused there; they are
 # provisioned for the cross-host path (docs/dev/DEPLOYMENT.md).
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-20260518-slim AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
