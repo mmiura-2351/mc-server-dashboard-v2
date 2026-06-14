@@ -343,7 +343,8 @@ func TestContainerLogCaptureFlowsToLogs(t *testing.T) {
 func TestContainerSample(t *testing.T) {
 	docker := newFakeDocker()
 	docker.stats = ContainerStats{CPUMillis: 250, MemoryBytes: 1 << 20}
-	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	ctrl := &fakeControl{listReply: "There are 5 of a max of 20 players online: a, b, c, d, e"}
+	d := newTestDriver(docker, ctrl, nil)
 	inst, err := d.Start(context.Background(), spec())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -361,10 +362,59 @@ func TestContainerSample(t *testing.T) {
 	if got.CPUMillis != 250 || got.MemoryBytes != 1<<20 || got.ServerID != "s1" {
 		t.Fatalf("sample = %+v", got)
 	}
+	if got.PlayerCount != 5 {
+		t.Fatalf("PlayerCount = %d, want 5", got.PlayerCount)
+	}
 
 	docker.statsErr = errors.New("daemon unreachable")
 	if _, err := stats.Sample(context.Background()); err == nil {
 		t.Fatal("expected Sample to surface a stats error")
+	}
+}
+
+// Sample still succeeds with honest zeroes when RCON is unavailable (issue #1068).
+func TestContainerSampleNoRCON(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stats = ContainerStats{CPUMillis: 100, MemoryBytes: 4096}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer docker.exit(0, nil)
+
+	stats, ok := inst.(execution.StatsSource)
+	if !ok {
+		t.Fatal("container instance should be a StatsSource")
+	}
+	got, err := stats.Sample(context.Background())
+	if err != nil {
+		t.Fatalf("Sample: %v", err)
+	}
+	if got.CPUMillis != 100 || got.MemoryBytes != 4096 {
+		t.Fatalf("sample = %+v", got)
+	}
+	if got.PlayerCount != 0 {
+		t.Fatalf("PlayerCount = %d, want 0 (RCON unavailable)", got.PlayerCount)
+	}
+}
+
+func TestParsePlayerCount(t *testing.T) {
+	cases := []struct {
+		reply string
+		want  uint32
+	}{
+		{"There are 3 of a max of 20 players online: a, b, c", 3},
+		{"There are 0 of a max of 20 players online:", 0},
+		{"There are 12 of a max of 100 players online: ...", 12},
+		{"", 0},
+		{"unexpected response", 0},
+		{"There are many players", 0},
+	}
+	for _, tc := range cases {
+		if got := parsePlayerCount(tc.reply); got != tc.want {
+			t.Errorf("parsePlayerCount(%q) = %d, want %d", tc.reply, got, tc.want)
+		}
 	}
 }
 
@@ -377,6 +427,9 @@ type fakeControl struct {
 	// phase deadline), then returns its error. tryRCONStop must give up at the
 	// phase budget rather than ride the whole escalation deadline (issue #832).
 	hangUntilCtxDone bool
+	// listReply is returned by Execute when the command is "list" (player count
+	// query, issue #1068). Empty means the default empty reply.
+	listReply string
 }
 
 func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) {
@@ -389,6 +442,9 @@ func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) 
 			<-ctx.Done()
 			return "", ctx.Err()
 		}
+	}
+	if line == "list" && c.listReply != "" {
+		return c.listReply, nil
 	}
 	return "", nil
 }

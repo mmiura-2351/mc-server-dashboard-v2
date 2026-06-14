@@ -456,6 +456,16 @@ body.col-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Long relay addresses overflow into the Worker column under table-layout:
+ * fixed (#1072). The cell constrains its box; the inner copyable button
+ * truncates with ellipsis — the full value is still available via title and
+ * the copy-to-clipboard click. */
+.dashboard-table table.data td .copyable {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .dashboard-table .row-actions {
   display: flex;
   gap: 6px;
