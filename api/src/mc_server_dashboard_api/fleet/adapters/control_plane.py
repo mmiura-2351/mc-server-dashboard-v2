@@ -443,6 +443,7 @@ class GrpcControlPlane(ControlPlane):
     def __init__(self, state: ControlPlaneState, *, timeout_seconds: float) -> None:
         self._state = state
         self._timeout = timeout_seconds
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def dispatch(
         self,
@@ -512,14 +513,14 @@ class GrpcControlPlane(ControlPlane):
         await queue.put(
             pb.ApiMessage(correlation_id=command_id, api_command=api_command)
         )
-        # Fire-and-forget: the result is not awaited here. The bare ensure_future
-        # is GC-safe because the pending-map (register_pending above) keeps the
-        # future referenced until the result resolves it or it times out, and the
-        # logging coroutine holds command_id/server_id; the task is not collected
-        # mid-flight despite no local reference being kept.
-        asyncio.ensure_future(
+        # Fire-and-forget: the result is not awaited here. The task is held in
+        # _background_tasks so it is not GC-collected mid-flight; a done callback
+        # removes it once the coroutine finishes.
+        task = asyncio.create_task(
             self._log_fire_and_forget_result(command_id, server_id, future)
         )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _log_fire_and_forget_result(
         self,
