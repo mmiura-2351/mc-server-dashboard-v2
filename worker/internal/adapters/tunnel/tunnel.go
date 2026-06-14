@@ -210,6 +210,9 @@ func (d *Dialer) dialHost(serverID string) string {
 // consumes the player bytes the relay starts splicing right after "OK\n" — a
 // buffered reader would swallow them and corrupt the stream.
 func handshake(ctx context.Context, conn net.Conn, token string) error {
+	if token == "" || strings.ContainsAny(token, "\n\r") {
+		return fmt.Errorf("tunnel: invalid tunnel token")
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
