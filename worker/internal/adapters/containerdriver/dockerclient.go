@@ -386,11 +386,16 @@ func (c *EngineClient) Logs(ctx context.Context, id string) (io.ReadCloser, erro
 }
 
 // Stats reads a one-shot resource sample for a container (FR-MON-3). stream=false
-// returns a single stats JSON object that already carries the precpu snapshot, so
-// CPU usage is computed from one request without holding a streaming connection.
+// without one-shot makes the daemon collect two internal samples (~1 s apart) and
+// return precpu_stats from the first and cpu_stats from the second, so the CPU
+// delta is a recent interval measurement. With one-shot=true the daemon returns
+// immediately with precpu_stats zeroed (the handler reinitialises its cached
+// preCPUStats to zero on each request), making the delta cover the entire
+// container lifetime; on a long-running host uint32 truncation rounds that average
+// to zero (issue #1068).
 func (c *EngineClient) Stats(ctx context.Context, id string) (ContainerStats, error) {
 	var raw statsResponse
-	q := url.Values{"stream": {"false"}, "one-shot": {"true"}}
+	q := url.Values{"stream": {"false"}}
 	if err := c.do(ctx, http.MethodGet, "/containers/"+id+"/stats", q, nil, &raw); err != nil {
 		return ContainerStats{}, err
 	}

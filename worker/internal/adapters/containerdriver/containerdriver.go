@@ -37,6 +37,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1021,7 +1022,8 @@ func (i *instance) captureLogs(ctx context.Context, id string) {
 
 // Sample reads a one-shot resource sample from the Engine stats endpoint
 // (execution.StatsSource, FR-MON-3). An error (daemon unreachable, container
-// gone) makes the manager fall back to an up-only sample.
+// gone) makes the manager fall back to an up-only sample. Player count is
+// queried best-effort via RCON "list"; a failure leaves it zero (issue #1068).
 func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) {
 	stats, err := i.docker.Stats(ctx, i.currentContainerID())
 	if err != nil {
@@ -1031,7 +1033,47 @@ func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) 
 		ServerID:    i.spec.ServerID,
 		CPUMillis:   stats.CPUMillis,
 		MemoryBytes: stats.MemoryBytes,
+		PlayerCount: i.queryPlayerCount(ctx),
 	}, nil
+}
+
+// queryPlayerCount opens a transient RCON connection and sends "list" to get
+// the online player count. It is best-effort: any error (RCON not ready,
+// dial failure, unparseable response) returns 0 so the metrics sample is
+// still emitted with honest zeroes rather than failing the whole sample.
+func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
+	ctrl, err := i.openControl(ctx, i.spec, i.rconHost)
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = ctrl.Close() }()
+	reply, err := ctrl.Execute(ctx, "list")
+	if err != nil {
+		return 0
+	}
+	return parsePlayerCount(reply)
+}
+
+// parsePlayerCount extracts the online count from a Minecraft "list" response.
+// The vanilla format is "There are N of a max of M players online: …". It
+// returns 0 when the format is unrecognised.
+func parsePlayerCount(reply string) uint32 {
+	// "There are 3 of a max of 20 players online: ..."
+	const prefix = "There are "
+	idx := strings.Index(reply, prefix)
+	if idx < 0 {
+		return 0
+	}
+	rest := reply[idx+len(prefix):]
+	end := strings.IndexByte(rest, ' ')
+	if end <= 0 {
+		return 0
+	}
+	n, err := strconv.ParseUint(rest[:end], 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
 }
 
 // Stop ends the instance. A graceful stop tries RCON "stop", then `docker stop`
