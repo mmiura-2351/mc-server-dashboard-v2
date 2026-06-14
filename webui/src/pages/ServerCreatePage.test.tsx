@@ -297,7 +297,7 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
     ).toBeInTheDocument();
   });
 
-  it("hides the port control while /api/meta is still loading (#1006)", async () => {
+  it("shows the port control while /api/meta is still loading (#1061)", async () => {
     // Stall meta so it never resolves during the test.
     mockApi.get.mockImplementation((path: string) => {
       if (path === "/api/meta") {
@@ -309,12 +309,11 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
     await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
     expect(
-      await screen.findByLabelText(t("serverCreate.backendLabel")),
+      await screen.findByLabelText(t("serverCreate.portLabel")),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText(t("serverCreate.portLabel"))).toBeNull();
   });
 
-  it("hides the port control when /api/meta fails (#1006)", async () => {
+  it("shows the port control when /api/meta fails (#1061)", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path === "/api/meta") {
         return Promise.reject(new Error("network error"));
@@ -327,9 +326,11 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
     expect(
       await screen.findByLabelText(t("serverCreate.backendLabel")),
     ).toBeInTheDocument();
-    // Wait for the error state to settle.
+    // Wait for the error state to settle, then confirm port is visible.
     await waitFor(() =>
-      expect(screen.queryByLabelText(t("serverCreate.portLabel"))).toBeNull(),
+      expect(
+        screen.getByLabelText(t("serverCreate.portLabel")),
+      ).toBeInTheDocument(),
     );
   });
 
