@@ -318,6 +318,14 @@ func TestEngineClientStatsComputesCPU(t *testing.T) {
 	if q.Get("stream") != "false" {
 		t.Fatalf("stream = %q, want false", q.Get("stream"))
 	}
+	// one-shot must NOT be set: without it the daemon collects two internal
+	// samples and returns meaningful precpu_stats; with it the daemon returns
+	// immediately with precpu_stats zeroed, making the CPU delta cover the
+	// entire container lifetime and truncating to 0 on a long-running host
+	// (issue #1068).
+	if q.Get("one-shot") != "" {
+		t.Fatalf("one-shot = %q, want absent", q.Get("one-shot"))
+	}
 }
 
 func TestEngineClientLogsStreamsBody(t *testing.T) {
