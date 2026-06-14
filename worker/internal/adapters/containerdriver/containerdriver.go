@@ -1118,7 +1118,10 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// graceful path actually attempted (and timed out) a clean shutdown, while a
 	// forced stop (graceful=false) skips RCON/docker-stop by design and kills
 	// directly, so "graceful stop timed out" would misdescribe it.
-	if graceful {
+	if flushed {
+		i.logger.Info("flush succeeded; terminating container",
+			"server_id", i.spec.ServerID)
+	} else if graceful {
 		i.logger.Warn("graceful stop timed out; escalating to kill",
 			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
 	} else {

@@ -154,9 +154,12 @@ func newRconFailInstance(id string) *rconFailInstance {
 
 func (i *rconFailInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
 	// Call the pre-fallback hook (the flush) before terminate, just as the real
-	// containerdriver does on the graceful path.
+	// containerdriver does on the graceful path. Honor the return value: when
+	// the flush succeeds (returns true), the real driver skips RCON stop and
+	// docker stop entirely — but rconFailInstance always terminates, so here
+	// we just record the call for test observability.
 	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
-		preFallback[0](ctx)
+		_ = preFallback[0](ctx)
 	}
 	return i.fakeInstance.Stop(ctx, graceful)
 }
