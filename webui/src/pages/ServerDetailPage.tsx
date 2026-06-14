@@ -13,6 +13,7 @@ import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { shortId } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -438,6 +439,8 @@ function StopControl({
   onStop: (force: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // When true the force-stop confirmation modal is shown.
+  const [confirmForce, setConfirmForce] = useState(false);
   // Index of the focused menu item while open; drives the roving tabindex.
   const [active, setActive] = useState(0);
   const ref = useRef<HTMLSpanElement>(null);
@@ -455,8 +458,12 @@ function StopControl({
   };
   const activate = (force: boolean) => {
     setOpen(false);
-    triggerRef.current?.focus();
-    onStop(force);
+    if (force) {
+      setConfirmForce(true);
+    } else {
+      triggerRef.current?.focus();
+      onStop(false);
+    }
   };
 
   // Move focus to the menu item once open/active settles, so opening with a key
@@ -598,6 +605,41 @@ function StopControl({
           ))}
         </span>
       )}
+      <Modal
+        open={confirmForce}
+        title={t("serverDetail.forceStop.dialogTitle")}
+        onClose={() => {
+          setConfirmForce(false);
+          triggerRef.current?.focus();
+        }}
+        footer={
+          <>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => {
+                setConfirmForce(false);
+                triggerRef.current?.focus();
+              }}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn danger"
+              onClick={() => {
+                setConfirmForce(false);
+                triggerRef.current?.focus();
+                onStop(true);
+              }}
+            >
+              {t("serverDetail.forceStop.confirm")}
+            </button>
+          </>
+        }
+      >
+        <p>{t("serverDetail.forceStop.dialogBody")}</p>
+      </Modal>
     </span>
   );
 }
