@@ -226,6 +226,8 @@ export const en = {
     "Could not start: the server image is missing.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Live updates degraded — polling",
+  // Clickable join-hostname copy feedback.
+  "dashboard.copiedJoinHostname": "Copied!",
 
   // Server detail page (WEBUI_SPEC.md 6.4 / 6.9). One contiguous block to keep
   // merge conflicts with sibling i18n PRs minimal.
