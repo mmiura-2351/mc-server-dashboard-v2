@@ -25,11 +25,15 @@ const (
 	// MaxPreRouteBytes bounds the bytes buffered before the relay decides how to
 	// route a connection (RELAY.md Section 7).
 	MaxPreRouteBytes = 1024
+	// MaxStatusResponseBytes bounds a status response read from the trusted
+	// tunnel side. Status responses with a base64 server icon routinely exceed
+	// 1 KiB (~12 KiB for a 64x64 PNG), so the pre-route cap is too tight.
+	MaxStatusResponseBytes = 64 * 1024
 	// maxVarIntBytes is the byte ceiling for a 32-bit VarInt.
 	maxVarIntBytes = 5
 	// maxStringLen is the protocol's absolute string ceiling (32767). It bounds
 	// fields with no tighter contextual limit (e.g. the server's Status Response
-	// JSON, itself capped by the 1 KiB packet ceiling).
+	// JSON, itself capped by MaxStatusResponseBytes at the packet level).
 	maxStringLen = 32767
 	// maxServerAddressLen bounds the handshake server_address field (the spec
 	// caps it at 255), rejecting a hostile length prefix before allocating.
@@ -266,11 +270,19 @@ func ReadLoginStart(r *bufio.Reader, protocolVersion int32) (LoginStart, error) 
 // bytes (length prefix + body) and a slice of just the body. It enforces the
 // 1 KiB pre-route cap.
 func readPacket(r *bufio.Reader) (raw, body []byte, err error) {
+	return readPacketWithLimit(r, MaxPreRouteBytes)
+}
+
+// readPacketWithLimit is like readPacket but accepts a caller-supplied byte
+// ceiling instead of the default MaxPreRouteBytes. Use the larger
+// MaxStatusResponseBytes for trusted tunnel-side reads that may carry a
+// server icon.
+func readPacketWithLimit(r *bufio.Reader, maxLen int) (raw, body []byte, err error) {
 	length, lenBytes, err := readVarInt(r)
 	if err != nil {
 		return nil, nil, err
 	}
-	if length <= 0 || int(length) > MaxPreRouteBytes {
+	if length <= 0 || int(length) > maxLen {
 		return nil, nil, fmt.Errorf("mc: packet length %d out of range", length)
 	}
 	body = make([]byte, length)
