@@ -1,5 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, useParams } from "react-router";
 import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
@@ -23,6 +29,32 @@ import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type LifecycleAction = "start" | "stop" | "restart";
+
+// Copy text to clipboard with an execCommand fallback for insecure contexts.
+function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok) {
+        resolve();
+      } else {
+        reject();
+      }
+    } catch {
+      reject();
+    }
+  });
+}
 
 // Dashboard server-list layout. Cards remain the default (#541); the table view
 // is the compact alternative for many servers / narrow screens.
@@ -287,6 +319,28 @@ interface ServerRowProps {
 
 function ServerCard({ server, communityId, can }: ServerRowProps) {
   const { mutation, state, displayState } = useLifecycle(server, communityId);
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  const handleCopy = useCallback(() => {
+    if (server.join_hostname === null) return;
+    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+    copyToClipboard(server.join_hostname).then(
+      () => {
+        setCopied(true);
+        copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
+      },
+      () => {
+        // Silently ignore — the badge text stays as the hostname.
+      },
+    );
+  }, [server.join_hostname]);
 
   return (
     <div className="card server-card">
@@ -304,7 +358,15 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
         </span>
         <span className="badge">{server.execution_backend}</span>
         {server.join_hostname !== null ? (
-          <span className="badge">{server.join_hostname}</span>
+          <button
+            type="button"
+            className="badge copyable"
+            title={server.join_hostname}
+            style={{ cursor: "pointer" }}
+            onClick={handleCopy}
+          >
+            {copied ? t("dashboard.copiedJoinHostname") : server.join_hostname}
+          </button>
         ) : (
           server.game_port !== null && (
             <span className="badge">:{server.game_port}</span>
@@ -375,6 +437,28 @@ function ServerTable({
 
 function ServerRow({ server, communityId, can }: ServerRowProps) {
   const { mutation, state, displayState } = useLifecycle(server, communityId);
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  const handleCopy = useCallback(() => {
+    if (server.join_hostname === null) return;
+    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+    copyToClipboard(server.join_hostname).then(
+      () => {
+        setCopied(true);
+        copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
+      },
+      () => {
+        // Silently ignore — the text stays as the hostname.
+      },
+    );
+  }, [server.join_hostname]);
 
   return (
     <tr>
@@ -391,9 +475,26 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
       </td>
       <td>{server.execution_backend}</td>
       <td>
-        {server.join_hostname !== null
-          ? server.join_hostname
-          : (server.game_port ?? "—")}
+        {server.join_hostname !== null ? (
+          <button
+            type="button"
+            className="copyable"
+            title={server.join_hostname}
+            style={{
+              cursor: "pointer",
+              background: "none",
+              border: "none",
+              padding: 0,
+              font: "inherit",
+              color: "inherit",
+            }}
+            onClick={handleCopy}
+          >
+            {copied ? t("dashboard.copiedJoinHostname") : server.join_hostname}
+          </button>
+        ) : (
+          (server.game_port ?? "—")
+        )}
       </td>
       <td className="dim" title={server.assigned_worker_id ?? undefined}>
         {server.assigned_worker_id !== null

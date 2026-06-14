@@ -233,6 +233,8 @@ export const ja: Record<TranslationKey, string> = {
     "起動できませんでした: サーバーイメージが見つかりません。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "ライブ更新が低下 — ポーリング中",
+  // Clickable join-hostname copy feedback.
+  "dashboard.copiedJoinHostname": "コピーしました！",
 
   // Server detail page (WEBUI_SPEC.md 6.4 / 6.9).
   "serverDetail.loading": "サーバーを読み込んでいます…",
