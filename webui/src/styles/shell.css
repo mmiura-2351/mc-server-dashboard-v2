@@ -499,11 +499,8 @@ body.col-resizing {
   color: var(--text-faint);
 }
 .badge.copyable {
-  font: inherit;
+  font-family: inherit;
   cursor: pointer;
-  border: none;
-  background: inherit;
-  padding: inherit;
 }
 
 /* Observed-state pills (color tokens from #399). */
