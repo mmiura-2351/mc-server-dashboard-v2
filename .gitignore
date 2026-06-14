@@ -5,3 +5,6 @@
 # Python bytecode left behind by running scripts/*.py directly.
 scripts/__pycache__/
 scripts/*.py[cod]
+
+# Deployed commit stamp written by scripts/update.sh.
+.last-deploy-sha

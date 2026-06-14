@@ -16,7 +16,8 @@
 	webui-lint webui-format webui-test webui-build webui-e2e \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
-	bootstrap hooks-install hooks-check hooks-test
+	bootstrap hooks-install hooks-check hooks-test \
+	update
 
 # golangci-lint is not part of the Go distribution; it is installed into a
 # module-local, gitignored ./.bin (see worker/README.md).
@@ -352,3 +353,13 @@ $(PROTOC_GEN_GO):
 $(PROTOC_GEN_GO_GRPC):
 	cd worker && GOBIN="$$(pwd)/.bin" go install \
 		google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+
+# ---------------------------------------------------------------------------
+# Deployment
+# ---------------------------------------------------------------------------
+
+# Selective rebuild with change detection. Rebuilds only the components that
+# changed since the last deploy (tracked via .last-deploy-sha). Use FORCE=1 to
+# rebuild all unconditionally. See scripts/update.sh for details.
+update:
+	FORCE=$(FORCE) scripts/update.sh
