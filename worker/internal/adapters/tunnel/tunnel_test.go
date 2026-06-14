@@ -477,6 +477,32 @@ func assertReadClosed(t *testing.T, conn net.Conn) {
 	}
 }
 
+// TestHandshakeRejectsInvalidToken: the handshake must reject tokens that are
+// empty or contain newline/carriage-return characters before writing anything to
+// the connection (issue #1053).
+func TestHandshakeRejectsInvalidToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"empty", ""},
+		{"contains newline", "tok\n123"},
+		{"contains carriage return", "tok\r123"},
+		{"contains both", "tok\r\n123"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := handshake(context.Background(), nil, tt.token)
+			if err == nil {
+				t.Fatal("handshake accepted an invalid token, want error")
+			}
+			if !strings.Contains(err.Error(), "invalid tunnel token") {
+				t.Fatalf("handshake error = %v, want 'invalid tunnel token'", err)
+			}
+		})
+	}
+}
+
 // TestDialRejectsBadToken: the relay closes a tunnel presenting an unknown token
 // without replying, so the Worker's handshake read fails.
 func TestDialRejectsBadToken(t *testing.T) {
