@@ -955,6 +955,16 @@ def test_memory_limit_default_above_max_fails_fast(
         load_settings(config_file=cfg)
 
 
+def test_memory_limit_default_above_ceiling_without_max_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """default_mb above the 1 TiB ceiling with max_mb unset must fail at startup."""
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[memory_limit]\ndefault_mb = 1048577\n")
+    with pytest.raises(ValidationError):
+        load_settings(config_file=cfg)
+
+
 def test_memory_limit_default_equal_to_max_is_accepted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

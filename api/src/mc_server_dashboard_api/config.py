@@ -24,6 +24,10 @@ from pydantic_settings import (
 )
 
 from mc_server_dashboard_api.identity.domain.password_policy import PRESETS
+from mc_server_dashboard_api.servers.domain.memory_limit import (
+    MEMORY_LIMIT_CEILING_MB,
+    MEMORY_LIMIT_FLOOR_MB,
+)
 
 _MASK = "***"
 
@@ -406,9 +410,8 @@ class MemoryLimitSettings(_Section):
 
     @model_validator(mode="after")
     def _enforce_bounds(self) -> MemoryLimitSettings:
-        # 512 MiB is the validation floor from memory_limit.py; a default or max
-        # below it would always fail per-server validation.
-        floor = 512
+        floor = MEMORY_LIMIT_FLOOR_MB
+        ceiling = MEMORY_LIMIT_CEILING_MB
         if self.default_mb is not None and self.default_mb < floor:
             raise ValueError(f"memory_limit.default_mb must be >= {floor}")
         if self.max_mb is not None and self.max_mb < floor:
@@ -419,6 +422,18 @@ class MemoryLimitSettings(_Section):
             and self.default_mb > self.max_mb
         ):
             raise ValueError("memory_limit.default_mb must be <= memory_limit.max_mb")
+        # When max_mb is unset the runtime falls back to the hardcoded ceiling;
+        # reject a default that exceeds it so the misconfiguration is caught at
+        # startup rather than at every server-create request (fail-fast).
+        if (
+            self.default_mb is not None
+            and self.max_mb is None
+            and self.default_mb > ceiling
+        ):
+            raise ValueError(
+                f"memory_limit.default_mb must be <= {ceiling} "
+                f"(the built-in ceiling) when max_mb is not set"
+            )
         return self
 
 
