@@ -116,3 +116,37 @@ async def test_prune_uses_now_minus_retention_as_cutoff() -> None:
     assert deleted == 1
     assert uow.game_sessions.deleted_before == [_NOW - dt.timedelta(days=90)]
     assert uow.commits == 1
+
+
+async def test_prune_deletes_stale_end_only_placeholder() -> None:
+    """End-only placeholders (started_at IS NULL) are pruned by ended_at."""
+    uow = FakeUnitOfWork()
+    cutoff = _NOW - dt.timedelta(days=90)
+    # Stale end-only placeholder: no started_at, ended_at older than cutoff.
+    stale = GameSession(
+        id=uuid.uuid4(),
+        server_id=None,
+        hostname=None,
+        player_ip=None,
+        username=None,
+        player_uuid=None,
+        started_at=None,
+        ended_at=_NOW - dt.timedelta(days=100),
+    )
+    # Fresh end-only placeholder: no started_at, ended_at newer than cutoff.
+    fresh = GameSession(
+        id=uuid.uuid4(),
+        server_id=None,
+        hostname=None,
+        player_ip=None,
+        username=None,
+        player_uuid=None,
+        started_at=None,
+        ended_at=_NOW - dt.timedelta(days=10),
+    )
+    uow.game_sessions.seed(stale)
+    uow.game_sessions.seed(fresh)
+    deleted = await uow.game_sessions.delete_started_before(cutoff)
+    assert deleted == 1
+    assert len(uow.game_sessions.rows) == 1
+    assert uow.game_sessions.rows[0].id == fresh.id

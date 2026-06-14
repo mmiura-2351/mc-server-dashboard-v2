@@ -544,7 +544,10 @@ class FakeGameSessionRepository(GameSessionRepository):
     async def delete_started_before(self, cutoff: dt.datetime) -> int:
         self.deleted_before.append(cutoff)
         stale = [
-            r for r in self.rows if r.started_at is not None and r.started_at < cutoff
+            r
+            for r in self.rows
+            if (r.started_at is not None and r.started_at < cutoff)
+            or (r.started_at is None and r.ended_at is not None and r.ended_at < cutoff)
         ]
         self.rows = [r for r in self.rows if r not in stale]
         return len(stale)
