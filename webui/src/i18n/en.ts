@@ -242,10 +242,7 @@ export const en = {
   "serverDetail.worker": "Worker",
   "serverDetail.noPort": "no port",
   // Relay join hostname (issue #961): shown in the header when the relay is enabled.
-  "serverDetail.joinHostname": "Join address",
-  "serverDetail.copyJoinHostname": "Copy",
   "serverDetail.copiedJoinHostname": "Copied!",
-  "serverDetail.copyJoinHostnameFailed": "Copy failed",
   // Tabs (WEBUI_SPEC.md 6.4–6.9). Built tabs: Overview, Settings; the rest are
   // placeholders pending later phases.
   "serverDetail.tab.overview": "Overview",
