@@ -531,6 +531,49 @@ func TestStopServerGracefulProceedsWhenSaveOffFails(t *testing.T) {
 	}
 }
 
+// A failed save-off poisons the RCON connection (#919), so save-all on the same
+// connection returns ErrConnBroken. flushBeforeStopWithDriver must redial a fresh
+// connection so save-all succeeds (#1040).
+func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
+	var seq []string
+	d := &rconFailDriver{}
+	poisonCtrl := &fakeControl{
+		reply:     "ok",
+		seq:       &seq,
+		failLines: map[string]error{"save-off": fmt.Errorf("rcon down")},
+		poison:    true,
+	}
+	// After the poisoned ctrl is closed, openControl returns a fresh ctrl.
+	freshCtrl := &fakeControl{reply: "ok", seq: &seq}
+	var dialCount int
+	scratch := t.TempDir()
+	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			dialCount++
+			if dialCount == 1 {
+				return poisonCtrl, nil
+			}
+			return freshCtrl, nil
+		})
+	m.settlePollInterval = 0
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success even when save-off failed on poisoned connection", res)
+	}
+	want := []string{"save-off", "save-all", "stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (must redial and issue save-all after poisoned save-off)", seq, want)
+	}
+	if dialCount < 2 {
+		t.Fatalf("openControl dial count = %d, want >= 2 (must redial after save-off poison)", dialCount)
+	}
+}
+
 func TestServerCommandForwardsOutput(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "There are 0 players"}
