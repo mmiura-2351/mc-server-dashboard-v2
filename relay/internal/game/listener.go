@@ -330,6 +330,9 @@ func (l *Listener) awaitTunnel(ctx context.Context, token string) (net.Conn, boo
 	select {
 	case tconn := <-ch:
 		l.tokens.Cancel(token)
+		if tconn == nil {
+			return nil, false
+		}
 		return tconn, true
 	case <-timer.C:
 	case <-ctx.Done():

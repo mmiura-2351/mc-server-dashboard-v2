@@ -121,6 +121,9 @@ func (t *TokenTable) sweepLoop(ctx context.Context) {
 	}
 }
 
+// SweepExpiredForTest exposes sweepExpired for cross-package tests.
+func (t *TokenTable) SweepExpiredForTest() { t.sweepExpired() }
+
 // sweepExpired removes all waiters whose expiry has passed. Before deleting an
 // entry, it closes the waiter's channel so any pending <-ch unblocks with the
 // zero value (nil). This preserves the Cancel invariant: if Cancel runs after
