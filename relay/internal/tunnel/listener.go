@@ -3,6 +3,7 @@ package tunnel
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -116,7 +117,7 @@ func readHandshake(conn net.Conn) (string, bool) {
 	r := bufio.NewReaderSize(io.LimitReader(conn, maxHandshakeBytes), maxHandshakeBytes)
 
 	first, err := r.ReadSlice('\n')
-	if err != nil || strings.TrimSuffix(string(first), "\n") != handshakePrefix {
+	if err != nil || subtle.ConstantTimeCompare([]byte(strings.TrimSuffix(string(first), "\n")), []byte(handshakePrefix)) != 1 {
 		return "", false
 	}
 	tokenLine, err := r.ReadSlice('\n')
