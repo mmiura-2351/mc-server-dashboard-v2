@@ -648,6 +648,7 @@ directory you own (set `MCD_RELAY_TLS_DIR` in `.env` to this path):
 
 ```sh
 mkdir -p /etc/mcsd/relay
+chmod 755 /etc/mcsd/relay    # must be traversable by the container user (uid 10001)
 # Replace <tunnel-host> with the hostname part of MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT
 # (e.g. relay.example.com). The SAN must match the host the Worker dials — Go
 # ignores CN and requires a matching DNS or IP SAN.
@@ -661,8 +662,15 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
 # The relay container runs as non-root (uid 10001), so the key must be
 # world-readable. The key is self-signed and scoped to intra-cluster tunnel
 # traffic, so 644 is acceptable.
-chmod 644 /etc/mcsd/relay/tunnel-key.pem
+chmod 644 /etc/mcsd/relay/tunnel-key.pem /etc/mcsd/relay/tunnel-cert.pem
 ```
+
+**Directory permissions matter.** The relay container runs as uid 10001 (`USER
+app` in the Dockerfile). The host directory bind-mounted at `/etc/mcsd/` must
+be **traversable** by that uid — `chmod 755` (or at least `a+rx`). A directory
+with mode `0700` (common when created by `mktemp -d` or under a
+security-hardened default umask) blocks the non-root container user from
+reaching the files inside, even if the files themselves are `644`.
 
 The cert and key are bind-mounted read-only into the relay container at
 `/etc/mcsd/` by `compose.yaml`.

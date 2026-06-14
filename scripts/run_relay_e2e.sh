@@ -57,6 +57,7 @@ BASE_DOMAIN="mc.test"
 
 ENV_FILE="$(mktemp)"
 TLS_DIR="$(mktemp -d)"
+chmod 755 "$TLS_DIR"   # mktemp -d creates 0700; the relay container is non-root (uid 10001)
 
 cleanup() {
   # MCD_RELAY_E2E_KEEP=1 leaves the stack up for debugging (tear it down manually
