@@ -14,6 +14,10 @@
 #               `relay` compose profile (opt-in). Accepts player TCP on :25565,
 #               and the Worker dial-back on :25665 (TLS). Requires a wildcard DNS
 #               record and TLS material — see docs/dev/DEPLOYMENT.md "Relay".
+#   cloudflared — Cloudflare Tunnel for HTTPS access without opening inbound ports
+#               (issue #1090); gated behind the `tunnel` compose profile (opt-in).
+#               The tunnel is configured in the Cloudflare Zero Trust dashboard;
+#               only the tunnel token is needed locally.
 #
 # Storage backend (issue #702): the shipped default is the `object` backend on the
 # SeaweedFS service below (STORAGE.md Section 7.3). To run the fs backend instead,
@@ -289,6 +293,26 @@ services:
       - "25665:25665"    # tunnel listener (Workers dial back here)
     depends_on:
       - api
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # Gated behind the `tunnel` compose profile so default bring-up is unchanged
+    # (issue #1090). Add `tunnel` to COMPOSE_PROFILES in .env to enable it, then
+    # set CLOUDFLARE_TUNNEL_TOKEN in .env (see .env.example). The tunnel's public
+    # hostname and routing are configured in the Cloudflare Zero Trust dashboard;
+    # only the token is needed locally.
+    profiles: ["tunnel"]
+    # `:-` (empty default), NOT `:?`: compose interpolates a service's command
+    # even when its profile is inactive, so a `:?` here would break plain
+    # `docker compose config` / `up` when the tunnel profile is off (same
+    # reason as the relay credential, issue #940). The blank-token fail-fast
+    # for this service is cloudflared itself, which refuses an empty token at
+    # startup. Only runs under the `tunnel` profile.
+    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      api:
+        condition: service_started
 
 volumes:
   db-data:

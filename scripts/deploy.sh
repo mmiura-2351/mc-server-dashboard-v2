@@ -107,6 +107,26 @@ if [ ! -f .env ]; then
 		MCD_RELAY_TLS_DIR="${input_tls_dir:-/etc/mcsd/relay}"
 	fi
 
+	# --- Cloudflare Tunnel ---
+	CLOUDFLARE_TUNNEL_TOKEN=""
+
+	read -rp "Enable Cloudflare Tunnel? (yes/no) [no]: " TUNNEL_ENABLED
+	TUNNEL_ENABLED="${TUNNEL_ENABLED:-no}"
+
+	if [ "$TUNNEL_ENABLED" = "yes" ]; then
+		read -rp "Cloudflare Tunnel token: " CLOUDFLARE_TUNNEL_TOKEN
+		if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+			echo "deploy: ERROR -- tunnel token is required when tunnel is enabled." >&2
+			exit 1
+		fi
+
+		if [ -n "$COMPOSE_PROFILES" ]; then
+			COMPOSE_PROFILES="${COMPOSE_PROFILES},tunnel"
+		else
+			COMPOSE_PROFILES="tunnel"
+		fi
+	fi
+
 	# --- Write .env ---
 	cat > .env << ENVEOF
 # Environment for the single-host compose deployment.
@@ -139,6 +159,9 @@ MCD_API_RELAY__ENABLED=${MCD_API_RELAY__ENABLED}
 MCD_API_RELAY__BASE_DOMAIN=${MCD_API_RELAY__BASE_DOMAIN}
 MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT=${MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT}
 MCD_RELAY_TLS_DIR=${MCD_RELAY_TLS_DIR}
+
+# --- Cloudflare Tunnel -----------------------------------------------------
+CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
 
 # --- Published host ports --------------------------------------------------
 API_HTTP_PORT=${API_HTTP_PORT}
