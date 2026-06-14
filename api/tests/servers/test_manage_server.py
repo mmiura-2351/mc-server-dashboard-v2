@@ -238,6 +238,96 @@ async def test_create_without_memory_limit_writes_no_key() -> None:
     assert MEMORY_LIMIT_CONFIG_KEY not in server.config
 
 
+async def test_create_applies_default_memory_limit() -> None:
+    # When DEFAULT_MEMORY_LIMIT_MB is set and the create config has no memory_limit_mb,
+    # the default is injected into the config blob (issue #1069).
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+        default_memory_limit_mb=2048,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={"motd": "hi"},
+    )
+    assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 2048
+
+
+async def test_create_explicit_memory_limit_overrides_default() -> None:
+    # An explicit memory_limit_mb in config takes precedence over the default (#1069).
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+        default_memory_limit_mb=2048,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={MEMORY_LIMIT_CONFIG_KEY: 4096},
+    )
+    assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 4096
+
+
+async def test_create_rejects_memory_limit_above_custom_max() -> None:
+    # When MAX_MEMORY_LIMIT_MB is configured, a value above it is rejected (#1069).
+    uow = FakeUnitOfWork()
+    with pytest.raises(InvalidMemoryLimitError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=_PORTS,
+            max_memory_limit_mb=4096,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            execution_backend="container",
+            config={MEMORY_LIMIT_CONFIG_KEY: 4097},
+        )
+    assert uow.commits == 0
+
+
+async def test_create_accepts_memory_limit_at_custom_max() -> None:
+    # A value equal to the custom max is accepted (#1069).
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+        max_memory_limit_mb=4096,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={MEMORY_LIMIT_CONFIG_KEY: 4096},
+    )
+    assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 4096
+
+
 async def test_create_accepts_valid_cpu_allocation() -> None:
     uow = FakeUnitOfWork()
     server = await CreateServer(
@@ -905,6 +995,29 @@ async def test_update_rejects_invalid_memory_limit() -> None:
             community_id=community,
             server_id=server.id,
             config={MEMORY_LIMIT_CONFIG_KEY: 1},
+        )
+    assert uow.commits == 0
+
+
+async def test_update_rejects_memory_limit_above_custom_max() -> None:
+    # When max_memory_limit_mb is configured, values above it are rejected (#1069).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    use_case = UpdateServer(
+        uow=uow,
+        clock=FakeClock(_LATER),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+        max_memory_limit_mb=4096,
+    )
+    with pytest.raises(InvalidMemoryLimitError):
+        await use_case(
+            community_id=community,
+            server_id=server.id,
+            config={MEMORY_LIMIT_CONFIG_KEY: 4097},
+            authorize=_grant_all,
         )
     assert uow.commits == 0
 

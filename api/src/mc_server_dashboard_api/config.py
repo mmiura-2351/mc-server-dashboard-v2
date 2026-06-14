@@ -391,6 +391,37 @@ class PortsSettings(_Section):
         return self
 
 
+class MemoryLimitSettings(_Section):
+    """Operator-configurable memory-limit defaults and ceiling (issue #1069).
+
+    ``default_mb`` is the application-wide default memory allocation (MiB) for
+    new servers when the create request omits ``memory_limit_mb``. ``None``
+    preserves the current behavior (blank / driver default). ``max_mb`` replaces
+    the hardcoded 1 TiB ceiling; ``None`` preserves it. Both must be at least
+    the validation floor (512 MiB) and ``default_mb <= max_mb`` when both are set.
+    """
+
+    default_mb: int | None = None
+    max_mb: int | None = None
+
+    @model_validator(mode="after")
+    def _enforce_bounds(self) -> MemoryLimitSettings:
+        # 512 MiB is the validation floor from memory_limit.py; a default or max
+        # below it would always fail per-server validation.
+        floor = 512
+        if self.default_mb is not None and self.default_mb < floor:
+            raise ValueError(f"memory_limit.default_mb must be >= {floor}")
+        if self.max_mb is not None and self.max_mb < floor:
+            raise ValueError(f"memory_limit.max_mb must be >= {floor}")
+        if (
+            self.default_mb is not None
+            and self.max_mb is not None
+            and self.default_mb > self.max_mb
+        ):
+            raise ValueError("memory_limit.default_mb must be <= memory_limit.max_mb")
+        return self
+
+
 class RelaySettings(_Section):
     """Game-ingress relay control surface (CONFIGURATION.md, RELAY.md Section 13).
 
@@ -665,6 +696,7 @@ class Settings(BaseSettings):
     reconciler: ReconcilerSettings = Field(default_factory=ReconcilerSettings)
     jar_gc: JarGcSettings = Field(default_factory=JarGcSettings)
     ports: PortsSettings = Field(default_factory=PortsSettings)
+    memory_limit: MemoryLimitSettings = Field(default_factory=MemoryLimitSettings)
     webui: WebuiSettings = Field(default_factory=WebuiSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
     relay: RelaySettings = Field(default_factory=RelaySettings)
@@ -718,6 +750,7 @@ class Settings(BaseSettings):
             "backup": self.backup.model_dump(),
             "reconciler": self.reconciler.model_dump(),
             "ports": self.ports.model_dump(),
+            "memory_limit": self.memory_limit.model_dump(),
             "webui": self.webui.model_dump(),
             "auth": auth,
             "relay": relay,

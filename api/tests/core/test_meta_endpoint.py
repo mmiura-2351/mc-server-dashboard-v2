@@ -56,7 +56,7 @@ def test_meta_reports_relay_enabled() -> None:
     client = next(_client(app))
     resp = client.get("/api/meta")
     assert resp.status_code == 200
-    assert resp.json() == {"relay_enabled": True}
+    assert resp.json()["relay_enabled"] is True
 
 
 def test_meta_reports_relay_disabled() -> None:
@@ -64,4 +64,35 @@ def test_meta_reports_relay_disabled() -> None:
     client = next(_client(app))
     resp = client.get("/api/meta")
     assert resp.status_code == 200
-    assert resp.json() == {"relay_enabled": False}
+    body = resp.json()
+    assert body["relay_enabled"] is False
+
+
+# --- Memory-limit config in /meta (issue #1069) ---
+
+
+def test_meta_reports_memory_limit_defaults_as_null() -> None:
+    app = _app()
+    client = next(_client(app))
+    resp = client.get("/api/meta")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["default_memory_limit_mb"] is None
+    assert body["max_memory_limit_mb"] is None
+
+
+def test_meta_reports_configured_memory_limits() -> None:
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: make_user()
+    settings = Settings.model_validate(
+        {
+            "memory_limit": {"default_mb": 2048, "max_mb": 8192},
+        }
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    client = next(_client(app))
+    resp = client.get("/api/meta")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["default_memory_limit_mb"] == 2048
+    assert body["max_memory_limit_mb"] == 8192

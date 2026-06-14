@@ -48,14 +48,18 @@ const BACKENDS: Backend[] = ["container"];
 // as reserved keys and are optional: blank = driver default / auto.
 const MEMORY_LIMIT_KEY = "memory_limit_mb";
 const MEMORY_LIMIT_FLOOR_MIB = 512;
-const MEMORY_LIMIT_CEILING_MIB = 1024 * 1024;
+const MEMORY_LIMIT_DEFAULT_CEILING_MIB = 1024 * 1024;
 const CPU_ALLOCATION_KEY = "cpu_millis";
 const CPU_ALLOCATION_FLOOR_MILLIS = 100;
 const CPU_ALLOCATION_CEILING_MILLIS = 128_000;
 
 // A non-blank input is valid only as a whole number within range; blank is
 // always allowed (the key is omitted so the server falls back to the default).
-function memoryLimitValid(value: string): boolean {
+// The ceiling can be overridden by the operator-configurable max (#1069).
+function memoryLimitValid(
+  value: string,
+  ceiling: number = MEMORY_LIMIT_DEFAULT_CEILING_MIB,
+): boolean {
   if (value.trim() === "") {
     return true;
   }
@@ -63,7 +67,7 @@ function memoryLimitValid(value: string): boolean {
   return (
     Number.isInteger(parsed) &&
     parsed >= MEMORY_LIMIT_FLOOR_MIB &&
-    parsed <= MEMORY_LIMIT_CEILING_MIB
+    parsed <= ceiling
   );
 }
 
@@ -250,6 +254,15 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     metaQuery.isLoading || metaQuery.isError
       ? true
       : metaQuery.data?.relay_enabled === true;
+  // Operator-configurable memory-limit knobs from /meta (issue #1069).
+  const defaultMemoryLimitMb: number | null =
+    typeof metaQuery.data?.default_memory_limit_mb === "number"
+      ? metaQuery.data.default_memory_limit_mb
+      : null;
+  const maxMemoryLimitMb: number =
+    typeof metaQuery.data?.max_memory_limit_mb === "number"
+      ? metaQuery.data.max_memory_limit_mb
+      : MEMORY_LIMIT_DEFAULT_CEILING_MIB;
 
   const versionsQuery = useQuery({
     queryKey: ["versions", type],
@@ -268,6 +281,15 @@ function NewServerWizard({ communityId }: { communityId: string }) {
       setVersion(versions[0]);
     }
   }, [versions]);
+
+  // Pre-fill the memory-limit field with the operator default when the meta
+  // response arrives and the user has not yet typed a value (#1069).
+  const [memoryLimitTouched, setMemoryLimitTouched] = useState(false);
+  useEffect(() => {
+    if (defaultMemoryLimitMb !== null && !memoryLimitTouched) {
+      setMemoryLimit(String(defaultMemoryLimitMb));
+    }
+  }, [defaultMemoryLimitMb, memoryLimitTouched]);
 
   const portCheck = usePortCheck(port);
 
@@ -296,7 +318,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     };
   }, [step, portTouched, relayEnabled]);
 
-  const memoryLimitOk = memoryLimitValid(memoryLimit);
+  const memoryLimitOk = memoryLimitValid(memoryLimit, maxMemoryLimitMb);
   const cpuAllocationOk = cpuAllocationValid(cpuAllocation);
   const slugOk = slugCreateValid(slug);
 
@@ -545,7 +567,10 @@ function NewServerWizard({ communityId }: { communityId: string }) {
               type="number"
               value={memoryLimit}
               placeholder={t("serverCreate.memoryLimitDefault")}
-              onChange={(e) => setMemoryLimit(e.target.value)}
+              onChange={(e) => {
+                setMemoryLimitTouched(true);
+                setMemoryLimit(e.target.value);
+              }}
             />
             {memoryLimitOk ? (
               <div className="hint">{t("serverCreate.memoryLimitHint")}</div>

@@ -974,7 +974,7 @@ function slugValid(value: string): boolean {
 // Mirror the API validator (servers/domain/memory_limit.py): a whole number in
 // [512, 1 TiB] MiB; the API rejects out-of-range values as `invalid_memory_limit`.
 const MEMORY_LIMIT_FLOOR_MIB = 512;
-const MEMORY_LIMIT_CEILING_MIB = 1024 * 1024;
+const MEMORY_LIMIT_DEFAULT_CEILING_MIB = 1024 * 1024;
 
 // The per-server CPU allocation (issue #726) rides the `config` blob the same
 // way as the memory limit, but the value is a *soft, relative share* (millicores,
@@ -996,8 +996,12 @@ const HIDDEN_CONFIG_KEYS = new Set([
 ]);
 
 // A non-blank memory-limit input is valid only as a whole number within range;
-// blank means "unset → driver default" and is always allowed.
-function memoryLimitValid(value: string): boolean {
+// blank means "unset → driver default" and is always allowed. The ceiling can
+// be overridden by the operator-configurable max (#1069).
+function memoryLimitValid(
+  value: string,
+  ceiling: number = MEMORY_LIMIT_DEFAULT_CEILING_MIB,
+): boolean {
   if (value.trim() === "") {
     return true;
   }
@@ -1005,7 +1009,7 @@ function memoryLimitValid(value: string): boolean {
   return (
     Number.isInteger(parsed) &&
     parsed >= MEMORY_LIMIT_FLOOR_MIB &&
-    parsed <= MEMORY_LIMIT_CEILING_MIB
+    parsed <= ceiling
   );
 }
 
@@ -1156,12 +1160,23 @@ function Settings({
   const [portHint, setPortHint] = useState<TranslationKey | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
+  // Operator-configurable memory-limit ceiling from /meta (issue #1069). The
+  // meta query is shared with the create page via react-query's cache.
+  const metaQuery = useQuery({
+    queryKey: ["meta"],
+    queryFn: () => api.get("/api/meta"),
+  });
+  const maxMemoryLimitMb: number =
+    typeof metaQuery.data?.max_memory_limit_mb === "number"
+      ? metaQuery.data.max_memory_limit_mb
+      : MEMORY_LIMIT_DEFAULT_CEILING_MIB;
+
   // Relay mode is signalled by a non-null join_hostname (the API exposes it only
   // when relay.enabled). In relay mode the game port is hidden and API-managed
   // (#1002); in direct mode it stays editable.
   const relayEnabled = server.join_hostname !== null;
   const canUpdate = can("server:update", { serverId: server.id });
-  const memoryLimitOk = memoryLimitValid(memoryLimit);
+  const memoryLimitOk = memoryLimitValid(memoryLimit, maxMemoryLimitMb);
   const cpuAllocationOk = cpuAllocationValid(cpuAllocation);
   const slugOk = slugValid(slug);
   const canDelete = can("server:delete", { serverId: server.id });

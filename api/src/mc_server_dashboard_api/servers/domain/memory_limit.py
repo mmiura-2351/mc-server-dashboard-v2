@@ -50,20 +50,30 @@ MEMORY_LIMIT_FLOOR_MB = 512
 MEMORY_LIMIT_CEILING_MB = 1024 * 1024
 
 
-def memory_limit_from_config(config: dict[str, Any]) -> int | None:
+def memory_limit_from_config(
+    config: dict[str, Any],
+    ceiling_mb: int | None = None,
+) -> int | None:
     """Read and validate the per-server memory limit (MiB) from a config blob.
 
     Returns the limit in MiB when present and valid, ``None`` when absent (no
     per-server limit). A present value must be a positive integer (``bool``
-    rejected) within ``[MEMORY_LIMIT_FLOOR_MB, MEMORY_LIMIT_CEILING_MB]``;
-    anything else raises :class:`InvalidMemoryLimitError`.
+    rejected) within ``[MEMORY_LIMIT_FLOOR_MB, ceiling_mb]``; anything else
+    raises :class:`InvalidMemoryLimitError`.
+
+    ``ceiling_mb`` overrides the hardcoded 1 TiB ceiling when set (issue #1069:
+    operator-configurable ``MAX_MEMORY_LIMIT_MB``). ``None`` preserves the
+    default ceiling.
     """
 
+    effective_ceiling = (
+        ceiling_mb if ceiling_mb is not None else MEMORY_LIMIT_CEILING_MB
+    )
     if MEMORY_LIMIT_CONFIG_KEY not in config:
         return None
     value = config[MEMORY_LIMIT_CONFIG_KEY]
     if isinstance(value, bool) or not isinstance(value, int):
         raise InvalidMemoryLimitError(MEMORY_LIMIT_CONFIG_KEY)
-    if value < MEMORY_LIMIT_FLOOR_MB or value > MEMORY_LIMIT_CEILING_MB:
+    if value < MEMORY_LIMIT_FLOOR_MB or value > effective_ceiling:
         raise InvalidMemoryLimitError(str(value))
     return value

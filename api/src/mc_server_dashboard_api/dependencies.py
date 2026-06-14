@@ -1195,12 +1195,15 @@ def get_create_server(
     """
 
     session_factory = create_session_factory(get_engine(request))
+    mem_cfg = get_settings(request).memory_limit
     return CreateServer(
         uow=ServersUnitOfWork(session_factory),
         clock=ServersSystemClock(),
         version_validator=CatalogVersionValidator(catalog=catalog),
         file_store=file_store,
         port_range=_port_range(request),
+        default_memory_limit_mb=mem_cfg.default_mb,
+        max_memory_limit_mb=mem_cfg.max_mb,
     )
 
 
@@ -1235,6 +1238,7 @@ def get_update_server(
     """
 
     session_factory = create_session_factory(get_engine(request))
+    settings = get_settings(request)
     return UpdateServer(
         uow=ServersUnitOfWork(session_factory),
         clock=ServersSystemClock(),
@@ -1242,8 +1246,9 @@ def get_update_server(
         port_range=_port_range(request),
         # The per-server snapshot-interval override carried on config is validated
         # against the configured floor here (CONFIGURATION.md Section 5.4).
-        min_interval_seconds=get_settings(request).snapshot.min_interval_seconds,
+        min_interval_seconds=settings.snapshot.min_interval_seconds,
         lifecycle_lock=get_lifecycle_lock(request),
+        max_memory_limit_mb=settings.memory_limit.max_mb,
     )
 
 

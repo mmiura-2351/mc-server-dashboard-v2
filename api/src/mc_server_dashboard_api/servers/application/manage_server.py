@@ -56,6 +56,7 @@ from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.memory_limit import (
+    MEMORY_LIMIT_CONFIG_KEY,
     memory_limit_from_config,
 )
 from mc_server_dashboard_api.servers.domain.ports import (
@@ -216,6 +217,10 @@ class CreateServer:
     file_store: FileStore
     port_range: PortRange
     token_generator: Callable[[], str] = field(default=_new_rcon_password)
+    # Operator-configurable memory-limit knobs (issue #1069). ``None`` preserves
+    # the current behavior (no default / 1 TiB ceiling).
+    default_memory_limit_mb: int | None = None
+    max_memory_limit_mb: int | None = None
 
     async def __call__(
         self,
@@ -246,10 +251,19 @@ class CreateServer:
             # compares against the existing row, so historical host_process rows stay
             # readable and updatable.
             raise RemovedExecutionBackendError(execution_backend)
+        # Apply the operator-configurable default when the request omits the key
+        # (issue #1069). The default is injected into the config so it persists on
+        # the row and is visible in responses. An explicit value takes precedence.
+        if (
+            self.default_memory_limit_mb is not None
+            and MEMORY_LIMIT_CONFIG_KEY not in config
+        ):
+            config[MEMORY_LIMIT_CONFIG_KEY] = self.default_memory_limit_mb
         # A per-server memory limit carried on config (#705) is validated before
-        # the row is staged: a bad shape/range 422s. Range only — host capacity
-        # is the deferred placement sub-issue #710.
-        memory_limit_from_config(config)
+        # the row is staged: a bad shape/range 422s. The ceiling is overridden
+        # by the operator-configurable max (issue #1069). Range only — host
+        # capacity is the deferred placement sub-issue #710.
+        memory_limit_from_config(config, ceiling_mb=self.max_memory_limit_mb)
         # The per-server CPU allocation carried on config (#722) is validated the
         # same way: a bad shape/range 422s before the row is staged. It is a soft
         # relative share, not a hard cap; range only — host capacity is the
@@ -451,6 +465,9 @@ class UpdateServer:
     port_range: PortRange
     min_interval_seconds: int = 0
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    # Operator-configurable ceiling for memory-limit validation (issue #1069).
+    # ``None`` preserves the hardcoded 1 TiB ceiling.
+    max_memory_limit_mb: int | None = None
 
     async def __call__(
         self,
@@ -476,9 +493,10 @@ class UpdateServer:
             override_from_config(config, floor=self.min_interval_seconds)
             schedule_from_config(config)
             # The per-server memory limit (#705) is validated the same way: a
-            # bad shape/range 422s before any write. Range only — host capacity
-            # is the deferred placement sub-issue #710.
-            memory_limit_from_config(config)
+            # bad shape/range 422s before any write. The ceiling is overridden
+            # by the operator-configurable max (issue #1069). Range only — host
+            # capacity is the deferred placement sub-issue #710.
+            memory_limit_from_config(config, ceiling_mb=self.max_memory_limit_mb)
             # The per-server CPU allocation (#722) is validated the same way: a
             # bad shape/range 422s before any write. A soft relative share, not a
             # hard cap; range only — host capacity is the deferred placement

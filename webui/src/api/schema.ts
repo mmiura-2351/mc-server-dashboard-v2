@@ -2092,6 +2092,10 @@ export interface components {
          * @description Deployment facts the Web UI reads before a server exists (issue #1002).
          */
         MetaResponse: {
+            /** Default Memory Limit Mb */
+            default_memory_limit_mb: number | null;
+            /** Max Memory Limit Mb */
+            max_memory_limit_mb: number | null;
             /** Relay Enabled */
             relay_enabled: boolean;
         };
