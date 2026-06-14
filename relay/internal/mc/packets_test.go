@@ -106,6 +106,32 @@ func TestSynthesizedStatus(t *testing.T) {
 	}
 }
 
+func TestReadStatusResponseLargePayload(t *testing.T) {
+	// A status response with a base64 server icon routinely exceeds 1 KiB.
+	// ReadStatusResponse must accept it (up to MaxStatusResponseBytes).
+	icon := strings.Repeat("A", 16000) // simulates ~12 KiB base64 icon
+	payload := `{"version":{"name":"1.20.4","protocol":765},"favicon":"data:image/png;base64,` + icon + `"}`
+	pkt := StatusResponsePacket(payload)
+
+	got, err := ReadStatusResponse(bufio.NewReader(bytes.NewReader(pkt)))
+	if err != nil {
+		t.Fatalf("ReadStatusResponse with large icon: %v", err)
+	}
+	if got != payload {
+		t.Errorf("payload mismatch: got %d bytes, want %d bytes", len(got), len(payload))
+	}
+}
+
+func TestReadStatusResponseRejectsOversize(t *testing.T) {
+	// A status response exceeding MaxStatusResponseBytes must be rejected.
+	huge := strings.Repeat("X", MaxStatusResponseBytes+1)
+	pkt := StatusResponsePacket(huge)
+
+	if _, err := ReadStatusResponse(bufio.NewReader(bytes.NewReader(pkt))); err == nil {
+		t.Error("expected error for oversize status response")
+	}
+}
+
 func TestStatusRequestPacketIsEmpty(t *testing.T) {
 	id, _, err := ReadStatusRequest(bufio.NewReader(bytes.NewReader(StatusRequestPacket())))
 	if err != nil {

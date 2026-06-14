@@ -58,7 +58,7 @@ func LoginDisconnectPacket(reason string) []byte {
 // and returns its JSON string payload (RELAY.md Section 7). Used when the relay
 // performs the status exchange on the player's behalf.
 func ReadStatusResponse(r *bufio.Reader) (string, error) {
-	_, body, err := readPacket(r)
+	_, body, err := readPacketWithLimit(r, MaxStatusResponseBytes)
 	if err != nil {
 		return "", err
 	}

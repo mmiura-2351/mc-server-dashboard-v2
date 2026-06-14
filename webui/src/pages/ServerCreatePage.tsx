@@ -247,12 +247,12 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     queryKey: ["meta"],
     queryFn: () => api.get("/api/meta"),
   });
-  // While loading or on error, default to hiding the port control (treat as
-  // relay-enabled) so a relay deployment doesn't briefly flash a game-port
-  // field before the meta response arrives (#1006).
+  // While loading or on error, default to showing the port control (treat as
+  // direct-mode): hiding port controls on error is more disruptive than briefly
+  // showing them, and direct-mode is the majority case (#1061).
   const relayEnabled =
     metaQuery.isLoading || metaQuery.isError
-      ? true
+      ? false
       : metaQuery.data?.relay_enabled === true;
   // Operator-configurable memory-limit knobs from /meta (issue #1069).
   const defaultMemoryLimitMb: number | null =
