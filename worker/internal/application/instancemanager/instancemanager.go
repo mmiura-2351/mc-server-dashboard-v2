@@ -744,13 +744,18 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // was evicted from the manager's map (driverFor would return empty after
 // eviction).
 //
-// It is best-effort and bounded: it does NOT disable auto-save (the process is
-// about to exit, so there is nothing to restore), and any failure — RCON cannot be
-// opened, save-all errors, or the save never settles within the budget — is logged
-// and the stop proceeds anyway. Wedging a stop on a save failure would be strictly
-// worse than the pre-fix behavior; the common path completes the flush. The settle
+// It is best-effort and bounded: any failure — RCON cannot be opened, save-off or
+// save-all errors, or the save never settles within the budget — is logged and the
+// stop proceeds anyway. Wedging a stop on a save failure would be strictly worse
+// than the pre-fix behavior; the common path completes the flush. The settle
 // budget (m.settleBudget, default 60s) stays well inside the API's stop dispatch
 // budget (stop_timeout_seconds=600).
+//
+// save-off is issued first to disable MC's auto-save disk writes (#1038): without
+// it, an active player's actions continuously generate new chunk writes, so
+// settleWorkingSet never converges within the budget. save-on is NOT sent — the
+// server is about to be stopped, so there is nothing to restore, and re-enabling
+// writes during the settle window would reintroduce the convergence problem.
 func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName string) {
 	ctrl, err := m.openControl(ctx, serverID, driverName)
 	if err != nil {
@@ -759,6 +764,14 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 		return
 	}
 	defer func() { _ = ctrl.Close() }()
+
+	// Disable auto-save so settleWorkingSet converges quickly even with active
+	// players (#1038). Best-effort: if save-off fails, save-all still runs — the
+	// settle may time out but the flush is no worse than before this fix.
+	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
+		m.logger.Warn("stop flush: save-off failed; proceeding with save-all",
+			"server_id", serverID, "error", err)
+	}
 
 	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
 		m.logger.Warn("stop flush: save-all failed; stopping without a final save",
