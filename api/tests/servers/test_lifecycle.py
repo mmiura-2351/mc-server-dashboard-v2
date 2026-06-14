@@ -437,6 +437,51 @@ async def test_reregister_between_commit_and_increment_does_not_double_count() -
     assert registry.list_workers()[0].assigned_count == 1
 
 
+async def test_start_skips_hydrate_when_held_generation_is_fresh() -> None:
+    # Generation-gated skip-hydrate for user-initiated start (#1007): when the
+    # placed Worker already holds a generation >= store, hydrating would roll back
+    # region data. __call__ must check exactly as redispatch_start does.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+    await _start_server(uow, cp, store_generation=5)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
+
+
+async def test_start_hydrates_when_held_generation_is_stale() -> None:
+    # When the Worker holds a stale generation, __call__ must hydrate to get the
+    # latest working set before starting (#1007).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), ServerId(server_id)): 3},
+    )
+    await _start_server(uow, cp, store_generation=8)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
+async def test_start_hydrates_when_worker_holds_nothing() -> None:
+    # No held entry -> held_generation is None -> hydrate (#1007).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    await _start_server(uow, cp, store_generation=2)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
 async def test_start_hydrate_failure_compensates_without_dispatching_start() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()

@@ -231,10 +231,31 @@ class StartServer:
                 )
                 raise
 
+        # Generation-gated skip-hydrate (#1007): the placed Worker may already
+        # hold a working set at least as fresh as the store (a same-worker
+        # stop→start where the final snapshot published before this start ran).
+        # Hydrating would unpack the snapshot OVER the Worker's newer scratch,
+        # rolling back region data while playerdata survives. Check the held
+        # generation exactly as redispatch_start does (#763).
+        held_generation = self.control_plane.held_generation(
+            worker_id=worker_id, server_id=server_id
+        )
+        store_generation = await self.store_generation.current_generation(
+            community_id=community_id, server_id=server_id
+        )
+        skip_hydrate = (
+            held_generation is not None and held_generation >= store_generation
+        )
+
         dispatch = _Dispatch()
         try:
             outcome = await self._launch(
-                server, community_id, server_id, worker_id, dispatch
+                server,
+                community_id,
+                server_id,
+                worker_id,
+                dispatch,
+                skip_hydrate=skip_hydrate,
             )
         except WorkerUnavailableError as exc:
             # A timeout/lost-response AFTER the start was sent (dispatch.attempted)
@@ -552,14 +573,12 @@ class StartServer:
         reconciler's re-dispatch paths can each react differently to a failure.
 
         ``skip_hydrate`` SKIPS the hydrate and goes straight to start (issue #696).
-        Only a same-worker restart (``redispatch_start``) sets it, and only when the
-        assigned Worker reports it still HOLDS the live working set: hydrating there
-        would unpack the last authoritative snapshot over the Worker's newer scratch
-        and roll the world back. A fresh placement (``place_and_start``, the normal
-        ``__call__``) always hydrates — the Worker may have an empty/absent scratch,
-        and a server that moved A->B->A returns via ``place_and_start``, whose
-        leftover scratch on A is stale (B advanced + snapshotted it), so it MUST
-        hydrate.
+        Both ``__call__`` and ``redispatch_start`` perform a generation-gated check
+        (#763/#1007): when the placed Worker reports holding a generation at least as
+        fresh as the store, hydrating would unpack the last authoritative snapshot
+        over the Worker's newer scratch and roll the world back. Only
+        ``place_and_start`` (orphan re-placement) always hydrates — the Worker was
+        freshly placed and may have an empty/absent scratch.
         """
 
         if not skip_hydrate:
