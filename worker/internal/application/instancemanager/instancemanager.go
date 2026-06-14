@@ -28,6 +28,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -40,6 +41,37 @@ import (
 // network reaches RCON over the network, every other driver over the host
 // loopback (issue #218).
 type controlFunc func(ctx context.Context, serverID, driver string) (execution.ServerControl, error)
+
+// resilientControl wraps a ServerControl and auto-redials on ErrConnBroken
+// (#919). The rcon client poisons the connection on any Execute error, so a
+// multi-command bracket (save-off → save-all → save-on, or the stop sequence)
+// loses all commands after the first failure. This wrapper transparently
+// redials once per Execute call so trailing commands in a bracket survive a
+// mid-sequence timeout or error.
+type resilientControl struct {
+	inner    execution.ServerControl
+	dial     func(ctx context.Context) (execution.ServerControl, error)
+	logger   *slog.Logger
+	serverID string
+}
+
+func (r *resilientControl) Execute(ctx context.Context, line string) (string, error) {
+	reply, err := r.inner.Execute(ctx, line)
+	if err == nil || !errors.Is(err, rcon.ErrConnBroken) {
+		return reply, err
+	}
+	r.logger.Warn("rcon connection poisoned; redialing for next command",
+		"server_id", r.serverID, "line", line)
+	_ = r.inner.Close()
+	fresh, dialErr := r.dial(ctx)
+	if dialErr != nil {
+		return "", fmt.Errorf("redial after broken connection: %w", dialErr)
+	}
+	r.inner = fresh
+	return r.inner.Execute(ctx, line)
+}
+
+func (r *resilientControl) Close() error { return r.inner.Close() }
 
 // Transfer is the data-plane Port: move a server's working set between the API's
 // authoritative Storage and the local working dir (FR-DATA-3/4). The trigger
@@ -694,19 +726,28 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 // requirement). A final failure is logged loudly: auto-save stuck off is
 // operator-actionable.
 func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string) (bool, func()) {
-	ctrl, err := m.openControl(ctx, serverID, m.driverFor(serverID))
+	driverName := m.driverFor(serverID)
+	raw, err := m.openControl(ctx, serverID, driverName)
 	if err != nil {
 		m.logger.Warn("snapshot quiesce: open rcon failed", "server_id", serverID, "error", err)
 		return false, func() {}
+	}
+	// Wrap in resilientControl (#919): a mid-bracket Execute error poisons the
+	// rcon connection, so save-all after a timed-out save-off (or save-on after
+	// a timed-out save-all) would return ErrConnBroken instantly. The wrapper
+	// auto-redials so the bracket's trailing commands still reach the server.
+	ctrl := &resilientControl{
+		inner: raw,
+		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
+			return m.openControl(dialCtx, serverID, driverName)
+		},
+		logger:   m.logger,
+		serverID: serverID,
 	}
 
 	saveOff := true
 	quiesced := true
 	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
-		// Could not disable auto-save: the world is not quiesced, so the caller refuses
-		// (quiesce_unavailable). Do not attempt save-all — the rcon client is already
-		// poisoned by this failed Execute, so it would be a guaranteed ErrConnBroken —
-		// and do not run save-on on exit (auto-save was never turned off).
 		m.logger.Warn("snapshot save-off failed; snapshot will not be quiesced",
 			"server_id", serverID, "error", err)
 		saveOff = false
@@ -757,11 +798,23 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // server is about to be stopped, so there is nothing to restore, and re-enabling
 // writes during the settle window would reintroduce the convergence problem.
 func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName string) {
-	ctrl, err := m.openControl(ctx, serverID, driverName)
+	raw, err := m.openControl(ctx, serverID, driverName)
 	if err != nil {
 		m.logger.Warn("stop flush: open rcon failed; stopping without a final save",
 			"server_id", serverID, "error", err)
 		return
+	}
+	// Wrap in resilientControl (#919/#1040): a save-off failure poisons the rcon
+	// connection, so save-all on the same client returns ErrConnBroken instantly.
+	// The wrapper auto-redials so save-all degrades to the pre-save-off behavior
+	// (flush without quiesce) instead of silently losing the flush entirely.
+	ctrl := &resilientControl{
+		inner: raw,
+		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
+			return m.openControl(dialCtx, serverID, driverName)
+		},
+		logger:   m.logger,
+		serverID: serverID,
 	}
 	defer func() { _ = ctrl.Close() }()
 
