@@ -50,6 +50,10 @@ if [ ! -f .env ]; then
 
 	read -rp "Storage backend (object/fs) [object]: " STORAGE_BACKEND
 	STORAGE_BACKEND="${STORAGE_BACKEND:-object}"
+	if [ "$STORAGE_BACKEND" != "object" ] && [ "$STORAGE_BACKEND" != "fs" ]; then
+		echo "deploy: ERROR -- invalid storage backend '${STORAGE_BACKEND}'; must be 'object' or 'fs'." >&2
+		exit 1
+	fi
 
 	COMPOSE_PROFILES=""
 	MCD_API_STORAGE__BACKEND_LINE=""
@@ -71,6 +75,7 @@ if [ ! -f .env ]; then
 	MCD_API_RELAY__BASE_DOMAIN=""
 	MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT=""
 	MCD_RELAY_TLS_DIR="/etc/mcsd/relay"
+	MCD_WORKER_GAME_BIND_IP=""
 
 	read -rp "Enable relay? (yes/no) [no]: " RELAY_ENABLED
 	RELAY_ENABLED="${RELAY_ENABLED:-no}"
@@ -78,6 +83,7 @@ if [ ! -f .env ]; then
 	if [ "$RELAY_ENABLED" = "yes" ]; then
 		MCD_API_RELAY__ENABLED="true"
 		MCD_API_RELAY__CREDENTIAL="$(openssl rand -base64 48)"
+		MCD_WORKER_GAME_BIND_IP="127.0.0.1"
 
 		if [ -n "$COMPOSE_PROFILES" ]; then
 			COMPOSE_PROFILES="${COMPOSE_PROFILES},relay"
@@ -125,6 +131,7 @@ ${MCD_API_STORAGE__BACKEND_LINE:+${MCD_API_STORAGE__BACKEND_LINE}}
 # --- Worker / container driver ---------------------------------------------
 MCSD_SCRATCH_DIR=${MCSD_SCRATCH_DIR}
 DOCKER_GID=${DOCKER_GID}
+${MCD_WORKER_GAME_BIND_IP:+MCD_WORKER_GAME_BIND_IP=${MCD_WORKER_GAME_BIND_IP}}
 
 # --- Relay -----------------------------------------------------------------
 MCD_API_RELAY__CREDENTIAL=${MCD_API_RELAY__CREDENTIAL}
