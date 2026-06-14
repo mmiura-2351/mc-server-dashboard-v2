@@ -14,8 +14,9 @@ const cacheSweepInterval = time.Minute
 // refresh; the cache absorbs that fan-out so a status ping rarely reaches a
 // Worker. It is safe for concurrent use.
 type StatusCache struct {
-	ttl time.Duration
-	now func() time.Time
+	ttl        time.Duration
+	maxEntries int
+	now        func() time.Time
 
 	mu      sync.Mutex
 	entries map[string]statusEntry
@@ -26,16 +27,21 @@ type statusEntry struct {
 	expires time.Time
 }
 
-// NewStatusCache builds a cache with the given TTL. now is injectable for tests;
-// pass time.Now in production.
-func NewStatusCache(ttl time.Duration, now func() time.Time) *StatusCache {
+// NewStatusCache builds a cache with the given TTL and a maximum entry count.
+// When Put would exceed maxEntries, the oldest entry (by expiry) is evicted.
+// now is injectable for tests; pass time.Now in production.
+func NewStatusCache(ttl time.Duration, maxEntries int, now func() time.Time) *StatusCache {
 	if now == nil {
 		now = time.Now
 	}
+	if maxEntries <= 0 {
+		maxEntries = 1024
+	}
 	return &StatusCache{
-		ttl:     ttl,
-		now:     now,
-		entries: make(map[string]statusEntry),
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		now:        now,
+		entries:    make(map[string]statusEntry),
 	}
 }
 
@@ -55,11 +61,37 @@ func (c *StatusCache) Get(slug string) (string, bool) {
 	return e.json, true
 }
 
-// Put stores status JSON for slug, expiring after the cache TTL.
+// Put stores status JSON for slug, expiring after the cache TTL. If inserting
+// a new key would exceed maxEntries, the oldest entry (by expiry) is evicted.
 func (c *StatusCache) Put(slug, statusJSON string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	_, exists := c.entries[slug]
 	c.entries[slug] = statusEntry{json: statusJSON, expires: c.now().Add(c.ttl)}
+	if !exists && len(c.entries) > c.maxEntries {
+		c.evictOldest(slug)
+	}
+}
+
+// evictOldest removes the entry with the earliest expiry, skipping skip.
+// Caller must hold c.mu.
+func (c *StatusCache) evictOldest(skip string) {
+	var oldestSlug string
+	var oldestExp time.Time
+	first := true
+	for s, e := range c.entries {
+		if s == skip {
+			continue
+		}
+		if first || e.expires.Before(oldestExp) {
+			oldestSlug = s
+			oldestExp = e.expires
+			first = false
+		}
+	}
+	if !first {
+		delete(c.entries, oldestSlug)
+	}
 }
 
 // StartSweep runs a background goroutine that periodically removes expired

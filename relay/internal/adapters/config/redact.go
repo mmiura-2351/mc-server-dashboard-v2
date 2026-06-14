@@ -26,6 +26,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Group("game",
 			slog.String("listen", c.Game.Listen),
 			slog.Uint64("status_cache_seconds", uint64(c.Game.StatusCacheSeconds)),
+			slog.Uint64("status_cache_max_entries", uint64(c.Game.StatusCacheMaxEntries)),
 			slog.Uint64("max_conns_per_ip", uint64(c.Game.MaxConnsPerIP)),
 			slog.Uint64("joins_per_ip_per_second", uint64(c.Game.JoinsPerIPPerSecond)),
 		),

@@ -63,6 +63,9 @@ type GameConfig struct {
 	Listen string
 	// StatusCacheSeconds is the per-slug status-ping cache TTL (default 5).
 	StatusCacheSeconds uint32
+	// StatusCacheMaxEntries caps the number of entries in the status cache
+	// (default 1024). When exceeded, the oldest entry is evicted.
+	StatusCacheMaxEntries uint32
 	// MaxConnsPerIP caps concurrent connections from one source IP (default 32).
 	MaxConnsPerIP uint32
 	// JoinsPerIPPerSecond caps the join rate from one source IP (default 10).
@@ -124,10 +127,11 @@ type fileConfig struct {
 		} `toml:"tls"`
 	} `toml:"api"`
 	Game struct {
-		Listen              *string `toml:"listen"`
-		StatusCacheSeconds  *uint32 `toml:"status_cache_seconds"`
-		MaxConnsPerIP       *uint32 `toml:"max_conns_per_ip"`
-		JoinsPerIPPerSecond *uint32 `toml:"joins_per_ip_per_second"`
+		Listen                *string `toml:"listen"`
+		StatusCacheSeconds    *uint32 `toml:"status_cache_seconds"`
+		StatusCacheMaxEntries *uint32 `toml:"status_cache_max_entries"`
+		MaxConnsPerIP         *uint32 `toml:"max_conns_per_ip"`
+		JoinsPerIPPerSecond   *uint32 `toml:"joins_per_ip_per_second"`
 	} `toml:"game"`
 	Tunnel struct {
 		Listen         *string `toml:"listen"`
@@ -150,10 +154,11 @@ type fileConfig struct {
 func defaults() Config {
 	return Config{
 		Game: GameConfig{
-			Listen:              ":25565",
-			StatusCacheSeconds:  5,
-			MaxConnsPerIP:       32,
-			JoinsPerIPPerSecond: 10,
+			Listen:                ":25565",
+			StatusCacheSeconds:    5,
+			StatusCacheMaxEntries: 1024,
+			MaxConnsPerIP:         32,
+			JoinsPerIPPerSecond:   10,
 		},
 		Tunnel: TunnelConfig{
 			Listen:        ":25665",
@@ -211,6 +216,7 @@ func applyFile(cfg *Config, path string) error {
 	}
 	setString(&cfg.Game.Listen, fc.Game.Listen)
 	setUint32(&cfg.Game.StatusCacheSeconds, fc.Game.StatusCacheSeconds)
+	setUint32(&cfg.Game.StatusCacheMaxEntries, fc.Game.StatusCacheMaxEntries)
 	setUint32(&cfg.Game.MaxConnsPerIP, fc.Game.MaxConnsPerIP)
 	setUint32(&cfg.Game.JoinsPerIPPerSecond, fc.Game.JoinsPerIPPerSecond)
 	setString(&cfg.Tunnel.Listen, fc.Tunnel.Listen)
@@ -240,6 +246,9 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	}
 	setEnvString(&cfg.Game.Listen, getenv, "GAME_LISTEN")
 	if err := setEnvUint32(&cfg.Game.StatusCacheSeconds, getenv, "GAME_STATUS_CACHE_SECONDS"); err != nil {
+		return err
+	}
+	if err := setEnvUint32(&cfg.Game.StatusCacheMaxEntries, getenv, "GAME_STATUS_CACHE_MAX_ENTRIES"); err != nil {
 		return err
 	}
 	if err := setEnvUint32(&cfg.Game.MaxConnsPerIP, getenv, "GAME_MAX_CONNS_PER_IP"); err != nil {

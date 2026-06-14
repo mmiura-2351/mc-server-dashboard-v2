@@ -136,7 +136,7 @@ func newHarness(t *testing.T) *harness {
 	svc := relaysvc.New(apiClient, conn, reporter, "relay:25665", "", logger)
 
 	tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
-	cache := game.NewStatusCache(5*time.Second, time.Now)
+	cache := game.NewStatusCache(5*time.Second, 1024, time.Now)
 	caps := ipcaps.NewIPCaps(32, 10, time.Now)
 	tunnelCaps := ipcaps.NewIPCaps(64, 0, time.Now)
 
