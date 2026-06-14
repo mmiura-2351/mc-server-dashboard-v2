@@ -231,6 +231,12 @@ func (t *fakeTransport) Close() error {
 	return nil
 }
 
+func (t *fakeTransport) registerCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.registers
+}
+
 func (t *fakeTransport) heartbeatCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -275,6 +281,11 @@ type fakeHandler struct {
 	// that the setter was called at all.
 	transferDeadline time.Duration
 	deadlineSet      bool
+	// resyncCalls counts ResyncStatus invocations (issue #985). resyncEmit, if
+	// set, is the status the handler re-emits onto events when ResyncStatus is
+	// called, modeling the instance manager re-reporting a live instance.
+	resyncCalls int
+	resyncEmit  []StatusEvent
 }
 
 func newFakeHandler(result CommandResult) *fakeHandler {
@@ -310,6 +321,25 @@ func (h *fakeHandler) transferDeadlineCopy() (time.Duration, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.transferDeadline, h.deadlineSet
+}
+
+// ResyncStatus models the instance manager re-emitting its live instances'
+// state after a (re-)register (issue #985): it counts the call and pushes any
+// configured events onto the events channel, exactly as the real handler does.
+func (h *fakeHandler) ResyncStatus() {
+	h.mu.Lock()
+	h.resyncCalls++
+	emit := h.resyncEmit
+	h.mu.Unlock()
+	for _, ev := range emit {
+		h.events <- ev
+	}
+}
+
+func (h *fakeHandler) resyncCallsCopy() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.resyncCalls
 }
 
 func (h *fakeHandler) handledCopy() []Command {

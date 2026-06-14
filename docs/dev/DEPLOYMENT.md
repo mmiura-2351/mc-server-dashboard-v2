@@ -612,3 +612,177 @@ itself is never written into the new working set.
 **Legacy incompatibility (one honest line):** archives produced by the legacy
 system carry a different metadata shape and are **not** importable here; a
 converter to the `format: 1` shape can be written later against this spec.
+
+## 12. Relay (game ingress, epic #659)
+
+The relay lets players join at `<slug>.<base_domain>` (e.g.
+`amber-falcon-42.mc.example.com`) with no port number and no client mods, and
+it keeps the Worker's IP off the internet — including when the Worker runs
+behind NAT. See `docs/app/RELAY.md` for the full design.
+
+The relay is **opt-in**: the `relay` compose profile is inactive by default, so
+all existing deployments are unaffected. Enable it only when you have a public
+IP for the relay host and a wildcard DNS record in place.
+
+### DNS setup
+
+Create one wildcard `A`/`AAAA` record pointing to the relay host's public IP:
+
+```
+*.<base_domain>    A    <relay public IP>
+```
+
+Example: `*.mc.example.com → 203.0.113.7`. Server create/rename/delete never
+touches DNS; the hostname-to-server mapping lives entirely in the database.
+The relay's game listener binds port **25565** — which makes player joins
+port-less.
+
+### TLS material (tunnel listener)
+
+The relay's tunnel listener (port 25665) always requires TLS. A self-signed
+certificate is fine: the relay advertises the CA PEM to Workers in-band via the
+`Register` → `TunnelDial` flow, so Workers need no extra configuration.
+
+Generate a self-signed cert once on the host and place both files in a
+directory you own (set `MCD_RELAY_TLS_DIR` in `.env` to this path):
+
+```sh
+mkdir -p /etc/mcsd/relay
+chmod 755 /etc/mcsd/relay    # must be traversable by the container user (uid 10001)
+# Replace <tunnel-host> with the hostname part of MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT
+# (e.g. relay.example.com). The SAN must match the host the Worker dials — Go
+# ignores CN and requires a matching DNS or IP SAN.
+# For a raw-IP endpoint use: -addext "subjectAltName=IP:<addr>"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -keyout /etc/mcsd/relay/tunnel-key.pem \
+  -out    /etc/mcsd/relay/tunnel-cert.pem \
+  -days 3650 -nodes \
+  -subj "/CN=mcsd-relay-tunnel" \
+  -addext "subjectAltName=DNS:<tunnel-host>"
+# The relay container runs as non-root (uid 10001), so the key must be
+# world-readable. The key is self-signed and scoped to intra-cluster tunnel
+# traffic, so 644 is acceptable.
+chmod 644 /etc/mcsd/relay/tunnel-key.pem /etc/mcsd/relay/tunnel-cert.pem
+```
+
+**Directory permissions matter.** The relay container runs as uid 10001 (`USER
+app` in the Dockerfile). The host directory bind-mounted at `/etc/mcsd/` must
+be **traversable** by that uid — `chmod 755` (or at least `a+rx`). A directory
+with mode `0700` (common when created by `mktemp -d` or under a
+security-hardened default umask) blocks the non-root container user from
+reaching the files inside, even if the files themselves are `644`.
+
+The cert and key are bind-mounted read-only into the relay container at
+`/etc/mcsd/` by `compose.yaml`.
+
+If you have a publicly-issued tunnel certificate (signed by a public CA), set
+`tunnel.tls.advertised_ca_file = "system"` in `relay.toml` (or
+`MCD_RELAY_TUNNEL_TLS_ADVERTISED_CA_FILE=system` in the environment) so the
+relay advertises an empty CA bundle and Workers fall back to their system roots.
+
+### Enabling the relay profile
+
+1. Add `relay` to `COMPOSE_PROFILES` in `.env`:
+
+   ```sh
+   # to run both object backend and the relay:
+   COMPOSE_PROFILES=object,relay
+   ```
+
+2. Fill the relay keys in `.env` (see `.env.example` for descriptions):
+
+   | Variable | How to get it |
+   |---|---|
+   | `MCD_API_RELAY__CREDENTIAL` | `openssl rand -base64 48` |
+   | `MCD_API_RELAY__ENABLED` | set to `true` |
+   | `MCD_API_RELAY__BASE_DOMAIN` | e.g. `mc.example.com` |
+   | `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` | e.g. `<host>:25665` |
+   | `MCD_RELAY_TLS_DIR` | host path to `tunnel-cert.pem` / `tunnel-key.pem` |
+
+3. Rebuild and bring the stack up:
+
+   ```sh
+   docker compose up -d --build
+   ```
+
+### Single-host port collision
+
+The relay binds `0.0.0.0:25565` for the game listener. The API's default
+game-port allocator range is `25565..25664`, so the first server created on a
+single host that also runs the relay will fail to publish its game port — even a
+`127.0.0.1:25565` publish conflicts with an existing `0.0.0.0:25565` bind.
+
+**Fix:** shift the allocator range up by setting `MCD_API_PORTS__RANGE_START`
+(e.g. `25566`) in `.env`, or run the relay on a separate host.
+
+### Reconciler grace after an API restart
+
+When a worker or the `api` container is recreated (e.g. a UI-only redeploy), the
+startup reset / worker orphan sweep marks the bounced servers `observed=unknown`;
+the reconciler then waits for the divergence to outlast a **grace window** before
+re-dispatching the start. The grace is per-action (issue #999):
+
+- **Fast held-restart path** — a same-worker restart where the worker is back
+  online **and** still holds a fresh-enough working set (its persistent scratch is
+  at least as new as the last published snapshot) skips the destructive hydrate, so
+  the re-dispatched start is command-only. This is the common single-host worker/API
+  restart, and it recovers after the **short** `reconciler.held_start_grace_seconds`
+  (default **90 s**): worker-reconnect (seconds) + ~90 s ≈ under 2 min.
+- **Slow hydrate / cross-worker path** — a `place_and_start` (orphan, may land on a
+  different worker, always hydrates) or a same-worker start whose worker does *not*
+  hold a fresh working set (hydrate will run) waits the full
+  `reconciler.grace_seconds` (default **660 s ≈ 11 min**). That long grace is
+  dominated by the hydrate budget and keeps the reconciler from racing an in-flight
+  first dispatch and spawning a duplicate live instance on another worker (#822), so
+  it is **not** safe to shorten on these paths.
+
+During the grace window the relay maps `observed=unknown` → `STOPPED` and players
+get a "server stopped" MOTD even though the MC containers are healthy (issue #985);
+the fast held path keeps that window short for routine single-host restarts without
+the operator lowering `grace_seconds` below its safety floor.
+
+Both knobs have boot-time safety floors (a warning, not fatal): `grace_seconds`
+must exceed `max(hydrate_timeout + command_timeout, snapshot_timeout)` (#822/#847),
+and `held_start_grace_seconds` must exceed `command_timeout_seconds` (it only covers
+a command-only start). Lowering `grace_seconds` below its floor reopens the
+duplicate-start / stale-snapshot races; prefer the (already short by default) held
+path over shrinking the full grace.
+
+The reconciler knobs (`INTERVAL_SECONDS`, `GRACE_SECONDS`, `BACKOFF_BASE_SECONDS`,
+`BACKOFF_MAX_SECONDS`) are forwarded via `compose.yaml`; see `.env.example` for
+their defaults and `api/src/mc_server_dashboard_api/config.py` for constraints
+(`backoff_max_seconds` must be ≥ 600 to keep crash-loop damping effective).
+`held_start_grace_seconds` defaults to 90 in the application and is set via
+`MCD_API_RECONCILER__HELD_START_GRACE_SECONDS` (forwarded through
+`compose.yaml` like the other reconciler knobs).
+
+### Direct path vs relay path
+
+| | Direct path (today) | Relay path |
+|---|---|---|
+| `relay.enabled` (API) | `false` (default) | `true` |
+| Player address | `<worker host>:<game_port>` | `<slug>.<base_domain>` |
+| `driver.container.game_bind_ip` | `0.0.0.0` (compose default) | `127.0.0.1` — no inbound game port needed |
+| `MCD_WORKER_GAME_BIND_IP` in `.env` | unset (defaults to `0.0.0.0`) | `127.0.0.1` |
+| Host firewall (worker) | game-port range open | nothing inbound on the Worker |
+
+When the relay is enabled, set `MCD_WORKER_GAME_BIND_IP=127.0.0.1` in `.env`
+so game ports bind only on loopback — the Worker dials its own loopback game
+port into the tunnel, and no inbound game-port range is needed on the worker
+host. The relay takes all inbound player traffic on port 25565. On a single
+host the loopback bind still allocates from `25565..`, so the first server's
+`127.0.0.1:25565` publish collides with the relay's `0.0.0.0:25565` bind; shift
+the allocator range as described under
+[Single-host port collision](#single-host-port-collision).
+
+The two paths are not mutually exclusive at the protocol level (a server is
+reachable both ways during migration); `relay.enabled` governs whether the
+relay control surface is active.
+
+### Firewall summary (relay host)
+
+| Port | Protocol | Direction | Purpose |
+|---|---|---|---|
+| 25565 | TCP | inbound | player game connections |
+| 25665 | TCP | inbound | Worker dial-back (TLS tunnel) |
+| 50051 | TCP | internal (compose network only) | gRPC control plane (not published) |

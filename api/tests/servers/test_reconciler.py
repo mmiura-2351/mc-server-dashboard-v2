@@ -50,6 +50,9 @@ from tests.servers.fakes import (
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _WORKER = WorkerId(uuid.uuid4())
 _GRACE = 60
+# The short held-start grace (issue #999): well below the full grace so a test can
+# pin a divergence age BETWEEN them and prove which grace was applied.
+_HELD_GRACE = 10
 _PAST_GRACE = _NOW - dt.timedelta(seconds=_GRACE + 1)
 
 
@@ -83,6 +86,8 @@ def _reconciler(
     uow: FakeUnitOfWork,
     cp: FakeControlPlane,
     clock: FakeClock,
+    *,
+    store_generation: int = 0,
 ) -> RunReconcilerTick:
     return RunReconcilerTick(
         uow=uow,
@@ -91,12 +96,14 @@ def _reconciler(
             control_plane=cp,
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
-            store_generation=FakeStoreGenerationReader(),
+            store_generation=FakeStoreGenerationReader(generation=store_generation),
         ),
         make_stop_server=lambda: StopServer(uow=uow, control_plane=cp, clock=clock),
         control_plane=cp,
+        store_generation=FakeStoreGenerationReader(generation=store_generation),
         clock=clock,
         grace_seconds=_GRACE,
+        held_start_grace_seconds=_HELD_GRACE,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )
@@ -352,6 +359,158 @@ async def test_disconnected_worker_is_skipped() -> None:
     clock = FakeClock(_NOW)
     await _reconciler(uow, cp, clock).tick()
     assert cp.dispatched == []
+
+
+# --- held-aware short start grace (issue #999) -----------------------------
+
+
+async def test_held_redispatch_start_acts_after_short_grace_not_full_grace() -> None:
+    # desired=running, assigned, observed crashed, worker connected AND holding a
+    # working set at least as fresh as the store (held=store=2): the start will SKIP
+    # hydrate, so the SHORT held-start grace applies. A divergence aged between the
+    # short and full grace is acted on now — and would NOT have been under the old
+    # uniform full grace.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    # Sanity: the divergence is still WITHIN the full grace, so the old uniform
+    # grace would not have acted yet.
+    assert (_NOW - aged) < dt.timedelta(seconds=_GRACE)
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["start"]  # command-only, no hydrate
+
+
+async def test_held_redispatch_start_still_waits_within_short_grace() -> None:
+    # The held short grace still suppresses a fresh divergence inside its own window:
+    # a held start aged below held_start_grace_seconds is not acted on yet.
+    uow = FakeUnitOfWork()
+    fresh = _NOW - dt.timedelta(seconds=_HELD_GRACE - 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=fresh,
+        updated_at=fresh,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+    assert cp.dispatched == []
+
+
+async def test_not_held_redispatch_start_still_waits_full_grace() -> None:
+    # Worker connected but does NOT hold the working set (held absent -> None): the
+    # start will hydrate, so the FULL grace still applies. A divergence aged past the
+    # short grace but within the full grace is NOT acted on (no regression of the
+    # #822 duplicate-start floor on the hydrate path).
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()  # nothing held -> hydrate -> full grace
+    clock = FakeClock(_NOW)
+    assert (_NOW - aged) < dt.timedelta(seconds=_GRACE)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+
+
+async def test_stale_held_redispatch_start_still_waits_full_grace() -> None:
+    # Worker holds a STALE generation (held=1 < store=2): the start MUST hydrate, so
+    # the full grace still applies — the same held >= store predicate the lifecycle
+    # skip-hydrate uses (#763). Aged past the short grace but within the full grace:
+    # not acted on.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 1})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+    assert cp.dispatched == []
+
+
+async def test_orphan_place_and_start_uses_full_grace_despite_held() -> None:
+    # place_and_start (no assigned worker) always hydrates and may place on a
+    # DIFFERENT worker, so the full grace (the #822 cross-worker floor) always
+    # applies — even though a (now-stale) held entry exists for some worker. Aged
+    # past the short grace but within the full grace: not acted on.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=None,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(place_to=_WORKER, held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+    assert cp.dispatched == []
+
+
+async def test_redispatch_stop_uses_full_grace_despite_held() -> None:
+    # The stop side (redispatch_stop) keeps the full grace (the #847 stale-snapshot
+    # floor): even with a held entry, a stop divergence aged past the short grace but
+    # within the full grace is NOT acted on.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+    assert cp.dispatched == []
+
+
+async def test_clear_stale_assignment_uses_full_grace_despite_held() -> None:
+    # The wedged-stop recovery (clear_stale_assignment) keeps the full grace (#847):
+    # a held entry must not shorten the window that protects an in-flight final
+    # snapshot. Aged past the short grace but within the full grace: assignment kept.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 
 
 # --- backoff ---------------------------------------------------------------
@@ -704,8 +863,10 @@ def _concurrent_reconciler(
             uow=fresh_uow(), control_plane=cp, clock=clock
         ),
         control_plane=cp,
+        store_generation=FakeStoreGenerationReader(),
         clock=clock,
         grace_seconds=_GRACE,
+        held_start_grace_seconds=_HELD_GRACE,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )
@@ -816,8 +977,10 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
             uow=FakeUnitOfWork(servers=repo), control_plane=cp, clock=clock
         ),
         control_plane=cp,
+        store_generation=FakeStoreGenerationReader(),
         clock=clock,
         grace_seconds=_GRACE,
+        held_start_grace_seconds=_HELD_GRACE,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )

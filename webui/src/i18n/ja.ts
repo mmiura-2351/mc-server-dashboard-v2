@@ -210,6 +210,7 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.col.type": "種類 / バージョン",
   "dashboard.col.backend": "バックエンド",
   "dashboard.col.port": "ポート",
+  "dashboard.col.address": "アドレス",
   "dashboard.col.worker": "Worker",
   "dashboard.col.actions": "操作",
   // Observed-state pill labels (WEBUI_SPEC.md 2.3).
@@ -232,6 +233,8 @@ export const ja: Record<TranslationKey, string> = {
     "起動できませんでした: サーバーイメージが見つかりません。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "ライブ更新が低下 — ポーリング中",
+  // Clickable join-hostname copy feedback.
+  "dashboard.copiedJoinHostname": "コピーしました！",
 
   // Server detail page (WEBUI_SPEC.md 6.4 / 6.9).
   "serverDetail.loading": "サーバーを読み込んでいます…",
@@ -245,6 +248,8 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.noWorker": "Worker未割り当て",
   "serverDetail.worker": "Worker",
   "serverDetail.noPort": "ポートなし",
+  // Relay join hostname (issue #961).
+  "serverDetail.copiedJoinHostname": "コピーしました！",
   // Tabs (WEBUI_SPEC.md 6.4–6.9).
   "serverDetail.tab.overview": "概要",
   "serverDetail.tab.console": "コンソール",
@@ -311,6 +316,14 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーへのCPUの割り当て（ミリコア、1000＝1コア）。上限ではなく負荷時の相対的な割り当てで、ホストに余裕があればこれを超えて使用できます。空欄にすると自動になります。",
   "serverDetail.settings.cpuAllocationRange":
     "100〜128000 ミリコアの整数を入力するか、空欄にして自動にしてください。",
+  // Relay join address name field (issue #961).
+  "serverDetail.settings.slug": "参加アドレス名",
+  "serverDetail.settings.slugHint":
+    "小文字・数字・ハイフンのみ使用できます。先頭と末尾にハイフンは使えません。変更しなければ現在の参加アドレスが維持されます。",
+  "serverDetail.settings.slugInvalid":
+    "有効なDNSラベルを入力してください: 小文字・数字・ハイフンのみ、先頭と末尾にハイフン不可。",
+  "serverDetail.settings.slugTaken":
+    "この参加アドレス名はすでに使用されています。",
   "serverDetail.settings.save": "変更を保存",
   "serverDetail.settings.saved": "設定を保存しました。",
   "serverDetail.settings.atRestHint":
@@ -354,6 +367,11 @@ export const ja: Record<TranslationKey, string> = {
     "メモリ上限は 512〜1048576 MiB の整数である必要があります。",
   "serverDetail.error.invalidCpuAllocation":
     "CPU割り当ては 100〜128000 ミリコアの整数である必要があります。",
+  // Relay join address name errors (issue #961).
+  "serverDetail.error.invalidSlug":
+    "参加アドレス名は有効なDNSラベルである必要があります: 小文字・数字・ハイフンのみ、先頭と末尾にハイフン不可。",
+  "serverDetail.error.slugTaken":
+    "その参加アドレス名はすでに使用されています。",
   "serverDetail.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Backups tab (WEBUI_SPEC.md 6.7).
@@ -536,6 +554,22 @@ export const ja: Record<TranslationKey, string> = {
   "players.manageLink": "コミュニティ設定",
   "players.error.generic": "問題が発生しました。もう一度お試しください。",
 
+  // Sessions view — relay game session history (issue #961).
+  "sessions.heading": "セッション",
+  "sessions.loading": "セッションを読み込んでいます…",
+  "sessions.loadError":
+    "セッションを読み込めませんでした。更新してみてください。",
+  "sessions.empty": "まだセッションの記録はありません。",
+  "sessions.col.hostname": "ホスト名",
+  "sessions.col.playerIp": "IPアドレス（申告値）",
+  "sessions.col.username": "ユーザー名（申告値）",
+  "sessions.col.start": "開始",
+  "sessions.col.end": "終了",
+  "sessions.valueUnknown": "—",
+  "sessions.active": "アクティブ",
+  "sessions.prev": "前へ",
+  "sessions.next": "次へ",
+
   // Server create wizard (WEBUI_SPEC.md 6.3).
   "serverCreate.subtitle": "新しいMinecraftサーバーをプロビジョニングします。",
   "serverCreate.denied": "サーバーを作成する権限がありません。",
@@ -596,6 +630,13 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーへのCPUの割り当て（ミリコア、1000＝1コア）。上限ではなく負荷時の相対的な割り当てで、ホストに余裕があればこれを超えて使用できます。空欄にすると自動になります。",
   "serverCreate.cpuAllocationRange":
     "100〜128000 ミリコアの整数を入力するか、空欄にして自動にしてください。",
+  // Optional join address name (slug) at create time (issue #981).
+  "serverCreate.slugLabel": "参加アドレス名（任意）",
+  "serverCreate.slugPlaceholder": "例: myserver",
+  "serverCreate.slugHint":
+    "小文字・数字・ハイフンのみ使用できます。空欄にするとランダムなアドレスが生成されます。",
+  "serverCreate.slugInvalid":
+    "有効なDNSラベルを入力してください：小文字・数字・ハイフンのみ、先頭・末尾にハイフン不可。",
   "serverCreate.propsHeading": "server.properties の上書き",
   "serverCreate.propsHint":
     "任意。初回起動時に server.properties に書き込まれるキー。",
@@ -622,6 +663,10 @@ export const ja: Record<TranslationKey, string> = {
     "メモリ上限は 512〜1048576 MiB の整数で指定してください。",
   "serverCreate.error.invalid_cpu_allocation":
     "CPU割り当ては 100〜128000 ミリコアの整数で指定してください。",
+  "serverCreate.error.invalid_slug":
+    "その参加アドレス名は無効です。小文字・数字・ハイフンのみ使用できます。",
+  "serverCreate.error.slug_taken":
+    "その参加アドレス名はすでに使用されています。別の名前を選択してください。",
   "serverCreate.genericError":
     "サーバーを作成できませんでした。もう一度お試しください。",
   // Import tab.
@@ -830,6 +875,8 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.roles.family.group": "グループ",
   "communitySettings.roles.family.community": "コミュニティ",
   "communitySettings.roles.family.audit": "監査ログ",
+  // Session family (issue #961).
+  "communitySettings.roles.family.session": "セッション",
   // Permission code labels (the action within each family).
   "communitySettings.roles.code.server:create": "作成",
   "communitySettings.roles.code.server:read": "閲覧",
@@ -861,6 +908,8 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.roles.code.community:update": "更新",
   "communitySettings.roles.code.community:delete": "削除",
   "communitySettings.roles.code.audit:read": "閲覧",
+  // Session permission code label (issue #961).
+  "communitySettings.roles.code.session:read": "閲覧",
 
   // Grants tab (WEBUI_SPEC.md 6.10): per-server permission grants.
   "communitySettings.grants.heading": "権限付与",

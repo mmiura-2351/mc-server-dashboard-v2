@@ -41,6 +41,7 @@ def _to_server(row: ServerModel) -> Server:
         execution_backend=ExecutionBackend(row.execution_backend),
         config=dict(row.config),
         game_port=row.game_port,
+        slug=row.slug,
         desired_state=DesiredState(row.desired_state),
         observed_state=ObservedState(row.observed_state),
         observed_at=row.observed_at,
@@ -70,6 +71,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 execution_backend=server.execution_backend.value,
                 config=server.config,
                 game_port=server.game_port,
+                slug=server.slug,
                 desired_state=server.desired_state.value,
                 observed_state=server.observed_state.value,
                 observed_at=server.observed_at,
@@ -123,10 +125,23 @@ class SqlAlchemyServerRepository(ServerRepository):
                 # write for name/config-only edits that leave it unchanged. The
                 # deployment-wide UNIQUE(game_port) backstops a concurrent racer.
                 game_port=server.game_port,
+                # Persist the (possibly renamed) slug (issue #955); a no-op write
+                # for non-slug edits. The deployment-wide UNIQUE(slug) backstops.
+                slug=server.slug,
                 updated_at=server.updated_at,
             )
         )
         await self._session.execute(stmt)
+
+    async def list_slugs(self) -> set[str]:
+        stmt = select(ServerModel.slug).where(ServerModel.slug != "")
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return set(rows)
+
+    async def get_by_slug(self, slug: str) -> Server | None:
+        stmt = select(ServerModel).where(ServerModel.slug == slug)
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_server(row) if row is not None else None
 
     async def update_lifecycle(
         self,

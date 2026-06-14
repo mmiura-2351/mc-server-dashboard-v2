@@ -28,6 +28,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -40,6 +41,37 @@ import (
 // network reaches RCON over the network, every other driver over the host
 // loopback (issue #218).
 type controlFunc func(ctx context.Context, serverID, driver string) (execution.ServerControl, error)
+
+// resilientControl wraps a ServerControl and auto-redials on ErrConnBroken
+// (#919). The rcon client poisons the connection on any Execute error, so a
+// multi-command bracket (save-off → save-all → save-on, or the stop sequence)
+// loses all commands after the first failure. This wrapper transparently
+// redials once per Execute call so trailing commands in a bracket survive a
+// mid-sequence timeout or error.
+type resilientControl struct {
+	inner    execution.ServerControl
+	dial     func(ctx context.Context) (execution.ServerControl, error)
+	logger   *slog.Logger
+	serverID string
+}
+
+func (r *resilientControl) Execute(ctx context.Context, line string) (string, error) {
+	reply, err := r.inner.Execute(ctx, line)
+	if err == nil || !errors.Is(err, rcon.ErrConnBroken) {
+		return reply, err
+	}
+	r.logger.Warn("rcon connection poisoned; redialing for next command",
+		"server_id", r.serverID, "line", line)
+	_ = r.inner.Close()
+	fresh, dialErr := r.dial(ctx)
+	if dialErr != nil {
+		return "", fmt.Errorf("redial after broken connection: %w", dialErr)
+	}
+	r.inner = fresh
+	return r.inner.Execute(ctx, line)
+}
+
+func (r *resilientControl) Close() error { return r.inner.Close() }
 
 // Transfer is the data-plane Port: move a server's working set between the API's
 // authoritative Storage and the local working dir (FR-DATA-3/4). The trigger
@@ -59,6 +91,27 @@ type Transfer interface {
 	// produced (the value of the API's response header, issue #763); 0 when the header
 	// is absent (an older API).
 	Snapshot(ctx context.Context, url, token, workingDir string, baseGeneration uint64, workerID string) (uint64, error)
+}
+
+// TunnelDialer is the relay dial-back Port (RELAY.md Section 5): for one player
+// session it dials the relay's tunnel listener over TLS, presents the token, dials
+// the local server's loopback game port, and splices the two. Dial returns once
+// the splice is established (or with an error on dial/handshake failure); the
+// splice runs on the adapter's own long-lived context, off this command, and is
+// torn down on Worker shutdown.
+type TunnelDialer interface {
+	Dial(ctx context.Context, spec TunnelSpec) error
+}
+
+// TunnelSpec carries everything one TunnelDial needs: the local server's working
+// dir (for its published game port) and the relay endpoint, token, and optional
+// CA bundle to dial back to (RELAY.md Section 5).
+type TunnelSpec struct {
+	ServerID   string
+	WorkingDir string
+	Endpoint   string
+	Token      string
+	CAPEM      string
 }
 
 // systemClock is the default wall-clock used for the metrics ticker when
@@ -88,6 +141,7 @@ type Manager struct {
 	scratchDir  string
 	openControl controlFunc
 	transfer    Transfer
+	tunnel      TunnelDialer
 	logger      *slog.Logger
 	// workerID is this Worker's own id, stamped on a snapshot publish so the API's
 	// publish-time generation guard can tell a same-Worker re-publish from a
@@ -240,6 +294,13 @@ func (m *Manager) WithTransfer(t Transfer) *Manager {
 	return m
 }
 
+// WithTunnelDialer wires the relay dial-back TunnelDialer used by TunnelDial
+// (RELAY.md Section 5). Without it, a TunnelDial fails with an internal error.
+func (m *Manager) WithTunnelDialer(t TunnelDialer) *Manager {
+	m.tunnel = t
+	return m
+}
+
 // SetTransferDeadline records the per-transfer bound the API advertised in
 // RegisterAck (session.TransferDeadlineSetter, issue #874). The hydrate/snapshot
 // handlers apply it as a context deadline so an upload/download cannot outlive
@@ -317,6 +378,8 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 		return m.handleEditFile(cmd)
 	case "ListFiles":
 		return m.handleListFiles(cmd)
+	case "TunnelDial":
+		return m.handleTunnelDial(ctx, cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
@@ -663,19 +726,28 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 // requirement). A final failure is logged loudly: auto-save stuck off is
 // operator-actionable.
 func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string) (bool, func()) {
-	ctrl, err := m.openControl(ctx, serverID, m.driverFor(serverID))
+	driverName := m.driverFor(serverID)
+	raw, err := m.openControl(ctx, serverID, driverName)
 	if err != nil {
 		m.logger.Warn("snapshot quiesce: open rcon failed", "server_id", serverID, "error", err)
 		return false, func() {}
+	}
+	// Wrap in resilientControl (#919): a mid-bracket Execute error poisons the
+	// rcon connection, so save-all after a timed-out save-off (or save-on after
+	// a timed-out save-all) would return ErrConnBroken instantly. The wrapper
+	// auto-redials so the bracket's trailing commands still reach the server.
+	ctrl := &resilientControl{
+		inner: raw,
+		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
+			return m.openControl(dialCtx, serverID, driverName)
+		},
+		logger:   m.logger,
+		serverID: serverID,
 	}
 
 	saveOff := true
 	quiesced := true
 	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
-		// Could not disable auto-save: the world is not quiesced, so the caller refuses
-		// (quiesce_unavailable). Do not attempt save-all — the rcon client is already
-		// poisoned by this failed Execute, so it would be a guaranteed ErrConnBroken —
-		// and do not run save-on on exit (auto-save was never turned off).
 		m.logger.Warn("snapshot save-off failed; snapshot will not be quiesced",
 			"server_id", serverID, "error", err)
 		saveOff = false
@@ -696,6 +768,75 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 		}
 		m.restoreSaveOn(ctx, serverID, ctrl)
 	}
+}
+
+// flushBeforeStopWithDriver drives the live world's dirty chunks to disk before
+// a graceful stop (issue #1007). The driver calls it always before tryRCONStop
+// on the graceful path, because MC's own shutdown save does NOT reliably flush
+// dirty region chunks when a player was connected.
+//
+// It issues a non-blocking save-all (the SAME mechanism quiesceRunning uses —
+// NOT save-all flush, whose synchronous flush parked a tick past max-tick-time
+// and tripped the Server Watchdog into a production crash, #693) and waits for
+// the asynchronous save to settle (settleWorkingSet: the region files' (mtime,
+// size) stop changing) so the chunks have landed on disk before the terminate.
+//
+// driverName is the driver that runs this server, captured before the instance
+// was evicted from the manager's map (driverFor would return empty after
+// eviction).
+//
+// It is best-effort and bounded: any failure — RCON cannot be opened, save-off or
+// save-all errors, or the save never settles within the budget — is logged and the
+// stop proceeds anyway. Wedging a stop on a save failure would be strictly worse
+// than the pre-fix behavior; the common path completes the flush. The settle
+// budget (m.settleBudget, default 60s) stays well inside the API's stop dispatch
+// budget (stop_timeout_seconds=600).
+//
+// save-off is issued first to disable MC's auto-save disk writes (#1038): without
+// it, an active player's actions continuously generate new chunk writes, so
+// settleWorkingSet never converges within the budget. save-on is NOT sent — the
+// server is about to be stopped, so there is nothing to restore, and re-enabling
+// writes during the settle window would reintroduce the convergence problem.
+func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName string) bool {
+	raw, err := m.openControl(ctx, serverID, driverName)
+	if err != nil {
+		m.logger.Warn("stop flush: open rcon failed; stopping without a final save",
+			"server_id", serverID, "error", err)
+		return false
+	}
+	// Wrap in resilientControl (#919/#1040): a save-off failure poisons the rcon
+	// connection, so save-all on the same client returns ErrConnBroken instantly.
+	// The wrapper auto-redials so save-all degrades to the pre-save-off behavior
+	// (flush without quiesce) instead of silently losing the flush entirely.
+	ctrl := &resilientControl{
+		inner: raw,
+		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
+			return m.openControl(dialCtx, serverID, driverName)
+		},
+		logger:   m.logger,
+		serverID: serverID,
+	}
+	defer func() { _ = ctrl.Close() }()
+
+	// Disable auto-save so settleWorkingSet converges quickly even with active
+	// players (#1038). Best-effort: if save-off fails, save-all still runs — the
+	// settle may time out but the flush is no worse than before this fix.
+	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
+		m.logger.Warn("stop flush: save-off failed; proceeding with save-all",
+			"server_id", serverID, "error", err)
+	}
+
+	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
+		m.logger.Warn("stop flush: save-all failed; stopping without a final save",
+			"server_id", serverID, "error", err)
+		return false
+	}
+	if !m.settleWorkingSet(ctx, serverID, filepath.Join(m.scratchDir, serverID)) {
+		m.logger.Warn("stop flush: working set did not settle within budget; stopping anyway",
+			"server_id", serverID)
+		return false
+	}
+	return true
 }
 
 // restoreSaveOn re-enables auto-save after a running-server snapshot quiesce.
@@ -917,6 +1058,9 @@ func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 }
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
+	// Capture the driver name BEFORE takeStoppableReserve evicts the instance and
+	// deletes startCmds, so the pre-stop flush closure can open RCON using it.
+	driver := m.driverFor(cmd.ServerID)
 	inst, outcome := m.takeStoppableReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
@@ -939,7 +1083,7 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 	// The id is now reserved across the eviction -> stop-confirmed window so the
 	// detached stop is the sole writer; released on every return below (issue #780).
 	defer m.release(cmd.ServerID)
-	if err := m.attemptStop(ctx, cmd.ServerID, inst, graceful); err != nil {
+	if err := m.attemptStop(ctx, cmd.ServerID, inst, graceful, driver); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: stop: %v", err))
 	}
@@ -1079,8 +1223,21 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 // records the instance as a failed-stop orphan so a retry can re-attempt
 // termination against the same handle rather than returning SERVER_NOT_FOUND; on
 // success it forgets any orphan record for the id (issue #251).
-func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool) error {
-	if err := inst.Stop(ctx, graceful); err != nil {
+//
+// driverName is the driver that runs this server (captured BEFORE
+// takeStoppableReserve / takeRunningReserve evicts the instance and deletes
+// startCmds, so driverFor would return empty after eviction). On a graceful
+// stop, attemptStop passes a pre-fallback flush closure so the driver can flush
+// the live world (save-all + settle) before stop — the driver calls it always
+// before tryRCONStop on the graceful path (#1007).
+func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName string) error {
+	var preFallback func(context.Context) bool
+	if graceful {
+		preFallback = func(flushCtx context.Context) bool {
+			return m.flushBeforeStopWithDriver(flushCtx, serverID, driverName)
+		}
+	}
+	if err := inst.Stop(ctx, graceful, preFallback); err != nil {
 		m.mu.Lock()
 		m.orphans[serverID] = inst
 		m.mu.Unlock()
@@ -1184,7 +1341,7 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	// orphan as a plain StopServer would, so the reconciler's retry path can still
 	// terminate it rather than double-instancing over it (issue #251). The reservation
 	// is dropped on this failure path; the orphan record then guards the id instead.
-	if err := m.attemptStop(ctx, cmd.ServerID, inst, true); err != nil {
+	if err := m.attemptStop(ctx, cmd.ServerID, inst, true, start.Driver); err != nil {
 		m.release(cmd.ServerID)
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: restart stop: %v", err))
@@ -1226,6 +1383,40 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 			fmt.Sprintf("instancemanager: server command: %v", err))
 	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true, Output: out}
+}
+
+// handleTunnelDial opens a relay dial-back tunnel for one player session (RELAY.md
+// Section 5). The server must be running locally — a not-running server returns
+// SERVER_NOT_FOUND — and the dialer resolves its published loopback game port from
+// the working dir, dials the relay endpoint, presents the token, and splices the
+// two. It returns once the splice is established; the splice itself runs on the
+// dialer's own long-lived context, off this command, so it outlives the result. A
+// TunnelDial is a quick command: it bypasses the slow-lane cap (session layer) so
+// a join never queues behind a hydrate.
+func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) session.CommandResult {
+	m.mu.Lock()
+	_, running := m.instances[cmd.ServerID]
+	m.mu.Unlock()
+	if !running {
+		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+			"instancemanager: server not running")
+	}
+	if m.tunnel == nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			"instancemanager: tunnel dialer not configured")
+	}
+
+	if err := m.tunnel.Dial(ctx, TunnelSpec{
+		ServerID:   cmd.ServerID,
+		WorkingDir: filepath.Join(m.scratchDir, cmd.ServerID),
+		Endpoint:   cmd.TunnelEndpoint,
+		Token:      cmd.TunnelToken,
+		CAPEM:      cmd.TunnelCAPEM,
+	}); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: tunnel dial: %v", err))
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
 // MaxFileBytes bounds a ReadFile response and an EditFile payload. File access
@@ -1690,6 +1881,35 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) {
 	defer m.mu.Unlock()
 	if m.orphans[serverID] == inst {
 		delete(m.orphans, serverID)
+	}
+}
+
+// ResyncStatus re-emits a StatusChange for every instance the manager still
+// holds, so a control-plane (re-)register moves those servers out of the API's
+// post-restart observed=unknown state within seconds instead of waiting out the
+// reconciler grace window (issue #985). The instance manager persists across
+// control-plane reconnects, so its instances map still names the live servers;
+// re-emitting their current Status() reflects reality (running/starting/etc.).
+// On a fresh process the map is empty (the orphan sweep removed leftovers and no
+// instances are re-created), so this is a harmless no-op.
+//
+// The instances are snapshotted under the lock, which is then RELEASED before any
+// emit: sendStatus can coalesce and wake the dispatcher, so it must never run
+// while m.mu is held.
+func (m *Manager) ResyncStatus() {
+	m.mu.Lock()
+	type snap struct {
+		serverID string
+		state    execution.ServerState
+	}
+	snaps := make([]snap, 0, len(m.instances))
+	for serverID, inst := range m.instances {
+		snaps = append(snaps, snap{serverID: serverID, state: inst.Status()})
+	}
+	m.mu.Unlock()
+
+	for _, s := range snaps {
+		m.sendStatus(session.StatusEvent{ServerID: s.serverID, State: s.state.String()})
 	}
 }
 

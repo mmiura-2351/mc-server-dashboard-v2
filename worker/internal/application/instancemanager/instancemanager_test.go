@@ -46,6 +46,9 @@ type fakeInstance struct {
 	events   chan execution.StatusEvent
 	stopped  bool
 	graceful bool
+	// seq, when set, records a "stop" marker on Stop so a test can assert the
+	// terminate ordered against the RCON recorder (the #1007 flush-before-stop).
+	seq *[]string
 }
 
 func newFakeInstance(id string) *fakeInstance {
@@ -54,11 +57,14 @@ func newFakeInstance(id string) *fakeInstance {
 	return i
 }
 
-func (i *fakeInstance) Stop(_ context.Context, graceful bool) error {
+func (i *fakeInstance) Stop(_ context.Context, graceful bool, _ ...func(context.Context) bool) error {
 	i.mu.Lock()
 	i.stopped = true
 	i.graceful = graceful
 	i.state = execution.StateStopped
+	if i.seq != nil {
+		*i.seq = append(*i.seq, "stop")
+	}
 	i.mu.Unlock()
 	i.events <- execution.StatusEvent{ServerID: i.serverID, State: execution.StateStopped}
 	return nil
@@ -134,11 +140,57 @@ func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) 
 
 func (c *fakeControl) Close() error { return nil }
 
+// rconFailInstance models a driver instance whose RCON "stop" fails, causing
+// the driver to fall back to docker stop. The preFallback hook is invoked (if
+// supplied) on the graceful path, just as the real driver does (#1007). This
+// lets the instancemanager tests verify the flush wiring.
+type rconFailInstance struct {
+	*fakeInstance
+}
+
+func newRconFailInstance(id string) *rconFailInstance {
+	return &rconFailInstance{fakeInstance: newFakeInstance(id)}
+}
+
+func (i *rconFailInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
+	// Call the pre-fallback hook (the flush) before terminate, just as the real
+	// containerdriver does on the graceful path. Honor the return value: when
+	// the flush succeeds (returns true), the real driver skips RCON stop and
+	// docker stop entirely — but rconFailInstance always terminates, so here
+	// we just record the call for test observability.
+	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
+		_ = preFallback[0](ctx)
+	}
+	return i.fakeInstance.Stop(ctx, graceful)
+}
+
+// rconFailDriver hands out rconFailInstances.
+type rconFailDriver struct {
+	mu   sync.Mutex
+	inst *rconFailInstance
+}
+
+func (d *rconFailDriver) Start(_ context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.inst = newRconFailInstance(spec.ServerID)
+	return d.inst, nil
+}
+
 func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.ServerControl) *Manager {
 	t.Helper()
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
-		func(context.Context, string, string) (execution.ServerControl, error) { return ctrl, nil })
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			// The real openControl never yields a nil control without an error (main.go).
+			// Tests that don't wire one exercise RCON-free paths; surface that as a dial
+			// failure so the #1007 stop-flush (and the snapshot quiesce) degrade gracefully
+			// instead of dereferencing a nil control.
+			if ctrl == nil {
+				return nil, fmt.Errorf("test: no rcon control configured")
+			}
+			return ctrl, nil
+		})
 	// Drop the quiesce settle-wait poll interval to zero by default so a running-id
 	// snapshot test does not pay the real 2s poll (#907); tests that exercise the
 	// settle-wait itself override it explicitly.
@@ -358,6 +410,173 @@ func TestStopServerGraceful(t *testing.T) {
 	}
 }
 
+// A graceful stop whose RCON "stop" succeeds: the fakeInstance does not call the
+// preFallback hook (it is a minimal fake), so no save-all appears in the sequence.
+// The real driver calls preFallback always before stop on the graceful path (#1007).
+func TestStopServerGracefulRCONSuccessSkipsFlush(t *testing.T) {
+	var seq []string
+	d := &fakeDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success", res)
+	}
+	// The fakeInstance does not call the preFallback hook (minimal fake), so no
+	// save-all appears. The real driver calls preFallback always before stop.
+	want := []string{"stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (fakeInstance does not exercise preFallback)", seq, want)
+	}
+}
+
+// When the driver calls the preFallback hook on the graceful path, the flush
+// must run: save-all + settle lands the dirty chunks on disk before the process
+// is terminated (#1007). The rconFailInstance models this by calling the
+// preFallback hook.
+func TestStopServerGracefulRCONFailureFlushesBeforeTerminate(t *testing.T) {
+	var seq []string
+	d := &rconFailDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success", res)
+	}
+	want := []string{"save-off", "save-all", "stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (graceful stop must save-off then flush before terminate)", seq, want)
+	}
+}
+
+// A force stop (cmd.Force) is the operator's "kill it now" escape hatch and must
+// NOT attempt the graceful save-all flush — it intentionally skips the save so a
+// wedged or unresponsive server can still be terminated (#1007).
+func TestStopServerForceSkipsFlush(t *testing.T) {
+	var seq []string
+	d := &fakeDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer", Force: true})
+	if !res.Success {
+		t.Fatalf("force stop = %+v, want success", res)
+	}
+	if len(ctrl.lines) != 0 {
+		t.Fatalf("force stop issued RCON %v, want none (force skips the graceful flush)", ctrl.lines)
+	}
+	want := []string{"stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (force stop terminates without a save)", seq, want)
+	}
+}
+
+// A failed save-all on the graceful-stop flush must DEGRADE to terminating the
+// server, not wedge the stop (#1007): the flush is best-effort, and a stop that
+// could not save must still complete (the API gives stop dispatch a bounded
+// budget and an unflushed world is no worse than today's pre-fix behavior). Uses
+// rconFailDriver so the preFallback hook fires and exercises the save-all code
+// path.
+func TestStopServerGracefulProceedsWhenSaveFails(t *testing.T) {
+	var seq []string
+	d := &rconFailDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq, failLines: map[string]error{"save-all": fmt.Errorf("rcon down")}}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success even when the save-all flush failed", res)
+	}
+	if stopped, graceful := d.inst.wasStopped(); !stopped || !graceful {
+		t.Fatalf("instance not gracefully stopped after failed flush: stopped=%v graceful=%v", stopped, graceful)
+	}
+}
+
+// A failed save-off on the graceful-stop flush must still proceed to save-all
+// (#1038): save-off is best-effort — if it fails, the flush continues with
+// save-all so dirty chunks still land on disk. The stop must succeed regardless.
+func TestStopServerGracefulProceedsWhenSaveOffFails(t *testing.T) {
+	var seq []string
+	d := &rconFailDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq, failLines: map[string]error{"save-off": fmt.Errorf("rcon down")}}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success even when save-off failed", res)
+	}
+	// save-off failed but save-all must still be attempted.
+	want := []string{"save-off", "save-all", "stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (save-off failure must not block save-all)", seq, want)
+	}
+}
+
+// A failed save-off poisons the RCON connection (#919), so save-all on the same
+// connection returns ErrConnBroken. flushBeforeStopWithDriver must redial a fresh
+// connection so save-all succeeds (#1040).
+func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
+	var seq []string
+	d := &rconFailDriver{}
+	poisonCtrl := &fakeControl{
+		reply:     "ok",
+		seq:       &seq,
+		failLines: map[string]error{"save-off": fmt.Errorf("rcon down")},
+		poison:    true,
+	}
+	// After the poisoned ctrl is closed, openControl returns a fresh ctrl.
+	freshCtrl := &fakeControl{reply: "ok", seq: &seq}
+	var dialCount int
+	scratch := t.TempDir()
+	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			dialCount++
+			if dialCount == 1 {
+				return poisonCtrl, nil
+			}
+			return freshCtrl, nil
+		})
+	m.settlePollInterval = 0
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success even when save-off failed on poisoned connection", res)
+	}
+	want := []string{"save-off", "save-all", "stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (must redial and issue save-all after poisoned save-off)", seq, want)
+	}
+	if dialCount < 2 {
+		t.Fatalf("openControl dial count = %d, want >= 2 (must redial after save-off poison)", dialCount)
+	}
+}
+
 func TestServerCommandForwardsOutput(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "There are 0 players"}
@@ -438,6 +657,52 @@ func TestRestartStopsAndStarts(t *testing.T) {
 	}
 	if d.startCount() != 2 {
 		t.Fatalf("restart started %d times total, want 2", d.startCount())
+	}
+}
+
+// An in-place restart with fakeInstance (which does not call preFallback): no
+// save-all appears in the sequence. The real driver calls preFallback always
+// before stop on the graceful path (#1007).
+func TestRestartRCONSuccessSkipsFlush(t *testing.T) {
+	var seq []string
+	d := &fakeDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c5", ServerID: "s1", Kind: "RestartServer"})
+	if !res.Success {
+		t.Fatalf("restart = %+v, want success", res)
+	}
+	want := []string{"stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (fakeInstance does not exercise preFallback)", seq, want)
+	}
+}
+
+// When a restart uses rconFailInstance (which calls preFallback), the flush
+// must run: the relaunch re-reads the same on-disk scratch, so unflushed dirty
+// chunks would roll the block edits back (#1007).
+func TestRestartRCONFailureFlushesBeforeTerminate(t *testing.T) {
+	var seq []string
+	d := &rconFailDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c5", ServerID: "s1", Kind: "RestartServer"})
+	if !res.Success {
+		t.Fatalf("restart = %+v, want success", res)
+	}
+	want := []string{"save-off", "save-all", "stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (graceful restart must save-off then flush before terminate)", seq, want)
 	}
 }
 

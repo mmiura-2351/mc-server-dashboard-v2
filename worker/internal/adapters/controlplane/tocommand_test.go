@@ -189,6 +189,33 @@ func TestToCommandMapsListFiles(t *testing.T) {
 	}
 }
 
+func TestToCommandMapsTunnelDial(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c6",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_TunnelDial{
+			TunnelDial: &controlplanev1.TunnelDial{
+				ServerId: "s1",
+				Endpoint: "relay.example:25665",
+				Token:    "tok-abc",
+				TlsCaPem: "ca-pem",
+			},
+		},
+	})
+	if cmd.Kind != "TunnelDial" {
+		t.Fatalf("Kind = %q, want TunnelDial", cmd.Kind)
+	}
+	if cmd.TunnelEndpoint != "relay.example:25665" {
+		t.Fatalf("TunnelEndpoint = %q, want relay.example:25665", cmd.TunnelEndpoint)
+	}
+	if cmd.TunnelToken != "tok-abc" {
+		t.Fatalf("TunnelToken = %q, want tok-abc", cmd.TunnelToken)
+	}
+	if cmd.TunnelCAPEM != "ca-pem" {
+		t.Fatalf("TunnelCAPEM = %q, want ca-pem", cmd.TunnelCAPEM)
+	}
+}
+
 func TestToFileListingMapsEntries(t *testing.T) {
 	wire := toFileListing(&session.FileListing{
 		Entries: []session.FileEntry{

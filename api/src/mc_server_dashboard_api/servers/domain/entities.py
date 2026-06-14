@@ -55,6 +55,11 @@ class Server:
     # rows that predate port tracking. Defaulted so existing constructions (tests,
     # other use cases) need not pass it; the create flow sets it explicitly.
     game_port: int | None = None
+    # The relay slug (issue #955): a DNS-label string unique deployment-wide,
+    # auto-generated at create and renameable via the server update PATCH.
+    # Defaults to empty string here so existing test constructions that predate
+    # the slug column need not pass it; the create flow always assigns a real slug.
+    slug: str = ""
 
     def is_at_rest(self) -> bool:
         """Return whether the server is fully stopped for edits/deletion.

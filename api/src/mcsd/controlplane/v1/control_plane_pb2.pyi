@@ -629,6 +629,7 @@ class ApiCommand(_message.Message):
     READ_FILE_FIELD_NUMBER: _builtins.int
     EDIT_FILE_FIELD_NUMBER: _builtins.int
     LIST_FILES_FIELD_NUMBER: _builtins.int
+    TUNNEL_DIAL_FIELD_NUMBER: _builtins.int
     command_id: _builtins.str
     """command_id correlates this command with its CommandResult
     (REQUIREMENTS.md NFR-OBS-1).
@@ -674,6 +675,14 @@ class ApiCommand(_message.Message):
         (Section 6.9, Section 7.2).
         """
 
+    @_builtins.property
+    def tunnel_dial(self) -> Global___TunnelDial:
+        """TunnelDial instructs the Worker to open a dial-back tunnel to the relay
+        for one player session (RELAY.md Section 5). Bypasses the slow-lane
+        concurrency cap (like ServerCommand) so a join does not queue behind a
+        hydrate.
+        """
+
     def __init__(
         self,
         *,
@@ -688,12 +697,13 @@ class ApiCommand(_message.Message):
         read_file: Global___ReadFile | None = ...,
         edit_file: Global___EditFile | None = ...,
         list_files: Global___ListFiles | None = ...,
+        tunnel_dial: Global___TunnelDial | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_command: _TypeAlias = _typing.Literal["start", "stop", "restart", "server_command", "hydrate", "snapshot", "read_file", "edit_file", "list_files"]  # noqa: Y015
+    _WhichOneofReturnType_command: _TypeAlias = _typing.Literal["start", "stop", "restart", "server_command", "hydrate", "snapshot", "read_file", "edit_file", "list_files", "tunnel_dial"]  # noqa: Y015
     _WhichOneofArgType_command: _TypeAlias = _typing.Literal["command", b"command"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_command) -> _WhichOneofReturnType_command | None: ...
 
@@ -970,6 +980,58 @@ class ListFiles(_message.Message):
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___ListFiles: _TypeAlias = ListFiles  # noqa: Y015
+
+@_typing.final
+class TunnelDial(_message.Message):
+    """TunnelDial instructs the Worker to dial back the relay's tunnel listener for
+    one player session (RELAY.md Section 5). Everything the Worker needs arrives
+    in-band so it requires zero new configuration. Bypasses the slow-lane
+    concurrency cap (like ServerCommand) — a join must not queue behind a hydrate.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SERVER_ID_FIELD_NUMBER: _builtins.int
+    ENDPOINT_FIELD_NUMBER: _builtins.int
+    TOKEN_FIELD_NUMBER: _builtins.int
+    TLS_CA_PEM_FIELD_NUMBER: _builtins.int
+    server_id: _builtins.str
+    """server_id identifies the local server whose game port the Worker splices
+    to. The Worker resolves it to the running instance's published loopback
+    game port; if the server is not running locally it returns a
+    CommandResult error. RELAY.md Section 5.
+    """
+    endpoint: _builtins.str
+    """endpoint is the relay tunnel endpoint to dial, in host:port form. Taken
+    from the relay's Register call so the API is the single config source.
+    RELAY.md Section 5.
+    """
+    token: _builtins.str
+    """token is the single-use session token the Worker presents to the relay
+    after the TLS handshake. The relay matches it to the waiting player
+    connection and then starts the splice. RELAY.md Section 5.
+    """
+    tls_ca_pem: _builtins.str
+    """tls_ca_pem is the optional PEM-encoded CA bundle the Worker uses to
+    verify the relay's tunnel certificate. Empty means system roots (public
+    CA). Delivered in-band so the Worker needs zero new configuration.
+    RELAY.md Section 5.
+    """
+    def __init__(
+        self,
+        *,
+        server_id: _builtins.str = ...,
+        endpoint: _builtins.str = ...,
+        token: _builtins.str = ...,
+        tls_ca_pem: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["endpoint", b"endpoint", "server_id", b"server_id", "tls_ca_pem", b"tls_ca_pem", "token", b"token"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___TunnelDial: _TypeAlias = TunnelDial  # noqa: Y015
 
 @_typing.final
 class CommandResult(_message.Message):

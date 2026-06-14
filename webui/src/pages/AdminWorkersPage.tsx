@@ -70,10 +70,7 @@ function Loaded({ workers }: { workers: WorkerResponse[] }) {
     onSuccess: (data: DrainResponse | undefined) => {
       const count = data?.servers_stopped ?? 0;
       showToast(
-        t("admin.workers.drained") +
-          (count > 0
-            ? " " + count + t("admin.workers.drainedCountSuffix")
-            : ""),
+        `${t("admin.workers.drained")}${count > 0 ? ` ${count}${t("admin.workers.drainedCountSuffix")}` : ""}`,
         "success",
       );
       queryClient.invalidateQueries({ queryKey: ["workers"] });

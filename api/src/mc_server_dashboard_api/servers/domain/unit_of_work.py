@@ -16,6 +16,9 @@ from types import TracebackType
 from mc_server_dashboard_api.servers.domain.backup_repository import (
     BackupRepository,
 )
+from mc_server_dashboard_api.servers.domain.game_session_repository import (
+    GameSessionRepository,
+)
 from mc_server_dashboard_api.servers.domain.group_repository import GroupRepository
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
@@ -30,6 +33,7 @@ class UnitOfWork(abc.ABC):
     resource_grants: ResourceGrantSweeper
     backups: BackupRepository
     groups: GroupRepository
+    game_sessions: GameSessionRepository
 
     @abc.abstractmethod
     async def __aenter__(self) -> UnitOfWork:

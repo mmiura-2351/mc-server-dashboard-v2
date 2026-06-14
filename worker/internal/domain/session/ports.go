@@ -91,6 +91,15 @@ type Command struct {
 	Path string
 	// Content is the bytes to write for EditFile.
 	Content []byte
+	// TunnelEndpoint is the relay tunnel endpoint to dial for a TunnelDial,
+	// host:port (RELAY.md Section 5).
+	TunnelEndpoint string
+	// TunnelToken is the single-use session token presented to the relay after the
+	// TLS handshake for a TunnelDial (RELAY.md Section 5).
+	TunnelToken string
+	// TunnelCAPEM is the optional PEM CA bundle to verify the relay's tunnel
+	// certificate for a TunnelDial; empty means system roots (RELAY.md Section 5).
+	TunnelCAPEM string
 }
 
 // CommandResult answers a Command. A failure carries an ErrorCode and message;
@@ -304,6 +313,20 @@ type TransferDeadlineSetter interface {
 	// SetTransferDeadline records the bound for one data-plane transfer (snapshot
 	// upload / hydrate download). A non-positive value leaves transfers unbounded.
 	SetTransferDeadline(d time.Duration)
+}
+
+// StatusResyncer is an optional CommandHandler capability: after a successful
+// (re-)register the session asks the handler to re-emit the current state of
+// every instance it still holds (issue #985). On an API restart the worker
+// process stays alive with its servers running, but the API resets their
+// observed state to unknown on boot; without this re-emit they sit at unknown
+// for the full reconciler grace window and the relay treats them as stopped.
+// Re-emitting moves them out of unknown within seconds. A handler that does not
+// implement it simply skips the resync (the prior behavior).
+type StatusResyncer interface {
+	// ResyncStatus re-emits a StatusChange for each currently-held instance. It
+	// must be a no-op when the handler holds no instances (e.g. a fresh process).
+	ResyncStatus()
 }
 
 // Transport is the Port over a single live control-plane stream. One Transport

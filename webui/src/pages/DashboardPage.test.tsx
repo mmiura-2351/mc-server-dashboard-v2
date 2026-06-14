@@ -57,6 +57,7 @@ function server(overrides: Record<string, unknown> = {}) {
     observed_at: null,
     assigned_worker_id: "worker-a",
     config: {},
+    join_hostname: null,
     ...overrides,
   };
 }
@@ -421,5 +422,173 @@ describe("DashboardPage view toggle (#541)", () => {
         `/api/communities/${CID}/servers/s1/start`,
       ),
     );
+  });
+});
+
+describe("DashboardPage join address in server list (issue #982)", () => {
+  it("shows the port badge when join_hostname is null (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ join_hostname: null, game_port: 25565 }),
+    ]);
+    renderPage();
+
+    expect(await screen.findByText(":25565")).toBeInTheDocument();
+  });
+
+  it("shows hostname-only badge (no port) when join_hostname is set (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    ]);
+    renderPage();
+
+    expect(
+      await screen.findByText("survival.relay.example.com"),
+    ).toBeInTheDocument();
+    // Port badge must be hidden when relay is active.
+    expect(screen.queryByText(":25565")).not.toBeInTheDocument();
+  });
+
+  it("table column header is 'Address', not 'Port'", async () => {
+    mockApi.get.mockResolvedValue([server()]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    expect(screen.getByText(t("dashboard.col.address"))).toBeInTheDocument();
+    expect(screen.queryByText(t("dashboard.col.port"))).not.toBeInTheDocument();
+  });
+
+  it("shows port in the address cell when join_hostname is null (table view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ join_hostname: null, game_port: 25565 }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    expect(screen.getByText("25565")).toBeInTheDocument();
+  });
+
+  it("shows hostname in the address cell when join_hostname is set (table view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        join_hostname: "survival.relay.example.com",
+        game_port: 25565,
+      }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    expect(screen.getByText("survival.relay.example.com")).toBeInTheDocument();
+    // Port must not appear when relay is active.
+    expect(screen.queryByText("25565")).not.toBeInTheDocument();
+  });
+
+  it("hostname badge is a clickable button in cards view", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    ]);
+    renderPage();
+
+    const badge = await screen.findByRole("button", {
+      name: "survival.relay.example.com",
+    });
+    expect(badge).toBeInTheDocument();
+    expect(badge.tagName).toBe("BUTTON");
+    expect(badge).toHaveAttribute("title", "survival.relay.example.com");
+  });
+
+  it("clicking hostname badge copies via execCommand and shows Copied! (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ join_hostname: "survival.relay.example.com" }),
+    ]);
+    renderPage();
+    await screen.findByText("survival.relay.example.com");
+
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+
+    fireEvent.click(screen.getByText("survival.relay.example.com"));
+
+    expect(execSpy).toHaveBeenCalledWith("copy");
+    expect(
+      await screen.findByText(t("dashboard.copiedJoinHostname")),
+    ).toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
+
+  it("hostname is a clickable button in table view", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    const btn = screen.getByRole("button", {
+      name: "survival.relay.example.com",
+    });
+    expect(btn).toBeInTheDocument();
+    expect(btn.tagName).toBe("BUTTON");
+  });
+
+  it("clicking hostname copies and shows Copied! in table view", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ join_hostname: "survival.relay.example.com" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+
+    fireEvent.click(screen.getByText("survival.relay.example.com"));
+
+    expect(execSpy).toHaveBeenCalledWith("copy");
+    expect(
+      await screen.findByText(t("dashboard.copiedJoinHostname")),
+    ).toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
+
+  it("port display is not clickable when join_hostname is null (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ join_hostname: null, game_port: 25565 }),
+    ]);
+    renderPage();
+
+    const port = await screen.findByText(":25565");
+    expect(port.tagName).toBe("SPAN");
   });
 });

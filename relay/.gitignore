@@ -1,0 +1,7 @@
+# Test and coverage artifacts.
+*.test
+*.out
+coverage.txt
+
+# Compiled binary from `go build` in the module root.
+/relay

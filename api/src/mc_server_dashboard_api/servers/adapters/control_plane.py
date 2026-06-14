@@ -162,6 +162,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         worker_credential: str | None = None,
         hydrate_timeout_seconds: float | None = None,
         snapshot_timeout_seconds: float | None = None,
+        stop_timeout_seconds: float | None = None,
     ) -> None:
         self._registry = registry
         self._control_plane = control_plane
@@ -181,6 +182,12 @@ class FleetControlPlaneAdapter(ControlPlane):
         # the assignment mid-upload, reopening the stop->re-place race. ``None``
         # keeps the default.
         self._snapshot_timeout_seconds = snapshot_timeout_seconds
+        # The graceful-stop command's worker round-trip gets its own (longer)
+        # command budget (issue #930): the worker's in-container save plus
+        # docker-stop escalation routinely outlasts the general command deadline on
+        # a slow host, and under it the dispatch times out -> 503 -> the assignment
+        # wedges and the stop-leg final snapshot is lost. ``None`` keeps the default.
+        self._stop_timeout_seconds = stop_timeout_seconds
 
     async def place(
         self,
@@ -257,6 +264,16 @@ class FleetControlPlaneAdapter(ControlPlane):
             _fleet_worker(worker_id), str(server_id.value)
         )
 
+    def holds_fresh_working_set(
+        self, *, worker_id: WorkerId, server_id: ServerId, store_generation: int
+    ) -> bool:
+        # Reuse the SAME held >= store predicate the lifecycle skip-hydrate decision
+        # uses (issue #763), so the reconciler's short-grace choice (issue #999) and
+        # the actual hydrate-skip can never diverge. None (nothing held) or a stale
+        # held generation -> hydrate runs -> full grace.
+        held_generation = self.held_generation(worker_id=worker_id, server_id=server_id)
+        return held_generation is not None and held_generation >= store_generation
+
     def increment_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
         self._registry.increment_assignment(
             _fleet_worker(worker_id), str(server_id.value)
@@ -301,7 +318,10 @@ class FleetControlPlaneAdapter(ControlPlane):
         self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
     ) -> CommandOutcome:
         return await self._dispatch(
-            worker_id, server_id, StopServerCommand(force=force)
+            worker_id,
+            server_id,
+            StopServerCommand(force=force),
+            timeout_override=self._stop_timeout_seconds,
         )
 
     async def restart(

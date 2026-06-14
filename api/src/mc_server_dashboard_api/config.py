@@ -163,6 +163,20 @@ class ControlSettings(_Section):
     # stop->re-place race the hold exists to close. Mirrors ``hydrate_timeout_seconds``
     # (#822/#868). A zero/negative deadline would fail every final snapshot.
     snapshot_timeout_seconds: int = Field(default=600, gt=0)
+    # Separate, generous deadline for the STOP command's worker round-trip (issue
+    # #930): a graceful stop does an in-container save (RCON save-all) and the
+    # worker's docker-stop escalation (RCON wait -> SIGTERM grace -> SIGKILL,
+    # ~3x the worker stop grace), which on a slow/CPU-starved host or a large
+    # world routinely exceeds the general 30s ``command_timeout_seconds``. Under
+    # the general deadline the dispatch times out and the API returns 503 for a
+    # stop the worker actually completes, wedging the row at (stopped, stopped,
+    # assigned) until the reconciler's stale-stop arm clears it and silently
+    # losing the stop-leg final snapshot. The stop therefore gets its own budget,
+    # mirroring ``hydrate_timeout_seconds`` (#822) and ``snapshot_timeout_seconds``
+    # (#847). Kept below ``reconciler.grace_seconds`` so the stale-stop arm never
+    # fires while a stop is legitimately in flight. A zero/negative deadline would
+    # fail every stop.
+    stop_timeout_seconds: int = Field(default=600, gt=0)
     worker_credential: str | None = None
     tls: ControlTlsSettings = Field(default_factory=ControlTlsSettings)
 
@@ -294,13 +308,23 @@ class ReconcilerSettings(_Section):
     diverged servers. ``grace_seconds`` is how long a divergence must persist
     before it is acted on, giving the normal in-flight lifecycle path time to
     converge (a mid-launch start reports ``starting``, not a divergence) before the
-    reconciler intervenes. ``backoff_base_seconds`` / ``backoff_max_seconds`` bound
-    the per-server exponential backoff that prevents a persistently failing server
-    from being retried every tick.
+    reconciler intervenes. It is dominated by the hydrate budget because a start
+    re-dispatch is hydrate-then-start and must not race an in-flight original
+    dispatch (#822/#847). ``held_start_grace_seconds`` is the SHORTER grace applied
+    only to a ``redispatch_start`` whose assigned Worker is connected AND already
+    holds a fresh-enough working set, so the start skips hydrate and is command-only
+    (issue #999): the long hydrate-based grace is pure dead waiting there, and the
+    cross-worker duplicate-live-instance race the long grace guards cannot occur on
+    a re-dispatch to the same already-connected Worker (its double-start guard
+    rejects a second live start). All other paths keep the full ``grace_seconds``.
+    ``backoff_base_seconds`` / ``backoff_max_seconds`` bound the per-server
+    exponential backoff that prevents a persistently failing server from being
+    retried every tick.
     """
 
     interval_seconds: int = Field(default=60, gt=0)
     grace_seconds: int = Field(default=660, gt=0)
+    held_start_grace_seconds: int = Field(default=90, gt=0)
     backoff_base_seconds: int = Field(default=30, gt=0)
     backoff_max_seconds: int = Field(default=3600, gt=0)
 
@@ -365,6 +389,45 @@ class PortsSettings(_Section):
         if self.range_start > self.range_end:
             raise ValueError("ports.range_start must be <= ports.range_end")
         return self
+
+
+class RelaySettings(_Section):
+    """Game-ingress relay control surface (CONFIGURATION.md, RELAY.md Section 13).
+
+    ``enabled`` is the master switch (default off, RELAY.md Section 9): it gates
+    serving ``RelayService`` on the gRPC listener, exposing ``join_hostname`` on
+    server responses, and (issue #957) the session prune loop. ``credential`` is
+    the shared secret the relay presents (a separate credential from the Worker's
+    so they rotate independently, RELAY.md Section 6); ``base_domain`` builds
+    ``<slug>.<base_domain>`` for ``join_hostname`` and is returned to the relay on
+    Register. Both are required when ``enabled`` is true, enforced at the edge
+    (app factory) like the Worker credential — declared optional here so a
+    deployment that leaves the relay off need not supply them.
+    ``session_retention_days`` is the ``game_session`` prune window consumed by
+    issue #957; it is parsed and validated here only.
+
+    ``game_port`` / ``tunnel_port`` are the relay container's published host
+    binds (RELAY.md Section 13): the game listener (players join here, fixed at
+    25565 to keep joins port-less) and the Worker dial-back tunnel (25665). When
+    ``enabled``, the allocator excludes any of these that fall inside the
+    assignable game-port range so a server is never assigned a port the relay
+    already holds on the host (issue #1002); they are otherwise unused here.
+    """
+
+    enabled: bool = False
+    credential: str | None = None
+    base_domain: str | None = None
+    game_port: int = Field(default=25565, gt=0, le=65535)
+    tunnel_port: int = Field(default=25665, gt=0, le=65535)
+    # The prune window for game_session rows (RELAY.md Section 8); consumed by
+    # issue #957. A zero/negative window is meaningless (it would prune every row
+    # or none); require a positive number of days.
+    session_retention_days: int = Field(default=90, gt=0)
+
+    # A blank ``${MCD_API_RELAY__CREDENTIAL}`` arrives as "" rather than unset;
+    # collapse it to None so the app factory's fail-fast (relay enabled without a
+    # credential) treats a blank as missing (#943).
+    _blank_credential = field_validator("credential")(_blank_to_none)
 
 
 class WebuiSettings(_Section):
@@ -604,6 +667,7 @@ class Settings(BaseSettings):
     ports: PortsSettings = Field(default_factory=PortsSettings)
     webui: WebuiSettings = Field(default_factory=WebuiSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    relay: RelaySettings = Field(default_factory=RelaySettings)
 
     @classmethod
     def settings_customise_sources(
@@ -639,6 +703,11 @@ class Settings(BaseSettings):
         for secret_key in ("access_key", "secret_key"):
             if storage["object"][secret_key] is not None:
                 storage["object"][secret_key] = _MASK
+        relay = self.relay.model_dump()
+        # The relay credential is a secret (RELAY.md Section 6); mask it whenever
+        # present. ``None`` (relay disabled) is not a secret.
+        if relay["credential"] is not None:
+            relay["credential"] = _MASK
         return {
             "server": self.server.model_dump(),
             "control": control,
@@ -651,6 +720,7 @@ class Settings(BaseSettings):
             "ports": self.ports.model_dump(),
             "webui": self.webui.model_dump(),
             "auth": auth,
+            "relay": relay,
         }
 
 

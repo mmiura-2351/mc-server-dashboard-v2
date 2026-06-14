@@ -26,25 +26,25 @@ from google.protobuf import duration_pb2 as google_dot_protobuf_dot_duration__pb
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n(mcsd/controlplane/v1/control_plane.proto\x12\x14mcsd.controlplane.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x83\x02\n\rWorkerMessage\x12\x16\n\x0e\x63orrelation_id\x18\x01 \x01(\t\x12.\n\nemitted_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x32\n\x08register\x18\x03 \x01(\x0b\x32\x1e.mcsd.controlplane.v1.RegisterH\x00\x12=\n\x0e\x63ommand_result\x18\x04 \x01(\x0b\x32#.mcsd.controlplane.v1.CommandResultH\x00\x12,\n\x05\x65vent\x18\x05 \x01(\x0b\x32\x1b.mcsd.controlplane.v1.EventH\x00\x42\t\n\x07payload\"\xd0\x01\n\nApiMessage\x12\x16\n\x0e\x63orrelation_id\x18\x01 \x01(\t\x12+\n\x07sent_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x39\n\x0cregister_ack\x18\x03 \x01(\x0b\x32!.mcsd.controlplane.v1.RegisterAckH\x00\x12\x37\n\x0b\x61pi_command\x18\x04 \x01(\x0b\x32 .mcsd.controlplane.v1.ApiCommandH\x00\x42\t\n\x07payload\"\xad\x01\n\x08Register\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x16\n\x0eworker_version\x18\x02 \x01(\t\x12>\n\x0c\x63\x61pabilities\x18\x03 \x01(\x0b\x32(.mcsd.controlplane.v1.WorkerCapabilities\x12\x36\n\x0cheld_servers\x18\x04 \x03(\x0b\x32 .mcsd.controlplane.v1.HeldServer\"3\n\nHeldServer\x12\x11\n\tserver_id\x18\x01 \x01(\t\x12\x12\n\ngeneration\x18\x02 \x01(\x04\"\x9d\x01\n\x12WorkerCapabilities\x12:\n\x07\x64rivers\x18\x01 \x03(\x0e\x32).mcsd.controlplane.v1.ExecutionDriverKind\x12\x13\n\x0bmax_servers\x18\x02 \x01(\r\x12\x36\n\tresources\x18\x03 \x01(\x0b\x32#.mcsd.controlplane.v1.HostResources\"8\n\rHostResources\x12\x11\n\tcpu_cores\x18\x01 \x01(\r\x12\x14\n\x0cmemory_bytes\x18\x02 \x01(\x04\"\xa6\x01\n\x0bRegisterAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x35\n\x12heartbeat_interval\x18\x02 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x18\n\x10rejection_reason\x18\x03 \x01(\t\x12\x34\n\x11transfer_deadline\x18\x04 \x01(\x0b\x32\x19.google.protobuf.Duration\"\xb0\x04\n\nApiCommand\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x11\n\tserver_id\x18\x02 \x01(\t\x12\x32\n\x05start\x18\x03 \x01(\x0b\x32!.mcsd.controlplane.v1.StartServerH\x00\x12\x30\n\x04stop\x18\x04 \x01(\x0b\x32 .mcsd.controlplane.v1.StopServerH\x00\x12\x36\n\x07restart\x18\x05 \x01(\x0b\x32#.mcsd.controlplane.v1.RestartServerH\x00\x12=\n\x0eserver_command\x18\x06 \x01(\x0b\x32#.mcsd.controlplane.v1.ServerCommandH\x00\x12\x37\n\x07hydrate\x18\x07 \x01(\x0b\x32$.mcsd.controlplane.v1.HydrateTriggerH\x00\x12\x39\n\x08snapshot\x18\x08 \x01(\x0b\x32%.mcsd.controlplane.v1.SnapshotTriggerH\x00\x12\x33\n\tread_file\x18\t \x01(\x0b\x32\x1e.mcsd.controlplane.v1.ReadFileH\x00\x12\x33\n\tedit_file\x18\n \x01(\x0b\x32\x1e.mcsd.controlplane.v1.EditFileH\x00\x12\x35\n\nlist_files\x18\x0b \x01(\x0b\x32\x1f.mcsd.controlplane.v1.ListFilesH\x00\x42\t\n\x07\x63ommand\"\xdf\x01\n\x0bStartServer\x12\x39\n\x06\x64river\x18\x01 \x01(\x0e\x32).mcsd.controlplane.v1.ExecutionDriverKind\x12\x13\n\x0bjar_relpath\x18\x02 \x01(\t\x12\x19\n\x11minecraft_version\x18\x03 \x01(\t\x12\x35\n\x0blaunch_mode\x18\x04 \x01(\x0e\x32 .mcsd.controlplane.v1.LaunchMode\x12\x1a\n\x12memory_limit_bytes\x18\x05 \x01(\x04\x12\x12\n\ncpu_millis\x18\x06 \x01(\r\"\x1b\n\nStopServer\x12\r\n\x05\x66orce\x18\x01 \x01(\x08\"\x0f\n\rRestartServer\"\x1d\n\rServerCommand\x12\x0c\n\x04line\x18\x01 \x01(\t\">\n\x0eHydrateTrigger\x12\x14\n\x0ctransfer_url\x18\x01 \x01(\t\x12\x16\n\x0etransfer_token\x18\x02 \x01(\t\"?\n\x0fSnapshotTrigger\x12\x14\n\x0ctransfer_url\x18\x01 \x01(\t\x12\x16\n\x0etransfer_token\x18\x02 \x01(\t\"\x18\n\x08ReadFile\x12\x0c\n\x04path\x18\x01 \x01(\t\")\n\x08\x45\x64itFile\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\x0c\"\x19\n\tListFiles\x12\x0c\n\x04path\x18\x01 \x01(\t\"\xca\x01\n\rCommandResult\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x31\n\x05\x65rror\x18\x02 \x01(\x0b\x32\".mcsd.controlplane.v1.CommandError\x12\x18\n\x0e\x63ommand_output\x18\x03 \x01(\tH\x00\x12\x16\n\x0c\x66ile_content\x18\x04 \x01(\x0cH\x00\x12\x39\n\x0c\x66ile_listing\x18\x05 \x01(\x0b\x32!.mcsd.controlplane.v1.FileListingH\x00\x42\x08\n\x06result\"R\n\x0b\x46ileListing\x12\x30\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1f.mcsd.controlplane.v1.FileEntry\x12\x11\n\ttruncated\x18\x02 \x01(\x08\"7\n\tFileEntry\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0e\n\x06is_dir\x18\x02 \x01(\x08\x12\x0c\n\x04size\x18\x03 \x01(\x04\"\x99\x01\n\x0c\x43ommandError\x12\x34\n\x04\x63ode\x18\x01 \x01(\x0e\x32&.mcsd.controlplane.v1.CommandErrorCode\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x42\n\x12\x66ile_access_reason\x18\x03 \x01(\x0e\x32&.mcsd.controlplane.v1.FileAccessReason\"\xfb\x01\n\x05\x45vent\x12\x11\n\tserver_id\x18\x01 \x01(\t\x12;\n\rstatus_change\x18\x02 \x01(\x0b\x32\".mcsd.controlplane.v1.StatusChangeH\x00\x12\x31\n\x08log_line\x18\x03 \x01(\x0b\x32\x1d.mcsd.controlplane.v1.LogLineH\x00\x12\x30\n\x07metrics\x18\x04 \x01(\x0b\x32\x1d.mcsd.controlplane.v1.MetricsH\x00\x12\x34\n\theartbeat\x18\x05 \x01(\x0b\x32\x1f.mcsd.controlplane.v1.HeartbeatH\x00\x42\x07\n\x05\x65vent\"P\n\x0cStatusChange\x12\x30\n\x05state\x18\x01 \x01(\x0e\x32!.mcsd.controlplane.v1.ServerState\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\"H\n\x07LogLine\x12\x0c\n\x04line\x18\x01 \x01(\t\x12/\n\x06stream\x18\x02 \x01(\x0e\x32\x1f.mcsd.controlplane.v1.LogStream\"I\n\x07Metrics\x12\x12\n\ncpu_millis\x18\x01 \x01(\r\x12\x14\n\x0cmemory_bytes\x18\x02 \x01(\x04\x12\x14\n\x0cplayer_count\x18\x03 \x01(\r\"\x0b\n\tHeartbeat*\x89\x01\n\x13\x45xecutionDriverKind\x12%\n!EXECUTION_DRIVER_KIND_UNSPECIFIED\x10\x00\x12&\n\"EXECUTION_DRIVER_KIND_HOST_PROCESS\x10\x01\x12#\n\x1f\x45XECUTION_DRIVER_KIND_CONTAINER\x10\x02*^\n\nLaunchMode\x12\x1b\n\x17LAUNCH_MODE_UNSPECIFIED\x10\x00\x12\x13\n\x0fLAUNCH_MODE_JAR\x10\x01\x12\x1e\n\x1aLAUNCH_MODE_FORGE_ARGSFILE\x10\x02*\xd7\x01\n\x10\x46ileAccessReason\x12\"\n\x1e\x46ILE_ACCESS_REASON_UNSPECIFIED\x10\x00\x12%\n!FILE_ACCESS_REASON_IS_A_DIRECTORY\x10\x01\x12&\n\"FILE_ACCESS_REASON_NOT_A_DIRECTORY\x10\x02\x12&\n\"FILE_ACCESS_REASON_SYMLINK_REFUSED\x10\x03\x12(\n$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\x8d\x03\n\x10\x43ommandErrorCode\x12\"\n\x1e\x43OMMAND_ERROR_CODE_UNSPECIFIED\x10\x00\x12\'\n#COMMAND_ERROR_CODE_SERVER_NOT_FOUND\x10\x01\x12$\n COMMAND_ERROR_CODE_INVALID_STATE\x10\x02\x12)\n%COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE\x10\x03\x12)\n%COMMAND_ERROR_CODE_FILE_ACCESS_DENIED\x10\x04\x12&\n\"COMMAND_ERROR_CODE_TRANSFER_FAILED\x10\x05\x12\x1f\n\x1b\x43OMMAND_ERROR_CODE_INTERNAL\x10\x06\x12$\n COMMAND_ERROR_CODE_PORT_CONFLICT\x10\x07\x12$\n COMMAND_ERROR_CODE_IMAGE_MISSING\x10\x08\x12\x1b\n\x17\x43OMMAND_ERROR_CODE_BUSY\x10\t*\xcc\x01\n\x0bServerState\x12\x1c\n\x18SERVER_STATE_UNSPECIFIED\x10\x00\x12\x19\n\x15SERVER_STATE_STARTING\x10\x01\x12\x18\n\x14SERVER_STATE_RUNNING\x10\x02\x12\x19\n\x15SERVER_STATE_STOPPING\x10\x03\x12\x18\n\x14SERVER_STATE_STOPPED\x10\x04\x12\x1b\n\x17SERVER_STATE_RESTARTING\x10\x05\x12\x18\n\x14SERVER_STATE_CRASHED\x10\x06*U\n\tLogStream\x12\x1a\n\x16LOG_STREAM_UNSPECIFIED\x10\x00\x12\x15\n\x11LOG_STREAM_STDOUT\x10\x01\x12\x15\n\x11LOG_STREAM_STDERR\x10\x02\x32\x65\n\rWorkerService\x12T\n\x07Session\x12#.mcsd.controlplane.v1.WorkerMessage\x1a .mcsd.controlplane.v1.ApiMessage(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n(mcsd/controlplane/v1/control_plane.proto\x12\x14mcsd.controlplane.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x83\x02\n\rWorkerMessage\x12\x16\n\x0e\x63orrelation_id\x18\x01 \x01(\t\x12.\n\nemitted_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x32\n\x08register\x18\x03 \x01(\x0b\x32\x1e.mcsd.controlplane.v1.RegisterH\x00\x12=\n\x0e\x63ommand_result\x18\x04 \x01(\x0b\x32#.mcsd.controlplane.v1.CommandResultH\x00\x12,\n\x05\x65vent\x18\x05 \x01(\x0b\x32\x1b.mcsd.controlplane.v1.EventH\x00\x42\t\n\x07payload\"\xd0\x01\n\nApiMessage\x12\x16\n\x0e\x63orrelation_id\x18\x01 \x01(\t\x12+\n\x07sent_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12\x39\n\x0cregister_ack\x18\x03 \x01(\x0b\x32!.mcsd.controlplane.v1.RegisterAckH\x00\x12\x37\n\x0b\x61pi_command\x18\x04 \x01(\x0b\x32 .mcsd.controlplane.v1.ApiCommandH\x00\x42\t\n\x07payload\"\xad\x01\n\x08Register\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x16\n\x0eworker_version\x18\x02 \x01(\t\x12>\n\x0c\x63\x61pabilities\x18\x03 \x01(\x0b\x32(.mcsd.controlplane.v1.WorkerCapabilities\x12\x36\n\x0cheld_servers\x18\x04 \x03(\x0b\x32 .mcsd.controlplane.v1.HeldServer\"3\n\nHeldServer\x12\x11\n\tserver_id\x18\x01 \x01(\t\x12\x12\n\ngeneration\x18\x02 \x01(\x04\"\x9d\x01\n\x12WorkerCapabilities\x12:\n\x07\x64rivers\x18\x01 \x03(\x0e\x32).mcsd.controlplane.v1.ExecutionDriverKind\x12\x13\n\x0bmax_servers\x18\x02 \x01(\r\x12\x36\n\tresources\x18\x03 \x01(\x0b\x32#.mcsd.controlplane.v1.HostResources\"8\n\rHostResources\x12\x11\n\tcpu_cores\x18\x01 \x01(\r\x12\x14\n\x0cmemory_bytes\x18\x02 \x01(\x04\"\xa6\x01\n\x0bRegisterAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x35\n\x12heartbeat_interval\x18\x02 \x01(\x0b\x32\x19.google.protobuf.Duration\x12\x18\n\x10rejection_reason\x18\x03 \x01(\t\x12\x34\n\x11transfer_deadline\x18\x04 \x01(\x0b\x32\x19.google.protobuf.Duration\"\xe9\x04\n\nApiCommand\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x11\n\tserver_id\x18\x02 \x01(\t\x12\x32\n\x05start\x18\x03 \x01(\x0b\x32!.mcsd.controlplane.v1.StartServerH\x00\x12\x30\n\x04stop\x18\x04 \x01(\x0b\x32 .mcsd.controlplane.v1.StopServerH\x00\x12\x36\n\x07restart\x18\x05 \x01(\x0b\x32#.mcsd.controlplane.v1.RestartServerH\x00\x12=\n\x0eserver_command\x18\x06 \x01(\x0b\x32#.mcsd.controlplane.v1.ServerCommandH\x00\x12\x37\n\x07hydrate\x18\x07 \x01(\x0b\x32$.mcsd.controlplane.v1.HydrateTriggerH\x00\x12\x39\n\x08snapshot\x18\x08 \x01(\x0b\x32%.mcsd.controlplane.v1.SnapshotTriggerH\x00\x12\x33\n\tread_file\x18\t \x01(\x0b\x32\x1e.mcsd.controlplane.v1.ReadFileH\x00\x12\x33\n\tedit_file\x18\n \x01(\x0b\x32\x1e.mcsd.controlplane.v1.EditFileH\x00\x12\x35\n\nlist_files\x18\x0b \x01(\x0b\x32\x1f.mcsd.controlplane.v1.ListFilesH\x00\x12\x37\n\x0btunnel_dial\x18\x0c \x01(\x0b\x32 .mcsd.controlplane.v1.TunnelDialH\x00\x42\t\n\x07\x63ommand\"\xdf\x01\n\x0bStartServer\x12\x39\n\x06\x64river\x18\x01 \x01(\x0e\x32).mcsd.controlplane.v1.ExecutionDriverKind\x12\x13\n\x0bjar_relpath\x18\x02 \x01(\t\x12\x19\n\x11minecraft_version\x18\x03 \x01(\t\x12\x35\n\x0blaunch_mode\x18\x04 \x01(\x0e\x32 .mcsd.controlplane.v1.LaunchMode\x12\x1a\n\x12memory_limit_bytes\x18\x05 \x01(\x04\x12\x12\n\ncpu_millis\x18\x06 \x01(\r\"\x1b\n\nStopServer\x12\r\n\x05\x66orce\x18\x01 \x01(\x08\"\x0f\n\rRestartServer\"\x1d\n\rServerCommand\x12\x0c\n\x04line\x18\x01 \x01(\t\">\n\x0eHydrateTrigger\x12\x14\n\x0ctransfer_url\x18\x01 \x01(\t\x12\x16\n\x0etransfer_token\x18\x02 \x01(\t\"?\n\x0fSnapshotTrigger\x12\x14\n\x0ctransfer_url\x18\x01 \x01(\t\x12\x16\n\x0etransfer_token\x18\x02 \x01(\t\"\x18\n\x08ReadFile\x12\x0c\n\x04path\x18\x01 \x01(\t\")\n\x08\x45\x64itFile\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\x0c\"\x19\n\tListFiles\x12\x0c\n\x04path\x18\x01 \x01(\t\"T\n\nTunnelDial\x12\x11\n\tserver_id\x18\x01 \x01(\t\x12\x10\n\x08\x65ndpoint\x18\x02 \x01(\t\x12\r\n\x05token\x18\x03 \x01(\t\x12\x12\n\ntls_ca_pem\x18\x04 \x01(\t\"\xca\x01\n\rCommandResult\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x31\n\x05\x65rror\x18\x02 \x01(\x0b\x32\".mcsd.controlplane.v1.CommandError\x12\x18\n\x0e\x63ommand_output\x18\x03 \x01(\tH\x00\x12\x16\n\x0c\x66ile_content\x18\x04 \x01(\x0cH\x00\x12\x39\n\x0c\x66ile_listing\x18\x05 \x01(\x0b\x32!.mcsd.controlplane.v1.FileListingH\x00\x42\x08\n\x06result\"R\n\x0b\x46ileListing\x12\x30\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1f.mcsd.controlplane.v1.FileEntry\x12\x11\n\ttruncated\x18\x02 \x01(\x08\"7\n\tFileEntry\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0e\n\x06is_dir\x18\x02 \x01(\x08\x12\x0c\n\x04size\x18\x03 \x01(\x04\"\x99\x01\n\x0c\x43ommandError\x12\x34\n\x04\x63ode\x18\x01 \x01(\x0e\x32&.mcsd.controlplane.v1.CommandErrorCode\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x42\n\x12\x66ile_access_reason\x18\x03 \x01(\x0e\x32&.mcsd.controlplane.v1.FileAccessReason\"\xfb\x01\n\x05\x45vent\x12\x11\n\tserver_id\x18\x01 \x01(\t\x12;\n\rstatus_change\x18\x02 \x01(\x0b\x32\".mcsd.controlplane.v1.StatusChangeH\x00\x12\x31\n\x08log_line\x18\x03 \x01(\x0b\x32\x1d.mcsd.controlplane.v1.LogLineH\x00\x12\x30\n\x07metrics\x18\x04 \x01(\x0b\x32\x1d.mcsd.controlplane.v1.MetricsH\x00\x12\x34\n\theartbeat\x18\x05 \x01(\x0b\x32\x1f.mcsd.controlplane.v1.HeartbeatH\x00\x42\x07\n\x05\x65vent\"P\n\x0cStatusChange\x12\x30\n\x05state\x18\x01 \x01(\x0e\x32!.mcsd.controlplane.v1.ServerState\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\"H\n\x07LogLine\x12\x0c\n\x04line\x18\x01 \x01(\t\x12/\n\x06stream\x18\x02 \x01(\x0e\x32\x1f.mcsd.controlplane.v1.LogStream\"I\n\x07Metrics\x12\x12\n\ncpu_millis\x18\x01 \x01(\r\x12\x14\n\x0cmemory_bytes\x18\x02 \x01(\x04\x12\x14\n\x0cplayer_count\x18\x03 \x01(\r\"\x0b\n\tHeartbeat*\x89\x01\n\x13\x45xecutionDriverKind\x12%\n!EXECUTION_DRIVER_KIND_UNSPECIFIED\x10\x00\x12&\n\"EXECUTION_DRIVER_KIND_HOST_PROCESS\x10\x01\x12#\n\x1f\x45XECUTION_DRIVER_KIND_CONTAINER\x10\x02*^\n\nLaunchMode\x12\x1b\n\x17LAUNCH_MODE_UNSPECIFIED\x10\x00\x12\x13\n\x0fLAUNCH_MODE_JAR\x10\x01\x12\x1e\n\x1aLAUNCH_MODE_FORGE_ARGSFILE\x10\x02*\xd7\x01\n\x10\x46ileAccessReason\x12\"\n\x1e\x46ILE_ACCESS_REASON_UNSPECIFIED\x10\x00\x12%\n!FILE_ACCESS_REASON_IS_A_DIRECTORY\x10\x01\x12&\n\"FILE_ACCESS_REASON_NOT_A_DIRECTORY\x10\x02\x12&\n\"FILE_ACCESS_REASON_SYMLINK_REFUSED\x10\x03\x12(\n$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\x8d\x03\n\x10\x43ommandErrorCode\x12\"\n\x1e\x43OMMAND_ERROR_CODE_UNSPECIFIED\x10\x00\x12\'\n#COMMAND_ERROR_CODE_SERVER_NOT_FOUND\x10\x01\x12$\n COMMAND_ERROR_CODE_INVALID_STATE\x10\x02\x12)\n%COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE\x10\x03\x12)\n%COMMAND_ERROR_CODE_FILE_ACCESS_DENIED\x10\x04\x12&\n\"COMMAND_ERROR_CODE_TRANSFER_FAILED\x10\x05\x12\x1f\n\x1b\x43OMMAND_ERROR_CODE_INTERNAL\x10\x06\x12$\n COMMAND_ERROR_CODE_PORT_CONFLICT\x10\x07\x12$\n COMMAND_ERROR_CODE_IMAGE_MISSING\x10\x08\x12\x1b\n\x17\x43OMMAND_ERROR_CODE_BUSY\x10\t*\xcc\x01\n\x0bServerState\x12\x1c\n\x18SERVER_STATE_UNSPECIFIED\x10\x00\x12\x19\n\x15SERVER_STATE_STARTING\x10\x01\x12\x18\n\x14SERVER_STATE_RUNNING\x10\x02\x12\x19\n\x15SERVER_STATE_STOPPING\x10\x03\x12\x18\n\x14SERVER_STATE_STOPPED\x10\x04\x12\x1b\n\x17SERVER_STATE_RESTARTING\x10\x05\x12\x18\n\x14SERVER_STATE_CRASHED\x10\x06*U\n\tLogStream\x12\x1a\n\x16LOG_STREAM_UNSPECIFIED\x10\x00\x12\x15\n\x11LOG_STREAM_STDOUT\x10\x01\x12\x15\n\x11LOG_STREAM_STDERR\x10\x02\x32\x65\n\rWorkerService\x12T\n\x07Session\x12#.mcsd.controlplane.v1.WorkerMessage\x1a .mcsd.controlplane.v1.ApiMessage(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'mcsd.controlplane.v1.control_plane_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_EXECUTIONDRIVERKIND']._serialized_start=3312
-  _globals['_EXECUTIONDRIVERKIND']._serialized_end=3449
-  _globals['_LAUNCHMODE']._serialized_start=3451
-  _globals['_LAUNCHMODE']._serialized_end=3545
-  _globals['_FILEACCESSREASON']._serialized_start=3548
-  _globals['_FILEACCESSREASON']._serialized_end=3763
-  _globals['_COMMANDERRORCODE']._serialized_start=3766
-  _globals['_COMMANDERRORCODE']._serialized_end=4163
-  _globals['_SERVERSTATE']._serialized_start=4166
-  _globals['_SERVERSTATE']._serialized_end=4370
-  _globals['_LOGSTREAM']._serialized_start=4372
-  _globals['_LOGSTREAM']._serialized_end=4457
+  _globals['_EXECUTIONDRIVERKIND']._serialized_start=3455
+  _globals['_EXECUTIONDRIVERKIND']._serialized_end=3592
+  _globals['_LAUNCHMODE']._serialized_start=3594
+  _globals['_LAUNCHMODE']._serialized_end=3688
+  _globals['_FILEACCESSREASON']._serialized_start=3691
+  _globals['_FILEACCESSREASON']._serialized_end=3906
+  _globals['_COMMANDERRORCODE']._serialized_start=3909
+  _globals['_COMMANDERRORCODE']._serialized_end=4306
+  _globals['_SERVERSTATE']._serialized_start=4309
+  _globals['_SERVERSTATE']._serialized_end=4513
+  _globals['_LOGSTREAM']._serialized_start=4515
+  _globals['_LOGSTREAM']._serialized_end=4600
   _globals['_WORKERMESSAGE']._serialized_start=132
   _globals['_WORKERMESSAGE']._serialized_end=391
   _globals['_APIMESSAGE']._serialized_start=394
@@ -60,43 +60,45 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_REGISTERACK']._serialized_start=1052
   _globals['_REGISTERACK']._serialized_end=1218
   _globals['_APICOMMAND']._serialized_start=1221
-  _globals['_APICOMMAND']._serialized_end=1781
-  _globals['_STARTSERVER']._serialized_start=1784
-  _globals['_STARTSERVER']._serialized_end=2007
-  _globals['_STOPSERVER']._serialized_start=2009
-  _globals['_STOPSERVER']._serialized_end=2036
-  _globals['_RESTARTSERVER']._serialized_start=2038
-  _globals['_RESTARTSERVER']._serialized_end=2053
-  _globals['_SERVERCOMMAND']._serialized_start=2055
-  _globals['_SERVERCOMMAND']._serialized_end=2084
-  _globals['_HYDRATETRIGGER']._serialized_start=2086
-  _globals['_HYDRATETRIGGER']._serialized_end=2148
-  _globals['_SNAPSHOTTRIGGER']._serialized_start=2150
-  _globals['_SNAPSHOTTRIGGER']._serialized_end=2213
-  _globals['_READFILE']._serialized_start=2215
-  _globals['_READFILE']._serialized_end=2239
-  _globals['_EDITFILE']._serialized_start=2241
-  _globals['_EDITFILE']._serialized_end=2282
-  _globals['_LISTFILES']._serialized_start=2284
-  _globals['_LISTFILES']._serialized_end=2309
-  _globals['_COMMANDRESULT']._serialized_start=2312
-  _globals['_COMMANDRESULT']._serialized_end=2514
-  _globals['_FILELISTING']._serialized_start=2516
-  _globals['_FILELISTING']._serialized_end=2598
-  _globals['_FILEENTRY']._serialized_start=2600
-  _globals['_FILEENTRY']._serialized_end=2655
-  _globals['_COMMANDERROR']._serialized_start=2658
-  _globals['_COMMANDERROR']._serialized_end=2811
-  _globals['_EVENT']._serialized_start=2814
-  _globals['_EVENT']._serialized_end=3065
-  _globals['_STATUSCHANGE']._serialized_start=3067
-  _globals['_STATUSCHANGE']._serialized_end=3147
-  _globals['_LOGLINE']._serialized_start=3149
-  _globals['_LOGLINE']._serialized_end=3221
-  _globals['_METRICS']._serialized_start=3223
-  _globals['_METRICS']._serialized_end=3296
-  _globals['_HEARTBEAT']._serialized_start=3298
-  _globals['_HEARTBEAT']._serialized_end=3309
-  _globals['_WORKERSERVICE']._serialized_start=4459
-  _globals['_WORKERSERVICE']._serialized_end=4560
+  _globals['_APICOMMAND']._serialized_end=1838
+  _globals['_STARTSERVER']._serialized_start=1841
+  _globals['_STARTSERVER']._serialized_end=2064
+  _globals['_STOPSERVER']._serialized_start=2066
+  _globals['_STOPSERVER']._serialized_end=2093
+  _globals['_RESTARTSERVER']._serialized_start=2095
+  _globals['_RESTARTSERVER']._serialized_end=2110
+  _globals['_SERVERCOMMAND']._serialized_start=2112
+  _globals['_SERVERCOMMAND']._serialized_end=2141
+  _globals['_HYDRATETRIGGER']._serialized_start=2143
+  _globals['_HYDRATETRIGGER']._serialized_end=2205
+  _globals['_SNAPSHOTTRIGGER']._serialized_start=2207
+  _globals['_SNAPSHOTTRIGGER']._serialized_end=2270
+  _globals['_READFILE']._serialized_start=2272
+  _globals['_READFILE']._serialized_end=2296
+  _globals['_EDITFILE']._serialized_start=2298
+  _globals['_EDITFILE']._serialized_end=2339
+  _globals['_LISTFILES']._serialized_start=2341
+  _globals['_LISTFILES']._serialized_end=2366
+  _globals['_TUNNELDIAL']._serialized_start=2368
+  _globals['_TUNNELDIAL']._serialized_end=2452
+  _globals['_COMMANDRESULT']._serialized_start=2455
+  _globals['_COMMANDRESULT']._serialized_end=2657
+  _globals['_FILELISTING']._serialized_start=2659
+  _globals['_FILELISTING']._serialized_end=2741
+  _globals['_FILEENTRY']._serialized_start=2743
+  _globals['_FILEENTRY']._serialized_end=2798
+  _globals['_COMMANDERROR']._serialized_start=2801
+  _globals['_COMMANDERROR']._serialized_end=2954
+  _globals['_EVENT']._serialized_start=2957
+  _globals['_EVENT']._serialized_end=3208
+  _globals['_STATUSCHANGE']._serialized_start=3210
+  _globals['_STATUSCHANGE']._serialized_end=3290
+  _globals['_LOGLINE']._serialized_start=3292
+  _globals['_LOGLINE']._serialized_end=3364
+  _globals['_METRICS']._serialized_start=3366
+  _globals['_METRICS']._serialized_end=3439
+  _globals['_HEARTBEAT']._serialized_start=3441
+  _globals['_HEARTBEAT']._serialized_end=3452
+  _globals['_WORKERSERVICE']._serialized_start=4602
+  _globals['_WORKERSERVICE']._serialized_end=4703
 # @@protoc_insertion_point(module_scope)

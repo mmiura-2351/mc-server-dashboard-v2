@@ -62,6 +62,23 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def list_slugs(self) -> set[str]:
+        """Return all slugs currently taken across all servers (issue #955).
+
+        Deployment-wide (not community-scoped): a slug is unique across every
+        server. Used by create to generate a unique slug and by the rename path
+        to check availability. Empty slugs (the entity default) are excluded.
+        """
+
+    @abc.abstractmethod
+    async def get_by_slug(self, slug: str) -> "Server | None":
+        """Return the server with the given slug, or ``None`` if absent (issue #955).
+
+        Used by the rename path to detect uniqueness collisions before the DB
+        constraint fires. Deployment-wide (slugs are globally unique).
+        """
+
+    @abc.abstractmethod
     async def list_ids_missing_game_port(self) -> list[ServerId]:
         """Return the ids of servers with no tracked game port (issue #310).
 

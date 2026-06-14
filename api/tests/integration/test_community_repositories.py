@@ -93,12 +93,17 @@ async def _insert_server(
             text(
                 "INSERT INTO server "
                 "(id, community_id, name, mc_edition, mc_version, server_type, "
-                "execution_backend, config, desired_state, observed_state, "
+                "execution_backend, config, slug, desired_state, observed_state, "
                 "created_at, updated_at) VALUES "
                 "(:id, :cid, :name, 'java', '1.21', 'vanilla', 'container', "
-                "'{}'::jsonb, 'stopped', 'stopped', now(), now())"
+                "'{}'::jsonb, :slug, 'stopped', 'stopped', now(), now())"
             ),
-            {"id": server_id, "cid": community_id.value, "name": f"srv-{server_id}"},
+            {
+                "id": server_id,
+                "cid": community_id.value,
+                "name": f"srv-{server_id}",
+                "slug": f"srv-{str(server_id)[:8]}-00",
+            },
         )
 
 

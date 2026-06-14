@@ -52,6 +52,10 @@ COMMUNITY_PERMISSIONS: frozenset[Permission] = frozenset(
         "community:update",
         "community:delete",
         "audit:read",
+        # Read a server's recorded game sessions (relay moderation surface,
+        # RELAY.md Section 8). Player IPs are PII, so this gates the sessions
+        # endpoint separately from server:read.
+        "session:read",
     )
 )
 

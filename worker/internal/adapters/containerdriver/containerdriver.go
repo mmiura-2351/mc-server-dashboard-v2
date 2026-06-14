@@ -232,6 +232,24 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 // container-name DNS resolves it, so RCON is reached over the network rather than
 // the unreachable host loopback (issue #218).
 func (d *Driver) RconHost(serverID string) string {
+	return d.networkHost(serverID)
+}
+
+// GameHost returns the host the relay tunnel dials serverID's game port at. Like
+// RconHost it is empty when no network is configured (the tunnel falls back to the
+// published-port loopback) and the container name when a user-defined network is
+// configured: the worker process is itself a container on that network, so the
+// server's game port is reachable at the container name over the network, not at
+// the worker's own loopback where the host publication does not exist (issue #979).
+func (d *Driver) GameHost(serverID string) string {
+	return d.networkHost(serverID)
+}
+
+// networkHost is the single decision RconHost and GameHost share: empty with no
+// network (caller dials the host loopback), the container name over the
+// user-defined network otherwise, so the RCON and tunnel dial hosts can never
+// drift (issues #218, #979).
+func (d *Driver) networkHost(serverID string) string {
 	if d.network == "" {
 		return ""
 	}
@@ -1020,7 +1038,7 @@ func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) 
 // (which SIGTERMs then SIGKILLs after stopTimeout inside the daemon), then a
 // direct `docker kill`; a forced stop skips the RCON step. Any terminal state
 // makes Stop a prompt no-op success.
-func (i *instance) Stop(ctx context.Context, graceful bool) error {
+func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
 	i.mu.Lock()
 	if i.stopping || isTerminal(i.state) {
 		i.mu.Unlock()
@@ -1060,12 +1078,35 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.stopDeadline())
 	defer cancel()
 
-	if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
-		return nil
+	// Always flush before stop on the graceful path (#1007/#1008): MC's own
+	// shutdown save (via RCON "stop") does NOT reliably flush dirty region
+	// chunks when a player was connected — observed on MC 26.1.2 with
+	// relay/tunnel connections. The flush (RCON save-all + settleWorkingSet)
+	// ensures chunks are on disk BEFORE the process terminates.
+	// Run on a detached context so it does not consume the stopDeadline.
+	//
+	// When the flush succeeds (returns true), RCON "stop" and docker stop
+	// (SIGTERM) are SKIPPED: both trigger MC's own shutdown save, which
+	// re-writes ALL loaded region files. If that save is interrupted by a kill
+	// (the MC 26.1.2 shutdown-hang observed with relay/tunnel connections), the
+	// half-written regions overwrite the safely-flushed data and corrupt the
+	// post-stop snapshot — the root cause of the world-rollback bug. SIGKILL
+	// cannot be intercepted, so the flushed files stay intact.
+	flushed := false
+	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
+		flushCtx, flushCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 90*time.Second)
+		flushed = preFallback[0](flushCtx)
+		flushCancel()
 	}
 
-	if err := i.docker.Stop(stopCtx, id, i.stopTimeout); err == nil && i.waitExit(stopCtx, i.stopTimeout) {
-		return nil
+	if !flushed {
+		if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
+			return nil
+		}
+
+		if err := i.docker.Stop(stopCtx, id, i.stopTimeout); err == nil && i.waitExit(stopCtx, i.stopTimeout) {
+			return nil
+		}
 	}
 
 	// The stop did not confirm the container's exit within the stop timeout, so it is
@@ -1077,7 +1118,10 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 	// graceful path actually attempted (and timed out) a clean shutdown, while a
 	// forced stop (graceful=false) skips RCON/docker-stop by design and kills
 	// directly, so "graceful stop timed out" would misdescribe it.
-	if graceful {
+	if flushed {
+		i.logger.Info("flush succeeded; terminating container",
+			"server_id", i.spec.ServerID)
+	} else if graceful {
 		i.logger.Warn("graceful stop timed out; escalating to kill",
 			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
 	} else {
@@ -1085,7 +1129,13 @@ func (i *instance) Stop(ctx context.Context, graceful bool) error {
 			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
 	}
 
-	if err := i.docker.Kill(stopCtx, id); err != nil {
+	// Use a detached context for the kill call so it is never starved by
+	// the stopDeadline — a kill MUST reach the daemon even when the prior
+	// RCON + docker-stop phases consumed the entire budget (observed with
+	// MC 26.1.2 shutdown-save hangs under relay/tunnel connections).
+	killCtx, killCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 30*time.Second)
+	defer killCancel()
+	if err := i.docker.Kill(killCtx, id); err != nil {
 		// The kill call itself errored (e.g. a hung or erroring daemon), so this Stop
 		// failed without confirming the container died. Reset the stopping latch (and
 		// restore the pre-stop state) so a retried Stop re-runs the full sequence
@@ -1417,7 +1467,8 @@ var (
 // ports reads the server's game and RCON ports from its working-dir
 // server.properties, falling back to the Minecraft defaults when the file is
 // absent or a key is unset. Start publishes the game port on the configured host
-// interface and RCON on loopback.
+// interface and RCON on loopback. Keep the game-port resolution in sync with
+// tunnel.gamePort (adapters/tunnel/tunnel.go), which dials the published port.
 func ports(workingDir string) (game, rcon string) {
 	props := readProperties(filepath.Join(workingDir, "server.properties"))
 	game = props["server-port"]
