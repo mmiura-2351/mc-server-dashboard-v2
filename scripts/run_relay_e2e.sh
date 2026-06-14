@@ -80,6 +80,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
   -days 3650 -nodes \
   -subj "/CN=mcsd-relay-tunnel" \
   -addext "subjectAltName=DNS:relay" >/dev/null 2>&1
+chmod 644 "$TLS_DIR/tunnel-key.pem" "$TLS_DIR/tunnel-cert.pem"
 
 echo "==> writing the compose env file"
 # fs storage backend with no object profile: the stopped/unknown paths never boot
