@@ -68,10 +68,14 @@ else
 				build_api=1
 				build_worker=1
 				;;
-			proto/mcsd/*)
+			proto/mcsd/relay/*)
 				build_api=1
 				build_worker=1
 				build_relay=1
+				;;
+			proto/mcsd/controlplane/*)
+				build_api=1
+				build_worker=1
 				;;
 			compose.yaml | .env.example)
 				build_api=1
@@ -120,10 +124,16 @@ echo "update: starting services..."
 sg docker -c "docker compose up -d"
 
 # ── 6. Healthcheck ────────────────────────────────────────────────────────────
-echo "update: waiting for API healthcheck..."
+api_port="${API_HTTP_PORT:-8000}"
+if [ -f .env ]; then
+	api_port="$(grep -E '^API_HTTP_PORT=' .env | cut -d= -f2 | tr -d '[:space:]')"
+	api_port="${api_port:-8000}"
+fi
+
+echo "update: waiting for API healthcheck (port ${api_port})..."
 ok=0
 for i in $(seq 1 30); do
-	if curl -sf http://localhost:8000/api/healthz > /dev/null 2>&1; then
+	if curl -sf "http://localhost:${api_port}/api/healthz" > /dev/null 2>&1; then
 		ok=1
 		break
 	fi
