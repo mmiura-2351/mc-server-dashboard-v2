@@ -450,9 +450,9 @@ func TestStopServerGracefulRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
-	want := []string{"save-all", "stop"}
+	want := []string{"save-off", "save-all", "stop"}
 	if !equalLines(seq, want) {
-		t.Fatalf("operation order = %v, want %v (graceful stop must flush before terminate)", seq, want)
+		t.Fatalf("operation order = %v, want %v (graceful stop must save-off then flush before terminate)", seq, want)
 	}
 }
 
@@ -504,6 +504,30 @@ func TestStopServerGracefulProceedsWhenSaveFails(t *testing.T) {
 	}
 	if stopped, graceful := d.inst.wasStopped(); !stopped || !graceful {
 		t.Fatalf("instance not gracefully stopped after failed flush: stopped=%v graceful=%v", stopped, graceful)
+	}
+}
+
+// A failed save-off on the graceful-stop flush must still proceed to save-all
+// (#1038): save-off is best-effort — if it fails, the flush continues with
+// save-all so dirty chunks still land on disk. The stop must succeed regardless.
+func TestStopServerGracefulProceedsWhenSaveOffFails(t *testing.T) {
+	var seq []string
+	d := &rconFailDriver{}
+	ctrl := &fakeControl{reply: "ok", seq: &seq, failLines: map[string]error{"save-off": fmt.Errorf("rcon down")}}
+	m := newManager(t, d, ctrl)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success even when save-off failed", res)
+	}
+	// save-off failed but save-all must still be attempted.
+	want := []string{"save-off", "save-all", "stop"}
+	if !equalLines(seq, want) {
+		t.Fatalf("operation order = %v, want %v (save-off failure must not block save-all)", seq, want)
 	}
 }
 
@@ -630,9 +654,9 @@ func TestRestartRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("restart = %+v, want success", res)
 	}
-	want := []string{"save-all", "stop"}
+	want := []string{"save-off", "save-all", "stop"}
 	if !equalLines(seq, want) {
-		t.Fatalf("operation order = %v, want %v (graceful restart must flush before terminate)", seq, want)
+		t.Fatalf("operation order = %v, want %v (graceful restart must save-off then flush before terminate)", seq, want)
 	}
 }
 
