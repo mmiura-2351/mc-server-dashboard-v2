@@ -20,7 +20,7 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { dashboardPath } from "../routes.ts";
-import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
 import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
@@ -323,6 +323,8 @@ function Controls({
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
   const state = normalizeState(server.observed_state);
+  const desired = normalizeState(server.desired_state);
+  const [eulaOpen, setEulaOpen] = useState(false);
 
   const invalidate = () => {
     queryClient.invalidateQueries({
@@ -368,6 +370,10 @@ function Controls({
       if (onForbidden(error)) {
         return;
       }
+      if (isEulaNotAccepted(error)) {
+        setEulaOpen(true);
+        return;
+      }
       showToast(t(lifecycleErrorMessage(error)), "error");
     },
   });
@@ -389,49 +395,88 @@ function Controls({
   const pending = lifecycle.isPending || exportMutation.isPending;
 
   return (
-    <div className="actions">
-      {can("server:start", { serverId: server.id }) &&
-        actionApplies("start", state) && (
-          <button
-            type="button"
-            className="btn success"
-            disabled={pending}
-            onClick={() => lifecycle.mutate(`${base}/start`)}
-          >
-            {t("serverDetail.start")}
-          </button>
-        )}
-      {can("server:stop", { serverId: server.id }) &&
-        actionApplies("stop", state) && (
-          <StopControl
-            disabled={pending}
-            onStop={(force) =>
-              lifecycle.mutate(`${base}/stop${force ? "?force=true" : ""}`)
-            }
-          />
-        )}
-      {can("server:restart", { serverId: server.id }) &&
-        actionApplies("restart", state) && (
+    <>
+      <div className="actions">
+        {can("server:start", { serverId: server.id }) &&
+          actionApplies("start", state, desired) && (
+            <button
+              type="button"
+              className="btn success"
+              disabled={pending}
+              onClick={() => lifecycle.mutate(`${base}/start`)}
+            >
+              {t("serverDetail.start")}
+            </button>
+          )}
+        {can("server:stop", { serverId: server.id }) &&
+          actionApplies("stop", state, desired) && (
+            <StopControl
+              disabled={pending}
+              onStop={(force) =>
+                lifecycle.mutate(`${base}/stop${force ? "?force=true" : ""}`)
+              }
+            />
+          )}
+        {can("server:restart", { serverId: server.id }) &&
+          actionApplies("restart", state, desired) && (
+            <button
+              type="button"
+              className="btn"
+              disabled={pending}
+              onClick={() => lifecycle.mutate(`${base}/restart`)}
+            >
+              {t("serverDetail.restart")}
+            </button>
+          )}
+        {can("file:read", { serverId: server.id }) && (
           <button
             type="button"
             className="btn"
-            disabled={pending}
-            onClick={() => lifecycle.mutate(`${base}/restart`)}
+            disabled={pending || !atRest(state, desired)}
+            onClick={() => exportMutation.mutate()}
           >
-            {t("serverDetail.restart")}
+            {t("serverDetail.export")}
           </button>
         )}
-      {can("file:read", { serverId: server.id }) && (
-        <button
-          type="button"
-          className="btn"
-          disabled={pending || !atRest(state)}
-          onClick={() => exportMutation.mutate()}
-        >
-          {t("serverDetail.export")}
-        </button>
-      )}
-    </div>
+      </div>
+      <Modal
+        open={eulaOpen}
+        title={t("serverDetail.eulaDialog.title")}
+        onClose={() => setEulaOpen(false)}
+        footer={
+          <>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => setEulaOpen(false)}
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => {
+                setEulaOpen(false);
+                lifecycle.mutate(`${base}/start?accept_eula=true`);
+              }}
+            >
+              {t("serverDetail.eulaDialog.accept")}
+            </button>
+          </>
+        }
+      >
+        <p>
+          {t("serverDetail.eulaDialog.body")}{" "}
+          <a
+            href="https://aka.ms/MinecraftEULA"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {t("serverDetail.eulaDialog.link")}
+          </a>
+        </p>
+      </Modal>
+    </>
   );
 }
 
@@ -1539,7 +1584,10 @@ function Settings({
               className="btn"
               disabled={
                 exportMutation.isPending ||
-                !atRest(normalizeState(server.observed_state))
+                !atRest(
+                  normalizeState(server.observed_state),
+                  normalizeState(server.desired_state),
+                )
               }
               onClick={() => exportMutation.mutate()}
             >

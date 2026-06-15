@@ -49,6 +49,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    EulaNotAcceptedError,
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
@@ -70,6 +71,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
+    FakeFileStore,
     FakeJarProvisioner,
     FakeServerRepository,
     FakeStoreGenerationReader,
@@ -174,6 +176,7 @@ async def test_start_places_sets_running_and_dispatches() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     result = await use_case(
@@ -189,6 +192,73 @@ async def test_start_places_sets_running_and_dispatches() -> None:
     ]
     assert cp.incremented == [WorkerId(worker)]
     assert cp.decremented == []
+
+
+async def test_start_raises_eula_not_accepted_when_eula_txt_missing() -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    # FakeFileStore with no seeded eula.txt -> read_file raises ServerFileNotFoundError.
+    file_store = FakeFileStore()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=FakeControlPlane(place_to=WorkerId(worker)),
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=file_store,
+    )
+
+    with pytest.raises(EulaNotAcceptedError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+
+async def test_start_raises_eula_not_accepted_when_eula_txt_says_false() -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    file_store = FakeFileStore()
+    file_store.files["eula.txt"] = b"eula=false\n"
+    use_case = StartServer(
+        uow=uow,
+        control_plane=FakeControlPlane(place_to=WorkerId(worker)),
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=file_store,
+    )
+
+    with pytest.raises(EulaNotAcceptedError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+
+async def test_start_with_accept_eula_writes_eula_and_starts() -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    file_store = FakeFileStore()
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=file_store,
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        accept_eula=True,
+    )
+
+    assert result.desired_state is DesiredState.RUNNING
+    assert file_store.files["eula.txt"] == b"eula=true\n"
 
 
 async def test_start_forwards_request_memory_and_committed_accounting() -> None:
@@ -223,6 +293,7 @@ async def test_start_forwards_request_memory_and_committed_accounting() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
@@ -245,6 +316,7 @@ async def test_start_records_resolved_jar_key_in_config() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=provisioner,
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
@@ -266,6 +338,7 @@ async def test_start_fails_before_placement_when_jar_provisioning_fails() -> Non
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(fail=True),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(JarProvisioningError):
@@ -300,6 +373,7 @@ async def test_start_when_already_running_is_conflict() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(InvalidLifecycleTransitionError):
@@ -319,6 +393,7 @@ async def test_start_with_no_eligible_worker_is_typed_error() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(NoEligibleWorkerError):
@@ -372,6 +447,7 @@ async def test_two_concurrent_starts_only_one_takes_the_last_slot() -> None:
             clock=FakeClock(_NOW),
             jar_provisioner=FakeJarProvisioner(),
             store_generation=FakeStoreGenerationReader(),
+            file_store=FakeFileStore(seed_eula=True),
         )
         try:
             return await use_case(
@@ -428,6 +504,7 @@ async def test_reregister_between_commit_and_increment_does_not_double_count() -
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
@@ -496,6 +573,7 @@ async def test_start_hydrate_failure_compensates_without_dispatching_start() -> 
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -528,6 +606,7 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -562,6 +641,7 @@ async def test_start_lost_response_after_dispatch_keeps_assignment() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(WorkerUnavailableError):
@@ -594,6 +674,7 @@ async def test_start_pre_dispatch_unavailable_compensates() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(WorkerUnavailableError):
@@ -636,6 +717,7 @@ async def test_start_invalid_state_outcome_keeps_assignment_as_running() -> None
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     result = await use_case(
@@ -681,6 +763,7 @@ async def test_start_busy_outcome_keeps_assignment_without_converging() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -721,6 +804,7 @@ async def test_start_pre_dispatch_busy_compensates() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -755,6 +839,7 @@ async def test_start_failure_logs_warning_with_server_and_kind(
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with (
@@ -823,6 +908,7 @@ async def test_start_compensation_decrements_only_when_revert_applies() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -876,6 +962,7 @@ async def test_start_compensation_skips_decrement_when_revert_loses_race() -> No
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(CommandDispatchError):
@@ -909,6 +996,7 @@ async def test_start_lost_race_is_conflict_without_dispatch_or_count() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(LifecycleTransitionConflictError):
@@ -958,6 +1046,7 @@ async def test_start_release_reservation_when_commit_raises() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(RuntimeError, match="commit failed"):
@@ -998,6 +1087,7 @@ async def test_start_release_reservation_when_cancelled() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(asyncio.CancelledError):
@@ -1042,6 +1132,7 @@ async def test_start_confirms_reservation_when_cancelled_after_commit() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with pytest.raises(asyncio.CancelledError):
@@ -1077,6 +1168,7 @@ async def test_two_sequential_starts_second_is_conflict() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
@@ -1121,6 +1213,7 @@ async def test_start_compensation_failure_preserves_both_errors(
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
     with (
@@ -1150,6 +1243,7 @@ async def test_start_missing_server_is_not_found() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
     with pytest.raises(ServerNotFoundError):
         await use_case(
@@ -1167,6 +1261,7 @@ async def test_start_cross_community_is_not_found() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
     with pytest.raises(ServerNotFoundError):
         await use_case(
@@ -1292,6 +1387,7 @@ async def test_stop_then_start_succeeds() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )(community_id=CommunityId(community), server_id=ServerId(server_id))
 
     assert started.desired_state is DesiredState.RUNNING
@@ -1389,6 +1485,7 @@ async def test_stop_start_race_cannot_replace_until_final_snapshot_settles() -> 
                     clock=FakeClock(_NOW),
                     jar_provisioner=FakeJarProvisioner(),
                     store_generation=FakeStoreGenerationReader(),
+                    file_store=FakeFileStore(seed_eula=True),
                 )(community_id=community_id, server_id=server_id)
             return await super().snapshot(
                 worker_id=worker_id,
@@ -1975,6 +2072,7 @@ async def test_stop_server_not_found_then_start_succeeds() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )(community_id=CommunityId(community), server_id=ServerId(server_id))
 
     assert started.desired_state is DesiredState.RUNNING
@@ -2154,6 +2252,7 @@ def _start_server(
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(generation=store_generation),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
 

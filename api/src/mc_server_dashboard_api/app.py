@@ -87,6 +87,9 @@ from mc_server_dashboard_api.servers.adapters.clock import (
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.file_store import (
+    StorageFileStoreAdapter,
+)
 from mc_server_dashboard_api.servers.adapters.game_session_prune_loop import (
     run_game_session_prune_loop,
 )
@@ -735,6 +738,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         )
                     ),
                     store_generation=StorageGenerationReader(storage=storage),
+                    file_store=StorageFileStoreAdapter(storage=storage),
                     # Carry the real per-server lock as insurance for future locked
                     # reconciler paths (issue #876): a tick that eventually acquires
                     # the lock will contend correctly against HTTP-path holders.

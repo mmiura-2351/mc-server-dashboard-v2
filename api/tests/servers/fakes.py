@@ -166,8 +166,10 @@ class FakeFileStore(FileStore):
     serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path).
     """
 
-    def __init__(self, *, fail_write: bool = False) -> None:
+    def __init__(self, *, fail_write: bool = False, seed_eula: bool = False) -> None:
         self.files: dict[str, bytes] = {}
+        if seed_eula:
+            self.files["eula.txt"] = b"eula=true\n"
         self.writes: list[tuple[str, bytes]] = []
         # When set, write_file raises to exercise the create seed-failure path
         # (issue #243): the committed row stays, surfaced as a mapped 503.

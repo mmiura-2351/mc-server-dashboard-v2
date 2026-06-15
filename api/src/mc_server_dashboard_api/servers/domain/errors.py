@@ -197,6 +197,15 @@ class ServerBusyError(ServerError):
     """
 
 
+class EulaNotAcceptedError(ServerError):
+    """The server's eula.txt does not contain ``eula=true``.
+
+    Starting without EULA acceptance would crash the Minecraft process
+    immediately. The edge maps this to 409 ``eula_not_accepted`` so the UI
+    can offer an inline acceptance dialog and retry with ``accept_eula=true``.
+    """
+
+
 class NoEligibleWorkerError(ServerError):
     """Placement found no Worker that can host the server (FR-WRK-3).
 
