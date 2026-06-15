@@ -39,6 +39,7 @@ from tests.fleet.fakes import FakeClock, make_worker
 from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import (
     FakeControlPlane,
+    FakeFileStore,
     FakeJarProvisioner,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
@@ -304,6 +305,7 @@ async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
             store_generation=FakeStoreGenerationReader(),
+            file_store=FakeFileStore(seed_eula=True),
         ),
         make_stop_server=lambda: StopServer(uow=uow, control_plane=cp, clock=clock),
         control_plane=cp,

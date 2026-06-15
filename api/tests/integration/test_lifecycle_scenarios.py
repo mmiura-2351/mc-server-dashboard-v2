@@ -169,6 +169,7 @@ def _start_server_use_case(
         clock=clock,
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
     )
 
 

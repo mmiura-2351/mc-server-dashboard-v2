@@ -10,6 +10,7 @@ import { Link, useParams } from "react-router";
 import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
+import { Modal } from "../components/Modal.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { shortId } from "../format.ts";
@@ -18,7 +19,7 @@ import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { dashboardPath } from "../routes.ts";
-import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import {
   actionApplies,
   normalizeState,
@@ -262,6 +263,7 @@ function useLifecycle(server: ServerResponse, communityId: string) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
+  const [eulaOpen, setEulaOpen] = useState(false);
 
   const mutation = useMutation({
     mutationFn: (action: LifecycleAction) =>
@@ -305,9 +307,30 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       if (onForbidden(error)) {
         return;
       }
+      if (isEulaNotAccepted(error)) {
+        setEulaOpen(true);
+        return;
+      }
       showToast(t(lifecycleErrorMessage(error)), "error");
     },
   });
+
+  const acceptEulaAndStart = useCallback(async () => {
+    setEulaOpen(false);
+    const path = apiPath(
+      "/api/communities/{community_id}/servers/{server_id}/start",
+      { community_id: communityId, server_id: server.id },
+    );
+    try {
+      await api.post(`${path}?accept_eula=true` as never);
+      queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+    } catch (error: unknown) {
+      if (onForbidden(error)) {
+        return;
+      }
+      showToast(t(lifecycleErrorMessage(error)), "error");
+    }
+  }, [communityId, server.id, queryClient, onForbidden, showToast]);
 
   const state = normalizeState(server.observed_state);
   // While a request is in flight, show the transition it requests so the pill
@@ -316,7 +339,14 @@ function useLifecycle(server: ServerResponse, communityId: string) {
     ? requestedState(mutation.variables)
     : state;
 
-  return { mutation, state, displayState };
+  return {
+    mutation,
+    state,
+    displayState,
+    eulaOpen,
+    setEulaOpen,
+    acceptEulaAndStart,
+  };
 }
 
 // The state pill for an observed/optimistic state.
@@ -336,7 +366,14 @@ interface ServerRowProps {
 }
 
 function ServerCard({ server, communityId, can }: ServerRowProps) {
-  const { mutation, state, displayState } = useLifecycle(server, communityId);
+  const {
+    mutation,
+    state,
+    displayState,
+    eulaOpen,
+    setEulaOpen,
+    acceptEulaAndStart,
+  } = useLifecycle(server, communityId);
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -408,6 +445,11 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
             : t("dashboard.noWorker")}
         </span>
       </div>
+      <EulaModal
+        open={eulaOpen}
+        onClose={() => setEulaOpen(false)}
+        onAccept={acceptEulaAndStart}
+      />
     </div>
   );
 }
@@ -453,7 +495,14 @@ function ServerTable({
 }
 
 function ServerRow({ server, communityId, can }: ServerRowProps) {
-  const { mutation, state, displayState } = useLifecycle(server, communityId);
+  const {
+    mutation,
+    state,
+    displayState,
+    eulaOpen,
+    setEulaOpen,
+    acceptEulaAndStart,
+  } = useLifecycle(server, communityId);
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -530,8 +579,52 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
             onRun={mutation.mutate}
           />
         ))}
+        <EulaModal
+          open={eulaOpen}
+          onClose={() => setEulaOpen(false)}
+          onAccept={acceptEulaAndStart}
+        />
       </td>
     </tr>
+  );
+}
+
+function EulaModal({
+  open,
+  onClose,
+  onAccept,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onAccept: () => void;
+}) {
+  return (
+    <Modal
+      open={open}
+      title={t("serverDetail.eulaDialog.title")}
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="btn ghost" onClick={onClose}>
+            {t("common.cancel")}
+          </button>
+          <button type="button" className="btn primary" onClick={onAccept}>
+            {t("serverDetail.eulaDialog.accept")}
+          </button>
+        </>
+      }
+    >
+      <p>
+        {t("serverDetail.eulaDialog.body")}{" "}
+        <a
+          href="https://aka.ms/MinecraftEULA"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {t("serverDetail.eulaDialog.link")}
+        </a>
+      </p>
+    </Modal>
   );
 }
 

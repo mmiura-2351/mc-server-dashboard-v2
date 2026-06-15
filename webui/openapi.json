@@ -6172,6 +6172,16 @@
               "title": "Server Id",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "accept_eula",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Accept Eula",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {

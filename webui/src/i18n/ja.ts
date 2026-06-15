@@ -385,6 +385,12 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.error.slugTaken":
     "その参加アドレス名はすでに使用されています。",
   "serverDetail.error.generic": "問題が発生しました。もう一度お試しください。",
+  // EULA acceptance dialog (issue #1104).
+  "serverDetail.eulaDialog.title": "Minecraft EULAに同意しますか？",
+  "serverDetail.eulaDialog.body":
+    "このサーバーを起動するには、Minecraftエンドユーザーライセンス契約（EULA）に同意する必要があります。",
+  "serverDetail.eulaDialog.accept": "同意して起動",
+  "serverDetail.eulaDialog.link": "Minecraft EULAを確認する",
 
   // Backups tab (WEBUI_SPEC.md 6.7).
   "backups.loading": "バックアップを読み込んでいます…",

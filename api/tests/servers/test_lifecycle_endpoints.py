@@ -40,6 +40,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailab
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    EulaNotAcceptedError,
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
@@ -294,6 +295,40 @@ def test_start_worker_busy_is_409_with_reason() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "worker_busy"
+
+
+def test_start_eula_not_accepted_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        start=_FakeUseCase(error=EulaNotAcceptedError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "eula_not_accepted"
+
+
+def test_start_accept_eula_forwards_to_use_case() -> None:
+    community = uuid.uuid4()
+    start = _FakeUseCase(result=_server(community))
+    app = _app(member=True, allow=True, start=start)
+    client = next(_client(app))
+    resp = client.post(
+        _url(community, uuid.uuid4(), "start"), params={"accept_eula": "true"}
+    )
+    assert resp.status_code == 200
+    assert start.kwargs["accept_eula"] is True
+
+
+def test_start_defaults_accept_eula_false() -> None:
+    community = uuid.uuid4()
+    start = _FakeUseCase(result=_server(community))
+    app = _app(member=True, allow=True, start=start)
+    client = next(_client(app))
+    resp = client.post(_url(community, uuid.uuid4(), "start"))
+    assert resp.status_code == 200
+    assert start.kwargs["accept_eula"] is False
 
 
 def test_stop_missing_server_is_404() -> None:

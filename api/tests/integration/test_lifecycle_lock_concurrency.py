@@ -207,6 +207,7 @@ async def test_start_blocks_until_restore_releases_the_lock(
         clock=_FixedClock(),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
         lifecycle_lock=lock,
     )
 
