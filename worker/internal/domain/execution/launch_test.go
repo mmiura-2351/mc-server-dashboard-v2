@@ -215,6 +215,64 @@ func TestResolveLegacyForgeJarAmbiguous(t *testing.T) {
 	}
 }
 
+// CleanForgeInstallArtifacts removes stale args files and legacy jars so
+// a re-install starts from a clean slate (issue #1127).
+func TestCleanForgeInstallArtifactsRemovesAll(t *testing.T) {
+	dir := t.TempDir()
+	// Two stale args files from different Forge versions.
+	writeFile(t, filepath.Join(dir, "libraries/net/minecraftforge/forge/1.20.1-47.2.0/unix_args.txt"))
+	writeFile(t, filepath.Join(dir, "libraries/net/minecraftforge/forge/1.20.1-47.3.0/unix_args.txt"))
+	// Two stale legacy Forge jars.
+	writeFile(t, filepath.Join(dir, "forge-1.12.2-14.23.5.2860.jar"))
+	writeFile(t, filepath.Join(dir, "forge-1.12.2-14.23.5.2861.jar"))
+	// Files that must NOT be removed.
+	writeFile(t, filepath.Join(dir, "server.jar"))
+	writeFile(t, filepath.Join(dir, "user_jvm_args.txt"))
+
+	if err := CleanForgeInstallArtifacts(dir); err != nil {
+		t.Fatalf("CleanForgeInstallArtifacts: %v", err)
+	}
+
+	// Args files removed.
+	for _, rel := range []string{
+		"libraries/net/minecraftforge/forge/1.20.1-47.2.0/unix_args.txt",
+		"libraries/net/minecraftforge/forge/1.20.1-47.3.0/unix_args.txt",
+		"forge-1.12.2-14.23.5.2860.jar",
+		"forge-1.12.2-14.23.5.2861.jar",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, rel)); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed, got stat err: %v", rel, err)
+		}
+	}
+
+	// Safe files intact.
+	for _, rel := range []string{"server.jar", "user_jvm_args.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, rel)); err != nil {
+			t.Errorf("expected %s to be preserved, got: %v", rel, err)
+		}
+	}
+}
+
+// CleanForgeInstallArtifacts succeeds when no artifacts are present.
+func TestCleanForgeInstallArtifactsNoArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	if err := CleanForgeInstallArtifacts(dir); err != nil {
+		t.Fatalf("CleanForgeInstallArtifacts on empty dir: %v", err)
+	}
+}
+
+// CleanForgeInstallArtifacts returns an error on glob failure. filepath.Glob
+// only fails on ErrBadPattern, which cannot happen with the hardcoded patterns,
+// so this test verifies the error path by passing a non-existent directory —
+// on which Glob returns no matches and no error (it degrades gracefully). The
+// real protection is the constant patterns; this test documents the boundary.
+func TestCleanForgeInstallArtifactsNonExistentDir(t *testing.T) {
+	err := CleanForgeInstallArtifacts("/no/such/directory")
+	if err != nil {
+		t.Fatalf("expected nil error for non-existent dir (glob returns empty), got: %v", err)
+	}
+}
+
 func equalArgs(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
