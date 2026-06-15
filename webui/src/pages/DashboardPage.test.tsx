@@ -111,11 +111,8 @@ describe("DashboardPage list", () => {
     expect(
       screen.getByText(`${t("dashboard.col.worker")}: worker`),
     ).toBeInTheDocument();
-    // The filter bar also renders state chips; the server's pill is one of the
-    // matches.
-    expect(
-      screen.getAllByText(t("dashboard.state.running")).length,
-    ).toBeGreaterThanOrEqual(1);
+    // The filter bar renders a "running" chip; the server card renders another.
+    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2);
   });
 
   it("shows the unknown pill for an unrecognised observed state", async () => {

@@ -288,6 +288,21 @@ function Loaded({ communityId }: { communityId: string }) {
   const [view, setView] = useViewMode();
   const [sort, setSort] = useSortPref();
   const [filters, setFilters] = useAuditFilterParams(FILTER_KEYS);
+
+  // The search input uses a local draft so each keystroke does not push a
+  // history entry. Filtering applies the draft immediately for instant
+  // feedback; the URL is updated on blur / Enter.
+  const [searchDraft, setSearchDraft] = useState(filters.search);
+  useEffect(() => {
+    setSearchDraft(filters.search);
+  }, [filters.search]);
+
+  const commitSearch = useCallback(() => {
+    if (searchDraft !== filters.search) {
+      setFilters({ ...filters, search: searchDraft });
+    }
+  }, [searchDraft, filters, setFilters]);
+
   const query = useQuery({
     queryKey: serversKey(communityId),
     queryFn: () =>
@@ -297,6 +312,16 @@ function Loaded({ communityId }: { communityId: string }) {
         }),
       ),
   });
+
+  // Hooks must be called unconditionally (Rules of Hooks), so filter/sort are
+  // computed before the early-return branches. They operate on an empty array
+  // when the query has not resolved yet.
+  const servers = query.data ?? [];
+  const filtered = useMemo(
+    () => filterServers(servers, searchDraft, filters.state),
+    [servers, searchDraft, filters.state],
+  );
+  const sorted = useMemo(() => sortServers(filtered, sort), [filtered, sort]);
 
   if (query.isPending) {
     return (
@@ -313,7 +338,6 @@ function Loaded({ communityId }: { communityId: string }) {
     );
   }
 
-  const servers = query.data;
   if (servers.length === 0) {
     return (
       <DashboardChrome degraded={degraded}>
@@ -322,9 +346,6 @@ function Loaded({ communityId }: { communityId: string }) {
     );
   }
 
-  const filtered = filterServers(servers, filters.search, filters.state);
-  const sorted = sortServers(filtered, sort);
-
   return (
     <DashboardChrome
       degraded={degraded}
@@ -332,6 +353,9 @@ function Loaded({ communityId }: { communityId: string }) {
     >
       <DashboardFilterBar
         filters={filters}
+        searchDraft={searchDraft}
+        onSearchDraftChange={setSearchDraft}
+        onSearchCommit={commitSearch}
         onFiltersChange={setFilters}
         sort={sort}
         onSortChange={setSort}
@@ -381,14 +405,23 @@ function EmptyState({ communityId }: { communityId: string }) {
 }
 
 // Filter and sort controls rendered above both card and table views (#1123).
+// The search input uses a local draft (owned by Loaded) to avoid pushing a
+// browser history entry per keystroke; the draft syncs to the URL on blur or
+// Enter (the audit pages use a separate "Apply" button for the same reason).
 function DashboardFilterBar({
   filters,
+  searchDraft,
+  onSearchDraftChange,
+  onSearchCommit,
   onFiltersChange,
   sort,
   onSortChange,
   view,
 }: {
   filters: Record<"search" | "state", string>;
+  searchDraft: string;
+  onSearchDraftChange: (value: string) => void;
+  onSearchCommit: () => void;
   onFiltersChange: (next: Record<"search" | "state", string>) => void;
   sort: SortPref;
   onSortChange: (next: SortPref) => void;
@@ -419,16 +452,20 @@ function DashboardFilterBar({
         type="text"
         className="filter-search"
         placeholder={t("dashboard.filter.search")}
-        value={filters.search}
-        onChange={(e) =>
-          onFiltersChange({ ...filters, search: e.target.value })
-        }
+        value={searchDraft}
+        onChange={(e) => onSearchDraftChange(e.target.value)}
+        onBlur={onSearchCommit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onSearchCommit();
+        }}
         aria-label={t("dashboard.filter.search")}
       />
       <fieldset
         className="filter-states"
         aria-label={t("dashboard.filter.state")}
       >
+        {/* "unknown" is excluded: it is a fallback for unrecognised API values,
+            not a state users intentionally filter for. */}
         {KNOWN.filter((s) => s !== "unknown").map((state) => {
           const pill = statePill(state);
           return (
@@ -505,13 +542,21 @@ function SortableHeader({
   children: ReactNode;
 }) {
   const active = sort.field === field;
+  const handleSort = () => onSort(toggleSort(sort, field));
   return (
     <th
       className="sortable"
       aria-sort={
         active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"
       }
-      onClick={() => onSort(toggleSort(sort, field))}
+      tabIndex={0}
+      onClick={handleSort}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleSort();
+        }
+      }}
     >
       {children}
       {active && (
