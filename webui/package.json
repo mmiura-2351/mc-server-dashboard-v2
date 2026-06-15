@@ -12,6 +12,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "bench": "vitest bench",
     "e2e": "playwright test",
     "lint": "biome check .",
     "format": "biome format --write .",

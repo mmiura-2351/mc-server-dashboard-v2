@@ -10,6 +10,7 @@
 #   make lint           # lint + typecheck both modules (no writes)
 #   make test           # run both test suites
 #   make check          # full gate: lint + test (what CI and pre-push run)
+#   make bench           # run benchmarks across all layers
 #   make hooks-install  # install the git hooks (one-time)
 #
 # Operations:
@@ -29,6 +30,7 @@
 	worker-lint worker-format worker-test worker-test-race worker-e2e-compile \
 	relay-lint relay-format relay-test relay-test-race relay-e2e relay-e2e-compile \
 	webui-lint webui-format webui-test webui-build webui-e2e \
+	bench bench-api bench-worker bench-webui \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
 	bootstrap hooks-install hooks-check hooks-test \
@@ -224,6 +226,25 @@ webui-build:
 # installed once: `cd webui && npx playwright install chromium`.
 webui-e2e:
 	scripts/run_webui_e2e.sh $(ARGS)
+
+# ---------------------------------------------------------------------------
+# Benchmarks (issue #1122)
+#
+# Per-layer benchmark suites and an umbrella target. Results print to the
+# terminal in each tool's native format. CI integration and regression
+# comparison are follow-ups.
+# ---------------------------------------------------------------------------
+
+bench: bench-api bench-worker bench-webui
+
+bench-api: api-env-check
+	cd api && uv run pytest tests/benchmarks/ --benchmark-enable -v
+
+bench-worker:
+	cd worker && go test -bench=. -benchmem -run='^$$' ./...
+
+bench-webui:
+	cd webui && npm run bench
 
 # ---------------------------------------------------------------------------
 # webui OpenAPI client artifacts (webui/openapi.json + webui/src/api/schema.ts)
@@ -455,6 +476,10 @@ help:
 	@echo "  lint           Lint + typecheck all modules"
 	@echo "  format         Auto-format all modules"
 	@echo "  test           Run all test suites"
+	@echo "  bench          Run benchmarks across all layers"
+	@echo "  bench-api      Python benchmarks only"
+	@echo "  bench-worker   Go benchmarks only"
+	@echo "  bench-webui    React benchmarks only"
 	@echo "  bootstrap      Install local tooling (uv sync, npm ci, golangci-lint)"
 	@echo "  hooks-install  Install git hooks (one-time)"
 	@echo ""

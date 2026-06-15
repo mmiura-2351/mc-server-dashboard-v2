@@ -105,6 +105,10 @@ dev = [
     # (2026-03-21) is well outside the 7-day cooldown (Section 3); cap the next
     # major (dev tooling, Section 1).
     "pytest-cov>=7.1.0,<8",
+    # Benchmark harness for `make bench-api` (issue #1122). 5.1.0 (2025-09-12)
+    # is well outside the 7-day cooldown (Section 3); cap the next major (dev
+    # tooling, Section 1).
+    "pytest-benchmark>=5.1.0,<6",
 ]
 
 [build-system]
@@ -177,7 +181,7 @@ asyncio_mode = "auto"
 # it abandons the event loop from a watchdog thread, masking async-cleanup bugs.
 # signal is the default on Linux (CI) and the main thread runs the asyncio loop,
 # so SIGALRM lands where we want it.
-addopts = "--timeout=120 --timeout-method=signal"
+addopts = "--timeout=120 --timeout-method=signal --benchmark-disable"
 
 [tool.importlinter]
 root_packages = ["mc_server_dashboard_api"]
