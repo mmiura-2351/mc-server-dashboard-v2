@@ -25,7 +25,11 @@ from mc_server_dashboard_api.versions.adapters.forge import (
     _installer_sha1_url,
     _installer_url,
 )
-from mc_server_dashboard_api.versions.domain.errors import UnknownVersionError
+from mc_server_dashboard_api.versions.domain.errors import (
+    CatalogUnavailableError,
+    UnknownVersionError,
+)
+from mc_server_dashboard_api.versions.domain.fetcher import JsonFetcher
 from mc_server_dashboard_api.versions.domain.value_objects import (
     HashAlgorithm,
     ServerType,
@@ -117,20 +121,62 @@ async def test_resolve_unknown_mc_version_raises() -> None:
         await catalog.resolve(ServerType.FORGE, "9.9.9")
 
 
-@pytest.mark.asyncio
-async def test_resolve_falls_back_to_legacy_suffixed_version() -> None:
-    """Old Forge versions (1.7.10, 1.8.9, 1.9.4) publish under {mc}-{forge}-{mc}."""
+class _RetryCacheStyleFetcher(JsonFetcher):
+    """Simulate the RetryCachingFetcher: missing URLs raise CatalogUnavailableError."""
+
+    def __init__(self, *, texts: dict[str, str], payloads: dict[str, object]) -> None:
+        self._texts = texts
+        self._payloads = payloads
+
+    async def get_json(self, url: str) -> object:
+        if url not in self._payloads:
+            raise CatalogUnavailableError(url)
+        return self._payloads[url]
+
+    async def get_text(self, url: str) -> str:
+        if url not in self._texts:
+            raise CatalogUnavailableError(url)
+        return self._texts[url]
+
+
+def _legacy_fixtures() -> tuple[str, dict[str, object], str, str]:
+    """Shared fixtures for the legacy-suffix tests."""
     metadata_xml = """<?xml version="1.0" encoding="UTF-8"?>
     <metadata><versioning><versions>
       <version>1.7.10-10.13.4.1614</version>
     </versions></versioning></metadata>"""
-    promotions = {
+    promotions: dict[str, object] = {
         "promos": {"1.7.10-recommended": "10.13.4.1614"},
     }
-    # The standard URL has no fixture (simulates 404); the suffixed URL does.
     suffixed = "1.7.10-10.13.4.1614-1.7.10"
     legacy_sha1 = "c" * 40
+    return metadata_xml, promotions, suffixed, legacy_sha1
+
+
+@pytest.mark.asyncio
+async def test_resolve_falls_back_to_legacy_suffixed_version() -> None:
+    """FetchError fallback (raw fetcher) for legacy {mc}-{forge}-{mc} naming."""
+    metadata_xml, promotions, suffixed, legacy_sha1 = _legacy_fixtures()
     fetcher = FakeDocumentFetcher(
+        texts={
+            _METADATA_URL: metadata_xml,
+            _installer_sha1_url(suffixed): legacy_sha1,
+        },
+        payloads={_PROMOTIONS_URL: promotions},
+    )
+    catalog = ForgeCatalog(fetcher=fetcher)
+    source = await catalog.resolve(ServerType.FORGE, "1.7.10")
+    assert source.url == _installer_url(suffixed)
+    assert source.expected_hash == legacy_sha1
+    assert source.hash_algorithm is HashAlgorithm.SHA1
+    assert source.version == "1.7.10"
+
+
+@pytest.mark.asyncio
+async def test_resolve_legacy_suffix_with_retry_cache_error() -> None:
+    """CatalogUnavailableError fallback (production retry-cache wrapper)."""
+    metadata_xml, promotions, suffixed, legacy_sha1 = _legacy_fixtures()
+    fetcher = _RetryCacheStyleFetcher(
         texts={
             _METADATA_URL: metadata_xml,
             _installer_sha1_url(suffixed): legacy_sha1,
