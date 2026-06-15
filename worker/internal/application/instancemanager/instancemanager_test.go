@@ -577,6 +577,53 @@ func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 	}
 }
 
+// Cascading RCON failure (#1135): save-off poisons the connection, the manager
+// redials, but save-all ALSO fails on the fresh connection (the Minecraft RCON
+// server is completely unreachable). The stop must still complete — RCON failure
+// should never prevent server shutdown.
+func TestStopServerGracefulCompletesWhenBothRCONCommandsFail(t *testing.T) {
+	var seq []string
+	d := &rconFailDriver{}
+	poisonCtrl := &fakeControl{
+		reply:     "ok",
+		seq:       &seq,
+		failLines: map[string]error{"save-off": fmt.Errorf("rcon down")},
+		poison:    true,
+	}
+	// The fresh (redialed) control also fails on save-all — total RCON failure.
+	freshCtrl := &fakeControl{
+		reply:     "ok",
+		seq:       &seq,
+		failLines: map[string]error{"save-all": fmt.Errorf("rcon unreachable")},
+	}
+	var dialCount int
+	scratch := t.TempDir()
+	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			dialCount++
+			if dialCount == 1 {
+				return poisonCtrl, nil
+			}
+			return freshCtrl, nil
+		})
+	m.settlePollInterval = 0
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	d.inst.seq = &seq
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	if !res.Success {
+		t.Fatalf("stop = %+v, want success even when both RCON commands failed", res)
+	}
+	if stopped, graceful := d.inst.wasStopped(); !stopped || !graceful {
+		t.Fatalf("instance not gracefully stopped after total RCON failure: stopped=%v graceful=%v", stopped, graceful)
+	}
+	if dialCount < 2 {
+		t.Fatalf("openControl dial count = %d, want >= 2 (must redial after save-off poison)", dialCount)
+	}
+}
+
 func TestServerCommandForwardsOutput(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "There are 0 players"}
