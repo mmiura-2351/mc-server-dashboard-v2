@@ -255,6 +255,21 @@ async def test_remove_owner_allowed_when_another_owner_remains() -> None:
     )
 
 
+async def test_remove_member_succeeds_when_no_preset_owner_role() -> None:
+    # When the community has no preset Owner role, _guard_last_owner is a no-op
+    # and the removal proceeds normally.  Exercises the early-return branch at
+    # lines 69-70 of manage_membership.py.
+    uow = FakeAuthzUnitOfWork()
+    community = _seed_community(uow)
+    user = UserId(uuid.uuid4())
+    uow._membership_for(user, community.id)
+
+    await RemoveMember(uow=uow)(community_id=community.id, user_id=user)
+
+    assert await uow.memberships.get_by_user_and_community(user, community.id) is None
+    assert uow.commits == 1
+
+
 async def test_remove_non_owner_is_allowed_even_as_sole_owner_exists() -> None:
     # A non-owner member can always be removed; the last-Owner guard only bites
     # the Owner-role holder.
