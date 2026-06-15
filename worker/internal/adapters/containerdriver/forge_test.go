@@ -478,14 +478,10 @@ func TestForgeContainerStopWinsLatchBeforeLaunch(t *testing.T) {
 	}
 }
 
-// A Wait TRANSPORT error on the install container while the container is GONE
-// (404) must emit crashed (issue #881). Without the re-inspect treatment, the
-// transport error is reported directly as crashed with the transport-error
-// message; with it, the re-inspect confirms gone → crashed with the correct
-// "no args file" detail (the install produced no argsfile so the re-plan after
-// Wait would crash anyway). This test verifies the install path runs through
-// the same re-inspect loop as supervise rather than short-circuiting to a crash
-// on the raw transport error.
+// A Wait TRANSPORT error on the install container where the container is gone
+// and no argsfile was produced still crashes — the re-plan check (not the stale
+// transport error) is the authority: no install artifacts means the install
+// failed (issue #895).
 func TestInstallWaitTransportErrorContainerGoneEmitsCrashed(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -508,13 +504,54 @@ func TestInstallWaitTransportErrorContainerGoneEmitsCrashed(t *testing.T) {
 	}
 
 	// Deliver a transport error on the install Wait. The re-inspect returns
-	// errNotFound → the container is gone → superviseInstall should report crashed.
+	// errNotFound → container is gone → waitErr cleared → re-plan finds no
+	// argsfile → crashes with "no args file", not the stale transport error.
 	docker.waitGates[installID] <- waitResult{err: errors.New("containerdriver: POST /wait: EOF")}
 
 	drainTo(t, inst.Events(), execution.StateCrashed)
 	if inst.Status() != execution.StateCrashed {
-		t.Fatalf("Status = %v, want crashed after install container gone", inst.Status())
+		t.Fatalf("Status = %v, want crashed after install container gone with no argsfile", inst.Status())
 	}
+}
+
+// A Wait TRANSPORT error on the install container where the container is gone
+// BUT the install actually succeeded (argsfile written) must fall through to the
+// re-plan check and proceed to launch, not crash with the stale transport error
+// (issue #895).
+func TestInstallWaitTransportErrorContainerGoneButArgsfileExistsLaunches(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	docker.waitGates[installID] = make(chan waitResult)
+	// Inspect: first call → errNotFound (container gone after blip).
+	docker.inspectGate = make(chan inspectStep, 1)
+	docker.inspectGate <- inspectStep{err: errNotFound}
+	prevDeadline, prevInterval := waitTransportProbeDeadline, waitTransportProbeInterval
+	waitTransportProbeDeadline, waitTransportProbeInterval = 30*time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		waitTransportProbeDeadline, waitTransportProbeInterval = prevDeadline, prevInterval
+	})
+	d := forgeDriver(docker)
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// The install container ran and produced the argsfile before exiting.
+	writeArgsfile(t, dir)
+
+	// Deliver a transport error on the install Wait. The re-inspect returns
+	// errNotFound → container is gone, but the argsfile exists → re-plan finds
+	// a launchable configuration → proceeds to launch, not crash.
+	docker.waitGates[installID] <- waitResult{err: errors.New("containerdriver: POST /wait: EOF")}
+
+	drainTo(t, inst.Events(), execution.StateRunning)
+	if inst.Status() != execution.StateRunning {
+		t.Fatalf("Status = %v, want running after install transport error with argsfile present", inst.Status())
+	}
+	docker.exit("mcsd-s1", 0, nil)
+	drainClosed(inst.Events())
 }
 
 // A Wait TRANSPORT error on the install container while the container is STILL
