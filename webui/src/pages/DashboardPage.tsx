@@ -644,7 +644,9 @@ function Action({ action, server, state, pending, can, onRun }: ActionProps) {
   if (!can(`server:${action}`, { serverId: server.id })) {
     return null;
   }
-  const disabled = pending || !actionApplies(action, state);
+  const disabled =
+    pending ||
+    !actionApplies(action, state, normalizeState(server.desired_state));
   return (
     <button
       type="button"

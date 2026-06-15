@@ -84,6 +84,28 @@ describe("actionApplies", () => {
       expect(actionApplies(action, "restarting")).toBe(false);
     }
   });
+
+  it("crash-looping: start blocked when desired=running", () => {
+    expect(actionApplies("start", "crashed", "running")).toBe(false);
+    expect(actionApplies("start", "unknown", "running")).toBe(false);
+  });
+
+  it("crash-looping: stop/restart allowed when desired=running and observed=crashed", () => {
+    expect(actionApplies("stop", "crashed", "running")).toBe(true);
+    expect(actionApplies("restart", "crashed", "running")).toBe(true);
+    expect(actionApplies("stop", "unknown", "running")).toBe(true);
+    expect(actionApplies("restart", "unknown", "running")).toBe(true);
+  });
+
+  it("start allowed when desired=stopped and observed=crashed", () => {
+    expect(actionApplies("start", "crashed", "stopped")).toBe(true);
+    expect(actionApplies("start", "stopped", "stopped")).toBe(true);
+  });
+
+  it("stop/restart for normally running server with desired", () => {
+    expect(actionApplies("stop", "running", "running")).toBe(true);
+    expect(actionApplies("restart", "running", "running")).toBe(true);
+  });
 });
 
 describe("atRest", () => {
@@ -100,5 +122,21 @@ describe("atRest", () => {
     expect(atRest("starting")).toBe(false);
     expect(atRest("stopping")).toBe(false);
     expect(atRest("restarting")).toBe(false);
+  });
+
+  it("crash-looping: not at rest when desired=running", () => {
+    expect(atRest("crashed", "running")).toBe(false);
+    expect(atRest("unknown", "running")).toBe(false);
+    expect(atRest("stopped", "running")).toBe(false);
+  });
+
+  it("at rest when desired=stopped and observed is terminal", () => {
+    expect(atRest("crashed", "stopped")).toBe(true);
+    expect(atRest("stopped", "stopped")).toBe(true);
+    expect(atRest("unknown", "stopped")).toBe(true);
+  });
+
+  it("running with desired is not at rest", () => {
+    expect(atRest("running", "running")).toBe(false);
   });
 });

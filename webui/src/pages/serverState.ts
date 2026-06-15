@@ -47,7 +47,8 @@ export function isTransitional(state: ObservedState): boolean {
  * config) gate on this; the API otherwise answers 409 server_unsettled /
  * server_not_stopped (WEBUI_SPEC.md 6.9).
  */
-export function atRest(state: ObservedState): boolean {
+export function atRest(state: ObservedState, desired?: string): boolean {
+  if (desired !== undefined && desired !== "stopped") return false;
   return state === "stopped" || state === "crashed" || state === "unknown";
 }
 
@@ -91,13 +92,18 @@ export function statePill(state: ObservedState): PillSpec {
 export function actionApplies(
   action: "start" | "stop" | "restart",
   state: ObservedState,
+  desired?: string,
 ): boolean {
   if (isTransitional(state)) {
     return false;
   }
   if (action === "start") {
+    if (desired === "running") return false;
     return state === "stopped" || state === "crashed" || state === "unknown";
   }
   // stop / restart
+  if (desired === "running" && (state === "crashed" || state === "unknown")) {
+    return true;
+  }
   return state === "running";
 }
