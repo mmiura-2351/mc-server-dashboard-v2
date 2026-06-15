@@ -300,6 +300,14 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	inst.emit(execution.StateStarting, "")
 
 	if plan.NeedsInstall {
+		// Remove stale Forge install artifacts (args files, legacy jars) so the
+		// re-install starts from a clean slate and never hits ambiguous-match
+		// errors (issue #1127). A cleanup failure is logged but does not block
+		// the install.
+		if cleanErr := execution.CleanForgeInstallArtifacts(spec.WorkingDir); cleanErr != nil {
+			d.logger.Warn("failed to clean stale Forge artifacts before install",
+				"server_id", spec.ServerID, "err", cleanErr)
+		}
 		id, err := d.runInstallContainer(ctx, spec, image, plan)
 		if err != nil {
 			return nil, fmt.Errorf("containerdriver: start install container: %w", classifyStartError(err))
