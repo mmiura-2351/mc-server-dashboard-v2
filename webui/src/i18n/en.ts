@@ -236,6 +236,14 @@ export const en = {
   "dashboard.liveDegraded": "Live updates degraded — polling",
   // Clickable join-hostname copy feedback.
   "dashboard.copiedJoinHostname": "Copied!",
+  // Filter and sort controls (#1123).
+  "dashboard.filter.search": "Search by name…",
+  "dashboard.filter.state": "Filter by state",
+  "dashboard.filter.noMatch": "No servers match the current filters.",
+  "dashboard.sort.label": "Sort",
+  "dashboard.sort.name": "Name",
+  "dashboard.sort.state": "State",
+  "dashboard.sort.type": "Type",
 
   // Server detail page (WEBUI_SPEC.md 6.4 / 6.9). One contiguous block to keep
   // merge conflicts with sibling i18n PRs minimal.
