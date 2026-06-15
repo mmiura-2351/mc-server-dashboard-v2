@@ -847,7 +847,14 @@ func (i *instance) superviseInstall(installID string) {
 	var waitErr error
 	for {
 		_, waitErr = i.docker.Wait(context.Background(), installID)
-		if waitErr == nil || !isTransportError(waitErr) || i.exitedAfterTransportError(installID) {
+		if waitErr == nil {
+			break
+		}
+		if !isTransportError(waitErr) {
+			break
+		}
+		if i.exitedAfterTransportError(installID) {
+			waitErr = nil // container exited; fall through to re-plan (issue #895)
 			break
 		}
 		time.Sleep(waitTransportProbeInterval)
