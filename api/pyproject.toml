@@ -87,7 +87,7 @@ dev = [
     # Control-plane codegen. grpcio-tools bundles protoc + the python/grpc
     # generators; mypy-protobuf adds .pyi type stubs. Both pinned outside the
     # cooldown (grpcio-tools 1.80.0 2026-03-30; mypy-protobuf 5.1.0 2026-04-28).
-    "grpcio-tools>=1.80.0,<1.81",
+    "grpcio-tools>=1.80.0,<1.82",
     "mypy-protobuf>=5.1.0,<6",
     # httpx (FastAPI's TestClient transport) is declared as a runtime dependency
     # above (the VersionCatalog adapters use it); no separate dev pin is needed.
@@ -95,7 +95,7 @@ dev = [
     # 1.4.0 (2026-05-26) is inside the 7-day cooldown as of this change; cap
     # below it. 1.3.0 (2025-11-10) is outside. Lift the cap once it ages out
     # (Section 3).
-    "pytest-asyncio>=1.3.0,<1.4.0",
+    "pytest-asyncio>=1.3.0,<1.5.0",
     # Suite-wide timeout safety net (#158): an unbounded await (e.g. a
     # wrongly-accepted gRPC session hanging call.code() forever, PR #153 review)
     # would otherwise hang the whole run. 2.4.0 (2025-05-05) is well outside the
