@@ -98,7 +98,8 @@ Grouping and PR rules:
 - **Production deps** are grouped into one PR per ecosystem (minor + patch).
 - **Dev deps** are grouped into one PR per ecosystem (minor + patch).
 - **Major version bumps** are excluded from groups and opened as standalone PRs
-  so each major update is reviewed individually per Section 1.
+  so each major update is reviewed individually per Section 1, citing the
+  upstream migration notes.
 - Open PRs are capped at 5 per ecosystem.
 - All Dependabot PRs carry the `dependencies` label and use the
   `chore(deps):` commit-message prefix.
@@ -106,3 +107,9 @@ Grouping and PR rules:
 The 7-day supply-chain cooldown (Section 3) is enforced at review time;
 Dependabot has no native "exclude releases newer than N days" setting.
 Security updates bypass the cooldown per Section 3.
+
+**Known limitation — `pip` ecosystem and `uv.lock`:** Dependabot updates
+`pyproject.toml` but does not regenerate `uv.lock`. CI runs `uv sync --locked`,
+which fails when the lockfile diverges from `pyproject.toml`. Dependabot pip PRs
+therefore require a manual `uv lock` step (or an automated post-update workflow)
+before they can pass CI.
