@@ -27,7 +27,9 @@ def pytest_configure(config: pytest.Config) -> None:
     test modules import the per-run URL.
     """
     global _SCRATCH_DB_URL
-    base_url = os.environ.get("MCD_TEST_DATABASE_URL")
+    base_url = os.environ.get("MCD_TEST_DATABASE_URL_BASE") or os.environ.get(
+        "MCD_TEST_DATABASE_URL"
+    )
     if base_url is None:
         return
     from tests.integration.scratch_db import (

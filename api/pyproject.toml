@@ -109,6 +109,10 @@ dev = [
     # is well outside the 7-day cooldown (Section 3); cap the next major (dev
     # tooling, Section 1).
     "pytest-benchmark>=5.1.0,<6",
+    # Parallel test execution in CI (issue #1144). 3.6.1 (2024-12-28) is well
+    # outside the 7-day cooldown (Section 3); cap the next major (dev tooling,
+    # Section 1).
+    "pytest-xdist>=3.6.1,<4",
 ]
 
 [build-system]

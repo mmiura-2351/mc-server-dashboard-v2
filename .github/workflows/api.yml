@@ -105,4 +105,4 @@ jobs:
         # Coverage is CI-only (#325): local `uv run pytest` / `make api-test`
         # stay fast and uncluttered; CI surfaces the number and the missing
         # lines per source path. No floor enforced.
-        run: uv run pytest --cov=src --cov-report=term-missing
+        run: uv run pytest -n auto --dist worksteal --cov=src --cov-report=term-missing
