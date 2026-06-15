@@ -36,7 +36,7 @@ dependencies = [
     # below the cooldown window. 0.0.30+ (2026-05-31 onward) is inside the 7-day
     # cooldown as of this change; 0.0.29 (2026-05-17) is outside. Lift the
     # temporary ``<0.0.30`` cap to ``<0.1`` once 0.0.30 ages out (Section 3).
-    "python-multipart>=0.0.29,<0.0.30",  # 2026-05-17
+    "python-multipart>=0.0.29,<0.0.33",  # 2026-05-17
     # Persistence adapter: async SQLAlchemy over asyncpg, migrations via Alembic.
     "sqlalchemy[asyncio]>=2.0.50,<3",   # 2026-05-24
     "asyncpg>=0.31.0,<0.32",            # 2025-11-24
