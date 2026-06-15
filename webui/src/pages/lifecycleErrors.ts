@@ -8,7 +8,9 @@
  * misleading generic state-changed toast. Every other 409 reason
  * (`invalid_transition`, `transition_conflict`, `command_failed`,
  * `server_not_running`) is race-flavoured and keeps the state-changed
- * treatment. Non-409 errors fall back to the generic action-failed toast.
+ * treatment. 503 responses with a recognized `reason` (`no_eligible_worker`,
+ * `worker_unavailable`, `jar_unavailable`) get their own message (issue #1092).
+ * All other errors fall back to the generic action-failed toast.
  *
  * 403 is intentionally NOT handled here: it carries a side effect (refetching
  * capabilities) that lives in `useOnForbidden`. Callers run that glue first and
@@ -29,12 +31,26 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
   image_missing: "dashboard.lifecycle.imageMissing",
 };
 
+// 503 service-unavailable reasons (issue #1092): post-restart scenarios where
+// the Worker or JAR backend is not yet ready. Matches the API's RFC 9457
+// `reason` extension member on 503 responses.
+const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
+  no_eligible_worker: "dashboard.lifecycle.noEligibleWorker",
+  worker_unavailable: "dashboard.lifecycle.workerUnavailable",
+  jar_unavailable: "dashboard.lifecycle.jarUnavailable",
+};
+
 export function lifecycleErrorMessage(error: unknown): TranslationKey {
   if (error instanceof ApiError && error.status === 409) {
     if (error.reason !== undefined && error.reason in SPECIFIC_409_MESSAGE) {
       return SPECIFIC_409_MESSAGE[error.reason];
     }
     return "dashboard.stateChanged";
+  }
+  if (error instanceof ApiError && error.status === 503) {
+    if (error.reason !== undefined && error.reason in SPECIFIC_503_MESSAGE) {
+      return SPECIFIC_503_MESSAGE[error.reason];
+    }
   }
   return "dashboard.actionFailed";
 }

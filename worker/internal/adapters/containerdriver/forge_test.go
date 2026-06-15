@@ -556,6 +556,72 @@ func TestInstallWaitTransportErrorContainerRunningContinuesSupervising(t *testin
 	drainClosed(inst.Events())
 }
 
+// A Forge install that produces a legacy forge-*.jar (no unix_args.txt) proceeds
+// to launch via JAR mode instead of crashing (issue #1093).
+func TestForgeContainerLegacyJarFallback(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	d := forgeDriver(docker)
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// The install produces a legacy forge jar (no args file).
+	legacyJar := "forge-1.12.2-14.23.5.2860.jar"
+	if err := os.WriteFile(filepath.Join(dir, legacyJar), []byte("jar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docker.exit("mcsd-s1-install", 0, nil)
+
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	got := docker.names()
+	if len(got) != 2 || got[0] != "mcsd-s1-install" || got[1] != "mcsd-s1" {
+		t.Fatalf("created containers = %v, want [mcsd-s1-install mcsd-s1]", got)
+	}
+	if !docker.wasRemoved("mcsd-s1-install") {
+		t.Fatal("install container must be removed after it exits")
+	}
+	// The launch container should use JAR mode with the legacy forge jar.
+	if !hasArg(docker.createSpecs[1].Cmd, "-jar") {
+		t.Fatalf("launch Cmd = %v, want -jar mode", docker.createSpecs[1].Cmd)
+	}
+	if !hasArg(docker.createSpecs[1].Cmd, containerWorkDir+"/"+legacyJar) {
+		t.Fatalf("launch Cmd = %v, want legacy forge jar path", docker.createSpecs[1].Cmd)
+	}
+	if !hasArg(docker.createSpecs[1].Cmd, "nogui") {
+		t.Fatalf("launch Cmd = %v, want nogui", docker.createSpecs[1].Cmd)
+	}
+
+	docker.exit("mcsd-s1", 0, nil)
+	drainClosed(inst.Events())
+}
+
+// A Forge install that produces no args file and no legacy forge jar still
+// crashes with the original error message (issue #1093).
+func TestForgeContainerNoArgsNoLegacyJarCrashes(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	d := forgeDriver(docker)
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Install exits cleanly but produces nothing.
+	docker.exit("mcsd-s1-install", 0, nil)
+
+	drainTo(t, inst.Events(), execution.StateCrashed)
+	if inst.Status() != execution.StateCrashed {
+		t.Fatalf("Status = %v, want crashed", inst.Status())
+	}
+	if got := docker.names(); len(got) != 1 {
+		t.Fatalf("created containers = %v, want only the install container", got)
+	}
+}
+
 func hasArg(args []string, want string) bool {
 	for _, a := range args {
 		if a == want {

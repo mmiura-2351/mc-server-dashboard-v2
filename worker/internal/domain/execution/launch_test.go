@@ -172,6 +172,49 @@ func TestBuildLaunchPlanForgeAmbiguous(t *testing.T) {
 	}
 }
 
+// ResolveLegacyForgeJar returns not-found when no forge-*.jar exists.
+func TestResolveLegacyForgeJarNone(t *testing.T) {
+	dir := t.TempDir()
+	_, found, err := ResolveLegacyForgeJar(dir)
+	if err != nil {
+		t.Fatalf("ResolveLegacyForgeJar: %v", err)
+	}
+	if found {
+		t.Fatal("expected not found when no forge jar exists")
+	}
+}
+
+// ResolveLegacyForgeJar returns the single match when exactly one forge-*.jar
+// exists in the working set root.
+func TestResolveLegacyForgeJarSingle(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "forge-1.12.2-14.23.5.2860.jar"))
+
+	rel, found, err := ResolveLegacyForgeJar(dir)
+	if err != nil {
+		t.Fatalf("ResolveLegacyForgeJar: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found when one forge jar exists")
+	}
+	if rel != "forge-1.12.2-14.23.5.2860.jar" {
+		t.Fatalf("relpath = %q, want forge-1.12.2-14.23.5.2860.jar", rel)
+	}
+}
+
+// ResolveLegacyForgeJar returns ErrLegacyForgeJarAmbiguous when multiple
+// forge-*.jar files exist.
+func TestResolveLegacyForgeJarAmbiguous(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "forge-1.12.2-14.23.5.2860.jar"))
+	writeFile(t, filepath.Join(dir, "forge-1.12.2-14.23.5.2861.jar"))
+
+	_, _, err := ResolveLegacyForgeJar(dir)
+	if !errors.Is(err, ErrLegacyForgeJarAmbiguous) {
+		t.Fatalf("err = %v, want ErrLegacyForgeJarAmbiguous", err)
+	}
+}
+
 func equalArgs(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
