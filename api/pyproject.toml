@@ -12,7 +12,7 @@ dependencies = [
     # generator (grpcio-tools 1.80.0 emits protobuf-6 code). grpcio 1.81.0
     # (2026-06-01) is inside the 7-day cooldown as of this change, so cap below
     # it; lift the cap to <2 once it ages out (docs/dev/DEPENDENCIES.md Section 3).
-    "grpcio>=1.80.0,<1.81",
+    "grpcio>=1.80.0,<1.82",
     "protobuf>=6.31.1,<7",
     # API framework stack (ARCHITECTURE.md Section 7.4). 0.x libraries cap the
     # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
