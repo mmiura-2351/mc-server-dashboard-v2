@@ -385,6 +385,7 @@ export const en = {
   "serverDetail.eulaDialog.body":
     "You must accept the Minecraft End User License Agreement (EULA) before starting this server.",
   "serverDetail.eulaDialog.accept": "Accept and start",
+  "serverDetail.eulaDialog.link": "View the Minecraft EULA",
 
   // Backups tab (WEBUI_SPEC.md 6.7). One contiguous block to keep merge
   // conflicts with sibling i18n PRs minimal.

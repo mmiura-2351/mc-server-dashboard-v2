@@ -321,9 +321,16 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       "/api/communities/{community_id}/servers/{server_id}/start",
       { community_id: communityId, server_id: server.id },
     );
-    await api.post(`${path}?accept_eula=true` as never);
-    queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
-  }, [communityId, server.id, queryClient]);
+    try {
+      await api.post(`${path}?accept_eula=true` as never);
+      queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+    } catch (error: unknown) {
+      if (onForbidden(error)) {
+        return;
+      }
+      showToast(t(lifecycleErrorMessage(error)), "error");
+    }
+  }, [communityId, server.id, queryClient, onForbidden, showToast]);
 
   const state = normalizeState(server.observed_state);
   // While a request is in flight, show the transition it requests so the pill
@@ -607,7 +614,12 @@ function EulaModal({
         </>
       }
     >
-      <p>{t("serverDetail.eulaDialog.body")}</p>
+      <p>
+        {t("serverDetail.eulaDialog.body")}{" "}
+        <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noopener noreferrer">
+          {t("serverDetail.eulaDialog.link")}
+        </a>
+      </p>
     </Modal>
   );
 }

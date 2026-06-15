@@ -661,8 +661,8 @@ class StartServer:
                 server_id=server_id,
                 rel_path="eula.txt",
             )
-        except ServerFileNotFoundError:
-            raise EulaNotAcceptedError(str(server_id.value))
+        except ServerFileNotFoundError as exc:
+            raise EulaNotAcceptedError(str(server_id.value)) from exc
         if b"eula=true" not in content.lower():
             raise EulaNotAcceptedError(str(server_id.value))
 
