@@ -223,4 +223,28 @@ describe("useServerEvents", () => {
       { id: expect.any(Number), kind: "output", line: "done" },
     ]);
   });
+
+  it("exposes the latest status detail from status frames", () => {
+    setup();
+    expect(state.statusDetail).toBe("");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", {
+          state: "crashed",
+          detail: "container exited unexpectedly",
+        }),
+      );
+    });
+    expect(state.statusDetail).toBe("container exited unexpectedly");
+
+    // A new status frame replaces the previous detail.
+    act(() => {
+      MockWebSocket.last().message(
+        frame("status", { state: "running", detail: "" }),
+      );
+    });
+    expect(state.statusDetail).toBe("");
+  });
 });

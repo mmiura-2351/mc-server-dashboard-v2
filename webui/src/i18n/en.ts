@@ -243,6 +243,7 @@ export const en = {
   "serverDetail.loadError": "Could not load this server. Try refreshing.",
   "serverDetail.breadcrumb": "Servers",
   // Overview header.
+  "serverDetail.crashDetail": "Crash reason:",
   "serverDetail.converging": "settling…",
   "serverDetail.desired": "desired",
   "serverDetail.observed": "observed",

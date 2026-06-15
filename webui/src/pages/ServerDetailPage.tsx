@@ -111,6 +111,7 @@ function Loaded({
         communityId={communityId}
         can={can}
         degraded={events.degraded}
+        statusDetail={events.statusDetail}
       />
       <div className="tabs" role="tablist">
         {TABS.map((name) => (
@@ -194,11 +195,13 @@ function Header({
   communityId,
   can,
   degraded,
+  statusDetail,
 }: {
   server: ServerResponse;
   communityId: string;
   can: Can;
   degraded: boolean;
+  statusDetail: string;
 }) {
   const state = normalizeState(server.observed_state);
   const pill = statePill(state);
@@ -258,6 +261,15 @@ function Header({
             </span>
           )}
         </div>
+        {(state === "crashed" || state === "unknown") &&
+          statusDetail.length > 0 && (
+            <div className="crash-detail">
+              <span className="crash-detail-label">
+                {t("serverDetail.crashDetail")}
+              </span>{" "}
+              {statusDetail}
+            </div>
+          )}
         <div className="sub">
           <span className="badge type">
             {server.server_type} {server.mc_version}

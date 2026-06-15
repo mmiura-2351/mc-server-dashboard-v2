@@ -1972,6 +1972,78 @@ describe("ServerDetailPage Overview live streams", () => {
     });
     expect(screen.getByText(t("dashboard.liveDegraded"))).toBeInTheDocument();
   });
+
+  it("shows the crash detail when a crashed status frame carries a detail string", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("status", {
+          state: "crashed",
+          detail: "container exited unexpectedly",
+        }),
+      );
+    });
+
+    expect(screen.getByText(t("serverDetail.crashDetail"))).toBeInTheDocument();
+    expect(
+      screen.getByText("container exited unexpectedly"),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the crash detail when the server recovers from crashed to running", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("status", {
+          state: "crashed",
+          detail: "forge install produced no args file",
+        }),
+      );
+    });
+    expect(
+      screen.getByText("forge install produced no args file"),
+    ).toBeInTheDocument();
+
+    act(() => {
+      MockWebSocket.last().message(
+        serverFrame("status", { state: "running", detail: "" }),
+      );
+    });
+    expect(
+      screen.queryByText("forge install produced no args file"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.crashDetail")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not show crash detail for a running server even if detail is non-empty", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("status", {
+          state: "running",
+          detail: "some info",
+        }),
+      );
+    });
+    expect(screen.queryByText("some info")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.crashDetail")),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("ServerDetailPage Console tab", () => {
