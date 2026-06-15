@@ -466,7 +466,11 @@ function Controls({
       >
         <p>
           {t("serverDetail.eulaDialog.body")}{" "}
-          <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noopener noreferrer">
+          <a
+            href="https://aka.ms/MinecraftEULA"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             {t("serverDetail.eulaDialog.link")}
           </a>
         </p>
