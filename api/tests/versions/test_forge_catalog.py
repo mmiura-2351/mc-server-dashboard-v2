@@ -118,6 +118,34 @@ async def test_resolve_unknown_mc_version_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_falls_back_to_legacy_suffixed_version() -> None:
+    """Old Forge versions (1.7.10, 1.8.9, 1.9.4) publish under {mc}-{forge}-{mc}."""
+    metadata_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <metadata><versioning><versions>
+      <version>1.7.10-10.13.4.1614</version>
+    </versions></versioning></metadata>"""
+    promotions = {
+        "promos": {"1.7.10-recommended": "10.13.4.1614"},
+    }
+    # The standard URL has no fixture (simulates 404); the suffixed URL does.
+    suffixed = "1.7.10-10.13.4.1614-1.7.10"
+    legacy_sha1 = "c" * 40
+    fetcher = FakeDocumentFetcher(
+        texts={
+            _METADATA_URL: metadata_xml,
+            _installer_sha1_url(suffixed): legacy_sha1,
+        },
+        payloads={_PROMOTIONS_URL: promotions},
+    )
+    catalog = ForgeCatalog(fetcher=fetcher)
+    source = await catalog.resolve(ServerType.FORGE, "1.7.10")
+    assert source.url == _installer_url(suffixed)
+    assert source.expected_hash == legacy_sha1
+    assert source.hash_algorithm is HashAlgorithm.SHA1
+    assert source.version == "1.7.10"
+
+
+@pytest.mark.asyncio
 async def test_non_forge_request_rejected() -> None:
     catalog, _ = _catalog()
     with pytest.raises(UnknownVersionError):
