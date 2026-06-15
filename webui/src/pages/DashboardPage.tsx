@@ -187,6 +187,11 @@ function sortServers(
         cmp = a.server_type.localeCompare(b.server_type);
         break;
     }
+    // Secondary sort by name (case-insensitive) for deterministic ordering
+    // when the primary field values are equal.
+    if (cmp === 0 && pref.field !== "name") {
+      cmp = a.name.localeCompare(b.name);
+    }
     return pref.dir === "desc" ? -cmp : cmp;
   });
   return sorted;
@@ -442,7 +447,7 @@ function DashboardFilterBar({
     }
     onFiltersChange({
       ...filters,
-      state: [...next].join(","),
+      state: [...next].sort().join(","),
     });
   };
 
