@@ -111,7 +111,8 @@ describe("DashboardPage list", () => {
     expect(
       screen.getByText(`${t("dashboard.col.worker")}: worker`),
     ).toBeInTheDocument();
-    expect(screen.getByText(t("dashboard.state.running"))).toBeInTheDocument();
+    // The filter bar renders a "running" chip; the server card renders another.
+    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2);
   });
 
   it("shows the unknown pill for an unrecognised observed state", async () => {
@@ -323,15 +324,20 @@ describe("DashboardPage lifecycle actions", () => {
     mockApi.post.mockReturnValue(new Promise(() => {}));
     renderPage();
 
-    await screen.findByText(t("dashboard.state.stopped"));
+    // The filter bar always shows a "stopped" chip; the server card adds another.
+    await waitFor(() =>
+      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(2),
+    );
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
 
-    expect(
-      await screen.findByText(t("dashboard.state.starting")),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("dashboard.state.stopped")),
-    ).not.toBeInTheDocument();
+    // After the action, the server's pill changes to "starting" (now 2: chip + pill).
+    // "stopped" drops to 1 (the filter chip only).
+    await waitFor(() =>
+      expect(screen.getAllByText(t("dashboard.state.starting"))).toHaveLength(
+        2,
+      ),
+    );
+    expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1);
   });
 
   it("optimistically shows the transitional pill immediately on stop", async () => {
@@ -339,15 +345,17 @@ describe("DashboardPage lifecycle actions", () => {
     mockApi.post.mockReturnValue(new Promise(() => {}));
     renderPage();
 
-    await screen.findByText(t("dashboard.state.running"));
+    await waitFor(() =>
+      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2),
+    );
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.stop") }));
 
-    expect(
-      await screen.findByText(t("dashboard.state.stopping")),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("dashboard.state.running")),
-    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getAllByText(t("dashboard.state.stopping"))).toHaveLength(
+        2,
+      ),
+    );
+    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1);
   });
 
   it("reverts the pill to the previous state on error", async () => {
@@ -357,13 +365,15 @@ describe("DashboardPage lifecycle actions", () => {
     );
     renderPage();
 
-    await screen.findByText(t("dashboard.state.stopped"));
+    await waitFor(() =>
+      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(2),
+    );
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
 
-    // After the error, the pill reverts to "Stopped".
-    expect(
-      await screen.findByText(t("dashboard.state.stopped")),
-    ).toBeInTheDocument();
+    // After the error, the pill reverts to "Stopped" (filter chip + server pill = 2).
+    await waitFor(() =>
+      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(2),
+    );
   });
 });
 
@@ -373,7 +383,8 @@ describe("DashboardPage live status", () => {
     renderPage();
 
     await screen.findByText("survival");
-    expect(screen.getByText(t("dashboard.state.stopped"))).toBeInTheDocument();
+    // Filter bar chip + server pill = 2 "stopped" matches.
+    expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(2);
 
     const socket = MockWebSocket.last();
     socket.open();
@@ -384,9 +395,10 @@ describe("DashboardPage live status", () => {
       server_id: "s1",
     });
 
-    expect(
-      await screen.findByText(t("dashboard.state.running")),
-    ).toBeInTheDocument();
+    // After the status event, the server pill changes to "running" (chip + pill = 2).
+    await waitFor(() =>
+      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2),
+    );
     // No second list fetch: the cache was patched in place.
     expect(mockApi.get).toHaveBeenCalledTimes(1);
   });
@@ -413,15 +425,17 @@ describe("DashboardPage view toggle (#541)", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // Cards by default: no column headers rendered.
-    expect(screen.queryByText(t("dashboard.col.name"))).not.toBeInTheDocument();
+    // Cards by default: no table role rendered.
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
 
     fireEvent.click(
       screen.getByRole("button", { name: t("dashboard.view.table") }),
     );
 
     // The table view exposes column headers and the same row data.
-    expect(screen.getByText(t("dashboard.col.name"))).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: /Name/ }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("table")).toBeInTheDocument();
   });
 
@@ -455,10 +469,10 @@ describe("DashboardPage view toggle (#541)", () => {
     );
 
     // Both servers, plus the shared card data: state pill, type/version,
-    // backend, port, worker.
+    // backend, port, worker. The filter bar adds one more "running" chip.
     expect(screen.getByText("survival")).toBeInTheDocument();
     expect(screen.getByText("creative")).toBeInTheDocument();
-    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2);
+    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(3);
     expect(screen.getAllByText("paper 1.21.6")).toHaveLength(2);
     expect(screen.getAllByText("container")).toHaveLength(2);
     expect(screen.getAllByText("25565")).toHaveLength(2);
@@ -652,5 +666,245 @@ describe("DashboardPage join address in server list (issue #982)", () => {
 
     const port = await screen.findByText(":25565");
     expect(port.tagName).toBe("SPAN");
+  });
+});
+
+describe("DashboardPage filter and sort (#1123)", () => {
+  it("filters servers by name search", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival" }),
+      server({ id: "s2", name: "creative" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(screen.getByText("creative")).toBeInTheDocument();
+
+    const searchInput = screen.getByPlaceholderText(
+      t("dashboard.filter.search"),
+    );
+    fireEvent.change(searchInput, { target: { value: "surv" } });
+
+    expect(screen.getByText("survival")).toBeInTheDocument();
+    expect(screen.queryByText("creative")).not.toBeInTheDocument();
+  });
+
+  it("filters servers by state chip toggle", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+      server({
+        id: "s2",
+        name: "creative",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(screen.getByText("creative")).toBeInTheDocument();
+
+    // Click the "running" filter chip to show only running servers.
+    const runningChip = screen.getByRole("button", {
+      name: t("dashboard.state.running"),
+      pressed: false,
+    });
+    fireEvent.click(runningChip);
+
+    expect(screen.getByText("survival")).toBeInTheDocument();
+    expect(screen.queryByText("creative")).not.toBeInTheDocument();
+  });
+
+  it("shows the empty-filter message when no servers match", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+
+    const searchInput = screen.getByPlaceholderText(
+      t("dashboard.filter.search"),
+    );
+    fireEvent.change(searchInput, { target: { value: "nonexistent" } });
+
+    expect(screen.getByText(t("dashboard.filter.noMatch"))).toBeInTheDocument();
+    expect(screen.queryByText("survival")).not.toBeInTheDocument();
+  });
+
+  it("sorts servers by name ascending by default", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s2", name: "creative" }),
+      server({ id: "s1", name: "survival" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    // Switch to table view to inspect row order.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    const rows = screen.getAllByRole("row");
+    // Row 0 is the header; rows 1+ are data rows.
+    expect(rows[1]).toHaveTextContent("creative");
+    expect(rows[2]).toHaveTextContent("survival");
+  });
+
+  it("clicking a table column header sorts by that field", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+      server({
+        id: "s2",
+        name: "creative",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    // Click the State column header to sort by state.
+    fireEvent.click(screen.getByRole("columnheader", { name: /State/ }));
+
+    const rows = screen.getAllByRole("row");
+    // "running" < "stopped" alphabetically, so running first.
+    expect(rows[1]).toHaveTextContent("survival");
+    expect(rows[2]).toHaveTextContent("creative");
+  });
+
+  it("clicking the same column header toggles sort direction", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "alpha" }),
+      server({ id: "s2", name: "zulu" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("alpha");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    // Default is name ascending: alpha first.
+    let rows = screen.getAllByRole("row");
+    expect(rows[1]).toHaveTextContent("alpha");
+    expect(rows[2]).toHaveTextContent("zulu");
+
+    // Click name header to toggle to descending.
+    fireEvent.click(screen.getByRole("columnheader", { name: /Name/ }));
+    rows = screen.getAllByRole("row");
+    expect(rows[1]).toHaveTextContent("zulu");
+    expect(rows[2]).toHaveTextContent("alpha");
+  });
+
+  it("persists sort preference in localStorage", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "alpha" }),
+      server({ id: "s2", name: "zulu" }),
+    ]);
+    const first = renderPage();
+
+    await screen.findByText("alpha");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+    // Toggle to descending.
+    fireEvent.click(screen.getByRole("columnheader", { name: /Name/ }));
+    let rows = screen.getAllByRole("row");
+    expect(rows[1]).toHaveTextContent("zulu");
+    first.unmount();
+
+    // Remount: sort preference is restored from localStorage.
+    renderPage();
+    await screen.findByText("alpha");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+    rows = screen.getAllByRole("row");
+    expect(rows[1]).toHaveTextContent("zulu");
+    expect(rows[2]).toHaveTextContent("alpha");
+  });
+
+  it("card view shows a sort control with the current sort field", async () => {
+    mockApi.get.mockResolvedValue([server()]);
+    renderPage();
+
+    await screen.findByText("survival");
+    // The card view sort control shows the default "Name ▲".
+    expect(screen.getByRole("button", { name: /Name.*▲/ })).toBeInTheDocument();
+  });
+
+  it("filter and sort work together", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "beta-survival", observed_state: "running" }),
+      server({ id: "s2", name: "alpha-creative", observed_state: "running" }),
+      server({
+        id: "s3",
+        name: "gamma-lobby",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    renderPage();
+
+    await screen.findByText("beta-survival");
+
+    // Filter to running only.
+    const runningChip = screen.getByRole("button", {
+      name: t("dashboard.state.running"),
+      pressed: false,
+    });
+    fireEvent.click(runningChip);
+
+    // gamma-lobby (stopped) is filtered out.
+    expect(screen.queryByText("gamma-lobby")).not.toBeInTheDocument();
+
+    // Switch to table view to check sort order.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    const rows = screen.getAllByRole("row");
+    // Sorted by name ascending: alpha-creative before beta-survival.
+    expect(rows[1]).toHaveTextContent("alpha-creative");
+    expect(rows[2]).toHaveTextContent("beta-survival");
+  });
+
+  it("does not show filter controls when server list is empty", async () => {
+    mockApi.get.mockResolvedValue([]);
+    renderPage();
+
+    await screen.findByText(t("dashboard.empty"));
+    // The filter bar should not render when there are no servers at all.
+    expect(
+      screen.queryByPlaceholderText(t("dashboard.filter.search")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("initializes filters from URL query params", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+      server({
+        id: "s2",
+        name: "creative",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    // Pass search and state filter via URL query params.
+    renderPage(`/communities/${CID}?search=surv&state=running`);
+
+    await screen.findByText("survival");
+    // The search input should be pre-filled.
+    const searchInput = screen.getByPlaceholderText(
+      t("dashboard.filter.search"),
+    );
+    expect(searchInput).toHaveValue("surv");
+    // "creative" (stopped) should be hidden by both the name and state filter.
+    expect(screen.queryByText("creative")).not.toBeInTheDocument();
   });
 });

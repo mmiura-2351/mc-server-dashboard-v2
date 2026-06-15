@@ -3,6 +3,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -22,10 +23,12 @@ import { dashboardPath } from "../routes.ts";
 import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import {
   actionApplies,
+  KNOWN,
   normalizeState,
   type ObservedState,
   statePill,
 } from "./serverState.ts";
+import { useAuditFilterParams } from "./urlState.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
@@ -88,6 +91,110 @@ function useViewMode(): [ViewMode, (mode: ViewMode) => void] {
     saveViewMode(next);
   };
   return [mode, select];
+}
+
+// Sort preference (#1123), persisted in localStorage like the view mode.
+type SortField = "name" | "state" | "type";
+type SortDir = "asc" | "desc";
+interface SortPref {
+  field: SortField;
+  dir: SortDir;
+}
+const SORT_KEY = "mcsd.dashboard.sort";
+const DEFAULT_SORT: SortPref = { field: "name", dir: "asc" };
+
+function loadSort(): SortPref {
+  try {
+    const raw = localStorage.getItem(SORT_KEY);
+    if (raw === null) return DEFAULT_SORT;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const field = parsed.field;
+    const dir = parsed.dir;
+    if (
+      (field === "name" || field === "state" || field === "type") &&
+      (dir === "asc" || dir === "desc")
+    ) {
+      return { field, dir };
+    }
+  } catch {
+    // Corrupt/blocked storage.
+  }
+  return DEFAULT_SORT;
+}
+
+function saveSort(pref: SortPref): void {
+  try {
+    localStorage.setItem(SORT_KEY, JSON.stringify(pref));
+  } catch {
+    // Best-effort.
+  }
+}
+
+function useSortPref(): [SortPref, (next: SortPref) => void] {
+  const [pref, setPref] = useState<SortPref>(() => loadSort());
+  const update = (next: SortPref) => {
+    setPref(next);
+    saveSort(next);
+  };
+  return [pref, update];
+}
+
+// Toggle sort: clicking the same field flips direction; a new field resets to asc.
+function toggleSort(current: SortPref, field: SortField): SortPref {
+  if (current.field === field) {
+    return { field, dir: current.dir === "asc" ? "desc" : "asc" };
+  }
+  return { field, dir: "asc" };
+}
+
+// URL-driven filter keys for the dashboard (#1123).
+const FILTER_KEYS = ["search", "state"] as const;
+
+// Apply client-side filtering to the server list.
+function filterServers(
+  servers: ServerResponse[],
+  search: string,
+  stateFilter: string,
+): ServerResponse[] {
+  const needle = search.trim().toLowerCase();
+  const states = stateFilter ? stateFilter.split(",").filter(Boolean) : [];
+  return servers.filter((s) => {
+    if (needle && !s.name.toLowerCase().includes(needle)) return false;
+    if (states.length > 0 && !states.includes(normalizeState(s.observed_state)))
+      return false;
+    return true;
+  });
+}
+
+// Apply client-side sorting to the server list.
+function sortServers(
+  servers: ServerResponse[],
+  pref: SortPref,
+): ServerResponse[] {
+  const sorted = [...servers];
+  sorted.sort((a, b) => {
+    let cmp: number;
+    switch (pref.field) {
+      case "name":
+        cmp = a.name.localeCompare(b.name);
+        break;
+      case "state":
+        cmp = normalizeState(a.observed_state).localeCompare(
+          normalizeState(b.observed_state),
+        );
+        break;
+      case "type":
+        cmp = a.server_type.localeCompare(b.server_type);
+        break;
+    }
+    // Secondary sort by name (case-insensitive) for deterministic ordering
+    // when the primary field values are equal.
+    if (cmp === 0 && pref.field !== "name") {
+      cmp = a.name.localeCompare(b.name);
+    }
+    return pref.dir === "desc" ? -cmp : cmp;
+  });
+  return sorted;
 }
 
 export function DashboardPage() {
@@ -184,6 +291,23 @@ function Loaded({ communityId }: { communityId: string }) {
   const can = useCan();
   const degraded = useCommunityEvents(communityId);
   const [view, setView] = useViewMode();
+  const [sort, setSort] = useSortPref();
+  const [filters, setFilters] = useAuditFilterParams(FILTER_KEYS);
+
+  // The search input uses a local draft so each keystroke does not push a
+  // history entry. Filtering applies the draft immediately for instant
+  // feedback; the URL is updated on blur / Enter.
+  const [searchDraft, setSearchDraft] = useState(filters.search);
+  useEffect(() => {
+    setSearchDraft(filters.search);
+  }, [filters.search]);
+
+  const commitSearch = useCallback(() => {
+    if (searchDraft !== filters.search) {
+      setFilters({ ...filters, search: searchDraft });
+    }
+  }, [searchDraft, filters, setFilters]);
+
   const query = useQuery({
     queryKey: serversKey(communityId),
     queryFn: () =>
@@ -193,6 +317,16 @@ function Loaded({ communityId }: { communityId: string }) {
         }),
       ),
   });
+
+  // Hooks must be called unconditionally (Rules of Hooks), so filter/sort are
+  // computed before the early-return branches. They operate on an empty array
+  // when the query has not resolved yet.
+  const servers = query.data ?? [];
+  const filtered = useMemo(
+    () => filterServers(servers, searchDraft, filters.state),
+    [servers, searchDraft, filters.state],
+  );
+  const sorted = useMemo(() => sortServers(filtered, sort), [filtered, sort]);
 
   if (query.isPending) {
     return (
@@ -209,7 +343,6 @@ function Loaded({ communityId }: { communityId: string }) {
     );
   }
 
-  const servers = query.data;
   if (servers.length === 0) {
     return (
       <DashboardChrome degraded={degraded}>
@@ -223,11 +356,31 @@ function Loaded({ communityId }: { communityId: string }) {
       degraded={degraded}
       toolbar={<ViewToggle view={view} onSelect={setView} />}
     >
-      {view === "table" ? (
-        <ServerTable servers={servers} communityId={communityId} can={can} />
+      <DashboardFilterBar
+        filters={filters}
+        searchDraft={searchDraft}
+        onSearchDraftChange={setSearchDraft}
+        onSearchCommit={commitSearch}
+        onFiltersChange={setFilters}
+        sort={sort}
+        onSortChange={setSort}
+        view={view}
+      />
+      {sorted.length === 0 ? (
+        <div className="empty">
+          <p className="sub">{t("dashboard.filter.noMatch")}</p>
+        </div>
+      ) : view === "table" ? (
+        <ServerTable
+          servers={sorted}
+          communityId={communityId}
+          can={can}
+          sort={sort}
+          onSort={setSort}
+        />
       ) : (
         <div className="grid cols-2">
-          {servers.map((server) => (
+          {sorted.map((server) => (
             <ServerCard
               key={server.id}
               server={server}
@@ -253,6 +406,168 @@ function EmptyState({ communityId }: { communityId: string }) {
         {t("dashboard.createServer")}
       </Link>
     </div>
+  );
+}
+
+// Filter and sort controls rendered above both card and table views (#1123).
+// The search input uses a local draft (owned by Loaded) to avoid pushing a
+// browser history entry per keystroke; the draft syncs to the URL on blur or
+// Enter (the audit pages use a separate "Apply" button for the same reason).
+function DashboardFilterBar({
+  filters,
+  searchDraft,
+  onSearchDraftChange,
+  onSearchCommit,
+  onFiltersChange,
+  sort,
+  onSortChange,
+  view,
+}: {
+  filters: Record<"search" | "state", string>;
+  searchDraft: string;
+  onSearchDraftChange: (value: string) => void;
+  onSearchCommit: () => void;
+  onFiltersChange: (next: Record<"search" | "state", string>) => void;
+  sort: SortPref;
+  onSortChange: (next: SortPref) => void;
+  view: ViewMode;
+}) {
+  const activeStates = useMemo(
+    () =>
+      new Set(filters.state ? filters.state.split(",").filter(Boolean) : []),
+    [filters.state],
+  );
+
+  const toggleState = (state: string) => {
+    const next = new Set(activeStates);
+    if (next.has(state)) {
+      next.delete(state);
+    } else {
+      next.add(state);
+    }
+    onFiltersChange({
+      ...filters,
+      state: [...next].sort().join(","),
+    });
+  };
+
+  return (
+    <div className="dashboard-filters">
+      <input
+        type="text"
+        className="filter-search"
+        placeholder={t("dashboard.filter.search")}
+        value={searchDraft}
+        onChange={(e) => onSearchDraftChange(e.target.value)}
+        onBlur={onSearchCommit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onSearchCommit();
+        }}
+        aria-label={t("dashboard.filter.search")}
+      />
+      <fieldset
+        className="filter-states"
+        aria-label={t("dashboard.filter.state")}
+      >
+        {/* "unknown" is excluded: it is a fallback for unrecognised API values,
+            not a state users intentionally filter for. */}
+        {KNOWN.filter((s) => s !== "unknown").map((state) => {
+          const pill = statePill(state);
+          return (
+            <button
+              key={state}
+              type="button"
+              className={`pill ${pill.className}${activeStates.has(state) ? "" : " dim"}`}
+              aria-pressed={activeStates.has(state)}
+              onClick={() => toggleState(state)}
+            >
+              {t(pill.labelKey)}
+            </button>
+          );
+        })}
+      </fieldset>
+      {/* In card view, show an explicit sort control; table view uses column headers. */}
+      {view === "cards" && (
+        <SortControl sort={sort} onSortChange={onSortChange} />
+      )}
+    </div>
+  );
+}
+
+const SORT_FIELDS: {
+  field: SortField;
+  labelKey:
+    | "dashboard.sort.name"
+    | "dashboard.sort.state"
+    | "dashboard.sort.type";
+}[] = [
+  { field: "name", labelKey: "dashboard.sort.name" },
+  { field: "state", labelKey: "dashboard.sort.state" },
+  { field: "type", labelKey: "dashboard.sort.type" },
+];
+
+function SortControl({
+  sort,
+  onSortChange,
+}: {
+  sort: SortPref;
+  onSortChange: (next: SortPref) => void;
+}) {
+  return (
+    <fieldset className="sort-control" aria-label={t("dashboard.sort.label")}>
+      <span className="sort-label">{t("dashboard.sort.label")}:</span>
+      {SORT_FIELDS.map(({ field, labelKey }) => (
+        <button
+          key={field}
+          type="button"
+          className="btn sm"
+          aria-pressed={sort.field === field}
+          onClick={() => onSortChange(toggleSort(sort, field))}
+        >
+          {t(labelKey)}
+          {sort.field === field && (sort.dir === "asc" ? " ▲" : " ▼")}
+        </button>
+      ))}
+    </fieldset>
+  );
+}
+
+// A sortable table column header that keeps the label text intact (for
+// getByText-style test queries) and renders the direction indicator in a
+// separate aria-hidden span.
+function SortableHeader({
+  field,
+  sort,
+  onSort,
+  children,
+}: {
+  field: SortField;
+  sort: SortPref;
+  onSort: (next: SortPref) => void;
+  children: ReactNode;
+}) {
+  const active = sort.field === field;
+  const handleSort = () => onSort(toggleSort(sort, field));
+  return (
+    <th
+      className="sortable"
+      aria-sort={
+        active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"
+      }
+      tabIndex={0}
+      onClick={handleSort}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleSort();
+        }
+      }}
+    >
+      {children}
+      {active && (
+        <span aria-hidden="true">{sort.dir === "asc" ? " ▲" : " ▼"}</span>
+      )}
+    </th>
   );
 }
 
@@ -460,19 +775,29 @@ function ServerTable({
   servers,
   communityId,
   can,
+  sort,
+  onSort,
 }: {
   servers: ServerResponse[];
   communityId: string;
   can: Can;
+  sort: SortPref;
+  onSort: (next: SortPref) => void;
 }) {
   return (
     <div className="card dashboard-table" style={{ padding: 0 }}>
       <ResizableTable storageKey="mcsd.colw.dashboard-servers" className="data">
         <thead>
           <tr>
-            <th>{t("dashboard.col.name")}</th>
-            <th>{t("dashboard.col.state")}</th>
-            <th>{t("dashboard.col.type")}</th>
+            <SortableHeader field="name" sort={sort} onSort={onSort}>
+              {t("dashboard.col.name")}
+            </SortableHeader>
+            <SortableHeader field="state" sort={sort} onSort={onSort}>
+              {t("dashboard.col.state")}
+            </SortableHeader>
+            <SortableHeader field="type" sort={sort} onSort={onSort}>
+              {t("dashboard.col.type")}
+            </SortableHeader>
             <th>{t("dashboard.col.backend")}</th>
             <th>{t("dashboard.col.address")}</th>
             <th>{t("dashboard.col.worker")}</th>

@@ -19,7 +19,7 @@ export type ObservedState =
   | "crashed"
   | "unknown";
 
-const KNOWN: readonly ObservedState[] = [
+export const KNOWN: readonly ObservedState[] = [
   "starting",
   "running",
   "stopping",

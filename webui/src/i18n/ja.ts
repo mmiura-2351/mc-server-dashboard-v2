@@ -242,6 +242,14 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.liveDegraded": "ライブ更新が低下 — ポーリング中",
   // Clickable join-hostname copy feedback.
   "dashboard.copiedJoinHostname": "コピーしました！",
+  // Filter and sort controls (#1123).
+  "dashboard.filter.search": "名前で検索…",
+  "dashboard.filter.state": "状態でフィルター",
+  "dashboard.filter.noMatch": "フィルター条件に一致するサーバーがありません。",
+  "dashboard.sort.label": "並べ替え",
+  "dashboard.sort.name": "名前",
+  "dashboard.sort.state": "状態",
+  "dashboard.sort.type": "種類",
 
   // Server detail page (WEBUI_SPEC.md 6.4 / 6.9).
   "serverDetail.loading": "サーバーを読み込んでいます…",
