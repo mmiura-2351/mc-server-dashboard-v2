@@ -48,4 +48,36 @@ describe("lifecycleErrorMessage", () => {
     const error = new ApiError(503, { reason: "port_conflict" });
     expect(lifecycleErrorMessage(error)).toBe("dashboard.actionFailed");
   });
+
+  // 503 service-unavailable reasons (issue #1092).
+  it("maps a 503 no_eligible_worker to its specific message", () => {
+    const error = new ApiError(503, { reason: "no_eligible_worker" });
+    expect(lifecycleErrorMessage(error)).toBe(
+      "dashboard.lifecycle.noEligibleWorker",
+    );
+  });
+
+  it("maps a 503 worker_unavailable to its specific message", () => {
+    const error = new ApiError(503, { reason: "worker_unavailable" });
+    expect(lifecycleErrorMessage(error)).toBe(
+      "dashboard.lifecycle.workerUnavailable",
+    );
+  });
+
+  it("maps a 503 jar_unavailable to its specific message", () => {
+    const error = new ApiError(503, { reason: "jar_unavailable" });
+    expect(lifecycleErrorMessage(error)).toBe(
+      "dashboard.lifecycle.jarUnavailable",
+    );
+  });
+
+  it("falls back to the generic message for a 503 with an unknown reason", () => {
+    const error = new ApiError(503, { reason: "something_else" });
+    expect(lifecycleErrorMessage(error)).toBe("dashboard.actionFailed");
+  });
+
+  it("falls back to the generic message for a 503 with no reason", () => {
+    const error = new ApiError(503, undefined);
+    expect(lifecycleErrorMessage(error)).toBe("dashboard.actionFailed");
+  });
 });

@@ -231,6 +231,13 @@ export const ja: Record<TranslationKey, string> = {
     "起動できませんでした: ポートがすでに使用されています。",
   "dashboard.lifecycle.imageMissing":
     "起動できませんでした: サーバーイメージが見つかりません。",
+  // 503 service-unavailable reasons (issue #1092).
+  "dashboard.lifecycle.noEligibleWorker":
+    "ワーカーが利用できません。システムが起動中の場合は、しばらく待ってから再試行してください。",
+  "dashboard.lifecycle.workerUnavailable":
+    "ワーカーとの通信に失敗しました。しばらく待ってから再試行してください。",
+  "dashboard.lifecycle.jarUnavailable":
+    "サーバーJARの取得に失敗しました。しばらく待ってから再試行してください。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "ライブ更新が低下 — ポーリング中",
   // Clickable join-hostname copy feedback.

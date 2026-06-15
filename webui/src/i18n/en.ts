@@ -224,6 +224,14 @@ export const en = {
     "Could not start: a port is already in use.",
   "dashboard.lifecycle.imageMissing":
     "Could not start: the server image is missing.",
+  // 503 service-unavailable reasons (issue #1092): post-restart scenarios where
+  // the Worker or JAR backend is not yet ready.
+  "dashboard.lifecycle.noEligibleWorker":
+    "No worker is available. If the system just restarted, wait a moment and try again.",
+  "dashboard.lifecycle.workerUnavailable":
+    "Could not reach the worker. Please wait a moment and try again.",
+  "dashboard.lifecycle.jarUnavailable":
+    "Could not provision the server JAR. Please wait a moment and try again.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Live updates degraded — polling",
   // Clickable join-hostname copy feedback.

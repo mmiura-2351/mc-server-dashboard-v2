@@ -29,12 +29,26 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
   image_missing: "dashboard.lifecycle.imageMissing",
 };
 
+// 503 service-unavailable reasons (issue #1092): post-restart scenarios where
+// the Worker or JAR backend is not yet ready. Matches the API's RFC 9457
+// `reason` extension member on 503 responses.
+const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
+  no_eligible_worker: "dashboard.lifecycle.noEligibleWorker",
+  worker_unavailable: "dashboard.lifecycle.workerUnavailable",
+  jar_unavailable: "dashboard.lifecycle.jarUnavailable",
+};
+
 export function lifecycleErrorMessage(error: unknown): TranslationKey {
   if (error instanceof ApiError && error.status === 409) {
     if (error.reason !== undefined && error.reason in SPECIFIC_409_MESSAGE) {
       return SPECIFIC_409_MESSAGE[error.reason];
     }
     return "dashboard.stateChanged";
+  }
+  if (error instanceof ApiError && error.status === 503) {
+    if (error.reason !== undefined && error.reason in SPECIFIC_503_MESSAGE) {
+      return SPECIFIC_503_MESSAGE[error.reason];
+    }
   }
   return "dashboard.actionFailed";
 }
