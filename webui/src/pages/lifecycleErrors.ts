@@ -40,6 +40,14 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
   jar_unavailable: "dashboard.lifecycle.jarUnavailable",
 };
 
+export function isEulaNotAccepted(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    error.reason === "eula_not_accepted"
+  );
+}
+
 export function lifecycleErrorMessage(error: unknown): TranslationKey {
   if (error instanceof ApiError && error.status === 409) {
     if (error.reason !== undefined && error.reason in SPECIFIC_409_MESSAGE) {

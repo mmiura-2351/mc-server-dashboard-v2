@@ -178,6 +178,7 @@ async def test_start_takes_lock_around_its_flip() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
         lifecycle_lock=lock,
     )(community_id=_COMMUNITY, server_id=server.id)
 
@@ -215,6 +216,7 @@ async def test_start_and_restore_take_the_same_keyed_lock() -> None:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
         lifecycle_lock=lock,
     )(community_id=_COMMUNITY, server_id=server.id)
 

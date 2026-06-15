@@ -4745,7 +4745,9 @@ export interface operations {
     };
     start_server_api_communities__community_id__servers__server_id__start_post: {
         parameters: {
-            query?: never;
+            query?: {
+                accept_eula?: boolean;
+            };
             header?: never;
             path: {
                 community_id: string;

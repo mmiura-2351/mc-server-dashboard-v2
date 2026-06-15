@@ -41,6 +41,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
+    FakeFileStore,
     FakeJarProvisioner,
     FakeServerRepository,
     FakeStoreGenerationReader,
@@ -97,6 +98,7 @@ def _reconciler(
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
             store_generation=FakeStoreGenerationReader(generation=store_generation),
+            file_store=FakeFileStore(seed_eula=True),
         ),
         make_stop_server=lambda: StopServer(uow=uow, control_plane=cp, clock=clock),
         control_plane=cp,
@@ -858,6 +860,7 @@ def _concurrent_reconciler(
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
             store_generation=FakeStoreGenerationReader(),
+            file_store=FakeFileStore(seed_eula=True),
         ),
         make_stop_server=lambda: StopServer(
             uow=fresh_uow(), control_plane=cp, clock=clock
@@ -967,6 +970,7 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
             store_generation=FakeStoreGenerationReader(),
+            file_store=FakeFileStore(seed_eula=True),
         )
 
     made: list[bool] = []

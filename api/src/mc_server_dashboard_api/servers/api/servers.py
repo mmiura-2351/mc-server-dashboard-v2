@@ -93,6 +93,7 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    EulaNotAcceptedError,
     ExecutionBackendImmutableError,
     FileTooLargeError,
     InvalidBackupScheduleError,
@@ -793,11 +794,13 @@ async def start_server(
     use_case: Annotated[StartServer, Depends(get_start_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    accept_eula: Annotated[bool, Query()] = False,
 ) -> ServerResponse:
     try:
         server = await use_case(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
+            accept_eula=accept_eula,
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
@@ -993,6 +996,7 @@ async def _read_capped_upload(file: UploadFile) -> bytes:
 _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     InvalidLifecycleTransitionError: (Outcome.DENIED, "invalid_transition"),
     LifecycleTransitionConflictError: (Outcome.DENIED, "transition_conflict"),
+    EulaNotAcceptedError: (Outcome.DENIED, "eula_not_accepted"),
     # StartServer holds the per-server lifecycle lock for its flip; if a gated op
     # holds it past the acquire budget the start is refused as a transient 409
     # ``server_busy`` (issue #876), the same retry-able conflict the gated routes

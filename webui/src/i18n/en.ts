@@ -380,6 +380,11 @@ export const en = {
     "The join address name must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
   "serverDetail.error.slugTaken": "That join address name is already in use.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
+  // EULA acceptance dialog (issue #1104).
+  "serverDetail.eulaDialog.title": "Accept Minecraft EULA?",
+  "serverDetail.eulaDialog.body":
+    "You must accept the Minecraft End User License Agreement (EULA) before starting this server.",
+  "serverDetail.eulaDialog.accept": "Accept and start",
 
   // Backups tab (WEBUI_SPEC.md 6.7). One contiguous block to keep merge
   // conflicts with sibling i18n PRs minimal.

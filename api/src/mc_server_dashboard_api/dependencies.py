@@ -1420,6 +1420,7 @@ def get_start_server(
     request: Request,
     control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
     ensure_jar: Annotated[EnsureJar, Depends(get_ensure_jar)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
 ) -> StartServer:
     """Assemble the :class:`StartServer` use case (server:start).
 
@@ -1434,6 +1435,7 @@ def get_start_server(
         clock=ServersSystemClock(),
         jar_provisioner=CatalogJarProvisioner(ensure_jar=ensure_jar),
         store_generation=StorageGenerationReader(storage=get_storage(request)),
+        file_store=file_store,
         lifecycle_lock=get_lifecycle_lock(request),
     )
 

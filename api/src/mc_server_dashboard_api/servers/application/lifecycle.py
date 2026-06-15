@@ -90,12 +90,15 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    EulaNotAcceptedError,
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
+    ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotRunningError,
 )
+from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioner
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     LifecycleLock,
@@ -163,10 +166,15 @@ class StartServer:
     clock: Clock
     jar_provisioner: JarProvisioner
     store_generation: StoreGenerationReader
+    file_store: FileStore
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        accept_eula: bool = False,
     ) -> Server:
         # Take the per-server lifecycle lock around the desired-state flip (issue
         # #827): an at-rest-gated operation (restore, delete, file edit) holds the
@@ -179,6 +187,17 @@ class StartServer:
             server = await _load(self.uow, community_id, server_id)
             if server.desired_state is DesiredState.RUNNING:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
+            # EULA gate: starting without acceptance would crash the Minecraft
+            # process immediately ("You need to agree to the EULA").
+            if accept_eula:
+                await self.file_store.write_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path="eula.txt",
+                    content=b"eula=true\n",
+                )
+            else:
+                await self._check_eula(community_id, server_id)
             # Ensure the resolved JAR is pooled BEFORE placement/dispatch (FR-VER-3):
             # a download/verify failure fails the start here, before a Worker is
             # placed or the desired state flipped. The ensure skips the download when
@@ -632,6 +651,20 @@ class StartServer:
             memory_limit_mb=memory_limit_from_config(server.config),
             committed_by_worker=committed,
         )
+
+    async def _check_eula(self, community_id: CommunityId, server_id: ServerId) -> None:
+        """Verify eula.txt contains ``eula=true``; raise if missing or unsigned."""
+
+        try:
+            content = await self.file_store.read_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path="eula.txt",
+            )
+        except ServerFileNotFoundError:
+            raise EulaNotAcceptedError(str(server_id.value))
+        if b"eula=true" not in content.lower():
+            raise EulaNotAcceptedError(str(server_id.value))
 
     async def _ensure_jar(self, server: Server) -> str:
         """Ensure the resolved JAR is pooled; return its content key (FR-VER-3).
