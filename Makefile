@@ -3,11 +3,26 @@
 # api/README.md and worker/README.md.
 #
 # Usage:
+#   make help           # list all targets with descriptions
+#
+# Development:
 #   make format         # auto-format both modules
 #   make lint           # lint + typecheck both modules (no writes)
 #   make test           # run both test suites
 #   make check          # full gate: lint + test (what CI and pre-push run)
 #   make hooks-install  # install the git hooks (one-time)
+#
+# Operations:
+#   make up             # start the compose stack
+#   make down           # stop the compose stack
+#   make restart        # restart the compose stack
+#   make status         # show service health and container state
+#   make logs           # tail live logs (all services)
+#   make ps             # list containers
+#   make build          # build images without deploying
+#   make clean          # stop and remove containers + networks (keeps volumes)
+#   make deploy         # first-time deploy with interactive .env setup
+#   make update         # selective rebuild with change detection
 
 .PHONY: all check lint format test docs-check \
 	api-env-check api-lint api-format api-test \
@@ -17,7 +32,8 @@
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
 	bootstrap hooks-install hooks-check hooks-test \
-	update deploy
+	update deploy \
+	up down restart status logs ps build clean help
 
 # golangci-lint is not part of the Go distribution; it is installed into a
 # module-local, gitignored ./.bin (see worker/README.md).
@@ -368,3 +384,99 @@ update:
 # skips setup and does a full rebuild + deploy. See scripts/deploy.sh.
 deploy:
 	scripts/deploy.sh
+
+# ---------------------------------------------------------------------------
+# Operations — start/stop/restart/observe the compose stack.
+#
+# These wrap `docker compose` through `sg docker -c` so the invoking user
+# does not need to be in the docker group directly (the single-host deploy
+# setup uses a secondary group via sg). SERVICE= narrows to one service
+# where it makes sense (logs, restart).
+# ---------------------------------------------------------------------------
+
+# Start the compose stack (idempotent — already-running services are untouched).
+up:
+	sg docker -c "docker compose up -d"
+
+# Stop and remove all compose services (containers + default network).
+# Volumes are preserved; use `make clean` to also remove containers/networks.
+down:
+	sg docker -c "docker compose down"
+
+# Restart one or all services. `make restart` restarts everything;
+# `make restart SERVICE=worker` restarts only the worker.
+restart:
+	sg docker -c "docker compose restart $(SERVICE)"
+
+# Show service health, state, and uptime at a glance.
+status:
+	@sg docker -c "docker compose ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'"
+	@echo ""
+	@api_port="$$(grep -E '^API_HTTP_PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"; \
+	api_port="$${api_port:-8000}"; \
+	if curl -sf "http://localhost:$${api_port}/api/healthz" > /dev/null 2>&1; then \
+		echo "API healthcheck: OK"; \
+	else \
+		echo "API healthcheck: FAIL"; \
+	fi
+
+# Tail live logs. `make logs` tails all; `make logs SERVICE=worker` tails one.
+# Ctrl-C to stop.
+logs:
+	sg docker -c "docker compose logs -f --tail=100 $(SERVICE)"
+
+# List containers (including stopped ones).
+ps:
+	sg docker -c "docker compose ps -a"
+
+# Build images without starting services. Useful for pre-building before a
+# deploy window. Builds all three components with host networking (the
+# BuildKit DNS workaround documented in the deploy memory).
+build:
+	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-api:dev -f api/Dockerfile ."
+	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-relay:dev ./relay"
+	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-worker:dev ./worker"
+
+# Stop and remove containers + networks. Volumes (db-data, api-storage,
+# seaweedfs-data) are NOT removed — use `docker compose down -v` manually
+# for a full wipe.
+clean:
+	sg docker -c "docker compose down --remove-orphans"
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+
+help:
+	@echo "Usage: make <target>"
+	@echo ""
+	@echo "Development:"
+	@echo "  check          Full gate: lint + test + build (CI / pre-push)"
+	@echo "  lint           Lint + typecheck all modules"
+	@echo "  format         Auto-format all modules"
+	@echo "  test           Run all test suites"
+	@echo "  bootstrap      Install local tooling (uv sync, npm ci, golangci-lint)"
+	@echo "  hooks-install  Install git hooks (one-time)"
+	@echo ""
+	@echo "Operations:"
+	@echo "  up             Start the compose stack"
+	@echo "  down           Stop and remove compose services"
+	@echo "  restart        Restart services (SERVICE=<name> for one)"
+	@echo "  status         Show service health and state"
+	@echo "  logs           Tail live logs (SERVICE=<name> for one)"
+	@echo "  ps             List containers"
+	@echo "  build          Build all images without deploying"
+	@echo "  clean          Stop + remove containers and networks (keeps volumes)"
+	@echo ""
+	@echo "Deployment:"
+	@echo "  deploy         First-time deploy with interactive .env setup"
+	@echo "  update         Selective rebuild with change detection (FORCE=1 for all)"
+	@echo ""
+	@echo "Code generation:"
+	@echo "  proto-gen      Regenerate protobuf stubs"
+	@echo "  openapi-gen    Regenerate OpenAPI client artifacts"
+	@echo ""
+	@echo "Per-module (api-*, worker-*, relay-*, webui-*):"
+	@echo "  <mod>-lint     Lint one module"
+	@echo "  <mod>-format   Format one module"
+	@echo "  <mod>-test     Test one module"
