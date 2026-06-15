@@ -271,7 +271,9 @@ describe("ServerDetailPage lifecycle controls", () => {
   });
 
   it("shows start (only) on a stopped server", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    );
     renderPage();
 
     await screen.findByText("survival");
@@ -591,7 +593,9 @@ describe("ServerDetailPage lifecycle controls", () => {
     }
 
     it("optimistically shows the starting pill immediately on start", async () => {
-      mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+      mockApi.get.mockResolvedValue(
+        server({ observed_state: "stopped", desired_state: "stopped" }),
+      );
       mockApi.post.mockReturnValue(new Promise(() => {}));
       renderPage();
 
@@ -622,7 +626,9 @@ describe("ServerDetailPage lifecycle controls", () => {
     });
 
     it("reverts the pill to the previous state on lifecycle error", async () => {
-      mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+      mockApi.get.mockResolvedValue(
+        server({ observed_state: "stopped", desired_state: "stopped" }),
+      );
       mockApi.post.mockRejectedValue(
         new ApiError(409, { reason: "port_conflict" }),
       );
@@ -643,7 +649,9 @@ describe("ServerDetailPage lifecycle controls", () => {
 
 describe("ServerDetailPage export", () => {
   it("downloads the export ZIP through the authenticated helper", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    );
     mockDownload.downloadFile.mockResolvedValue(undefined);
     renderPage();
 
@@ -1914,7 +1922,9 @@ describe("ServerDetailPage Overview live streams", () => {
   });
 
   it("says metrics are unavailable while the server is stopped", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    );
     renderPage();
     await screen.findByText("survival");
 

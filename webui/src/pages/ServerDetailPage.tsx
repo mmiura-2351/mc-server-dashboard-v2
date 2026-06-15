@@ -323,6 +323,7 @@ function Controls({
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
   const state = normalizeState(server.observed_state);
+  const desired = normalizeState(server.desired_state);
   const [eulaOpen, setEulaOpen] = useState(false);
 
   const invalidate = () => {
@@ -397,7 +398,7 @@ function Controls({
     <>
       <div className="actions">
         {can("server:start", { serverId: server.id }) &&
-          actionApplies("start", state) && (
+          actionApplies("start", state, desired) && (
             <button
               type="button"
               className="btn success"
@@ -408,7 +409,7 @@ function Controls({
             </button>
           )}
         {can("server:stop", { serverId: server.id }) &&
-          actionApplies("stop", state) && (
+          actionApplies("stop", state, desired) && (
             <StopControl
               disabled={pending}
               onStop={(force) =>
@@ -417,7 +418,7 @@ function Controls({
             />
           )}
         {can("server:restart", { serverId: server.id }) &&
-          actionApplies("restart", state) && (
+          actionApplies("restart", state, desired) && (
             <button
               type="button"
               className="btn"
@@ -431,7 +432,7 @@ function Controls({
           <button
             type="button"
             className="btn"
-            disabled={pending || !atRest(state)}
+            disabled={pending || !atRest(state, desired)}
             onClick={() => exportMutation.mutate()}
           >
             {t("serverDetail.export")}
@@ -1583,7 +1584,10 @@ function Settings({
               className="btn"
               disabled={
                 exportMutation.isPending ||
-                !atRest(normalizeState(server.observed_state))
+                !atRest(
+                  normalizeState(server.observed_state),
+                  normalizeState(server.desired_state),
+                )
               }
               onClick={() => exportMutation.mutate()}
             >

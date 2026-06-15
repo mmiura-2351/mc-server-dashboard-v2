@@ -193,7 +193,9 @@ describe("DashboardPage permission-gated actions", () => {
 
   it("disables an action that does not apply to the current state", async () => {
     // Stopped server: stop does not apply even though it is permitted.
-    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    ]);
     renderPage();
 
     await screen.findByText("survival");
@@ -208,7 +210,9 @@ describe("DashboardPage permission-gated actions", () => {
 
 describe("DashboardPage lifecycle actions", () => {
   it("starts a stopped server and invalidates the list on settle", async () => {
-    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    ]);
     mockApi.post.mockResolvedValue(server({ observed_state: "starting" }));
     renderPage();
 
@@ -259,7 +263,9 @@ describe("DashboardPage lifecycle actions", () => {
   });
 
   it("surfaces a specific message for a 409 port_conflict start failure", async () => {
-    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    ]);
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "port_conflict" }),
     );
@@ -277,7 +283,9 @@ describe("DashboardPage lifecycle actions", () => {
   });
 
   it("surfaces a specific message for a 409 image_missing start failure", async () => {
-    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    ]);
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "image_missing" }),
     );
@@ -309,7 +317,9 @@ describe("DashboardPage lifecycle actions", () => {
   it("optimistically shows the transitional pill immediately on start", async () => {
     // The mutation never resolves during this test — the pill must already
     // show "Starting" before the API responds.
-    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    ]);
     mockApi.post.mockReturnValue(new Promise(() => {}));
     renderPage();
 
@@ -457,7 +467,9 @@ describe("DashboardPage view toggle (#541)", () => {
   });
 
   it("runs a quick action from the table row", async () => {
-    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    ]);
     mockApi.post.mockResolvedValue(server({ observed_state: "starting" }));
     renderPage();
 

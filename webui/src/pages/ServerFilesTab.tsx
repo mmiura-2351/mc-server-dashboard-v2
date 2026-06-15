@@ -113,7 +113,10 @@ export function ServerFilesTab({
 
   const canRead = can("file:read", { serverId: server.id });
   const canEdit = can("file:edit", { serverId: server.id });
-  const notAtRest = !atRest(normalizeState(server.observed_state));
+  const notAtRest = !atRest(
+    normalizeState(server.observed_state),
+    normalizeState(server.desired_state),
+  );
 
   // Current directory rel-path ("" is the working-set root) and the open file.
   const [dir, setDir] = useState("");
