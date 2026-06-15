@@ -155,7 +155,15 @@ GROUP_PLAYER_REMOVE: Final = "group:player_remove"
 GROUP_ATTACH: Final = "group:attach"
 GROUP_DETACH: Final = "group:detach"
 
+# Plugin/mod content management (issue #1150). Recorded under the
+# plugin:manage permission the mutating routes require.
+PLUGIN_INSTALL: Final = "plugin:install"
+PLUGIN_REMOVE: Final = "plugin:remove"
+PLUGIN_ENABLE: Final = "plugin:enable"
+PLUGIN_DISABLE: Final = "plugin:disable"
+
 # Target-type names (the ``target_type`` column).
+TARGET_PLUGIN: Final = "plugin"
 TARGET_COMMUNITY: Final = "community"
 TARGET_USER: Final = "user"
 TARGET_ROLE: Final = "role"

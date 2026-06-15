@@ -59,6 +59,8 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import (
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
+from mc_server_dashboard_api.servers.domain.plugin import PluginId, ServerPlugin
+from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
@@ -638,6 +640,37 @@ class FakeGroupRepository(GroupRepository):
         ]
 
 
+class FakePluginRepository(PluginRepository):
+    def __init__(self) -> None:
+        self.by_id: dict[PluginId, ServerPlugin] = {}
+
+    def seed(self, plugin: ServerPlugin) -> None:
+        self.by_id[plugin.id] = plugin
+
+    async def add(self, plugin: ServerPlugin) -> None:
+        self.by_id[plugin.id] = plugin
+
+    async def get_by_id(
+        self, server_id: ServerId, plugin_id: PluginId
+    ) -> ServerPlugin | None:
+        plugin = self.by_id.get(plugin_id)
+        if plugin is not None and plugin.server_id != server_id:
+            return None
+        return plugin
+
+    async def list_for_server(self, server_id: ServerId) -> list[ServerPlugin]:
+        return sorted(
+            (p for p in self.by_id.values() if p.server_id == server_id),
+            key=lambda p: (p.display_name, str(p.id.value)),
+        )
+
+    async def delete(self, plugin_id: PluginId) -> None:
+        self.by_id.pop(plugin_id, None)
+
+    async def update(self, plugin: ServerPlugin) -> None:
+        self.by_id[plugin.id] = plugin
+
+
 class FakeUnitOfWork(UnitOfWork):
     # Narrow the Port-declared attribute types to the concrete fakes so tests can
     # reach their inspection helpers without casts.
@@ -646,6 +679,7 @@ class FakeUnitOfWork(UnitOfWork):
     backups: FakeBackupRepository
     groups: FakeGroupRepository
     game_sessions: FakeGameSessionRepository
+    plugins: FakePluginRepository
 
     def __init__(
         self,
@@ -654,12 +688,14 @@ class FakeUnitOfWork(UnitOfWork):
         backups: FakeBackupRepository | None = None,
         groups: FakeGroupRepository | None = None,
         game_sessions: FakeGameSessionRepository | None = None,
+        plugins: FakePluginRepository | None = None,
     ) -> None:
         self.servers = servers or FakeServerRepository()
         self.resource_grants = resource_grants or FakeResourceGrantSweeper()
         self.backups = backups or FakeBackupRepository()
         self.groups = groups or FakeGroupRepository()
         self.game_sessions = game_sessions or FakeGameSessionRepository()
+        self.plugins = plugins or FakePluginRepository()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":

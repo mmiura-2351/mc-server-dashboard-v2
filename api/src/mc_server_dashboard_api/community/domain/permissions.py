@@ -56,6 +56,9 @@ COMMUNITY_PERMISSIONS: frozenset[Permission] = frozenset(
         # RELAY.md Section 8). Player IPs are PII, so this gates the sessions
         # endpoint separately from server:read.
         "session:read",
+        # Plugin/mod content management (issue #1150).
+        "plugin:read",
+        "plugin:manage",
     )
 )
 
@@ -124,7 +127,8 @@ GRANT_PERMISSIONS_BY_RESOURCE_TYPE: dict[str, frozenset[Permission]] = {
     "server": frozenset(
         permission
         for permission in COMMUNITY_PERMISSIONS
-        if permission.value.split(":", 1)[0] in ("server", "file", "backup")
+        if permission.value.split(":", 1)[0]
+        in ("server", "file", "backup", "plugin")
     ),
 }
 
