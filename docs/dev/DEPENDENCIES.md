@@ -108,8 +108,8 @@ The 7-day supply-chain cooldown (Section 3) is enforced at review time;
 Dependabot has no native "exclude releases newer than N days" setting.
 Security updates bypass the cooldown per Section 3.
 
-**Known limitation — `pip` ecosystem and `uv.lock`:** Dependabot updates
-`pyproject.toml` but does not regenerate `uv.lock`. CI runs `uv sync --locked`,
-which fails when the lockfile diverges from `pyproject.toml`. Dependabot pip PRs
-therefore require a manual `uv lock` step (or an automated post-update workflow)
-before they can pass CI.
+**`pip` ecosystem and `uv.lock`:** Dependabot updates `pyproject.toml` but does
+not regenerate `uv.lock`. The `dependabot-uv-lock` workflow
+(`.github/workflows/dependabot-uv-lock.yml`) detects this and automatically runs
+`uv lock`, committing the updated lockfile back to the PR branch so that
+`uv sync --locked` in the `api` workflow passes without manual intervention.
