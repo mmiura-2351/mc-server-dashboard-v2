@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -697,10 +698,10 @@ func TestForgeInstallRetrySucceeds(t *testing.T) {
 	// This runs after CleanForgeInstallArtifacts and before Wait, so the
 	// re-plan finds the argsfile exactly as in production (the install container
 	// "produced" it).
-	var createCount int
+	var createCount atomic.Int32
 	docker.onCreateHook = func(spec CreateSpec) {
-		createCount++
-		if createCount == 2 && spec.Name == installID {
+		n := createCount.Add(1)
+		if n == 2 && spec.Name == installID {
 			writeArgsfile(t, dir)
 		}
 	}

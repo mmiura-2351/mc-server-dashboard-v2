@@ -900,6 +900,17 @@ func (i *instance) superviseInstall(installID string) {
 			return
 		}
 
+		// Re-check stopping after backoff: a Stop may have arrived in the
+		// window between Remove and the backoff start that was too late for
+		// the backoff polling to observe (issue #1128).
+		i.mu.Lock()
+		stopping = i.stopping
+		i.mu.Unlock()
+		if stopping {
+			i.finishTerminal(execution.StateStopped, "")
+			return
+		}
+
 		// Clean stale artifacts and re-run install (issue #1127).
 		_ = execution.CleanForgeInstallArtifacts(i.spec.WorkingDir)
 		newID, err := i.rerunInstallContainer()
@@ -1098,7 +1109,7 @@ func (i *instance) captureInstallOutput(installID string) {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o750); err != nil {
 		return
 	}
-	f, err := os.Create(logPath) //nolint:gosec // logPath is the server's own working dir, not user-controlled.
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640) //nolint:gosec // logPath is the server's own working dir, not user-controlled.
 	if err != nil {
 		return
 	}
