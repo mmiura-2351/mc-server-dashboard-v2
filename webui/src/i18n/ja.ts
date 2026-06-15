@@ -242,6 +242,7 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーを読み込めませんでした。更新してみてください。",
   "serverDetail.breadcrumb": "サーバー",
   // Overview header.
+  "serverDetail.crashDetail": "クラッシュ理由:",
   "serverDetail.converging": "収束中…",
   "serverDetail.desired": "目標",
   "serverDetail.observed": "現在",

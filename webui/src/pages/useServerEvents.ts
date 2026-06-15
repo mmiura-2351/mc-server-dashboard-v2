@@ -49,6 +49,8 @@ export interface ServerEventsState {
   logs: LogEntry[];
   metrics: MetricsSample[];
   degraded: boolean;
+  /** The detail string from the latest status frame (crash reason, etc.). */
+  statusDetail: string;
   /** Append locally-echoed RCON lines (command + output) into the stream. */
   appendLocal: (entries: LocalEcho[]) => void;
 }
@@ -75,6 +77,7 @@ export function useServerEvents(
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [metrics, setMetrics] = useState<MetricsSample[]>([]);
   const [degraded, setDegraded] = useState(false);
+  const [statusDetail, setStatusDetail] = useState("");
   // A monotonic id so React keys stay stable across the bounded-buffer trim.
   const nextId = useRef(0);
 
@@ -88,6 +91,7 @@ export function useServerEvents(
     setLogs([]);
     setMetrics([]);
     setDegraded(false);
+    setStatusDetail("");
 
     const onFrame = (frame: ServerFrame) => {
       if (frame.kind === "status") {
@@ -99,6 +103,7 @@ export function useServerEvents(
               ? current
               : { ...current, observed_state: frame.state },
         );
+        setStatusDetail(frame.detail);
         // Once the server settles at rest there is no metrics stream (SPEC
         // 7.2); drop the windowed samples so the strip falls back to the idle
         // copy instead of freezing the last numbers forever.
@@ -155,7 +160,7 @@ export function useServerEvents(
     return () => client.close();
   }, [communityId, serverId, queryClient]);
 
-  return { logs, metrics, degraded, appendLocal };
+  return { logs, metrics, degraded, statusDetail, appendLocal };
 }
 
 /** Keep only the most recent {@link LOG_BUFFER_MAX} log entries. */
