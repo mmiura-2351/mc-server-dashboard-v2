@@ -18,7 +18,7 @@ FROM ghcr.io/astral-sh/uv:0.9.7 AS uv
 # Webui: build the SPA into /webui/dist. Node major matches webui/.nvmrc (24);
 # npm is pinned to webui/package.json engines (11.13.0).
 # ---------------------------------------------------------------------------
-FROM node:24-slim AS webui
+FROM node:26-slim AS webui
 
 WORKDIR /webui
 
