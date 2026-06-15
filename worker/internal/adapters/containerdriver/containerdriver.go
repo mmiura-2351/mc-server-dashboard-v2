@@ -98,6 +98,13 @@ var (
 	waitTransportProbeDeadline = 30 * time.Second
 )
 
+// maxInstallRetries is the number of additional attempts after the first Forge
+// install failure (3 total attempts). installRetryBackoff is the delay before
+// each retry; a var so tests can shrink it.
+const maxInstallRetries = 2
+
+var installRetryBackoff = []time.Duration{5 * time.Second, 15 * time.Second}
+
 // defaultImagePullTimeout bounds a lazy base-image pull (issue #904). A pull is
 // hundreds of MB and the EngineClient has no http.Client timeout, so the create
 // path gives the pull its own generous deadline rather than the create call's
@@ -840,41 +847,78 @@ func (i *instance) awaitReady() {
 // through the install-exit→launch handoff window (issue #306). Its distinct name
 // (mcsd-<id>-install) means the launch create never contends with it.
 func (i *instance) superviseInstall(installID string) {
-	i.captureInstallOutput(installID)
-
-	// Re-attach on transport errors the same way supervise does: a daemon blip
-	// does not mean the install container died (issue #881).
+	// Retry loop: on a non-zero install exit, clean artifacts and re-run the
+	// install container up to maxInstallRetries additional times before giving
+	// up (issue #1128). Transport-error re-attach is per-attempt (issue #881).
 	var waitErr error
-	for {
-		_, waitErr = i.docker.Wait(context.Background(), installID)
+	for attempt := 0; ; attempt++ {
+		i.captureInstallOutput(installID)
+
+		// Re-attach on transport errors the same way supervise does: a daemon
+		// blip does not mean the install container died (issue #881).
+		for {
+			_, waitErr = i.docker.Wait(context.Background(), installID)
+			if waitErr == nil {
+				break
+			}
+			if !isTransportError(waitErr) {
+				break
+			}
+			if i.exitedAfterTransportError(installID) {
+				waitErr = nil // container exited; fall through to re-plan (issue #895)
+				break
+			}
+			time.Sleep(waitTransportProbeInterval)
+		}
+
+		i.mu.Lock()
+		stopping := i.stopping
+		i.mu.Unlock()
+
+		if stopping {
+			_ = i.docker.Remove(context.Background(), installID)
+			i.finishTerminal(execution.StateStopped, "")
+			return
+		}
+
 		if waitErr == nil {
-			break
+			break // install succeeded, proceed to re-plan
 		}
-		if !isTransportError(waitErr) {
-			break
+
+		// Install failed. Can we retry?
+		_ = i.docker.Remove(context.Background(), installID)
+		if attempt >= maxInstallRetries {
+			i.finishTerminal(execution.StateCrashed,
+				fmt.Sprintf("forge install failed after %d attempts: %s", attempt+1, waitErr))
+			return
 		}
-		if i.exitedAfterTransportError(installID) {
-			waitErr = nil // container exited; fall through to re-plan (issue #895)
-			break
+
+		// Backoff before retry, polling for Stop so a concurrent Stop is
+		// observed promptly rather than sleeping the full backoff (issue #1128).
+		if i.installBackoffOrStopping(installRetryBackoff[attempt]) {
+			i.finishTerminal(execution.StateStopped, "")
+			return
 		}
-		time.Sleep(waitTransportProbeInterval)
+
+		// Clean stale artifacts and re-run install (issue #1127).
+		_ = execution.CleanForgeInstallArtifacts(i.spec.WorkingDir)
+		newID, err := i.rerunInstallContainer()
+		if err != nil {
+			i.finishTerminal(execution.StateCrashed, "forge install retry failed: "+err.Error())
+			return
+		}
+		installID = newID
+		i.setContainerID(newID)
 	}
 
+	// The install exited cleanly. A Stop that arrived after the wait returned
+	// but before the re-plan still wins — report stopped and clean up.
 	i.mu.Lock()
 	stopping := i.stopping
 	i.mu.Unlock()
-
 	if stopping {
-		// A Stop terminated the install container: it is still the current container
-		// (the launch was never published), so Stop acts on a valid exited container;
-		// remove it and report stopped.
 		_ = i.docker.Remove(context.Background(), installID)
 		i.finishTerminal(execution.StateStopped, "")
-		return
-	}
-	if waitErr != nil {
-		_ = i.docker.Remove(context.Background(), installID)
-		i.finishTerminal(execution.StateCrashed, "forge install failed: "+waitErr.Error())
 		return
 	}
 
@@ -982,6 +1026,60 @@ func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
 	return i.createFn(context.Background(), create)
+}
+
+// installBackoffOrStopping sleeps for d in small increments, checking the
+// stopping latch between each tick so a concurrent Stop is observed within one
+// tick rather than after the full delay. Returns true if stopping was observed
+// (the caller should abort), false if the full delay elapsed.
+func (i *instance) installBackoffOrStopping(d time.Duration) bool {
+	const tick = 50 * time.Millisecond
+	remaining := d
+	for remaining > 0 {
+		sleep := tick
+		if sleep > remaining {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+		remaining -= sleep
+		i.mu.Lock()
+		stopping := i.stopping
+		i.mu.Unlock()
+		if stopping {
+			return true
+		}
+	}
+	return false
+}
+
+// rerunInstallContainer creates and starts a new install container for a retry
+// attempt, reusing the instance's captured fields. It mirrors
+// Driver.runInstallContainer but runs from the instance after the driver has
+// returned (issue #1128).
+func (i *instance) rerunInstallContainer() (string, error) {
+	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, containerPathResolver(i.spec.WorkingDir))
+	if err != nil {
+		return "", err
+	}
+	create := CreateSpec{
+		Name:             installContainerName(i.spec.ServerID),
+		Image:            i.image,
+		Cmd:              containerCmd(plan.InstallArgs),
+		WorkingDir:       containerWorkDir,
+		Binds:            []string{i.spec.WorkingDir + ":" + containerWorkDir},
+		Labels:           i.labels,
+		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
+		CPUShares:        cpuShares(i.spec.CPUMillis),
+	}
+	id, err := i.createFn(context.Background(), create)
+	if err != nil {
+		return "", err
+	}
+	if err := i.docker.Start(context.Background(), id); err != nil {
+		_ = i.docker.Remove(context.Background(), id)
+		return "", err
+	}
+	return id, nil
 }
 
 // captureInstallOutput follows the install container's log stream and writes it to

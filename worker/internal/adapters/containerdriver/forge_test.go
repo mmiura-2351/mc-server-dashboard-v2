@@ -36,6 +36,10 @@ type forgeFakeDocker struct {
 	waitGates map[string]chan waitResult
 	// inspectGate, when non-nil, scripts Inspect calls result-by-result.
 	inspectGate chan inspectStep
+	// onCreateHook, when non-nil, is called with the spec after a Create
+	// succeeds. Tests use it to inject side effects (e.g., writing files) when
+	// a specific container is created.
+	onCreateHook func(spec CreateSpec)
 }
 
 func newForgeFakeDocker() *forgeFakeDocker {
@@ -50,11 +54,15 @@ func newForgeFakeDocker() *forgeFakeDocker {
 
 func (f *forgeFakeDocker) Create(_ context.Context, spec CreateSpec) (string, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.createSpecs = append(f.createSpecs, spec)
 	f.nextID++
 	id := spec.Name // use the deterministic name as the id so tests can target it
 	f.exited[id] = make(chan struct{})
+	hook := f.onCreateHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook(spec)
+	}
 	return id, nil
 }
 
@@ -330,23 +338,35 @@ func TestForgeContainerCPUShares(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// A Forge install container exiting non-zero reports crashed and never creates the
-// launch container (issue #305). Install failure surfaces as crashed via the
-// status pump, not a command error code.
+// A Forge install container exiting non-zero is retried up to maxInstallRetries
+// times; after all attempts fail the instance reports crashed with an attempt
+// count and never creates the launch container (issue #305, #1128).
 func TestForgeContainerInstallFailureCrashesNoLaunch(t *testing.T) {
+	prev := installRetryBackoff
+	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { installRetryBackoff = prev })
+
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	// Use a statusError so isTransportError returns false (matching the real
+	// Docker client's behavior for a non-zero exit).
+	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}
+	docker.waitGates[installID] = make(chan waitResult, 3)
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
 	d := forgeDriver(docker)
 
 	inst, err := d.Start(context.Background(), forgeSpec(dir))
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	docker.exit("mcsd-s1-install", 1, errors.New("install exited 1"))
 
 	drainTo(t, inst.Events(), execution.StateCrashed)
-	if got := docker.names(); len(got) != 1 {
-		t.Fatalf("created containers = %v, want only the install container", got)
+	// 1 initial install + 2 retry installs = 3 install containers, no launch.
+	if got := docker.names(); len(got) != 3 {
+		t.Fatalf("created containers = %v, want 3 install attempts", got)
 	}
 }
 
@@ -656,6 +676,154 @@ func TestForgeContainerNoArgsNoLegacyJarCrashes(t *testing.T) {
 	}
 	if got := docker.names(); len(got) != 1 {
 		t.Fatalf("created containers = %v, want only the install container", got)
+	}
+}
+
+// First install attempt fails, second succeeds: the instance proceeds to launch
+// without crashing (issue #1128).
+func TestForgeInstallRetrySucceeds(t *testing.T) {
+	prev := installRetryBackoff
+	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { installRetryBackoff = prev })
+
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "download failed"}
+	docker.waitGates[installID] = make(chan waitResult, 2)
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 0}
+	// Write the argsfile when the retry creates the second install container.
+	// This runs after CleanForgeInstallArtifacts and before Wait, so the
+	// re-plan finds the argsfile exactly as in production (the install container
+	// "produced" it).
+	var createCount int
+	docker.onCreateHook = func(spec CreateSpec) {
+		createCount++
+		if createCount == 2 && spec.Name == installID {
+			writeArgsfile(t, dir)
+		}
+	}
+	d := forgeDriver(docker)
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	// 2 install containers + 1 launch container.
+	got := docker.names()
+	if len(got) != 3 || got[2] != "mcsd-s1" {
+		t.Fatalf("created containers = %v, want 2 installs + 1 launch", got)
+	}
+	docker.exit("mcsd-s1", 0, nil)
+	drainClosed(inst.Events())
+}
+
+// All install attempts fail: the instance crashes with an attempt-count message
+// (issue #1128).
+func TestForgeInstallRetryExhausted(t *testing.T) {
+	prev := installRetryBackoff
+	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { installRetryBackoff = prev })
+
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "download failed"}
+	docker.waitGates[installID] = make(chan waitResult, 3)
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	d := forgeDriver(docker)
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ev := drainToEvent(t, inst.Events(), execution.StateCrashed)
+	if !strings.Contains(ev.Detail, "after 3 attempts") {
+		t.Fatalf("crash detail = %q, want 'after 3 attempts'", ev.Detail)
+	}
+	// 3 install containers, no launch.
+	if got := docker.names(); len(got) != 3 {
+		t.Fatalf("created containers = %v, want 3 install attempts", got)
+	}
+}
+
+// Stop during the retry backoff aborts the retry and reports stopped (issue #1128).
+func TestForgeInstallRetryStopDuringBackoff(t *testing.T) {
+	// Use a long backoff so Stop arrives during the sleep.
+	prev := installRetryBackoff
+	installRetryBackoff = []time.Duration{2 * time.Second, 2 * time.Second}
+	t.Cleanup(func() { installRetryBackoff = prev })
+
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "download failed"}
+	docker.waitGates[installID] = make(chan waitResult, 1)
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	// A generous StopTimeout so Stop's waitExitDone does not time out before the
+	// supervisor's backoff poll notices the stopping latch (50ms tick).
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{
+		WorkerID:             "w1",
+		StopTimeout:          500 * time.Millisecond,
+		GameBindIP:           "0.0.0.0",
+		ReadinessTimeout:     20 * time.Millisecond,
+		ConflictPollInterval: time.Millisecond,
+		ConflictDeadline:     100 * time.Millisecond,
+	})
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Wait for the first attempt to fail and enter backoff, then Stop.
+	// The first install is removed before backoff, so wait until that happens.
+	deadline := time.After(2 * time.Second)
+	for !docker.wasRemoved(installID) {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for first install to be removed")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	if err := inst.Stop(context.Background(), false); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateStopped)
+	// Only 1 install container created (the retry never ran because Stop arrived).
+	if got := docker.names(); len(got) != 1 {
+		t.Fatalf("created containers = %v, want only 1 install (retry aborted)", got)
+	}
+}
+
+// drainToEvent collects status events until it sees want, returning the matching
+// event so the caller can inspect its Detail field.
+func drainToEvent(t *testing.T, ch <-chan execution.StatusEvent, want execution.ServerState) execution.StatusEvent {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("event channel closed before reaching %v", want)
+			}
+			if ev.State == want {
+				return ev
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %v", want)
+		}
 	}
 }
 
