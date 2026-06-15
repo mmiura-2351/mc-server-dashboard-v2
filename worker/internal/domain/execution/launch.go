@@ -35,6 +35,11 @@ var ErrLegacyForgeJarAmbiguous = errors.New("execution: multiple legacy Forge ja
 // legacyForgeJarGlob matches the legacy Forge universal/launch jar in the
 // working set root. Legacy Forge installers (MC <=1.16.x) produce a
 // forge-<mc_version>-<forge_version>.jar instead of unix_args.txt.
+//
+// Safety: the glob does not match the installer jar because the API always
+// saves the installer as "server.jar" (api/.../lifecycle.py _DEFAULT_JAR_RELPATH).
+// If the API ever preserves the upstream filename (forge-*-installer.jar), the
+// caller must exclude spec.JarRelpath from the matches.
 const legacyForgeJarGlob = "forge-*.jar"
 
 // LaunchPlan describes how to launch (or first install) a server, resolved from
