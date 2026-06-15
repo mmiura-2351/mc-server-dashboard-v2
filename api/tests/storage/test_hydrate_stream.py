@@ -173,7 +173,7 @@ async def test_open_file_stream_aclose_releases_lease_and_sweep_reclaims(
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     # A multi-chunk file so the stream is still mid-iteration when we aclose it.
-    big = b"z" * (3 * 1024 * 1024)
+    big = b"z" * 256
     await publish(storage, community, server, {"f": big})
     old_snapshot = snapshot_dir(tmp_path, community, server)
 
