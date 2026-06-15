@@ -125,6 +125,9 @@ _POINTER = "current.json"
 # between two separate writes could attribute the previous publisher to the new
 # generation and invert the guard.
 _GENERATION = "generation"
+# Zero-byte marker object placed inside a directory prefix by ``make_dir`` so the
+# otherwise-empty prefix is visible in listings (issue #1125).
+_DIR_MARKER = ".dir"
 # Age threshold below which an in-progress multipart upload is left alone by the
 # sweep (issue #903): only uploads initiated more than this long ago are aborted,
 # so a live ``put_backup``/``upload_multipart`` is never aborted out from under
@@ -1475,25 +1478,18 @@ class ObjectStorage(Storage):
     async def make_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
-        # Object storage has no real directories — a directory exists only as the
-        # shared key-prefix of its files (Section 7.3), so an empty directory
-        # cannot be represented and make_dir does NOT materialize anything (the
-        # documented limitation, issue #259). Validate the path so a traversal-unsafe
-        # input is still rejected at the seam rather than silently accepted.
-        self._safe_subkey(rel_path)
-        # Still bump the generation (issue #889): make_dir is an authoritative
-        # ``current/`` mutation in the Port contract, so it advances the generation
-        # uniformly with the fs backend even though no content lands here. Bumping a
-        # no-op edit only forces a (same-world) re-hydrate — harmless — and keeps the
-        # store generation in lockstep across adapters so the #767 staleness invariant
-        # never has to special-case the object backend. Requires a published snapshot,
-        # matching the fs backend (which raises NotFoundError without one).
+        sub = self._safe_subkey(rel_path)
+        # Write a zero-byte marker object so the empty directory is visible in
+        # listings (issue #1125). The marker is filtered out by ``_entries_at_level``
+        # so it never appears as a file entry.
         async with self._client_factory() as client:
             server_prefix = self._server_prefix(community_id, server_id)
-            # Bump under the server lock (issue #899), serializing with a concurrent
-            # snapshot commit's generation re-check.
             async with self._server_lock(community_id, server_id):
-                await self._live_snapshot_prefix(client, community_id, server_id)
+                snapshot_prefix = await self._live_snapshot_prefix(
+                    client, community_id, server_id
+                )
+                marker_key = snapshot_prefix + sub + "/" + _DIR_MARKER
+                await client.put_object(marker_key, b"")
                 await self._bump_generation(client, server_prefix, API_EDIT_PUBLISHER)
 
     # --- file version retention / rollback (Section 3.5, Section 5) ---------
@@ -1685,6 +1681,9 @@ def _entries_at_level(objs: list[S3Object], dir_prefix: str) -> list[DirEntry]:
     dirs: set[str] = set()
     for obj in objs:
         rest = obj.key[len(dir_prefix) :]
+        if rest == _DIR_MARKER:
+            # Marker placed by make_dir (issue #1125) — hide it from listings.
+            continue
         if "/" in rest:
             dirs.add(rest.split("/", 1)[0])
         else:

@@ -23,6 +23,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     PublishPhase,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import (
+    _DIR_MARKER,
     _GENERATION,
     _POINTER,
     ObjectStorage,
@@ -32,7 +33,6 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
 from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
     MissingRegionsError,
-    NotFoundError,
     PathTraversalError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -478,32 +478,30 @@ async def test_sweep_reclaims_crash_leftover_staging_with_no_handle() -> None:
     )
 
 
-async def test_make_dir_is_a_noop_empty_dir_not_represented() -> None:
-    """Object storage has no real directories, so make_dir creates no dir object.
+async def test_make_dir_writes_marker_and_dir_is_visible() -> None:
+    """make_dir writes a zero-byte marker so the empty directory is visible (#1125).
 
-    An empty directory exists only as the shared key-prefix of its files
-    (Section 7.3); there is nothing to create until a file lands under it. The
-    documented limitation (issue #259): make_dir leaves no marker object that would
-    pollute listings. It DOES bump the generation marker (issue #889) so the store
-    generation stays in lockstep with the fs backend, but it writes nothing under
-    the new directory's own prefix.
+    The marker object anchors the directory prefix so ``list_dir`` discovers it,
+    but ``_entries_at_level`` filters the marker out so it never appears as a file.
     """
 
     store, storage = _store_and_storage()
     community, server = new_scope()
     await _publish(storage, community, server, {"server.properties": b"x"})
 
-    before = set(store.objects)
     await storage.make_dir(community, server, RelPath("plugins"))
-    # The only new object is the bumped generation marker; nothing lands under the
-    # new directory's prefix (no placeholder that would pollute listings).
-    new_objects = set(store.objects) - before
-    assert all(key.endswith("/generation") for key in new_objects)
-    assert not any("/plugins" in key for key in store.objects)
 
-    # The empty directory is not observable (a prefix scan finds no members).
-    with pytest.raises(NotFoundError):
-        await storage.list_dir(community, server, RelPath("plugins"))
+    # The marker object exists in the store under the directory prefix.
+    assert any(key.endswith("/plugins/" + _DIR_MARKER) for key in store.objects)
+
+    # The directory is now visible in the root listing.
+    root_entries = await storage.list_dir(community, server, RelPath(""))
+    dir_names = {e.name for e in root_entries if e.is_dir}
+    assert "plugins" in dir_names
+
+    # Listing the directory itself returns empty (marker is filtered out).
+    entries = await storage.list_dir(community, server, RelPath("plugins"))
+    assert entries == []
 
 
 async def test_subkey_traversal_is_confined_to_server_prefix() -> None:
