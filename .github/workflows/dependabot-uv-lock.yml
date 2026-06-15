@@ -1,0 +1,38 @@
+name: dependabot-uv-lock
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "api/pyproject.toml"
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    if: startsWith(github.head_ref, 'dependabot/pip/')
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Regenerate uv.lock
+        working-directory: api
+        run: uv lock
+
+      - name: Commit and push if changed
+        run: |
+          git diff --exit-code api/uv.lock && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add api/uv.lock
+          git commit -m "chore(deps): regenerate uv.lock"
+          git push
