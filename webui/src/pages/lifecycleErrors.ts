@@ -8,7 +8,9 @@
  * misleading generic state-changed toast. Every other 409 reason
  * (`invalid_transition`, `transition_conflict`, `command_failed`,
  * `server_not_running`) is race-flavoured and keeps the state-changed
- * treatment. Non-409 errors fall back to the generic action-failed toast.
+ * treatment. 503 responses with a recognized `reason` (`no_eligible_worker`,
+ * `worker_unavailable`, `jar_unavailable`) get their own message (issue #1092).
+ * All other errors fall back to the generic action-failed toast.
  *
  * 403 is intentionally NOT handled here: it carries a side effect (refetching
  * capabilities) that lives in `useOnForbidden`. Callers run that glue first and
