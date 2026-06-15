@@ -27,6 +27,16 @@ const forgeUserJVMArgs = "user_jvm_args.txt"
 // failure rather than guessing.
 var ErrForgeArgsfileAmbiguous = errors.New("execution: multiple Forge args files found")
 
+// ErrLegacyForgeJarAmbiguous is returned when more than one legacy Forge launch
+// jar (forge-*.jar) is found in the working set root after install: the launch
+// cannot pick one deterministically.
+var ErrLegacyForgeJarAmbiguous = errors.New("execution: multiple legacy Forge jars found")
+
+// legacyForgeJarGlob matches the legacy Forge universal/launch jar in the
+// working set root. Legacy Forge installers (MC <=1.16.x) produce a
+// forge-<mc_version>-<forge_version>.jar instead of unix_args.txt.
+const legacyForgeJarGlob = "forge-*.jar"
+
 // LaunchPlan describes how to launch (or first install) a server, resolved from
 // the spec and the working set's current contents (issue #305). When NeedsInstall
 // is true the driver runs InstallArgs to completion, then re-plans (the args file
@@ -146,6 +156,36 @@ func forgeLaunchArgs(spec InstanceSpec, jvmArgsPath, argsPath string) []string {
 		args = append(args, "@"+jvmArgsPath)
 	}
 	return append(args, "@"+argsPath, "nogui")
+}
+
+// JarLaunchArgs builds the historical JAR launch args: `[heap] -jar <jarPath> nogui`.
+// Exported for use by the container driver's legacy Forge fallback path.
+func JarLaunchArgs(spec InstanceSpec, jarPath string) []string {
+	return jarLaunchArgs(spec, jarPath)
+}
+
+// ResolveLegacyForgeJar globs for a legacy Forge launch jar (forge-*.jar) in
+// the working set root. Legacy Forge installers (MC <=1.16.x) produce this jar
+// instead of unix_args.txt. Returns the working-dir-relative slash path when
+// exactly one match exists. Returns ("", false, nil) when none is found, and
+// ErrLegacyForgeJarAmbiguous when multiple matches exist.
+func ResolveLegacyForgeJar(workingDir string) (relpath string, found bool, err error) {
+	matches, err := filepath.Glob(filepath.Join(workingDir, legacyForgeJarGlob))
+	if err != nil {
+		return "", false, fmt.Errorf("execution: glob legacy Forge jar: %w", err)
+	}
+	switch len(matches) {
+	case 0:
+		return "", false, nil
+	case 1:
+		rel, err := filepath.Rel(workingDir, matches[0])
+		if err != nil {
+			return "", false, fmt.Errorf("execution: relativize legacy Forge jar: %w", err)
+		}
+		return filepath.ToSlash(rel), true, nil
+	default:
+		return "", false, fmt.Errorf("%w: %d matching %s", ErrLegacyForgeJarAmbiguous, len(matches), legacyForgeJarGlob)
+	}
 }
 
 // resolveForgeArgsfile globs the Forge args file under workingDir, reporting

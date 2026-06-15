@@ -864,14 +864,26 @@ func (i *instance) superviseInstall(installID string) {
 	}
 
 	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, containerPathResolver(i.spec.WorkingDir))
-	if err != nil || plan.NeedsInstall {
+	if err != nil {
 		_ = i.docker.Remove(context.Background(), installID)
-		detail := "forge install produced no args file"
-		if err != nil {
-			detail = "forge re-plan after install failed: " + err.Error()
-		}
-		i.finishTerminal(execution.StateCrashed, detail)
+		i.finishTerminal(execution.StateCrashed, "forge re-plan after install failed: "+err.Error())
 		return
+	}
+	if plan.NeedsInstall {
+		// No args file: try legacy Forge jar fallback (MC <=1.16.x installers
+		// produce forge-<version>.jar instead of unix_args.txt).
+		rel, found, legacyErr := execution.ResolveLegacyForgeJar(i.spec.WorkingDir)
+		if legacyErr != nil || !found {
+			_ = i.docker.Remove(context.Background(), installID)
+			detail := "forge install produced no args file"
+			if legacyErr != nil {
+				detail = "forge legacy jar resolve failed: " + legacyErr.Error()
+			}
+			i.finishTerminal(execution.StateCrashed, detail)
+			return
+		}
+		jarPath := containerWorkDir + "/" + rel
+		plan = execution.LaunchPlan{LaunchArgs: execution.JarLaunchArgs(i.spec, jarPath)}
 	}
 
 	// Create the launch container outside the lock: the create rides the Docker API
