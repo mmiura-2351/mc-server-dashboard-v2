@@ -79,13 +79,37 @@ pin explaining why and linking the advisory/issue:
 
 ## 6. Automated updates
 
-An automated dependency updater runs on a schedule per ecosystem, with:
+Dependabot runs weekly (Monday) for every ecosystem in the repository. The
+configuration lives in `.github/dependabot.yml` and covers:
 
-- Updates **grouped** (production vs. dev) to keep PR volume low.
-- A capped number of open PRs.
-- The cooldown from Section 3 applied; major bumps held longer and opened as
-  **standalone** PRs (a major update is reviewed on its own, never bundled),
-  citing the upstream migration notes.
+| Ecosystem | Directory | What it covers |
+|---|---|---|
+| `pip` | `/api` | Python runtime + dev dependencies |
+| `gomod` | `/worker` | Go worker module |
+| `gomod` | `/relay` | Go relay module |
+| `npm` | `/webui` | React frontend |
+| `github-actions` | `/` | Actions used in CI workflows |
+| `docker` | `/api` | Base images |
+| `docker` | `/worker` | Base images |
+| `docker` | `/relay` | Base images |
 
-The concrete updater configuration (schedule, grouping, labels, cooldown days)
-lives in repository configuration *(forthcoming)*.
+Grouping and PR rules:
+
+- **Production deps** are grouped into one PR per ecosystem (minor + patch).
+- **Dev deps** are grouped into one PR per ecosystem (minor + patch).
+- **Major version bumps** are excluded from groups and opened as standalone PRs
+  so each major update is reviewed individually per Section 1, citing the
+  upstream migration notes.
+- Open PRs are capped at 5 per ecosystem.
+- All Dependabot PRs carry the `dependencies` label and use the
+  `chore(deps):` commit-message prefix.
+
+The 7-day supply-chain cooldown (Section 3) is enforced at review time;
+Dependabot has no native "exclude releases newer than N days" setting.
+Security updates bypass the cooldown per Section 3.
+
+**`pip` ecosystem and `uv.lock`:** Dependabot updates `pyproject.toml` but does
+not regenerate `uv.lock`. The `dependabot-uv-lock` workflow
+(`.github/workflows/dependabot-uv-lock.yml`) detects this and automatically runs
+`uv lock`, committing the updated lockfile back to the PR branch so that
+`uv sync --locked` in the `api` workflow passes without manual intervention.
