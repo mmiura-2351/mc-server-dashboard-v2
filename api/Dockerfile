@@ -12,7 +12,7 @@
 # `webui/` while the python stages copy from `api/`.
 
 # uv binary, copied from the official image (pinned tag).
-FROM ghcr.io/astral-sh/uv:0.9.7 AS uv
+FROM ghcr.io/astral-sh/uv:0.11.21 AS uv
 
 # ---------------------------------------------------------------------------
 # Webui: build the SPA into /webui/dist. Node major matches webui/.nvmrc (24);
@@ -39,7 +39,7 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Builder: install the locked dependencies into /app/.venv.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim AS builder
+FROM python:3.14-slim AS builder
 
 COPY --from=uv /uv /usr/local/bin/uv
 
@@ -64,7 +64,7 @@ RUN uv sync --frozen --no-dev
 # ---------------------------------------------------------------------------
 # Runtime: slim python + the built venv + the app + the built SPA, as non-root.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 # Run as an unprivileged user.
 RUN useradd --create-home --uid 10001 app
