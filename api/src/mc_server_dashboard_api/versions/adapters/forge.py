@@ -28,8 +28,11 @@ from dataclasses import dataclass
 from xml.etree import ElementTree
 
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
-from mc_server_dashboard_api.versions.domain.errors import UnknownVersionError
-from mc_server_dashboard_api.versions.domain.fetcher import JsonFetcher
+from mc_server_dashboard_api.versions.domain.errors import (
+    CatalogUnavailableError,
+    UnknownVersionError,
+)
+from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
 from mc_server_dashboard_api.versions.domain.value_objects import (
     HashAlgorithm,
     JarSource,
@@ -76,7 +79,15 @@ class ForgeCatalog(VersionCatalog):
         if forge_version is None:
             raise UnknownVersionError(f"forge {version} has no promoted build")
         full_version = f"{version}-{forge_version}"
-        sha1 = (await self.fetcher.get_text(_installer_sha1_url(full_version))).strip()
+        try:
+            url = _installer_sha1_url(full_version)
+            sha1 = (await self.fetcher.get_text(url)).strip()
+        except (FetchError, CatalogUnavailableError):
+            # Legacy Maven naming: some old Forge versions
+            # (1.7.10, 1.8.9, 1.9.4) append the MC version.
+            full_version = f"{version}-{forge_version}-{version}"
+            url = _installer_sha1_url(full_version)
+            sha1 = (await self.fetcher.get_text(url)).strip()
         return JarSource(
             server_type=ServerType.FORGE,
             version=version,
