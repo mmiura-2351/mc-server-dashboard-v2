@@ -175,7 +175,7 @@ class ModrinthCatalog(CatalogProvider):
                 if response.status_code == 404:
                     raise CatalogProjectNotFoundError(path)
                 response.raise_for_status()
-                return response.json()  # type: ignore[no-any-return]
+                return response.json()
         except CatalogProjectNotFoundError:
             raise
         except httpx.HTTPStatusError as exc:

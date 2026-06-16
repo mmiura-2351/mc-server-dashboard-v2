@@ -777,6 +777,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/catalog/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Install From Catalog
+         * @description Install a plugin/mod from the Modrinth catalog (plugin:manage).
+         */
+        post: operations["install_from_catalog_api_communities__community_id__servers__server_id__catalog_install_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/catalog/projects/{project_id_or_slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Catalog Project
+         * @description Fetch catalog project detail + compatible versions (plugin:read).
+         */
+        get: operations["get_catalog_project_api_communities__community_id__servers__server_id__catalog_projects__project_id_or_slug__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/catalog/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Catalog
+         * @description Search the Modrinth catalog with auto-applied server facets (plugin:read).
+         */
+        get: operations["search_catalog_api_communities__community_id__servers__server_id__catalog_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/command": {
         parameters: {
             query?: never;
@@ -1042,6 +1102,90 @@ export interface paths {
         get: operations["list_server_groups_api_communities__community_id__servers__server_id__groups_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Plugins
+         * @description List installed plugins for a server (plugin:read).
+         */
+        get: operations["list_plugins_api_communities__community_id__servers__server_id__plugins_get"];
+        put?: never;
+        /**
+         * Install Plugin
+         * @description Install a plugin jar via multipart upload (plugin:manage).
+         */
+        post: operations["install_plugin_api_communities__community_id__servers__server_id__plugins_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Plugin
+         * @description Remove an installed plugin (plugin:manage).
+         */
+        delete: operations["remove_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable Plugin
+         * @description Disable an enabled plugin (plugin:manage).
+         */
+        post: operations["disable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__disable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enable Plugin
+         * @description Enable a disabled plugin (plugin:manage).
+         */
+        post: operations["enable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__enable_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1784,6 +1928,13 @@ export interface components {
             /** Name */
             name: string;
         };
+        /** Body_install_plugin_api_communities__community_id__servers__server_id__plugins_post */
+        Body_install_plugin_api_communities__community_id__servers__server_id__plugins_post: {
+            /** Display Name */
+            display_name: string;
+            /** File */
+            file: string;
+        };
         /** Body_upload_backup_api_communities__community_id__servers__server_id__backups_upload_post */
         Body_upload_backup_api_communities__community_id__servers__server_id__backups_upload_post: {
             /** File */
@@ -1801,6 +1952,106 @@ export interface components {
             /** Max Servers */
             max_servers: number;
             resources: components["schemas"]["HostResourcesResponse"];
+        };
+        /** CatalogFileResponse */
+        CatalogFileResponse: {
+            /** Filename */
+            filename: string;
+            /** Primary */
+            primary: boolean;
+            /** Sha512 */
+            sha512: string;
+            /** Size */
+            size: number;
+            /** Url */
+            url: string;
+        };
+        /** CatalogInstallRequest */
+        CatalogInstallRequest: {
+            /** Project Id */
+            project_id: string;
+            /** Version Id */
+            version_id: string;
+        };
+        /** CatalogProjectDetailResponse */
+        CatalogProjectDetailResponse: {
+            project: components["schemas"]["CatalogProjectResponse"];
+            /** Versions */
+            versions: components["schemas"]["CatalogVersionResponse"][];
+        };
+        /** CatalogProjectResponse */
+        CatalogProjectResponse: {
+            /** Author */
+            author: string | null;
+            /** Body */
+            body: string;
+            /** Categories */
+            categories: string[];
+            /** Description */
+            description: string;
+            /** Downloads */
+            downloads: number;
+            /** Game Versions */
+            game_versions: string[];
+            /** Icon Url */
+            icon_url: string | null;
+            /** Loaders */
+            loaders: string[];
+            /** Project Id */
+            project_id: string;
+            /** Slug */
+            slug: string;
+            /** Title */
+            title: string;
+        };
+        /** CatalogSearchListResponse */
+        CatalogSearchListResponse: {
+            /** Hits */
+            hits: components["schemas"]["CatalogSearchResultResponse"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total Hits */
+            total_hits: number;
+        };
+        /** CatalogSearchResultResponse */
+        CatalogSearchResultResponse: {
+            /** Author */
+            author: string;
+            /** Categories */
+            categories: string[];
+            /** Description */
+            description: string;
+            /** Downloads */
+            downloads: number;
+            /** Icon Url */
+            icon_url: string | null;
+            /** Latest Game Versions */
+            latest_game_versions: string[];
+            /** Project Id */
+            project_id: string;
+            /** Slug */
+            slug: string;
+            /** Title */
+            title: string;
+        };
+        /** CatalogVersionResponse */
+        CatalogVersionResponse: {
+            /** Date Published */
+            date_published: string;
+            /** Files */
+            files: components["schemas"]["CatalogFileResponse"][];
+            /** Game Versions */
+            game_versions: string[];
+            /** Loaders */
+            loaders: string[];
+            /** Name */
+            name: string;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: string;
         };
         /** ChangePasswordRequest */
         ChangePasswordRequest: {
@@ -2110,6 +2361,63 @@ export interface components {
             username: string;
             /** Uuid */
             uuid: string;
+        };
+        /** PluginListResponse */
+        PluginListResponse: {
+            /** Plugins */
+            plugins: components["schemas"]["PluginResponse"][];
+        };
+        /**
+         * PluginResponse
+         * @description One plugin's metadata.
+         */
+        PluginResponse: {
+            /** Checksum Sha512 */
+            checksum_sha512: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Description */
+            description: string | null;
+            /** Display Name */
+            display_name: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Filename */
+            filename: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Installed By */
+            installed_by: string | null;
+            /** Loader Type */
+            loader_type: string;
+            /** Rel Path */
+            rel_path: string;
+            /**
+             * Server Id
+             * Format: uuid
+             */
+            server_id: string;
+            /** Size Bytes */
+            size_bytes: number | null;
+            /** Source */
+            source: string;
+            /** Source Project Id */
+            source_project_id: string | null;
+            /** Source Version Id */
+            source_version_id: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version Number */
+            version_number: string | null;
         };
         /**
          * PortCheckResponse
@@ -4230,6 +4538,111 @@ export interface operations {
             };
         };
     };
+    install_from_catalog_api_communities__community_id__servers__server_id__catalog_install_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CatalogInstallRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_catalog_project_api_communities__community_id__servers__server_id__catalog_projects__project_id_or_slug__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                project_id_or_slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogProjectDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_catalog_api_communities__community_id__servers__server_id__catalog_search_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogSearchListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     send_server_command_api_communities__community_id__servers__server_id__command_post: {
         parameters: {
             query?: never;
@@ -4663,6 +5076,171 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GroupResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_plugins_api_communities__community_id__servers__server_id__plugins_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    install_plugin_api_communities__community_id__servers__server_id__plugins_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_install_plugin_api_communities__community_id__servers__server_id__plugins_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__disable_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    enable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__enable_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
                 };
             };
             /** @description Validation Error */
