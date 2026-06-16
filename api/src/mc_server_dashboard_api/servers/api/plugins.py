@@ -138,9 +138,7 @@ async def list_plugins(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
-    return PluginListResponse(
-        plugins=[PluginResponse.from_plugin(p) for p in plugins]
-    )
+    return PluginListResponse(plugins=[PluginResponse.from_plugin(p) for p in plugins])
 
 
 @router.post(
@@ -199,7 +197,7 @@ async def install_plugin(
         )
         raise _conflict("server_busy") from exc
     await _record_plugin(
-        recorder, ops.PLUGIN_INSTALL, authorized, community_id, server_id
+        recorder, ops.PLUGIN_INSTALL, authorized, community_id, plugin.id.value
     )
     return PluginResponse.from_plugin(plugin)
 
@@ -239,16 +237,16 @@ async def remove_plugin(
         raise _not_found() from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_REMOVE, authorized, community_id, server_id
+            recorder, ops.PLUGIN_REMOVE, authorized, community_id, plugin_id
         )
         raise _conflict("server_unsettled") from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_REMOVE, authorized, community_id, server_id
+            recorder, ops.PLUGIN_REMOVE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
     await _record_plugin(
-        recorder, ops.PLUGIN_REMOVE, authorized, community_id, server_id
+        recorder, ops.PLUGIN_REMOVE, authorized, community_id, plugin_id
     )
 
 
@@ -285,18 +283,20 @@ async def enable_plugin(
         raise _not_found() from exc
     except PluginNotFoundError as exc:
         raise _not_found() from exc
+    except PluginAlreadyExistsError as exc:
+        raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_ENABLE, authorized, community_id, server_id
+            recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_unsettled") from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_ENABLE, authorized, community_id, server_id
+            recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
     await _record_plugin(
-        recorder, ops.PLUGIN_ENABLE, authorized, community_id, server_id
+        recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
     )
     return PluginResponse.from_plugin(plugin)
 
@@ -334,18 +334,20 @@ async def disable_plugin(
         raise _not_found() from exc
     except PluginNotFoundError as exc:
         raise _not_found() from exc
+    except PluginAlreadyExistsError as exc:
+        raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_DISABLE, authorized, community_id, server_id
+            recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_unsettled") from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_DISABLE, authorized, community_id, server_id
+            recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
     await _record_plugin(
-        recorder, ops.PLUGIN_DISABLE, authorized, community_id, server_id
+        recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
     )
     return PluginResponse.from_plugin(plugin)
 
@@ -371,7 +373,7 @@ async def _record_plugin(
     operation: str,
     authorized: AuthUser,
     community_id: uuid.UUID,
-    server_id: uuid.UUID,
+    target_id: uuid.UUID,
 ) -> None:
     await recorder.record(
         AuditEvent(
@@ -380,7 +382,7 @@ async def _record_plugin(
             actor_id=authorized.user_id.value,
             community_id=community_id,
             target_type=ops.TARGET_PLUGIN,
-            target_id=server_id,
+            target_id=target_id,
         )
     )
 
@@ -390,7 +392,7 @@ async def _record_plugin_failure(
     operation: str,
     authorized: AuthUser,
     community_id: uuid.UUID,
-    server_id: uuid.UUID,
+    target_id: uuid.UUID,
 ) -> None:
     await recorder.record(
         AuditEvent(
@@ -399,7 +401,7 @@ async def _record_plugin_failure(
             actor_id=authorized.user_id.value,
             community_id=community_id,
             target_type=ops.TARGET_PLUGIN,
-            target_id=server_id,
+            target_id=target_id,
         )
     )
 
