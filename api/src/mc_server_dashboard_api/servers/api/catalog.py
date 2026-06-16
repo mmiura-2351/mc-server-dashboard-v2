@@ -45,6 +45,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
+    FileTooLargeError,
+    InvalidFilePathError,
     PluginAlreadyExistsError,
     ServerBusyError,
     ServerFilesUnsettledError,
@@ -303,6 +305,10 @@ async def install_from_catalog(
         raise _bad_gateway("catalog_unavailable") from exc
     except CatalogChecksumMismatchError as exc:
         raise _bad_gateway("checksum_mismatch") from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable("invalid_path") from exc
+    except FileTooLargeError as exc:
+        raise _too_large() from exc
     except PluginAlreadyExistsError as exc:
         raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
@@ -373,3 +379,7 @@ def _bad_gateway(reason: str) -> ProblemException:
 
 def _conflict(reason: str) -> ProblemException:
     return problem(status.HTTP_409_CONFLICT, reason)
+
+
+def _too_large() -> ProblemException:
+    return problem(status.HTTP_413_CONTENT_TOO_LARGE, "file_too_large")
