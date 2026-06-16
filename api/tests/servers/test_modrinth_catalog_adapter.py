@@ -6,6 +6,8 @@ host-allowlist enforcement — these cannot be tested through the FakeCatalogPro
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -41,8 +43,8 @@ async def test_download_redirect_to_disallowed_host_raises() -> None:
         # download_file. We do this by temporarily replacing httpx.AsyncClient.
         real_init = httpx.AsyncClient.__init__
 
-        def patched_init(self_client: httpx.AsyncClient, **kwargs: object) -> None:
-            kwargs["transport"] = transport  # type: ignore[assignment]
+        def patched_init(self_client: httpx.AsyncClient, **kwargs: Any) -> None:
+            kwargs["transport"] = transport
             kwargs.pop("follow_redirects", None)
             real_init(self_client, **kwargs)
 
@@ -50,7 +52,7 @@ async def test_download_redirect_to_disallowed_host_raises() -> None:
         try:
             return await original(url)
         finally:
-            httpx.AsyncClient.__init__ = real_init  # type: ignore[assignment]
+            httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
 
     with pytest.raises(CatalogUnavailableError, match="disallowed host"):
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
@@ -79,8 +81,8 @@ async def test_download_too_many_redirects_raises() -> None:
     async def _patched_download(url: str) -> bytes:
         real_init = httpx.AsyncClient.__init__
 
-        def patched_init(self_client: httpx.AsyncClient, **kwargs: object) -> None:
-            kwargs["transport"] = transport  # type: ignore[assignment]
+        def patched_init(self_client: httpx.AsyncClient, **kwargs: Any) -> None:
+            kwargs["transport"] = transport
             kwargs.pop("follow_redirects", None)
             real_init(self_client, **kwargs)
 
@@ -88,7 +90,7 @@ async def test_download_too_many_redirects_raises() -> None:
         try:
             return await original(url)
         finally:
-            httpx.AsyncClient.__init__ = real_init  # type: ignore[assignment]
+            httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
 
     with pytest.raises(CatalogUnavailableError, match="too many redirects"):
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
@@ -113,8 +115,8 @@ async def test_download_redirect_to_non_https_raises() -> None:
     async def _patched_download(url: str) -> bytes:
         real_init = httpx.AsyncClient.__init__
 
-        def patched_init(self_client: httpx.AsyncClient, **kwargs: object) -> None:
-            kwargs["transport"] = transport  # type: ignore[assignment]
+        def patched_init(self_client: httpx.AsyncClient, **kwargs: Any) -> None:
+            kwargs["transport"] = transport
             kwargs.pop("follow_redirects", None)
             real_init(self_client, **kwargs)
 
@@ -122,7 +124,7 @@ async def test_download_redirect_to_non_https_raises() -> None:
         try:
             return await original(url)
         finally:
-            httpx.AsyncClient.__init__ = real_init  # type: ignore[assignment]
+            httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
 
     with pytest.raises(CatalogUnavailableError, match="non-HTTPS"):
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
@@ -143,8 +145,8 @@ async def test_get_json_oversized_response_raises() -> None:
 
     real_init = httpx.AsyncClient.__init__
 
-    def patched_init(self_client: httpx.AsyncClient, **kwargs: object) -> None:
-        kwargs["transport"] = transport  # type: ignore[assignment]
+    def patched_init(self_client: httpx.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
         real_init(self_client, **kwargs)
 
     httpx.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
@@ -154,7 +156,7 @@ async def test_get_json_oversized_response_raises() -> None:
                 query="test", loader="fabric", game_versions=["1.20.4"]
             )
     finally:
-        httpx.AsyncClient.__init__ = real_init  # type: ignore[assignment]
+        httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
 
 
 # -- Constants sanity --
