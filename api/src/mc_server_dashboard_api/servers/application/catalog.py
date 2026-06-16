@@ -137,9 +137,14 @@ class InstallFromCatalog:
 
         content_dir = content_dir_for_server_type(server.server_type)
         loader_type = loader_type_for_server_type(server.server_type)
+        loader = modrinth_loader_for_server_type(server.server_type)
 
         # Phase 2: Fetch from catalog (no lock, no DB).
-        versions = await self.catalog.list_versions(project_id)
+        versions = await self.catalog.list_versions(
+            project_id,
+            loader=loader,
+            game_versions=[server.mc_version],
+        )
         version = next((v for v in versions if v.version_id == version_id), None)
         if version is None:
             raise CatalogProjectNotFoundError(

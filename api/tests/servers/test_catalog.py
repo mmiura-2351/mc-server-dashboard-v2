@@ -463,6 +463,54 @@ async def test_install_from_catalog_empty_sha512_fails() -> None:
         )
 
 
+async def test_install_from_catalog_filters_versions_by_loader_and_game_version() -> (
+    None
+):
+    """InstallFromCatalog passes loader and game_versions to list_versions."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    # Capture the list_versions call args via a recording subclass.
+    list_versions_calls: list[tuple[str, str | None, list[str] | None]] = []
+    _original = catalog.list_versions
+
+    async def _recording_list_versions(
+        project_id_or_slug: str,
+        *,
+        loader: str | None = None,
+        game_versions: list[str] | None = None,
+    ) -> list[CatalogVersion]:
+        list_versions_calls.append((project_id_or_slug, loader, game_versions))
+        return await _original(
+            project_id_or_slug, loader=loader, game_versions=game_versions
+        )
+
+    catalog.list_versions = _recording_list_versions  # type: ignore[assignment]
+
+    uc = InstallFromCatalog(
+        uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW)
+    )
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    # Should have been called with loader and game_versions.
+    assert len(list_versions_calls) == 1
+    _proj_id, _loader, _gv = list_versions_calls[0]
+    assert _loader == "fabric"
+    assert _gv == ["1.20.4"]
+
+
 async def test_install_from_catalog_non_jar_filename_fails() -> None:
     """Catalog filenames must end with .jar."""
     uow = FakeUnitOfWork()

@@ -28,6 +28,7 @@ from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
     get_check_plugin_update,
     get_check_updates,
+    get_get_plugin,
     get_install_plugin,
     get_list_plugin_dependencies,
     get_list_plugins,
@@ -46,6 +47,7 @@ from mc_server_dashboard_api.servers.application.catalog import (
 )
 from mc_server_dashboard_api.servers.application.plugins import (
     MAX_PLUGIN_BYTES,
+    GetPlugin,
     InstallPlugin,
     ListPlugins,
     RemovePlugin,
@@ -387,6 +389,40 @@ async def check_plugin_update(
     )
 
 
+@router.get(
+    "/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}",
+)
+async def get_plugin(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    plugin_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("plugin:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[GetPlugin, Depends(get_get_plugin)],
+) -> PluginResponse:
+    """Get a single installed plugin by id (plugin:read)."""
+
+    try:
+        plugin = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            plugin_id=PluginId(plugin_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except PluginNotFoundError as exc:
+        raise _not_found() from exc
+    return PluginResponse.from_plugin(plugin)
+
+
 @router.post(
     "/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/update",
 )
@@ -422,7 +458,7 @@ async def update_plugin(
     except PluginNotFoundError as exc:
         raise _not_found() from exc
     except CatalogProjectNotFoundError as exc:
-        raise _not_found() from exc
+        raise _not_found_catalog() from exc
     except CatalogUnavailableError as exc:
         raise _bad_gateway("catalog_unavailable") from exc
     except CatalogChecksumMismatchError as exc:
@@ -715,6 +751,10 @@ def _conflict(reason: str) -> ProblemException:
 
 def _not_found() -> ProblemException:
     return problem(status.HTTP_404_NOT_FOUND, "not_found")
+
+
+def _not_found_catalog() -> ProblemException:
+    return problem(status.HTTP_404_NOT_FOUND, "catalog_project_not_found")
 
 
 def _bad_gateway(reason: str) -> ProblemException:
