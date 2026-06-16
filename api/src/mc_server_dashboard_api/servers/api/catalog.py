@@ -33,6 +33,9 @@ from mc_server_dashboard_api.servers.application.catalog import (
     SearchCatalog,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogDependency as CatalogDependencyDomain,
+)
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogProject as CatalogProjectDomain,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
@@ -104,6 +107,20 @@ class CatalogFileResponse(BaseModel):
     primary: bool
 
 
+class CatalogDependencyResponse(BaseModel):
+    version_id: str | None
+    project_id: str
+    dependency_type: str
+
+    @classmethod
+    def from_domain(cls, d: CatalogDependencyDomain) -> CatalogDependencyResponse:
+        return cls(
+            version_id=d.version_id,
+            project_id=d.project_id,
+            dependency_type=d.dependency_type,
+        )
+
+
 class CatalogVersionResponse(BaseModel):
     version_id: str
     version_number: str
@@ -112,6 +129,7 @@ class CatalogVersionResponse(BaseModel):
     loaders: list[str]
     files: list[CatalogFileResponse]
     date_published: str
+    dependencies: list[CatalogDependencyResponse]
 
     @classmethod
     def from_domain(cls, v: CatalogVersionDomain) -> CatalogVersionResponse:
@@ -132,6 +150,9 @@ class CatalogVersionResponse(BaseModel):
                 for f in v.files
             ],
             date_published=v.date_published,
+            dependencies=[
+                CatalogDependencyResponse.from_domain(d) for d in v.dependencies
+            ],
         )
 
 

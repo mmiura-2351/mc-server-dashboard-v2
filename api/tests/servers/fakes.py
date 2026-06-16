@@ -66,7 +66,11 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import (
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
-from mc_server_dashboard_api.servers.domain.plugin import PluginId, ServerPlugin
+from mc_server_dashboard_api.servers.domain.plugin import (
+    PluginId,
+    PluginSource,
+    ServerPlugin,
+)
 from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
@@ -684,6 +688,18 @@ class FakePluginRepository(PluginRepository):
 
     async def update(self, plugin: ServerPlugin) -> None:
         self.by_id[plugin.id] = plugin
+
+    async def list_modrinth_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
+        return sorted(
+            (
+                p
+                for p in self.by_id.values()
+                if p.server_id == server_id
+                and p.source is PluginSource.MODRINTH
+                and p.source_project_id is not None
+            ),
+            key=lambda p: (p.display_name, str(p.id.value)),
+        )
 
 
 class FakeUnitOfWork(UnitOfWork):

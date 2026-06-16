@@ -26,14 +26,24 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
+    get_check_plugin_update,
+    get_check_updates,
     get_install_plugin,
+    get_list_plugin_dependencies,
     get_list_plugins,
     get_remove_plugin,
     get_toggle_plugin,
+    get_update_plugin,
     require_permission,
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.servers.application.catalog import (
+    CheckPluginUpdate,
+    CheckUpdates,
+    ListPluginDependencies,
+    UpdatePlugin,
+)
 from mc_server_dashboard_api.servers.application.plugins import (
     MAX_PLUGIN_BYTES,
     InstallPlugin,
@@ -41,7 +51,13 @@ from mc_server_dashboard_api.servers.application.plugins import (
     RemovePlugin,
     TogglePlugin,
 )
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogVersion as CatalogVersionDomain,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
+    CatalogChecksumMismatchError,
+    CatalogProjectNotFoundError,
+    CatalogUnavailableError,
     FileTooLargeError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
@@ -109,6 +125,88 @@ class PluginResponse(BaseModel):
 
 class PluginListResponse(BaseModel):
     plugins: list[PluginResponse]
+
+
+class _CatalogFileItem(BaseModel):
+    url: str
+    filename: str
+    size: int
+    sha512: str
+    primary: bool
+
+
+class _CatalogDependencyItem(BaseModel):
+    version_id: str | None
+    project_id: str
+    dependency_type: str
+
+
+class _CatalogVersionItem(BaseModel):
+    """Inline catalog version response to avoid circular import with catalog.py."""
+
+    version_id: str
+    version_number: str
+    name: str
+    game_versions: list[str]
+    loaders: list[str]
+    files: list[_CatalogFileItem]
+    date_published: str
+    dependencies: list[_CatalogDependencyItem]
+
+    @classmethod
+    def from_domain(cls, v: CatalogVersionDomain) -> _CatalogVersionItem:
+        return cls(
+            version_id=v.version_id,
+            version_number=v.version_number,
+            name=v.name,
+            game_versions=v.game_versions,
+            loaders=v.loaders,
+            files=[
+                _CatalogFileItem(
+                    url=f.url,
+                    filename=f.filename,
+                    size=f.size,
+                    sha512=f.sha512,
+                    primary=f.primary,
+                )
+                for f in v.files
+            ],
+            date_published=v.date_published,
+            dependencies=[
+                _CatalogDependencyItem(
+                    version_id=d.version_id,
+                    project_id=d.project_id,
+                    dependency_type=d.dependency_type,
+                )
+                for d in v.dependencies
+            ],
+        )
+
+
+class PluginUpdateInfoResponse(BaseModel):
+    plugin: PluginResponse
+    latest_version: _CatalogVersionItem | None
+
+
+class PluginUpdatesResponse(BaseModel):
+    updates: list[PluginUpdateInfoResponse]
+
+
+class UpdatePluginRequest(BaseModel):
+    version_id: str
+
+
+class PluginDependencyResponse(BaseModel):
+    project_id: str
+    version_id: str | None
+    dependency_type: str
+    project_title: str | None
+    project_slug: str | None
+    installed: bool
+
+
+class PluginDependenciesResponse(BaseModel):
+    dependencies: list[PluginDependencyResponse]
 
 
 @router.get("/communities/{community_id}/servers/{server_id}/plugins")
@@ -200,6 +298,201 @@ async def install_plugin(
         recorder, ops.PLUGIN_INSTALL, authorized, community_id, plugin.id.value
     )
     return PluginResponse.from_plugin(plugin)
+
+
+@router.get("/communities/{community_id}/servers/{server_id}/plugins/updates")
+async def check_updates(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("plugin:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[CheckUpdates, Depends(get_check_updates)],
+) -> PluginUpdatesResponse:
+    """Batch check for plugin updates (plugin:read)."""
+
+    try:
+        results = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except UnsupportedPluginServerTypeError as exc:
+        raise _unprocessable("unsupported_server_type") from exc
+    except CatalogUnavailableError as exc:
+        raise _bad_gateway("catalog_unavailable") from exc
+    return PluginUpdatesResponse(
+        updates=[
+            PluginUpdateInfoResponse(
+                plugin=PluginResponse.from_plugin(r.plugin),
+                latest_version=(
+                    _CatalogVersionItem.from_domain(r.latest_version)
+                    if r.latest_version
+                    else None
+                ),
+            )
+            for r in results
+        ]
+    )
+
+
+@router.get(
+    "/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/updates",
+)
+async def check_plugin_update(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    plugin_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("plugin:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[CheckPluginUpdate, Depends(get_check_plugin_update)],
+) -> PluginUpdateInfoResponse:
+    """Check for a single plugin update (plugin:read)."""
+
+    try:
+        result = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            plugin_id=PluginId(plugin_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except PluginNotFoundError as exc:
+        raise _not_found() from exc
+    except UnsupportedPluginServerTypeError as exc:
+        raise _unprocessable("unsupported_server_type") from exc
+    except CatalogUnavailableError as exc:
+        raise _bad_gateway("catalog_unavailable") from exc
+    return PluginUpdateInfoResponse(
+        plugin=PluginResponse.from_plugin(result.plugin),
+        latest_version=(
+            _CatalogVersionItem.from_domain(result.latest_version)
+            if result.latest_version
+            else None
+        ),
+    )
+
+
+@router.post(
+    "/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/update",
+)
+async def update_plugin(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    plugin_id: uuid.UUID,
+    body: UpdatePluginRequest,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("plugin:manage"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[UpdatePlugin, Depends(get_update_plugin)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> PluginResponse:
+    """Execute a plugin update to a specific version (plugin:manage)."""
+
+    try:
+        plugin = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            plugin_id=PluginId(plugin_id),
+            version_id=body.version_id,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except PluginNotFoundError as exc:
+        raise _not_found() from exc
+    except CatalogProjectNotFoundError as exc:
+        raise _not_found() from exc
+    except CatalogUnavailableError as exc:
+        raise _bad_gateway("catalog_unavailable") from exc
+    except CatalogChecksumMismatchError as exc:
+        raise _bad_gateway("checksum_mismatch") from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable("invalid_path") from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin_id
+        )
+        raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin_id
+        )
+        raise _conflict("server_busy") from exc
+    await _record_plugin(
+        recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin.id.value
+    )
+    return PluginResponse.from_plugin(plugin)
+
+
+@router.get(
+    "/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/dependencies",
+)
+async def list_plugin_dependencies(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    plugin_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("plugin:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ListPluginDependencies, Depends(get_list_plugin_dependencies)],
+) -> PluginDependenciesResponse:
+    """List dependencies for an installed plugin (plugin:read)."""
+
+    try:
+        deps = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            plugin_id=PluginId(plugin_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except PluginNotFoundError as exc:
+        raise _not_found() from exc
+    except CatalogUnavailableError as exc:
+        raise _bad_gateway("catalog_unavailable") from exc
+    return PluginDependenciesResponse(
+        dependencies=[
+            PluginDependencyResponse(
+                project_id=d.project_id,
+                version_id=d.version_id,
+                dependency_type=d.dependency_type,
+                project_title=d.project_title,
+                project_slug=d.project_slug,
+                installed=d.installed,
+            )
+            for d in deps
+        ]
+    )
 
 
 @router.delete(
@@ -420,3 +713,7 @@ def _conflict(reason: str) -> ProblemException:
 
 def _not_found() -> ProblemException:
     return problem(status.HTTP_404_NOT_FOUND, "not_found")
+
+
+def _bad_gateway(reason: str) -> ProblemException:
+    return problem(status.HTTP_502_BAD_GATEWAY, reason)

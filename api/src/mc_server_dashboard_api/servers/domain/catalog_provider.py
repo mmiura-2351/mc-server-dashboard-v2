@@ -8,7 +8,7 @@ dataclasses that carry catalog metadata without framework or transport types.
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,15 @@ class CatalogFile:
 
 
 @dataclass(frozen=True)
+class CatalogDependency:
+    """A dependency declaration within a catalog version."""
+
+    version_id: str | None
+    project_id: str
+    dependency_type: str  # "required" | "optional" | "incompatible" | "embedded"
+
+
+@dataclass(frozen=True)
 class CatalogVersion:
     """One version (release) of a catalog project."""
 
@@ -65,6 +74,7 @@ class CatalogVersion:
     loaders: list[str]
     files: list[CatalogFile]
     date_published: str
+    dependencies: list[CatalogDependency] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

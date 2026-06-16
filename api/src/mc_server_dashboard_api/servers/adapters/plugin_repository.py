@@ -127,3 +127,16 @@ class SqlAlchemyPluginRepository(PluginRepository):
             )
         )
         await self._session.execute(stmt)
+
+    async def list_modrinth_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
+        stmt = (
+            select(ServerPluginModel)
+            .where(
+                ServerPluginModel.server_id == server_id.value,
+                ServerPluginModel.source == PluginSource.MODRINTH.value,
+                ServerPluginModel.source_project_id.is_not(None),
+            )
+            .order_by(ServerPluginModel.display_name, ServerPluginModel.id)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_plugin(row) for row in rows]
