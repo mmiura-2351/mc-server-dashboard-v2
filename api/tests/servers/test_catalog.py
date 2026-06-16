@@ -493,7 +493,7 @@ async def test_install_from_catalog_filters_versions_by_loader_and_game_version(
             project_id_or_slug, loader=loader, game_versions=game_versions
         )
 
-    catalog.list_versions = _recording_list_versions  # type: ignore[assignment]
+    catalog.list_versions = _recording_list_versions  # type: ignore[method-assign]
 
     uc = InstallFromCatalog(
         uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW)
