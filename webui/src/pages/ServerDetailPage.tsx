@@ -24,6 +24,7 @@ import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
 import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
+import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
 import { serverKey } from "./serverKey.ts";
 import {
   actionApplies,
@@ -50,6 +51,7 @@ const TABS = [
   "console",
   "files",
   "backups",
+  "plugins",
   "players",
   "settings",
 ] as const;
@@ -60,9 +62,13 @@ const TAB_LABEL: Record<Tab, TranslationKey> = {
   console: "serverDetail.tab.console",
   files: "serverDetail.tab.files",
   backups: "serverDetail.tab.backups",
+  plugins: "serverDetail.tab.plugins",
   players: "serverDetail.tab.players",
   settings: "serverDetail.tab.settings",
 };
+
+/** Tabs hidden for vanilla servers (vanilla has no plugin/mod support). */
+const VANILLA_HIDDEN_TABS: ReadonlySet<Tab> = new Set(["plugins"]);
 
 export function ServerDetailPage() {
   const { cid, sid } = useParams();
@@ -104,6 +110,10 @@ function Loaded({
   }
 
   const server = query.data;
+  const isVanilla = server.server_type === "vanilla";
+  const visibleTabs = isVanilla
+    ? TABS.filter((name) => !VANILLA_HIDDEN_TABS.has(name))
+    : TABS;
   return (
     <>
       <Header
@@ -114,7 +124,7 @@ function Loaded({
         statusDetail={events.statusDetail}
       />
       <div className="tabs" role="tablist">
-        {TABS.map((name) => (
+        {visibleTabs.map((name) => (
           <button
             key={name}
             type="button"
@@ -147,6 +157,9 @@ function Loaded({
       )}
       {tab === "backups" && (
         <ServerBackupsTab server={server} communityId={communityId} can={can} />
+      )}
+      {tab === "plugins" && (
+        <ServerPluginsTab server={server} communityId={communityId} can={can} />
       )}
       {tab === "players" && (
         <ServerPlayersTab

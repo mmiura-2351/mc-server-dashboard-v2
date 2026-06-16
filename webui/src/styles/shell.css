@@ -1227,6 +1227,111 @@ body.col-resizing {
   justify-content: flex-end;
 }
 
+/* ---------- Server detail Plugins tab (issue #1153) ---------- */
+.plugins-notice {
+  margin-bottom: 12px;
+}
+.plugins-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.plugins-table {
+  padding: 0;
+}
+.plugins-table table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.plugins-table table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.plugins-table table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.plugins-table .row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.plugins-update-badge {
+  margin-left: 8px;
+  font-size: 11px;
+}
+.plugins-deps {
+  list-style: none;
+  padding: 4px 12px;
+  margin: 0;
+}
+.plugins-deps li {
+  padding: 4px 0;
+}
+/* Modrinth search modal */
+.plugins-search-input {
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+.plugins-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.plugins-search-hit {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+}
+.plugins-search-hit:hover {
+  background: var(--bg-inset);
+}
+.plugins-search-icon {
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.plugins-search-hit-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.plugins-versions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.plugins-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 /* ---------- Server detail Files tab (WEBUI_SPEC.md 6.6) ---------- */
 .files .notice {
   border-radius: var(--radius-sm);
