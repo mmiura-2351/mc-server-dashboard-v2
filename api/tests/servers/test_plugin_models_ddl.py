@@ -50,11 +50,7 @@ def test_installed_by_has_no_foreign_key() -> None:
 
 
 def test_unique_constraint_server_rel_path() -> None:
-    uqs = {
-        c.name
-        for c in _TABLE.constraints
-        if isinstance(c, UniqueConstraint)
-    }
+    uqs = {c.name for c in _TABLE.constraints if isinstance(c, UniqueConstraint)}
     assert "uq_server_plugin_server_rel" in uqs
 
 
