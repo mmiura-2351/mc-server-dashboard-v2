@@ -7,11 +7,13 @@ FileStore write pattern as :class:`InstallPlugin`.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogDependency,
     CatalogProject,
     CatalogProvider,
     CatalogSearchResponse,
@@ -22,6 +24,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
+    CatalogUnavailableError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
@@ -245,6 +248,31 @@ class PluginDependencyInfo:
 
 # -- Update check use cases --
 
+_CATALOG_CONCURRENCY = 5  # Max parallel Modrinth API calls
+
+
+async def _check_one(
+    catalog: CatalogProvider,
+    plugin: ServerPlugin,
+    loader: str,
+    mc_version: str,
+    sem: asyncio.Semaphore,
+) -> PluginUpdateInfo:
+    """Check a single plugin for updates, bounded by *sem*."""
+    async with sem:
+        try:
+            versions = await catalog.list_versions(
+                plugin.source_project_id or "",
+                loader=loader,
+                game_versions=[mc_version],
+            )
+        except CatalogUnavailableError:
+            return PluginUpdateInfo(plugin=plugin, latest_version=None)
+        latest = versions[0] if versions else None
+        if latest and latest.version_id != plugin.source_version_id:
+            return PluginUpdateInfo(plugin=plugin, latest_version=latest)
+        return PluginUpdateInfo(plugin=plugin, latest_version=None)
+
 
 @dataclass(frozen=True)
 class CheckUpdates:
@@ -264,19 +292,14 @@ class CheckUpdates:
             loader = modrinth_loader_for_server_type(server.server_type)
             plugins = await self.uow.plugins.list_modrinth_plugins(server_id)
 
-        results: list[PluginUpdateInfo] = []
-        for plugin in plugins:
-            versions = await self.catalog.list_versions(
-                plugin.source_project_id or "",
-                loader=loader,
-                game_versions=[server.mc_version],
+        sem = asyncio.Semaphore(_CATALOG_CONCURRENCY)
+        results = await asyncio.gather(
+            *(
+                _check_one(self.catalog, plugin, loader, server.mc_version, sem)
+                for plugin in plugins
             )
-            latest = versions[0] if versions else None
-            if latest and latest.version_id != plugin.source_version_id:
-                results.append(PluginUpdateInfo(plugin=plugin, latest_version=latest))
-            else:
-                results.append(PluginUpdateInfo(plugin=plugin, latest_version=None))
-        return results
+        )
+        return list(results)
 
 
 @dataclass(frozen=True)
@@ -469,18 +492,19 @@ class ListPluginDependencies:
         installed_project_ids = {
             p.source_project_id for p in all_plugins if p.source_project_id
         }
-        results: list[PluginDependencyInfo] = []
-        for dep in installed_version.dependencies:
-            project_title: str | None = None
-            project_slug: str | None = None
-            try:
-                proj = await self.catalog.get_project(dep.project_id)
-                project_title = proj.title
-                project_slug = proj.slug
-            except Exception:  # noqa: BLE001 - catalog may be unavailable
-                pass
-            results.append(
-                PluginDependencyInfo(
+        sem = asyncio.Semaphore(_CATALOG_CONCURRENCY)
+
+        async def _fetch_dep(dep: CatalogDependency) -> PluginDependencyInfo:
+            async with sem:
+                project_title: str | None = None
+                project_slug: str | None = None
+                try:
+                    proj = await self.catalog.get_project(dep.project_id)
+                    project_title = proj.title
+                    project_slug = proj.slug
+                except (CatalogUnavailableError, CatalogProjectNotFoundError):
+                    pass
+                return PluginDependencyInfo(
                     project_id=dep.project_id,
                     version_id=dep.version_id,
                     dependency_type=dep.dependency_type,
@@ -488,5 +512,8 @@ class ListPluginDependencies:
                     project_slug=project_slug,
                     installed=dep.project_id in installed_project_ids,
                 )
-            )
-        return results
+
+        results = await asyncio.gather(
+            *(_fetch_dep(dep) for dep in installed_version.dependencies)
+        )
+        return list(results)

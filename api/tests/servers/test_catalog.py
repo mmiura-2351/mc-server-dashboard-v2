@@ -681,6 +681,62 @@ async def test_check_updates_server_not_found() -> None:
         await uc(community_id=_COMMUNITY, server_id=ServerId.new())
 
 
+async def test_check_updates_partial_catalog_unavailable() -> None:
+    """CatalogUnavailableError on one plugin does not fail the entire batch."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    p1 = _plugin(
+        server_id=server.id,
+        source_project_id="proj-1",
+        source_version_id="ver-1",
+        display_name="Fabric API",
+    )
+    p2 = _plugin(
+        server_id=server.id,
+        source_project_id="proj-2",
+        source_version_id="ver-3",
+        display_name="Failing Mod",
+        rel_path="mods/failing-mod.jar",
+        filename="failing-mod.jar",
+    )
+    uow.plugins.seed(p1)
+    uow.plugins.seed(p2)
+
+    proj1 = _project(project_id="proj-1")
+    v1_new, _ = _version(version_id="ver-2", version_number="0.93.0")
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(proj1, [v1_new])
+
+    # Make list_versions raise CatalogUnavailableError for proj-2 only.
+    _original = catalog.list_versions
+
+    async def _partial_unavailable(
+        project_id_or_slug: str,
+        *,
+        loader: str | None = None,
+        game_versions: list[str] | None = None,
+    ) -> list[CatalogVersion]:
+        if project_id_or_slug == "proj-2":
+            raise CatalogUnavailableError("fake partial unavailable")
+        return await _original(
+            project_id_or_slug, loader=loader, game_versions=game_versions
+        )
+
+    catalog.list_versions = _partial_unavailable  # type: ignore[method-assign]
+
+    uc = CheckUpdates(uow=uow, catalog=catalog)
+    results = await uc(community_id=_COMMUNITY, server_id=server.id)
+    assert len(results) == 2
+    by_name = {r.plugin.display_name: r for r in results}
+    # proj-1 should still report the update.
+    assert by_name["Fabric API"].latest_version is not None
+    assert by_name["Fabric API"].latest_version.version_id == "ver-2"
+    # proj-2 should gracefully return no update (not raise).
+    assert by_name["Failing Mod"].latest_version is None
+
+
 # -- CheckPluginUpdate --
 
 
