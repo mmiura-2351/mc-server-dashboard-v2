@@ -2033,6 +2033,15 @@ export interface components {
             max_servers: number;
             resources: components["schemas"]["HostResourcesResponse"];
         };
+        /** CatalogDependencyItem */
+        CatalogDependencyItem: {
+            /** Dependency Type */
+            dependency_type: string;
+            /** Project Id */
+            project_id: string;
+            /** Version Id */
+            version_id: string | null;
+        };
         /** CatalogDependencyResponse */
         CatalogDependencyResponse: {
             /** Dependency Type */
@@ -2041,6 +2050,19 @@ export interface components {
             project_id: string;
             /** Version Id */
             version_id: string | null;
+        };
+        /** CatalogFileItem */
+        CatalogFileItem: {
+            /** Filename */
+            filename: string;
+            /** Primary */
+            primary: boolean;
+            /** Sha512 */
+            sha512: string;
+            /** Size */
+            size: number;
+            /** Url */
+            url: string;
         };
         /** CatalogFileResponse */
         CatalogFileResponse: {
@@ -2124,6 +2146,28 @@ export interface components {
             slug: string;
             /** Title */
             title: string;
+        };
+        /**
+         * CatalogVersionItem
+         * @description Inline catalog version response to avoid circular import with catalog.py.
+         */
+        CatalogVersionItem: {
+            /** Date Published */
+            date_published: string;
+            /** Dependencies */
+            dependencies: components["schemas"]["CatalogDependencyItem"][];
+            /** Files */
+            files: components["schemas"]["CatalogFileItem"][];
+            /** Game Versions */
+            game_versions: string[];
+            /** Loaders */
+            loaders: string[];
+            /** Name */
+            name: string;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: string;
         };
         /** CatalogVersionResponse */
         CatalogVersionResponse: {
@@ -2532,7 +2576,7 @@ export interface components {
         };
         /** PluginUpdateInfoResponse */
         PluginUpdateInfoResponse: {
-            latest_version: components["schemas"]["_CatalogVersionItem"] | null;
+            latest_version: components["schemas"]["CatalogVersionItem"] | null;
             plugin: components["schemas"]["PluginResponse"];
         };
         /** PluginUpdatesResponse */
@@ -2868,50 +2912,6 @@ export interface components {
              * @default
              */
             content_base64: string;
-        };
-        /** _CatalogDependencyItem */
-        _CatalogDependencyItem: {
-            /** Dependency Type */
-            dependency_type: string;
-            /** Project Id */
-            project_id: string;
-            /** Version Id */
-            version_id: string | null;
-        };
-        /** _CatalogFileItem */
-        _CatalogFileItem: {
-            /** Filename */
-            filename: string;
-            /** Primary */
-            primary: boolean;
-            /** Sha512 */
-            sha512: string;
-            /** Size */
-            size: number;
-            /** Url */
-            url: string;
-        };
-        /**
-         * _CatalogVersionItem
-         * @description Inline catalog version response to avoid circular import with catalog.py.
-         */
-        _CatalogVersionItem: {
-            /** Date Published */
-            date_published: string;
-            /** Dependencies */
-            dependencies: components["schemas"]["_CatalogDependencyItem"][];
-            /** Files */
-            files: components["schemas"]["_CatalogFileItem"][];
-            /** Game Versions */
-            game_versions: string[];
-            /** Loaders */
-            loaders: string[];
-            /** Name */
-            name: string;
-            /** Version Id */
-            version_id: string;
-            /** Version Number */
-            version_number: string;
         };
     };
     responses: never;

@@ -555,6 +555,36 @@
         "title": "CapabilitiesResponse",
         "type": "object"
       },
+      "CatalogDependencyItem": {
+        "properties": {
+          "dependency_type": {
+            "title": "Dependency Type",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          }
+        },
+        "required": [
+          "version_id",
+          "project_id",
+          "dependency_type"
+        ],
+        "title": "CatalogDependencyItem",
+        "type": "object"
+      },
       "CatalogDependencyResponse": {
         "properties": {
           "dependency_type": {
@@ -583,6 +613,39 @@
           "dependency_type"
         ],
         "title": "CatalogDependencyResponse",
+        "type": "object"
+      },
+      "CatalogFileItem": {
+        "properties": {
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "primary": {
+            "title": "Primary",
+            "type": "boolean"
+          },
+          "sha512": {
+            "title": "Sha512",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "filename",
+          "size",
+          "sha512",
+          "primary"
+        ],
+        "title": "CatalogFileItem",
         "type": "object"
       },
       "CatalogFileResponse": {
@@ -837,6 +900,67 @@
           "latest_game_versions"
         ],
         "title": "CatalogSearchResultResponse",
+        "type": "object"
+      },
+      "CatalogVersionItem": {
+        "description": "Inline catalog version response to avoid circular import with catalog.py.",
+        "properties": {
+          "date_published": {
+            "title": "Date Published",
+            "type": "string"
+          },
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogDependencyItem"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogFileItem"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "game_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Game Versions",
+            "type": "array"
+          },
+          "loaders": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Loaders",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version_id",
+          "version_number",
+          "name",
+          "game_versions",
+          "loaders",
+          "files",
+          "date_published",
+          "dependencies"
+        ],
+        "title": "CatalogVersionItem",
         "type": "object"
       },
       "CatalogVersionResponse": {
@@ -1934,7 +2058,7 @@
           "latest_version": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/_CatalogVersionItem"
+                "$ref": "#/components/schemas/CatalogVersionItem"
               },
               {
                 "type": "null"
@@ -2802,130 +2926,6 @@
           }
         },
         "title": "WriteFileRequest",
-        "type": "object"
-      },
-      "_CatalogDependencyItem": {
-        "properties": {
-          "dependency_type": {
-            "title": "Dependency Type",
-            "type": "string"
-          },
-          "project_id": {
-            "title": "Project Id",
-            "type": "string"
-          },
-          "version_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Version Id"
-          }
-        },
-        "required": [
-          "version_id",
-          "project_id",
-          "dependency_type"
-        ],
-        "title": "_CatalogDependencyItem",
-        "type": "object"
-      },
-      "_CatalogFileItem": {
-        "properties": {
-          "filename": {
-            "title": "Filename",
-            "type": "string"
-          },
-          "primary": {
-            "title": "Primary",
-            "type": "boolean"
-          },
-          "sha512": {
-            "title": "Sha512",
-            "type": "string"
-          },
-          "size": {
-            "title": "Size",
-            "type": "integer"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "url",
-          "filename",
-          "size",
-          "sha512",
-          "primary"
-        ],
-        "title": "_CatalogFileItem",
-        "type": "object"
-      },
-      "_CatalogVersionItem": {
-        "description": "Inline catalog version response to avoid circular import with catalog.py.",
-        "properties": {
-          "date_published": {
-            "title": "Date Published",
-            "type": "string"
-          },
-          "dependencies": {
-            "items": {
-              "$ref": "#/components/schemas/_CatalogDependencyItem"
-            },
-            "title": "Dependencies",
-            "type": "array"
-          },
-          "files": {
-            "items": {
-              "$ref": "#/components/schemas/_CatalogFileItem"
-            },
-            "title": "Files",
-            "type": "array"
-          },
-          "game_versions": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Game Versions",
-            "type": "array"
-          },
-          "loaders": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Loaders",
-            "type": "array"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "version_id": {
-            "title": "Version Id",
-            "type": "string"
-          },
-          "version_number": {
-            "title": "Version Number",
-            "type": "string"
-          }
-        },
-        "required": [
-          "version_id",
-          "version_number",
-          "name",
-          "game_versions",
-          "loaders",
-          "files",
-          "date_published",
-          "dependencies"
-        ],
-        "title": "_CatalogVersionItem",
         "type": "object"
       }
     },

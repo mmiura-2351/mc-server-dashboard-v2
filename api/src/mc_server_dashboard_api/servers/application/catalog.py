@@ -339,9 +339,14 @@ class UpdatePlugin:
             raise PluginNotFoundError(str(plugin_id.value))
 
         content_dir = content_dir_for_server_type(server.server_type)
+        loader = modrinth_loader_for_server_type(server.server_type)
 
         # Phase 2: Fetch version from catalog, select primary file, validate .jar.
-        versions = await self.catalog.list_versions(plugin.source_project_id or "")
+        versions = await self.catalog.list_versions(
+            plugin.source_project_id or "",
+            loader=loader,
+            game_versions=[server.mc_version],
+        )
         version = next((v for v in versions if v.version_id == version_id), None)
         if version is None:
             raise CatalogProjectNotFoundError(
@@ -378,6 +383,14 @@ class UpdatePlugin:
 
                 self.file_store.validate_rel_path(new_rel_path)
 
+                old_rel_path = plugin.rel_path
+                if new_rel_path != old_rel_path:
+                    existing = await self.uow.plugins.get_by_rel_path(
+                        server_id, new_rel_path
+                    )
+                    if existing is not None and existing.id != plugin_id:
+                        raise PluginAlreadyExistsError(new_rel_path)
+
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,
@@ -385,7 +398,6 @@ class UpdatePlugin:
                     content=content,
                 )
 
-                old_rel_path = plugin.rel_path
                 if new_rel_path != old_rel_path:
                     await self.file_store.delete_file(
                         community_id=community_id,

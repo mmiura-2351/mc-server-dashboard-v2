@@ -127,7 +127,7 @@ class PluginListResponse(BaseModel):
     plugins: list[PluginResponse]
 
 
-class _CatalogFileItem(BaseModel):
+class CatalogFileItem(BaseModel):
     url: str
     filename: str
     size: int
@@ -135,13 +135,13 @@ class _CatalogFileItem(BaseModel):
     primary: bool
 
 
-class _CatalogDependencyItem(BaseModel):
+class CatalogDependencyItem(BaseModel):
     version_id: str | None
     project_id: str
     dependency_type: str
 
 
-class _CatalogVersionItem(BaseModel):
+class CatalogVersionItem(BaseModel):
     """Inline catalog version response to avoid circular import with catalog.py."""
 
     version_id: str
@@ -149,12 +149,12 @@ class _CatalogVersionItem(BaseModel):
     name: str
     game_versions: list[str]
     loaders: list[str]
-    files: list[_CatalogFileItem]
+    files: list[CatalogFileItem]
     date_published: str
-    dependencies: list[_CatalogDependencyItem]
+    dependencies: list[CatalogDependencyItem]
 
     @classmethod
-    def from_domain(cls, v: CatalogVersionDomain) -> _CatalogVersionItem:
+    def from_domain(cls, v: CatalogVersionDomain) -> CatalogVersionItem:
         return cls(
             version_id=v.version_id,
             version_number=v.version_number,
@@ -162,7 +162,7 @@ class _CatalogVersionItem(BaseModel):
             game_versions=v.game_versions,
             loaders=v.loaders,
             files=[
-                _CatalogFileItem(
+                CatalogFileItem(
                     url=f.url,
                     filename=f.filename,
                     size=f.size,
@@ -173,7 +173,7 @@ class _CatalogVersionItem(BaseModel):
             ],
             date_published=v.date_published,
             dependencies=[
-                _CatalogDependencyItem(
+                CatalogDependencyItem(
                     version_id=d.version_id,
                     project_id=d.project_id,
                     dependency_type=d.dependency_type,
@@ -185,7 +185,7 @@ class _CatalogVersionItem(BaseModel):
 
 class PluginUpdateInfoResponse(BaseModel):
     plugin: PluginResponse
-    latest_version: _CatalogVersionItem | None
+    latest_version: CatalogVersionItem | None
 
 
 class PluginUpdatesResponse(BaseModel):
@@ -334,7 +334,7 @@ async def check_updates(
             PluginUpdateInfoResponse(
                 plugin=PluginResponse.from_plugin(r.plugin),
                 latest_version=(
-                    _CatalogVersionItem.from_domain(r.latest_version)
+                    CatalogVersionItem.from_domain(r.latest_version)
                     if r.latest_version
                     else None
                 ),
@@ -375,14 +375,12 @@ async def check_plugin_update(
         raise _not_found() from exc
     except PluginNotFoundError as exc:
         raise _not_found() from exc
-    except UnsupportedPluginServerTypeError as exc:
-        raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnavailableError as exc:
         raise _bad_gateway("catalog_unavailable") from exc
     return PluginUpdateInfoResponse(
         plugin=PluginResponse.from_plugin(result.plugin),
         latest_version=(
-            _CatalogVersionItem.from_domain(result.latest_version)
+            CatalogVersionItem.from_domain(result.latest_version)
             if result.latest_version
             else None
         ),
@@ -431,6 +429,10 @@ async def update_plugin(
         raise _bad_gateway("checksum_mismatch") from exc
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
+    except FileTooLargeError as exc:
+        raise _too_large() from exc
+    except PluginAlreadyExistsError as exc:
+        raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
             recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin_id

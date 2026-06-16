@@ -844,6 +844,55 @@ async def test_update_plugin_local_raises() -> None:
         )
 
 
+async def test_update_plugin_rel_path_collision() -> None:
+    """Update rejects a new filename that collides with another plugin."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+
+    plugin_a = _plugin(
+        server_id=server.id,
+        source_project_id="proj-1",
+        source_version_id="ver-1",
+        rel_path="mods/fabric-api-0.92.0.jar",
+        filename="fabric-api-0.92.0.jar",
+        display_name="Fabric API",
+    )
+    plugin_b = _plugin(
+        server_id=server.id,
+        source_project_id="proj-2",
+        source_version_id="ver-10",
+        rel_path="mods/other-mod-1.0.jar",
+        filename="other-mod-1.0.jar",
+        display_name="Other Mod",
+    )
+    uow.plugins.seed(plugin_a)
+    uow.plugins.seed(plugin_b)
+
+    project = _project(project_id="proj-2", slug="other-mod", title="Other Mod")
+    # New version of other-mod has the same filename as plugin_a's jar.
+    new_content = b"colliding-jar"
+    ver_new, _ = _version(
+        version_id="ver-11",
+        version_number="2.0.0",
+        filename="fabric-api-0.92.0.jar",  # collides with plugin_a
+        file_content=new_content,
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [ver_new])
+    catalog.seed_file(ver_new.files[0].url, new_content)
+
+    uc = UpdatePlugin(uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW))
+    with pytest.raises(PluginAlreadyExistsError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=plugin_b.id,
+            version_id="ver-11",
+        )
+
+
 # -- ListPluginDependencies --
 
 
