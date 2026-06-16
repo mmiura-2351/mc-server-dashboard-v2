@@ -200,6 +200,22 @@ async def test_install_rejects_non_jar() -> None:
         )
 
 
+async def test_install_accepts_uppercase_jar_extension() -> None:
+    """Case-insensitive .jar check: .JAR and .Jar should be accepted."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    uc = InstallPlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="MyPlugin.JAR",
+        display_name="My Plugin",
+        content=b"jar-bytes",
+    )
+    assert plugin.filename == "MyPlugin.JAR"
+
+
 async def test_install_requires_at_rest() -> None:
     uow = FakeUnitOfWork()
     server = _server(

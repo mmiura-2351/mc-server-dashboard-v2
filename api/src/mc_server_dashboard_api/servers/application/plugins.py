@@ -86,7 +86,7 @@ class InstallPlugin:
     ) -> ServerPlugin:
         if len(content) > MAX_PLUGIN_BYTES:
             raise FileTooLargeError(str(len(content)))
-        if not filename.endswith(".jar"):
+        if not filename.lower().endswith(".jar"):
             raise InvalidFilePathError(filename)
 
         async with self.lifecycle_lock.hold(server_id):
