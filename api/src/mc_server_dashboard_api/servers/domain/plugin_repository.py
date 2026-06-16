@@ -36,5 +36,11 @@ class PluginRepository(abc.ABC):
         """Delete the plugin row."""
 
     @abc.abstractmethod
+    async def get_by_rel_path(
+        self, server_id: ServerId, rel_path: str
+    ) -> ServerPlugin | None:
+        """Return the plugin at ``rel_path`` scoped to ``server_id``, or ``None``."""
+
+    @abc.abstractmethod
     async def update(self, plugin: ServerPlugin) -> None:
         """Full entity update of the plugin row."""

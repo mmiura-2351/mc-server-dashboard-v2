@@ -15,7 +15,9 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
+    PluginAlreadyExistsError,
     PluginNotFoundError,
+    ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
 )
@@ -98,6 +100,10 @@ class InstallPlugin:
                 rel_path = f"{content_dir}/{filename}"
                 self.file_store.validate_rel_path(rel_path)
 
+                existing = await self.uow.plugins.get_by_rel_path(server_id, rel_path)
+                if existing is not None:
+                    raise PluginAlreadyExistsError(rel_path)
+
                 # Write jar to storage.
                 await self.file_store.write_file(
                     community_id=community_id,
@@ -158,11 +164,14 @@ class RemovePlugin:
                 if plugin is None:
                     raise PluginNotFoundError(str(plugin_id.value))
 
-                await self.file_store.delete_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=plugin.rel_path,
-                )
+                try:
+                    await self.file_store.delete_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=plugin.rel_path,
+                    )
+                except ServerFileNotFoundError:
+                    pass  # jar already gone; proceed with DB cleanup
                 await self.uow.plugins.delete(plugin_id)
                 await self.uow.commit()
 
@@ -205,6 +214,10 @@ class TogglePlugin:
                 else:
                     # Append .disabled suffix.
                     new_path = f"{old_path}.disabled"
+
+                existing = await self.uow.plugins.get_by_rel_path(server_id, new_path)
+                if existing is not None:
+                    raise PluginAlreadyExistsError(new_path)
 
                 # Rename: read old -> write new -> delete old (same pattern as
                 # RenameFile in files.py).

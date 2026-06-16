@@ -667,6 +667,14 @@ class FakePluginRepository(PluginRepository):
     async def delete(self, plugin_id: PluginId) -> None:
         self.by_id.pop(plugin_id, None)
 
+    async def get_by_rel_path(
+        self, server_id: ServerId, rel_path: str
+    ) -> ServerPlugin | None:
+        for plugin in self.by_id.values():
+            if plugin.server_id == server_id and plugin.rel_path == rel_path:
+                return plugin
+        return None
+
     async def update(self, plugin: ServerPlugin) -> None:
         self.by_id[plugin.id] = plugin
 

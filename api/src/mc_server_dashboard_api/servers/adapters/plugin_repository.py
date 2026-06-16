@@ -92,10 +92,18 @@ class SqlAlchemyPluginRepository(PluginRepository):
         return [_to_plugin(row) for row in rows]
 
     async def delete(self, plugin_id: PluginId) -> None:
-        stmt = delete(ServerPluginModel).where(
-            ServerPluginModel.id == plugin_id.value
-        )
+        stmt = delete(ServerPluginModel).where(ServerPluginModel.id == plugin_id.value)
         await self._session.execute(stmt)
+
+    async def get_by_rel_path(
+        self, server_id: ServerId, rel_path: str
+    ) -> ServerPlugin | None:
+        stmt = select(ServerPluginModel).where(
+            ServerPluginModel.server_id == server_id.value,
+            ServerPluginModel.rel_path == rel_path,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_plugin(row) if row is not None else None
 
     async def update(self, plugin: ServerPlugin) -> None:
         stmt = (

@@ -16,7 +16,9 @@ from mc_server_dashboard_api.servers.application.plugins import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
+    PluginAlreadyExistsError,
     PluginNotFoundError,
+    ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     UnsupportedPluginServerTypeError,
@@ -273,9 +275,7 @@ async def test_enable_plugin() -> None:
     uow.servers.seed(server)
     fs = FakeFileStore()
     fs.files["mods/test.jar.disabled"] = b"jar"
-    p = _plugin(
-        server_id=server.id, enabled=False, rel_path="mods/test.jar.disabled"
-    )
+    p = _plugin(server_id=server.id, enabled=False, rel_path="mods/test.jar.disabled")
     uow.plugins.seed(p)
     uc = TogglePlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
     result = await uc(
@@ -299,3 +299,79 @@ async def test_toggle_noop_if_already_desired_state() -> None:
     )
     assert result.enabled is True
     assert uow.commits == 0
+
+
+# -- Duplicate install (Bug 1) --
+
+
+async def test_install_duplicate_raises_already_exists() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    uc = InstallPlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="fabric-api.jar",
+        display_name="Fabric API",
+        content=b"jar-bytes",
+    )
+    with pytest.raises(PluginAlreadyExistsError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            filename="fabric-api.jar",
+            display_name="Fabric API v2",
+            content=b"other-jar-bytes",
+        )
+
+
+# -- Toggle collision (Bug 2) --
+
+
+async def test_enable_collision_raises_already_exists() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    # Plugin A occupies mods/foo.jar.
+    plugin_a = _plugin(server_id=server.id, enabled=True, rel_path="mods/foo.jar")
+    uow.plugins.seed(plugin_a)
+    fs.files["mods/foo.jar"] = b"jar-a"
+    # Plugin B is disabled at mods/foo.jar.disabled.
+    plugin_b = _plugin(
+        server_id=server.id, enabled=False, rel_path="mods/foo.jar.disabled"
+    )
+    uow.plugins.seed(plugin_b)
+    fs.files["mods/foo.jar.disabled"] = b"jar-b"
+    uc = TogglePlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    with pytest.raises(PluginAlreadyExistsError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=plugin_b.id,
+            enable=True,
+        )
+
+
+# -- Remove with missing file (Improvement 3) --
+
+
+async def test_remove_plugin_succeeds_when_jar_already_gone() -> None:
+    """Removing a plugin whose jar was already gone still cleans up the DB record."""
+
+    class _RaisingFileStore(FakeFileStore):
+        async def delete_file(
+            self, *, community_id: object, server_id: object, rel_path: str
+        ) -> None:
+            raise ServerFileNotFoundError(str(rel_path))
+
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    p = _plugin(server_id=server.id)
+    uow.plugins.seed(p)
+    uc = RemovePlugin(uow=uow, file_store=_RaisingFileStore())
+    await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
+    assert p.id not in uow.plugins.by_id
