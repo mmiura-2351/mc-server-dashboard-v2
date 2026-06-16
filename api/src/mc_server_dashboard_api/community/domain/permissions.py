@@ -121,14 +121,13 @@ def require_community_permission(permission: Permission) -> Permission:
 # The community-scoped permission families a grant on each ``resource_type`` may
 # carry. M1's only resource type is ``server`` (DATABASE.md Section 6); a server
 # grant is a per-server scope, so it may only carry the resource-scoped families —
-# server / file / backup operations — never community-wide codes (member, role,
+# server / file / backup / plugin operations — never community-wide codes (member, role,
 # grant, community). This keeps grants honest without enumerating every code.
 GRANT_PERMISSIONS_BY_RESOURCE_TYPE: dict[str, frozenset[Permission]] = {
     "server": frozenset(
         permission
         for permission in COMMUNITY_PERMISSIONS
-        if permission.value.split(":", 1)[0]
-        in ("server", "file", "backup", "plugin")
+        if permission.value.split(":", 1)[0] in ("server", "file", "backup", "plugin")
     ),
 }
 
