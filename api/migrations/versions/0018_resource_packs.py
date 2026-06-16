@@ -72,7 +72,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["resource_pack_id"],
             ["resource_packs.id"],
-            name="fk_server_resource_pack_assignments_resource_pack_id_resource_packs",
+            name="fk_srv_rp_assignments_resource_pack_id_resource_packs",
         ),
     )
 

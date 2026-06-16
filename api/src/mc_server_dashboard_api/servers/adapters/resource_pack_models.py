@@ -60,7 +60,10 @@ class ServerResourcePackAssignmentModel(Base):
     )
     resource_pack_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("resource_packs.id"),
+        ForeignKey(
+            "resource_packs.id",
+            name="fk_srv_rp_assignments_resource_pack_id_resource_packs",
+        ),
         nullable=False,
     )
     require_resource_pack: Mapped[bool] = mapped_column(
