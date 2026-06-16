@@ -438,3 +438,18 @@ class SlugExhaustedError(ServerError):
     This is a transient capacity condition (extremely unlikely in practice); the
     edge maps it to 503 so the caller can retry without a client-side code change.
     """
+
+
+class ResourcePackNotFoundError(ServerError):
+    """A resource pack operation targeted a pack that does not exist.
+
+    Raised by get/delete when the pack id is unknown. The edge maps this to 404.
+    """
+
+
+class ResourcePackInUseError(ServerError):
+    """A resource pack cannot be deleted because it is assigned to servers.
+
+    Raised by delete when one or more servers still reference the pack. The
+    caller must remove the assignments first. The edge maps this to 409.
+    """
