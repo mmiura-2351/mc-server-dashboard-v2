@@ -1,4 +1,4 @@
-"""Endpoint tests for the resource pack library (issue #1176).
+"""Endpoint tests for the resource pack library (issues #1176, #1177).
 
 The HTTP boundary is exercised in-process via FastAPI's TestClient with the use
 cases faked (NFR-TEST-1, no database). Verifies:
@@ -22,12 +22,15 @@ from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.dependencies import (
+    get_assign_resource_pack,
     get_audit_recorder,
     get_current_user,
     get_delete_resource_pack,
     get_download_resource_pack,
+    get_get_resource_pack_assignment,
     get_list_resource_packs,
     get_resource_pack_store,
+    get_unassign_resource_pack,
     get_upload_resource_pack,
     require_server_update_in_any_community,
 )
@@ -36,9 +39,13 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PermissionDeniedError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
+    ServerBusyError,
+    ServerFilesUnsettledError,
+    ServerNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
+    ResourcePackAssignment,
     ResourcePackId,
 )
 from tests.audit.fakes import RecordingAuditRecorder
@@ -322,4 +329,197 @@ class TestPublicDownloadEndpoint:
         app = _app(download=uc)
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(f"/api/public/resource-packs/{uuid.uuid4()}/any.zip")
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Assignment endpoint tests (issue #1177)
+# ---------------------------------------------------------------------------
+
+_COMMUNITY_ID = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+_SERVER_ID = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+_ASSIGN_PATH = f"/api/communities/{_COMMUNITY_ID}/servers/{_SERVER_ID}/resource-pack"
+
+
+def _assignment_result(
+    pack: ResourcePack | None = None,
+) -> tuple[ResourcePackAssignment, ResourcePack]:
+    p = pack or _pack()
+    a = ResourcePackAssignment(
+        server_id=__import__(
+            "mc_server_dashboard_api.servers.domain.value_objects",
+            fromlist=["ServerId"],
+        ).ServerId(_SERVER_ID),
+        resource_pack_id=p.id,
+        require_resource_pack=False,
+        resource_pack_prompt=None,
+        assigned_by=uuid.uuid4(),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    return a, p
+
+
+def _assignment_app(
+    *,
+    assign: _FakeUseCase | None = None,
+    unassign: _FakeUseCase | None = None,
+    get_assignment: _FakeUseCase | None = None,
+    recorder: RecordingAuditRecorder | None = None,
+) -> object:
+    from mc_server_dashboard_api.community.domain.permission_checker import (
+        MembershipVisibility,
+        PermissionChecker,
+    )
+    from mc_server_dashboard_api.dependencies import (
+        get_membership_visibility,
+        get_permission_checker,
+    )
+
+    app = create_app()
+    user = make_user()
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    if assign is not None:
+        app.dependency_overrides[get_assign_resource_pack] = lambda: assign
+    if unassign is not None:
+        app.dependency_overrides[get_unassign_resource_pack] = lambda: unassign
+    if get_assignment is not None:
+        app.dependency_overrides[get_get_resource_pack_assignment] = lambda: (
+            get_assignment
+        )
+    if recorder is not None:
+        app.dependency_overrides[get_audit_recorder] = lambda: recorder
+
+    # Bypass the two-layer permission check by overriding the visibility and
+    # checker ports with always-allow fakes.
+    class _AlwaysMember(MembershipVisibility):
+        async def is_member(self, *, user_id: object, community_id: object) -> bool:
+            return True
+
+    class _AlwaysAllow(PermissionChecker):
+        async def can(
+            self, *, user: object, operation: object, resource: object
+        ) -> bool:
+            return True
+
+    app.dependency_overrides[get_membership_visibility] = _AlwaysMember
+    app.dependency_overrides[get_permission_checker] = _AlwaysAllow
+
+    return app
+
+
+class TestAssignEndpoint:
+    def test_assign_200(self) -> None:
+        p = _pack()
+        result = _assignment_result(pack=p)
+        uc = _FakeUseCase(result=result)
+        recorder = RecordingAuditRecorder()
+        app = _assignment_app(assign=uc, recorder=recorder)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                _ASSIGN_PATH,
+                json={
+                    "resource_pack_id": str(p.id.value),
+                    "require_resource_pack": False,
+                },
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["resource_pack"]["id"] == str(p.id.value)
+        assert body["require_resource_pack"] is False
+        assert len(recorder.events) == 1
+        assert recorder.events[0].operation == ops.RESOURCE_PACK_ASSIGN
+
+    def test_assign_server_not_found_404(self) -> None:
+        uc = _FakeUseCase(error=ServerNotFoundError("nope"))
+        app = _assignment_app(assign=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                _ASSIGN_PATH,
+                json={"resource_pack_id": str(uuid.uuid4())},
+            )
+        assert resp.status_code == 404
+
+    def test_assign_pack_not_found_404(self) -> None:
+        uc = _FakeUseCase(error=ResourcePackNotFoundError("nope"))
+        app = _assignment_app(assign=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                _ASSIGN_PATH,
+                json={"resource_pack_id": str(uuid.uuid4())},
+            )
+        assert resp.status_code == 404
+
+    def test_assign_unsettled_409(self) -> None:
+        uc = _FakeUseCase(error=ServerFilesUnsettledError("nope"))
+        app = _assignment_app(assign=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                _ASSIGN_PATH,
+                json={"resource_pack_id": str(uuid.uuid4())},
+            )
+        assert resp.status_code == 409
+
+    def test_assign_busy_409(self) -> None:
+        uc = _FakeUseCase(error=ServerBusyError("nope"))
+        app = _assignment_app(assign=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                _ASSIGN_PATH,
+                json={"resource_pack_id": str(uuid.uuid4())},
+            )
+        assert resp.status_code == 409
+
+
+class TestUnassignEndpoint:
+    def test_unassign_204(self) -> None:
+        uc = _FakeUseCase()
+        recorder = RecordingAuditRecorder()
+        app = _assignment_app(unassign=uc, recorder=recorder)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.delete(_ASSIGN_PATH)
+        assert resp.status_code == 204
+        assert len(recorder.events) == 1
+        assert recorder.events[0].operation == ops.RESOURCE_PACK_UNASSIGN
+
+    def test_unassign_not_found_404(self) -> None:
+        uc = _FakeUseCase(error=ResourcePackNotFoundError("nope"))
+        app = _assignment_app(unassign=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.delete(_ASSIGN_PATH)
+        assert resp.status_code == 404
+
+    def test_unassign_unsettled_409(self) -> None:
+        uc = _FakeUseCase(error=ServerFilesUnsettledError("nope"))
+        app = _assignment_app(unassign=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.delete(_ASSIGN_PATH)
+        assert resp.status_code == 409
+
+
+class TestGetAssignmentEndpoint:
+    def test_get_200(self) -> None:
+        p = _pack()
+        result = _assignment_result(pack=p)
+        uc = _FakeUseCase(result=result)
+        app = _assignment_app(get_assignment=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_ASSIGN_PATH)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["resource_pack"]["id"] == str(p.id.value)
+
+    def test_get_not_found_404(self) -> None:
+        uc = _FakeUseCase(result=None)
+        app = _assignment_app(get_assignment=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_ASSIGN_PATH)
+        assert resp.status_code == 404
+
+    def test_get_server_not_found_404(self) -> None:
+        uc = _FakeUseCase(error=ServerNotFoundError("nope"))
+        app = _assignment_app(get_assignment=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_ASSIGN_PATH)
         assert resp.status_code == 404

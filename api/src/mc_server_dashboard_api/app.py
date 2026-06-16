@@ -932,6 +932,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(server_groups.router)
     api_router.include_router(server_resource_packs.router)
     api_router.include_router(server_resource_packs.public_router)
+    api_router.include_router(server_resource_packs.assignment_router)
     api_router.include_router(workers.router)
     api_router.include_router(server_events.router)
     api_router.include_router(transfers.router)

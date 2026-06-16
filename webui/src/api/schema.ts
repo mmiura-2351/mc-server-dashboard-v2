@@ -1048,6 +1048,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/resource-pack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Resource Pack Assignment
+         * @description Get the resource pack assignment for a server (server:read, issue #1177).
+         */
+        get: operations["get_resource_pack_assignment_api_communities__community_id__servers__server_id__resource_pack_get"];
+        put?: never;
+        /**
+         * Assign Resource Pack
+         * @description Assign a resource pack to a server (server:update, issue #1177).
+         */
+        post: operations["assign_resource_pack_api_communities__community_id__servers__server_id__resource_pack_post"];
+        /**
+         * Unassign Resource Pack
+         * @description Unassign the resource pack from a server (server:update, issue #1177).
+         */
+        delete: operations["unassign_resource_pack_api_communities__community_id__servers__server_id__resource_pack_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/restart": {
         parameters: {
             query?: never;
@@ -1765,6 +1793,21 @@ export interface components {
             /** Username */
             username: string;
         };
+        /** AssignResourcePackRequest */
+        AssignResourcePackRequest: {
+            /**
+             * Require Resource Pack
+             * @default false
+             */
+            require_resource_pack: boolean;
+            /**
+             * Resource Pack Id
+             * Format: uuid
+             */
+            resource_pack_id: string;
+            /** Resource Pack Prompt */
+            resource_pack_prompt?: string | null;
+        };
         /** AssignRoleRequest */
         AssignRoleRequest: {
             /** Role Id */
@@ -2273,6 +2316,24 @@ export interface components {
             from: string;
             /** To */
             to: string;
+        };
+        /** ResourcePackAssignmentResponse */
+        ResourcePackAssignmentResponse: {
+            /**
+             * Assigned At
+             * Format: date-time
+             */
+            assigned_at: string;
+            /**
+             * Assigned By
+             * Format: uuid
+             */
+            assigned_by: string;
+            /** Require Resource Pack */
+            require_resource_pack: boolean;
+            resource_pack: components["schemas"]["ResourcePackResponse"];
+            /** Resource Pack Prompt */
+            resource_pack_prompt: string | null;
         };
         /** ResourcePackListResponse */
         ResourcePackListResponse: {
@@ -4802,6 +4863,104 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GroupResponse"][];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_resource_pack_assignment_api_communities__community_id__servers__server_id__resource_pack_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResourcePackAssignmentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    assign_resource_pack_api_communities__community_id__servers__server_id__resource_pack_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssignResourcePackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResourcePackAssignmentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unassign_resource_pack_api_communities__community_id__servers__server_id__resource_pack_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

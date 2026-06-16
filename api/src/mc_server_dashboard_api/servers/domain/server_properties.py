@@ -20,6 +20,10 @@ _PORT_KEY = "server-port"
 _ENABLE_RCON_KEY = "enable-rcon"
 _RCON_PORT_KEY = "rcon.port"
 _RCON_PASSWORD_KEY = "rcon.password"
+_RESOURCE_PACK_KEY = "resource-pack"
+_RESOURCE_PACK_SHA1_KEY = "resource-pack-sha1"
+_REQUIRE_RESOURCE_PACK_KEY = "require-resource-pack"
+_RESOURCE_PACK_PROMPT_KEY = "resource-pack-prompt"
 
 # The in-container RCON port the worker connects to (issue #335). It is never
 # published to the host (the container driver drops the host RCON publication,
@@ -58,6 +62,12 @@ def _get_property(lines: list[str], key: str) -> str | None:
         if _is_key_line(line, key):
             return line.split("=", 1)[1]
     return None
+
+
+def _clear_property(lines: list[str], key: str) -> list[str]:
+    """Remove the first live ``key=...`` line entirely, if present."""
+
+    return [line for line in lines if not _is_key_line(line, key)]
 
 
 def _set_property(lines: list[str], key: str, value: str) -> list[str]:
@@ -119,4 +129,46 @@ def set_rcon_properties(content: bytes, *, password: str) -> bytes:
     existing = _get_property(lines, _RCON_PASSWORD_KEY)
     if not existing:
         lines = _set_property(lines, _RCON_PASSWORD_KEY, password)
+    return ("\n".join(lines) + "\n").encode()
+
+
+def set_resource_pack_properties(
+    content: bytes,
+    *,
+    url: str,
+    sha1: str,
+    require: bool = False,
+    prompt: str | None = None,
+) -> bytes:
+    """Return ``content`` with the resource pack keys set (issue #1177).
+
+    ``resource-pack``, ``resource-pack-sha1``, and ``require-resource-pack`` are
+    always set. ``resource-pack-prompt`` is set only when ``prompt`` is not None;
+    otherwise the existing value (if any) is left untouched.
+    """
+
+    lines = _split_content_lines(content)
+    lines = _set_property(lines, _RESOURCE_PACK_KEY, url)
+    lines = _set_property(lines, _RESOURCE_PACK_SHA1_KEY, sha1)
+    lines = _set_property(
+        lines, _REQUIRE_RESOURCE_PACK_KEY, "true" if require else "false"
+    )
+    if prompt is not None:
+        lines = _set_property(lines, _RESOURCE_PACK_PROMPT_KEY, prompt)
+    return ("\n".join(lines) + "\n").encode()
+
+
+def clear_resource_pack_properties(content: bytes) -> bytes:
+    """Return ``content`` with the 4 resource pack keys removed (issue #1177).
+
+    Removes ``resource-pack``, ``resource-pack-sha1``, ``require-resource-pack``,
+    and ``resource-pack-prompt`` entirely. Other lines and their order are
+    preserved; the result ends with a single trailing newline.
+    """
+
+    lines = _split_content_lines(content)
+    lines = _clear_property(lines, _RESOURCE_PACK_KEY)
+    lines = _clear_property(lines, _RESOURCE_PACK_SHA1_KEY)
+    lines = _clear_property(lines, _REQUIRE_RESOURCE_PACK_KEY)
+    lines = _clear_property(lines, _RESOURCE_PACK_PROMPT_KEY)
     return ("\n".join(lines) + "\n").encode()

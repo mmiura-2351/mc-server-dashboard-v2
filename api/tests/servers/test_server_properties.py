@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from mc_server_dashboard_api.servers.domain.server_properties import (
     RCON_PORT,
+    clear_resource_pack_properties,
     set_rcon_properties,
+    set_resource_pack_properties,
     set_server_port,
 )
 
@@ -96,3 +98,97 @@ def test_set_rcon_preserves_other_lines_and_order() -> None:
         b"#comment\nlevel-name=world\nserver-port=25565\n"
         + f"enable-rcon=true\nrcon.port={RCON_PORT}\nrcon.password=s3cret\n".encode()
     )
+
+
+# --- resource pack properties (issue #1177) ----------------------------------
+
+_RP_URL = "https://example.com/api/public/resource-packs/abc/pack.zip"
+_RP_SHA1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+
+
+def test_set_resource_pack_appends_all_keys_to_empty_content() -> None:
+    out = set_resource_pack_properties(b"", url=_RP_URL, sha1=_RP_SHA1)
+    assert (
+        out
+        == (
+            f"resource-pack={_RP_URL}\n"
+            f"resource-pack-sha1={_RP_SHA1}\n"
+            f"require-resource-pack=false\n"
+        ).encode()
+    )
+
+
+def test_set_resource_pack_with_require_true() -> None:
+    out = set_resource_pack_properties(b"", url=_RP_URL, sha1=_RP_SHA1, require=True)
+    assert b"require-resource-pack=true\n" in out
+
+
+def test_set_resource_pack_with_prompt() -> None:
+    out = set_resource_pack_properties(
+        b"", url=_RP_URL, sha1=_RP_SHA1, prompt="Install this pack"
+    )
+    assert b"resource-pack-prompt=Install this pack\n" in out
+
+
+def test_set_resource_pack_without_prompt_preserves_existing() -> None:
+    content = b"resource-pack-prompt=Old prompt\nmotd=hi\n"
+    out = set_resource_pack_properties(content, url=_RP_URL, sha1=_RP_SHA1)
+    # prompt=None leaves the existing prompt line untouched
+    assert b"resource-pack-prompt=Old prompt\n" in out
+
+
+def test_set_resource_pack_replaces_existing_keys() -> None:
+    content = (
+        b"resource-pack=old-url\n"
+        b"resource-pack-sha1=old-sha\n"
+        b"require-resource-pack=true\n"
+        b"motd=hi\n"
+    )
+    out = set_resource_pack_properties(
+        content, url=_RP_URL, sha1=_RP_SHA1, require=False
+    )
+    assert (
+        out
+        == (
+            f"resource-pack={_RP_URL}\n"
+            f"resource-pack-sha1={_RP_SHA1}\n"
+            f"require-resource-pack=false\n"
+            f"motd=hi\n"
+        ).encode()
+    )
+
+
+def test_set_resource_pack_preserves_other_lines() -> None:
+    content = b"#comment\nserver-port=25565\nlevel-name=world\n"
+    out = set_resource_pack_properties(content, url=_RP_URL, sha1=_RP_SHA1)
+    assert out.startswith(b"#comment\nserver-port=25565\nlevel-name=world\n")
+
+
+def test_clear_resource_pack_removes_all_four_keys() -> None:
+    content = (
+        b"motd=hi\n"
+        b"resource-pack=some-url\n"
+        b"resource-pack-sha1=some-sha\n"
+        b"require-resource-pack=true\n"
+        b"resource-pack-prompt=Hi there\n"
+        b"max-players=20\n"
+    )
+    out = clear_resource_pack_properties(content)
+    assert out == b"motd=hi\nmax-players=20\n"
+
+
+def test_clear_resource_pack_on_empty_content() -> None:
+    out = clear_resource_pack_properties(b"")
+    assert out == b"\n"
+
+
+def test_clear_resource_pack_preserves_other_lines() -> None:
+    content = b"motd=hi\nserver-port=25565\n"
+    out = clear_resource_pack_properties(content)
+    assert out == b"motd=hi\nserver-port=25565\n"
+
+
+def test_clear_resource_pack_ignores_commented_keys() -> None:
+    content = b"#resource-pack=url\nresource-pack=real-url\nmotd=hi\n"
+    out = clear_resource_pack_properties(content)
+    assert out == b"#resource-pack=url\nmotd=hi\n"
