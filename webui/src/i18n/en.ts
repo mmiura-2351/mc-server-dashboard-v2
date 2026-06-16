@@ -1277,6 +1277,7 @@ export const en = {
   "plugins.col.source": "Source",
   "plugins.col.status": "Status",
   "plugins.col.size": "Size",
+  "plugins.col.actions": "Actions",
   // Status / source labels.
   "plugins.status.enabled": "Enabled",
   "plugins.status.disabled": "Disabled",
@@ -1291,7 +1292,6 @@ export const en = {
   "plugins.browse": "Browse Modrinth",
   // Update indicators.
   "plugins.updateAvailable": "Update available: ",
-  "plugins.upToDate": "Up to date",
   // Remove dialog.
   "plugins.removeDialog.title": "Remove plugin",
   "plugins.removeDialog.body":
@@ -1299,11 +1299,6 @@ export const en = {
   "plugins.removeDialog.confirm": "Remove plugin",
   "plugins.removeDialog.prompt": "Type REMOVE to confirm",
   "plugins.removeDialog.phrase": "REMOVE",
-  // Update dialog.
-  "plugins.updateDialog.title": "Update plugin",
-  "plugins.updateDialog.body":
-    "This replaces the current plugin file with the selected version. The server must be stopped.",
-  "plugins.updateDialog.confirm": "Update",
   // Dependencies.
   "plugins.dependencies": "Dependencies",
   "plugins.dependencies.loading": "Loading dependencies…",

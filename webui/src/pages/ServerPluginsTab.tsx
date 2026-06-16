@@ -36,9 +36,9 @@ type CatalogSearchResultResponse =
   components["schemas"]["CatalogSearchResultResponse"];
 type CatalogVersionResponse = components["schemas"]["CatalogVersionResponse"];
 
-/** Server types that support plugins/mods. Vanilla does not. */
+/** Server types that support plugins/mods. Vanilla and Spigot do not. */
 function supportsPlugins(serverType: string): boolean {
-  return serverType !== "vanilla";
+  return !["vanilla", "spigot"].includes(serverType);
 }
 
 function pluginErrorMessage(error: unknown): string {
@@ -296,7 +296,7 @@ export function ServerPluginsTab({
               <th>{t("plugins.col.source")}</th>
               <th>{t("plugins.col.status")}</th>
               <th>{t("plugins.col.size")}</th>
-              {canManage && <th />}
+              {canManage && <th aria-label={t("plugins.col.actions")} />}
             </tr>
           </thead>
           <tbody>
@@ -600,6 +600,7 @@ function ModrinthBrowser({
         type="text"
         className="plugins-search-input"
         placeholder={t("plugins.search.placeholder")}
+        aria-label={t("plugins.search.placeholder")}
         value={searchInput}
         onChange={(e) => handleSearchChange(e.target.value)}
       />
