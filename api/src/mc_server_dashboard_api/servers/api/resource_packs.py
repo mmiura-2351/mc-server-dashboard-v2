@@ -1,4 +1,4 @@
-"""HTTP edge for the resource pack library (issue #1176).
+"""HTTP edge for the resource pack library (issues #1176, #1177).
 
 Resource packs are global (not community-scoped). The authenticated routes live
 under ``/resource-packs``; the unauthenticated public download endpoint lives
@@ -8,6 +8,11 @@ router so the auth middleware does not apply.
 Upload requires ``server:update`` in at least one community. Delete requires
 the caller to be the uploader or a platform admin. List and download require
 only authentication. The public endpoint requires no authentication.
+
+Assignment routes (issue #1177) live under
+``/communities/{community_id}/servers/{server_id}/resource-pack`` and are
+permission-gated per server (``server:update`` for assign/unassign,
+``server:read`` for get).
 """
 
 from __future__ import annotations
@@ -23,14 +28,22 @@ from pydantic import BaseModel
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
+from mc_server_dashboard_api.community.domain.value_objects import (
+    AuthUser,
+    Permission,
+)
 from mc_server_dashboard_api.dependencies import (
+    get_assign_resource_pack,
     get_audit_recorder,
     get_current_user,
     get_delete_resource_pack,
     get_download_resource_pack,
+    get_get_resource_pack_assignment,
     get_list_resource_packs,
     get_settings,
+    get_unassign_resource_pack,
     get_upload_resource_pack,
+    require_permission,
     require_server_update_in_any_community,
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
@@ -38,9 +51,12 @@ from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.resource_packs import (
     MAX_RESOURCE_PACK_BYTES,
+    AssignResourcePack,
     DeleteResourcePack,
     DownloadResourcePack,
+    GetResourcePackAssignment,
     ListResourcePacks,
+    UnassignResourcePack,
     UploadResourcePack,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -48,6 +64,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PermissionDeniedError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
+    ServerBusyError,
+    ServerFilesUnsettledError,
+    ServerNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
@@ -56,6 +75,7 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
 
 router = APIRouter()
 public_router = APIRouter()
+assignment_router = APIRouter()
 
 # Chunked read buffer for the upload body (same pattern as backups.py).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
@@ -311,3 +331,189 @@ def _unprocessable(reason: str) -> ProblemException:
 
 def _conflict(reason: str) -> ProblemException:
     return problem(status.HTTP_409_CONFLICT, reason)
+
+
+# ---------------------------------------------------------------------------
+# Assignment routes (issue #1177)
+# ---------------------------------------------------------------------------
+
+_ASSIGNMENT_PATH = "/communities/{community_id}/servers/{server_id}/resource-pack"
+_SERVER_RESOURCE_TYPE = "server"
+
+
+class AssignResourcePackRequest(BaseModel):
+    resource_pack_id: uuid.UUID
+    require_resource_pack: bool = False
+    resource_pack_prompt: str | None = None
+
+
+class ResourcePackAssignmentResponse(BaseModel):
+    resource_pack: ResourcePackResponse
+    require_resource_pack: bool
+    resource_pack_prompt: str | None
+    assigned_by: uuid.UUID
+    assigned_at: UtcDatetime
+
+
+@assignment_router.post(_ASSIGNMENT_PATH)
+async def assign_resource_pack(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    body: AssignResourcePackRequest,
+    auth_user: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("server:update"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[AssignResourcePack, Depends(get_assign_resource_pack)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    base_url: Annotated[str, Depends(_public_base_url)],
+) -> ResourcePackAssignmentResponse:
+    """Assign a resource pack to a server (server:update, issue #1177)."""
+
+    from mc_server_dashboard_api.servers.domain.value_objects import (
+        CommunityId,
+        ServerId,
+    )
+
+    try:
+        assignment, pack = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            resource_pack_id=ResourcePackId(body.resource_pack_id),
+            require_resource_pack=body.require_resource_pack,
+            resource_pack_prompt=body.resource_pack_prompt,
+            assigned_by=auth_user.user_id.value,
+            public_base_url=base_url,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ResourcePackNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFilesUnsettledError as exc:
+        raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        raise _conflict("server_busy") from exc
+
+    await recorder.record(
+        AuditEvent(
+            operation=ops.RESOURCE_PACK_ASSIGN,
+            outcome=Outcome.SUCCESS,
+            actor_id=auth_user.user_id.value,
+            target_type=ops.TARGET_SERVER,
+            target_id=server_id,
+        )
+    )
+
+    return ResourcePackAssignmentResponse(
+        resource_pack=ResourcePackResponse.from_pack(pack, base_url=base_url),
+        require_resource_pack=assignment.require_resource_pack,
+        resource_pack_prompt=assignment.resource_pack_prompt,
+        assigned_by=assignment.assigned_by,
+        assigned_at=assignment.created_at,
+    )
+
+
+@assignment_router.delete(
+    _ASSIGNMENT_PATH,
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def unassign_resource_pack(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    auth_user: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("server:update"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[UnassignResourcePack, Depends(get_unassign_resource_pack)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> None:
+    """Unassign the resource pack from a server (server:update, issue #1177)."""
+
+    from mc_server_dashboard_api.servers.domain.value_objects import (
+        CommunityId,
+        ServerId,
+    )
+
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ResourcePackNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFilesUnsettledError as exc:
+        raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        raise _conflict("server_busy") from exc
+
+    await recorder.record(
+        AuditEvent(
+            operation=ops.RESOURCE_PACK_UNASSIGN,
+            outcome=Outcome.SUCCESS,
+            actor_id=auth_user.user_id.value,
+            target_type=ops.TARGET_SERVER,
+            target_id=server_id,
+        )
+    )
+
+
+@assignment_router.get(_ASSIGNMENT_PATH)
+async def get_resource_pack_assignment(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _auth_user: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("server:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[
+        GetResourcePackAssignment, Depends(get_get_resource_pack_assignment)
+    ],
+    base_url: Annotated[str, Depends(_public_base_url)],
+) -> ResourcePackAssignmentResponse:
+    """Get the resource pack assignment for a server (server:read, issue #1177)."""
+
+    from mc_server_dashboard_api.servers.domain.value_objects import (
+        CommunityId,
+        ServerId,
+    )
+
+    try:
+        result = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+
+    if result is None:
+        raise _not_found()
+
+    assignment, pack = result
+
+    return ResourcePackAssignmentResponse(
+        resource_pack=ResourcePackResponse.from_pack(pack, base_url=base_url),
+        require_resource_pack=assignment.require_resource_pack,
+        resource_pack_prompt=assignment.resource_pack_prompt,
+        assigned_by=assignment.assigned_by,
+        assigned_at=assignment.created_at,
+    )

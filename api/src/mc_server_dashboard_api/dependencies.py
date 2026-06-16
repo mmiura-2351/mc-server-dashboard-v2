@@ -264,9 +264,12 @@ from mc_server_dashboard_api.servers.application.port_availability import (
     ListAvailablePorts,
 )
 from mc_server_dashboard_api.servers.application.resource_packs import (
+    AssignResourcePack,
     DeleteResourcePack,
     DownloadResourcePack,
+    GetResourcePackAssignment,
     ListResourcePacks,
+    UnassignResourcePack,
     UploadResourcePack,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
@@ -1898,6 +1901,42 @@ def get_download_resource_pack(
         uow=ServersUnitOfWork(session_factory),
         store=store,
     )
+
+
+def get_assign_resource_pack(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> AssignResourcePack:
+    """Assemble the :class:`AssignResourcePack` use case (issue #1177)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return AssignResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_unassign_resource_pack(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> UnassignResourcePack:
+    """Assemble the :class:`UnassignResourcePack` use case (issue #1177)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UnassignResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_get_resource_pack_assignment(request: Request) -> GetResourcePackAssignment:
+    """Assemble the :class:`GetResourcePackAssignment` use case (issue #1177)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return GetResourcePackAssignment(uow=ServersUnitOfWork(session_factory))
 
 
 async def require_server_update_in_any_community(

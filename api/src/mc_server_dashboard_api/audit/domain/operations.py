@@ -162,6 +162,10 @@ GROUP_DETACH: Final = "group:detach"
 RESOURCE_PACK_UPLOAD: Final = "resource_pack:upload"
 RESOURCE_PACK_DELETE: Final = "resource_pack:delete"
 RESOURCE_PACK_DOWNLOAD: Final = "resource_pack:download"
+# Resource pack assignment / unassignment (issue #1177). Gated by server:update
+# on the target server; names the operation, not a permission code.
+RESOURCE_PACK_ASSIGN: Final = "resource_pack:assign"
+RESOURCE_PACK_UNASSIGN: Final = "resource_pack:unassign"
 
 # Target-type names (the ``target_type`` column).
 TARGET_COMMUNITY: Final = "community"
