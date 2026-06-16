@@ -155,6 +155,14 @@ GROUP_PLAYER_REMOVE: Final = "group:player_remove"
 GROUP_ATTACH: Final = "group:attach"
 GROUP_DETACH: Final = "group:detach"
 
+# Resource pack upload / delete / download (issue #1176). Names the operation,
+# not a permission code — upload is gated by server:update in any community,
+# delete by uploader-or-admin, download by authenticated. The ``operation``
+# column is free text (see module docstring).
+RESOURCE_PACK_UPLOAD: Final = "resource_pack:upload"
+RESOURCE_PACK_DELETE: Final = "resource_pack:delete"
+RESOURCE_PACK_DOWNLOAD: Final = "resource_pack:download"
+
 # Target-type names (the ``target_type`` column).
 TARGET_COMMUNITY: Final = "community"
 TARGET_USER: Final = "user"
@@ -165,3 +173,4 @@ TARGET_BACKUP: Final = "backup"
 TARGET_WORKER: Final = "worker"
 TARGET_FILE: Final = "file"
 TARGET_GROUP: Final = "group"
+TARGET_RESOURCE_PACK: Final = "resource_pack"

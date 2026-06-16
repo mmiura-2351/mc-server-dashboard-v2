@@ -263,6 +263,12 @@ from mc_server_dashboard_api.servers.application.port_availability import (
     CheckPort,
     ListAvailablePorts,
 )
+from mc_server_dashboard_api.servers.application.resource_packs import (
+    DeleteResourcePack,
+    DownloadResourcePack,
+    ListResourcePacks,
+    UploadResourcePack,
+)
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
 )
@@ -276,6 +282,9 @@ from mc_server_dashboard_api.servers.domain.file_store import (
     FileStore as ServersFileStore,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
+from mc_server_dashboard_api.servers.domain.resource_pack_store import (
+    ResourcePackStore,
+)
 from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.versions.adapters.clock import (
     SystemClock as VersionsSystemClock,
@@ -1824,6 +1833,103 @@ def get_global_backup_statistics(request: Request) -> GlobalBackupStatistics:
 
     session_factory = create_session_factory(get_engine(request))
     return GlobalBackupStatistics(uow=ServersUnitOfWork(session_factory))
+
+
+def get_resource_pack_store(request: Request) -> ResourcePackStore:
+    """Return the :class:`ResourcePackStore` adapter from app state (issue #1176).
+
+    Built by the app factory from the storage config; ``None`` when the storage
+    backend is ``fs`` (no fs adapter exists yet). A missing store is a 503.
+    """
+
+    store: ResourcePackStore | None = getattr(
+        request.app.state, "resource_pack_store", None
+    )
+    if store is None:
+        raise problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "resource_pack_store_unavailable",
+        )
+    return store
+
+
+def get_upload_resource_pack(
+    request: Request,
+    store: Annotated[ResourcePackStore, Depends(get_resource_pack_store)],
+) -> UploadResourcePack:
+    """Assemble the :class:`UploadResourcePack` use case (issue #1176)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UploadResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+        clock=ServersSystemClock(),
+    )
+
+
+def get_list_resource_packs(request: Request) -> ListResourcePacks:
+    """Assemble the :class:`ListResourcePacks` use case (issue #1176)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListResourcePacks(uow=ServersUnitOfWork(session_factory))
+
+
+def get_delete_resource_pack(
+    request: Request,
+    store: Annotated[ResourcePackStore, Depends(get_resource_pack_store)],
+) -> DeleteResourcePack:
+    """Assemble the :class:`DeleteResourcePack` use case (issue #1176)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+    )
+
+
+def get_download_resource_pack(
+    request: Request,
+    store: Annotated[ResourcePackStore, Depends(get_resource_pack_store)],
+) -> DownloadResourcePack:
+    """Assemble the :class:`DownloadResourcePack` use case (issue #1176)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DownloadResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+    )
+
+
+async def require_server_update_in_any_community(
+    user: Annotated[User, Depends(get_current_user)],
+    request: Request,
+) -> User:
+    """Dependency: the caller must hold ``server:update`` in at least one community.
+
+    This is the non-standard upload gate for resource packs (issue #1176): not
+    community-scoped (resource packs are global) and not per-resource, but
+    "exists any community where user has server:update". Platform admins pass
+    unconditionally.
+    """
+
+    if user.is_platform_admin:
+        return user
+
+    session_factory = create_session_factory(get_engine(request))
+    community_uow = CommunityUnitOfWork(session_factory)
+
+    auth_user = _to_auth_user(user)
+    target_permission = Permission("server:update")
+
+    async with community_uow as uow:
+        memberships = await uow.memberships.list_for_user(auth_user.user_id)
+        for membership in memberships:
+            role_ids = await uow.memberships.list_role_ids(membership.id)
+            for role in await uow.roles.get_by_ids(role_ids):
+                if target_permission in role.permissions:
+                    return user
+
+    raise _forbidden(target_permission)
 
 
 def _to_auth_user(user: User) -> AuthUser:

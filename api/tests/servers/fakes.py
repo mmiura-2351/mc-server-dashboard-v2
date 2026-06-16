@@ -71,6 +71,9 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
 from mc_server_dashboard_api.servers.domain.resource_pack_repository import (
     ResourcePackRepository,
 )
+from mc_server_dashboard_api.servers.domain.resource_pack_store import (
+    ResourcePackStore,
+)
 from mc_server_dashboard_api.servers.domain.store_generation import (
     StoreGenerationReader,
 )
@@ -1054,3 +1057,33 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         return len(self.bytes_by_ref[storage_ref])
+
+
+class FakeResourcePackStore(ResourcePackStore):
+    """In-memory resource pack blob store for use-case tests (issue #1176)."""
+
+    def __init__(self) -> None:
+        self.blobs: dict[ResourcePackId, bytes] = {}
+
+    async def put(
+        self,
+        pack_id: ResourcePackId,
+        filename: str,
+        stream: AsyncIterator[bytes],
+    ) -> None:
+        data = b"".join([chunk async for chunk in stream])
+        self.blobs[pack_id] = data
+
+    def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:
+        data = self.blobs[pack_id]
+
+        async def _gen() -> AsyncIterator[bytes]:
+            yield data
+
+        return _gen()
+
+    async def delete(self, pack_id: ResourcePackId) -> None:
+        self.blobs.pop(pack_id, None)
+
+    async def size(self, pack_id: ResourcePackId, filename: str) -> int:
+        return len(self.blobs[pack_id])

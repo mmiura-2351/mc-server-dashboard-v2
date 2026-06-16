@@ -1322,6 +1322,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/public/resource-packs/{resource_pack_id}/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Public Download Resource Pack
+         * @description Public download endpoint for Minecraft clients (no auth, issue #1176).
+         *
+         *     Validates that ``filename`` matches the stored filename (404 otherwise).
+         */
+        get: operations["public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/readyz": {
         parameters: {
             query?: never;
@@ -1331,6 +1353,70 @@ export interface paths {
         };
         /** Readyz */
         get: operations["readyz_api_readyz_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/resource-packs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Resource Packs
+         * @description List all resource packs (authenticated, issue #1176).
+         */
+        get: operations["list_resource_packs_api_resource_packs_get"];
+        put?: never;
+        /**
+         * Upload Resource Pack
+         * @description Upload a resource pack (server:update in any community, issue #1176).
+         */
+        post: operations["upload_resource_pack_api_resource_packs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/resource-packs/{resource_pack_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Resource Pack
+         * @description Delete a resource pack (uploader or platform admin, issue #1176).
+         */
+        delete: operations["delete_resource_pack_api_resource_packs__resource_pack_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/resource-packs/{resource_pack_id}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Resource Pack
+         * @description Download a resource pack (authenticated, issue #1176).
+         */
+        get: operations["download_resource_pack_api_resource_packs__resource_pack_id__download_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1794,6 +1880,13 @@ export interface components {
             /** File */
             file: string;
         };
+        /** Body_upload_resource_pack_api_resource_packs_post */
+        Body_upload_resource_pack_api_resource_packs_post: {
+            /** Display Name */
+            display_name: string;
+            /** File */
+            file: string;
+        };
         /** CapabilitiesResponse */
         CapabilitiesResponse: {
             /** Drivers */
@@ -2180,6 +2273,51 @@ export interface components {
             from: string;
             /** To */
             to: string;
+        };
+        /** ResourcePackListResponse */
+        ResourcePackListResponse: {
+            /** Resource Packs */
+            resource_packs: components["schemas"]["ResourcePackResponse"][];
+        };
+        /**
+         * ResourcePackResponse
+         * @description One resource pack's metadata.
+         */
+        ResourcePackResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Description */
+            description: string | null;
+            /** Display Name */
+            display_name: string;
+            /** Download Url */
+            download_url: string;
+            /** Filename */
+            filename: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Sha1 Hash */
+            sha1_hash: string;
+            /** Sha256 Hash */
+            sha256_hash: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Uploaded By
+             * Format: uuid
+             */
+            uploaded_by: string;
         };
         /** RevokeOtherSessionsRequest */
         RevokeOtherSessionsRequest: {
@@ -5002,6 +5140,38 @@ export interface operations {
             };
         };
     };
+    public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                resource_pack_id: string;
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     readyz_api_readyz_get: {
         parameters: {
             query?: never;
@@ -5018,6 +5188,119 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReadinessResponse"];
+                };
+            };
+        };
+    };
+    list_resource_packs_api_resource_packs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResourcePackListResponse"];
+                };
+            };
+        };
+    };
+    upload_resource_pack_api_resource_packs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_resource_pack_api_resource_packs_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResourcePackResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_resource_pack_api_resource_packs__resource_pack_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                resource_pack_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_resource_pack_api_resource_packs__resource_pack_id__download_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                resource_pack_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
