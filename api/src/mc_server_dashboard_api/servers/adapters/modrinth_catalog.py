@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -33,6 +33,8 @@ _USER_AGENT = "mc-server-dashboard/2.0 (mmiura2351@gmail.com)"
 _METADATA_TIMEOUT = httpx.Timeout(15.0)
 _DOWNLOAD_TIMEOUT = httpx.Timeout(120.0)
 _MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB
+_MAX_JSON_BYTES = 10 * 1024 * 1024  # 10 MiB
+_MAX_REDIRECTS = 5
 
 _ALLOWED_DOWNLOAD_HOSTS = frozenset(
     {
@@ -138,21 +140,42 @@ class ModrinthCatalog(CatalogProvider):
             async with httpx.AsyncClient(
                 timeout=_DOWNLOAD_TIMEOUT,
                 headers=self._headers(),
-                follow_redirects=True,
             ) as client:
-                async with client.stream("GET", url) as response:
-                    response.raise_for_status()
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in response.aiter_bytes():
-                        total += len(chunk)
-                        if total > _MAX_DOWNLOAD_BYTES:
-                            raise FileTooLargeError(
-                                f"download exceeds {_MAX_DOWNLOAD_BYTES} bytes"
-                            )
-                        chunks.append(chunk)
-                    return b"".join(chunks)
-        except FileTooLargeError:
+                current_url = url
+                for _ in range(_MAX_REDIRECTS):
+                    async with client.stream(
+                        "GET", current_url, follow_redirects=False
+                    ) as response:
+                        if response.is_redirect:
+                            location = response.headers.get("location", "")
+                            redirect_parsed = urlparse(location)
+                            if not redirect_parsed.scheme:
+                                location = urljoin(current_url, location)
+                                redirect_parsed = urlparse(location)
+                            if redirect_parsed.scheme != "https":
+                                raise CatalogUnavailableError(
+                                    f"redirect to non-HTTPS: {location}"
+                                )
+                            if redirect_parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
+                                raise CatalogUnavailableError(
+                                    f"redirect to disallowed host: "
+                                    f"{redirect_parsed.hostname}"
+                                )
+                            current_url = location
+                            continue
+                        response.raise_for_status()
+                        chunks: list[bytes] = []
+                        total = 0
+                        async for chunk in response.aiter_bytes():
+                            total += len(chunk)
+                            if total > _MAX_DOWNLOAD_BYTES:
+                                raise FileTooLargeError(
+                                    f"download exceeds {_MAX_DOWNLOAD_BYTES} bytes"
+                                )
+                            chunks.append(chunk)
+                        return b"".join(chunks)
+                raise CatalogUnavailableError("too many redirects")
+        except (FileTooLargeError, CatalogUnavailableError):
             raise
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
@@ -176,6 +199,10 @@ class ModrinthCatalog(CatalogProvider):
                 if response.status_code == 404:
                     raise CatalogProjectNotFoundError(path)
                 response.raise_for_status()
+                if len(response.content) > _MAX_JSON_BYTES:
+                    raise CatalogUnavailableError(
+                        f"response too large: {len(response.content)} bytes"
+                    )
                 return response.json()
         except CatalogProjectNotFoundError:
             raise
