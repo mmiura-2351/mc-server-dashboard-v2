@@ -376,7 +376,7 @@ async def _record_failure(
             outcome=Outcome.DENIED,
             actor_id=authorized.user_id.value,
             community_id=community_id,
-            target_type=ops.TARGET_PLUGIN,
+            target_type=ops.TARGET_SERVER,
             target_id=server_id,
         )
     )

@@ -1159,7 +1159,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Get Plugin
+         * @description Get a single installed plugin by id (plugin:read).
+         */
+        get: operations["get_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__get"];
         put?: never;
         post?: never;
         /**
@@ -5346,6 +5350,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PluginUpdatesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
                 };
             };
             /** @description Validation Error */

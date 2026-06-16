@@ -66,6 +66,23 @@ class ListPlugins:
 
 
 @dataclass(frozen=True)
+class GetPlugin:
+    """Fetch a single installed plugin by id (plugin:read)."""
+
+    uow: UnitOfWork
+
+    async def __call__(
+        self, *, community_id: CommunityId, server_id: ServerId, plugin_id: PluginId
+    ) -> ServerPlugin:
+        async with self.uow:
+            await _load(self.uow, community_id, server_id)
+            plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
+        if plugin is None:
+            raise PluginNotFoundError(str(plugin_id.value))
+        return plugin
+
+
+@dataclass(frozen=True)
 class InstallPlugin:
     """Install a local plugin jar into the server's content directory."""
 

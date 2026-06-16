@@ -269,6 +269,7 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     UpdateServer,
 )
 from mc_server_dashboard_api.servers.application.plugins import (
+    GetPlugin,
     InstallPlugin,
     ListPlugins,
     RemovePlugin,
@@ -1849,6 +1850,13 @@ def get_list_plugins(request: Request) -> ListPlugins:
 
     session_factory = create_session_factory(get_engine(request))
     return ListPlugins(uow=ServersUnitOfWork(session_factory))
+
+
+def get_get_plugin(request: Request) -> GetPlugin:
+    """Assemble the :class:`GetPlugin` use case (plugin:read, issue #1161)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return GetPlugin(uow=ServersUnitOfWork(session_factory))
 
 
 def get_install_plugin(

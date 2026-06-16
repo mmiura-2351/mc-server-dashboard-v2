@@ -8,6 +8,7 @@ import uuid
 import pytest
 
 from mc_server_dashboard_api.servers.application.plugins import (
+    GetPlugin,
     InstallPlugin,
     ListPlugins,
     RemovePlugin,
@@ -140,6 +141,46 @@ async def test_list_plugins_unsupported_server_type() -> None:
     uc = ListPlugins(uow=uow)
     with pytest.raises(UnsupportedPluginServerTypeError):
         await uc(community_id=_COMMUNITY, server_id=server.id)
+
+
+# -- GetPlugin --
+
+
+async def test_get_plugin_happy_path() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    p = _plugin(server_id=server.id)
+    uow.plugins.seed(p)
+    uc = GetPlugin(uow=uow)
+    result = await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
+    assert result.id == p.id
+
+
+async def test_get_plugin_not_found() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    uc = GetPlugin(uow=uow)
+    with pytest.raises(PluginNotFoundError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=PluginId.new(),
+        )
+
+
+async def test_get_plugin_server_not_found() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    uc = GetPlugin(uow=uow)
+    with pytest.raises(ServerNotFoundError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=ServerId.new(),
+            plugin_id=PluginId.new(),
+        )
 
 
 # -- InstallPlugin --
