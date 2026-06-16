@@ -438,3 +438,27 @@ class SlugExhaustedError(ServerError):
     This is a transient capacity condition (extremely unlikely in practice); the
     edge maps it to 503 so the caller can retry without a client-side code change.
     """
+
+
+class PluginNotFoundError(ServerError):
+    """A plugin operation targeted a plugin that does not exist for the server.
+
+    Raised when the plugin id is unknown or belongs to a different server;
+    reported as not-found so no cross-server existence signal leaks. The edge
+    maps this to 404.
+    """
+
+
+class UnsupportedPluginServerTypeError(ServerError):
+    """The server type does not support plugin/mod content management.
+
+    Vanilla and Spigot have no managed content directory; the edge maps this
+    to 422 ``unsupported_server_type``.
+    """
+
+
+class PluginAlreadyExistsError(ServerError):
+    """A plugin install hit the per-server rel_path uniqueness constraint.
+
+    The edge maps this to 409 ``plugin_already_exists``.
+    """

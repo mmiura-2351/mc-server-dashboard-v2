@@ -259,6 +259,12 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.application.plugins import (
+    InstallPlugin,
+    ListPlugins,
+    RemovePlugin,
+    TogglePlugin,
+)
 from mc_server_dashboard_api.servers.application.port_availability import (
     CheckPort,
     ListAvailablePorts,
@@ -1824,6 +1830,57 @@ def get_global_backup_statistics(request: Request) -> GlobalBackupStatistics:
 
     session_factory = create_session_factory(get_engine(request))
     return GlobalBackupStatistics(uow=ServersUnitOfWork(session_factory))
+
+
+def get_list_plugins(request: Request) -> ListPlugins:
+    """Assemble the :class:`ListPlugins` use case (plugin:read, issue #1150)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListPlugins(uow=ServersUnitOfWork(session_factory))
+
+
+def get_install_plugin(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> InstallPlugin:
+    """Assemble the :class:`InstallPlugin` use case (plugin:manage, issue #1150)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return InstallPlugin(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_remove_plugin(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> RemovePlugin:
+    """Assemble the :class:`RemovePlugin` use case (plugin:manage, issue #1150)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RemovePlugin(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_toggle_plugin(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> TogglePlugin:
+    """Assemble the :class:`TogglePlugin` use case (plugin:manage, issue #1150)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return TogglePlugin(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def _to_auth_user(user: User) -> AuthUser:

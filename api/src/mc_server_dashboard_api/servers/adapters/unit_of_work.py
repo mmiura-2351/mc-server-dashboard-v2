@@ -34,6 +34,9 @@ from mc_server_dashboard_api.servers.adapters.game_session_repository import (
 from mc_server_dashboard_api.servers.adapters.group_repository import (
     SqlAlchemyGroupRepository,
 )
+from mc_server_dashboard_api.servers.adapters.plugin_repository import (
+    SqlAlchemyPluginRepository,
+)
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
@@ -86,6 +89,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.backups = SqlAlchemyBackupRepository(self._session)
         self.groups = SqlAlchemyGroupRepository(self._session)
         self.game_sessions = SqlAlchemyGameSessionRepository(self._session)
+        self.plugins = SqlAlchemyPluginRepository(self._session)
         return self
 
     async def __aexit__(

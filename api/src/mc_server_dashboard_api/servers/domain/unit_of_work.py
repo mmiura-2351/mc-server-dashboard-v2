@@ -20,6 +20,7 @@ from mc_server_dashboard_api.servers.domain.game_session_repository import (
     GameSessionRepository,
 )
 from mc_server_dashboard_api.servers.domain.group_repository import GroupRepository
+from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
@@ -34,6 +35,7 @@ class UnitOfWork(abc.ABC):
     backups: BackupRepository
     groups: GroupRepository
     game_sessions: GameSessionRepository
+    plugins: PluginRepository
 
     @abc.abstractmethod
     async def __aenter__(self) -> UnitOfWork:
