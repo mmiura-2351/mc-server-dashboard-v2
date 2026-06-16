@@ -1,7 +1,7 @@
 /**
  * Permission code catalog (WEBUI_SPEC.md 2.2).
  *
- * The community axis is the 30-code set assignable to roles / grants. The
+ * The community axis is the 33-code set assignable to roles / grants. The
  * platform axis is flag-driven (not assignable to roles) but is still part of
  * the caller's effective set the API returns, so it is included in the union
  * so `can()` can be typed against every code the UI may check.

@@ -9,7 +9,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import {
@@ -572,6 +572,12 @@ function ModrinthBrowser({
     if (timerRef.current !== null) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => setQuery(value.trim()), 400);
   };
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   if (selectedProject !== null) {
     return (
