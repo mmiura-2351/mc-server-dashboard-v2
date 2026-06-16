@@ -26,6 +26,13 @@ from mc_server_dashboard_api.servers.domain.backup_repository import (
     BackupRepository,
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogProject,
+    CatalogProvider,
+    CatalogSearchResponse,
+    CatalogSearchResult,
+    CatalogVersion,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.committed_resources import (
     CommittedResources,
@@ -1050,3 +1057,113 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         return len(self.bytes_by_ref[storage_ref])
+
+
+class FakeCatalogProvider(CatalogProvider):
+    """In-memory :class:`CatalogProvider` double for catalog use-case tests.
+
+    Stores projects, versions, and downloadable file bytes. Search returns all
+    seeded projects (no actual text matching). ``unavailable`` makes every call
+    raise :class:`CatalogUnavailableError`.
+    """
+
+    def __init__(self, *, unavailable: bool = False) -> None:
+        self.projects: dict[str, CatalogProject] = {}
+        self.versions: dict[str, list[CatalogVersion]] = {}
+        self.file_bytes: dict[str, bytes] = {}
+        self._unavailable = unavailable
+
+    def seed_project(
+        self,
+        project: CatalogProject,
+        versions: list[CatalogVersion] | None = None,
+    ) -> None:
+        self.projects[project.project_id] = project
+        self.projects[project.slug] = project
+        if versions:
+            self.versions.setdefault(project.project_id, []).extend(versions)
+            self.versions.setdefault(project.slug, []).extend(versions)
+
+    def seed_file(self, url: str, content: bytes) -> None:
+        self.file_bytes[url] = content
+
+    async def search(
+        self,
+        *,
+        query: str,
+        loader: str,
+        game_versions: list[str],
+        limit: int = 20,
+        offset: int = 0,
+    ) -> CatalogSearchResponse:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            CatalogUnavailableError,
+        )
+
+        if self._unavailable:
+            raise CatalogUnavailableError("fake unavailable")
+        # Deduplicate by project_id (seeded twice: by id and slug).
+        seen: set[str] = set()
+        hits: list[CatalogSearchResult] = []
+        for project in self.projects.values():
+            if project.project_id in seen:
+                continue
+            seen.add(project.project_id)
+            hits.append(
+                CatalogSearchResult(
+                    project_id=project.project_id,
+                    slug=project.slug,
+                    title=project.title,
+                    description=project.description,
+                    author=project.author or "",
+                    icon_url=project.icon_url,
+                    downloads=project.downloads,
+                    categories=project.categories,
+                    latest_game_versions=project.game_versions,
+                )
+            )
+        page = hits[offset : offset + limit]
+        return CatalogSearchResponse(
+            hits=page, total_hits=len(hits), offset=offset, limit=limit
+        )
+
+    async def get_project(self, project_id_or_slug: str) -> CatalogProject:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            CatalogProjectNotFoundError,
+            CatalogUnavailableError,
+        )
+
+        if self._unavailable:
+            raise CatalogUnavailableError("fake unavailable")
+        project = self.projects.get(project_id_or_slug)
+        if project is None:
+            raise CatalogProjectNotFoundError(project_id_or_slug)
+        return project
+
+    async def list_versions(
+        self,
+        project_id_or_slug: str,
+        *,
+        loader: str | None = None,
+        game_versions: list[str] | None = None,
+    ) -> list[CatalogVersion]:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            CatalogUnavailableError,
+        )
+
+        if self._unavailable:
+            raise CatalogUnavailableError("fake unavailable")
+        return self.versions.get(project_id_or_slug, [])
+
+    async def download_file(self, url: str) -> bytes:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            CatalogProjectNotFoundError,
+            CatalogUnavailableError,
+        )
+
+        if self._unavailable:
+            raise CatalogUnavailableError("fake unavailable")
+        content = self.file_bytes.get(url)
+        if content is None:
+            raise CatalogProjectNotFoundError(url)
+        return content

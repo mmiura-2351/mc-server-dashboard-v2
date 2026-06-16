@@ -212,6 +212,11 @@ from mc_server_dashboard_api.servers.application.backups import (
     ServerBackupStatistics,
     UploadBackup,
 )
+from mc_server_dashboard_api.servers.application.catalog import (
+    GetCatalogProject,
+    InstallFromCatalog,
+    SearchCatalog,
+)
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
@@ -274,6 +279,9 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 )
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
+)
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogProvider,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane as ServersControlPlane,
@@ -1877,6 +1885,64 @@ def get_toggle_plugin(
     session_factory = create_session_factory(get_engine(request))
     return TogglePlugin(
         uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_catalog_provider() -> CatalogProvider:
+    """Provide a per-request :class:`CatalogProvider` (Modrinth, issue #1151).
+
+    Stateless adapter; each request creates a fresh httpx client per call.
+    The import is local to avoid pulling the adapter at module level (the
+    adapter is bound at the edge, not importable from domain/application).
+    """
+
+    from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
+        ModrinthCatalog,
+    )
+
+    return ModrinthCatalog()
+
+
+def get_search_catalog(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> SearchCatalog:
+    """Assemble the :class:`SearchCatalog` use case (plugin:read, issue #1151)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SearchCatalog(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_get_catalog_project(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> GetCatalogProject:
+    """Assemble the :class:`GetCatalogProject` use case (plugin:read, issue #1151)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return GetCatalogProject(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_install_from_catalog(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> InstallFromCatalog:
+    """Assemble :class:`InstallFromCatalog` (plugin:manage, issue #1151)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return InstallFromCatalog(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
         file_store=file_store,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
