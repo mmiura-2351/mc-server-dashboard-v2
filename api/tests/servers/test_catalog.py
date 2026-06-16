@@ -23,6 +23,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
+    InvalidFilePathError,
     PluginAlreadyExistsError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -405,6 +406,89 @@ async def test_install_from_catalog_unavailable() -> None:
         uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
     )
     with pytest.raises(CatalogUnavailableError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="proj-1",
+            version_id="ver-1",
+        )
+
+
+async def test_install_from_catalog_empty_sha512_fails() -> None:
+    """Mandatory checksum: empty sha512 must raise CatalogChecksumMismatchError."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    project = _project()
+    file_content = b"fake-jar-bytes"
+    version = CatalogVersion(
+        version_id="ver-1",
+        version_number="0.92.0",
+        name="Fabric API 0.92.0",
+        game_versions=["1.20.4"],
+        loaders=["fabric"],
+        files=[
+            CatalogFile(
+                url="https://cdn.modrinth.com/data/fabric-api-0.92.0.jar",
+                filename="fabric-api-0.92.0.jar",
+                size=len(file_content),
+                sha512="",  # Empty hash
+                primary=True,
+            ),
+        ],
+        date_published="2024-01-15T12:00:00Z",
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, file_content)
+
+    uc = InstallFromCatalog(
+        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+    )
+    with pytest.raises(CatalogChecksumMismatchError, match="no sha512"):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="proj-1",
+            version_id="ver-1",
+        )
+
+
+async def test_install_from_catalog_non_jar_filename_fails() -> None:
+    """Catalog filenames must end with .jar."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    project = _project()
+    file_content = b"fake-content"
+    computed = hashlib.sha512(file_content).hexdigest()
+    version = CatalogVersion(
+        version_id="ver-1",
+        version_number="0.92.0",
+        name="Fabric API 0.92.0",
+        game_versions=["1.20.4"],
+        loaders=["fabric"],
+        files=[
+            CatalogFile(
+                url="https://cdn.modrinth.com/data/fabric-api-0.92.0.zip",
+                filename="fabric-api-0.92.0.zip",
+                size=len(file_content),
+                sha512=computed,
+                primary=True,
+            ),
+        ],
+        date_published="2024-01-15T12:00:00Z",
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, file_content)
+
+    uc = InstallFromCatalog(
+        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+    )
+    with pytest.raises(InvalidFilePathError):
         await uc(
             community_id=_COMMUNITY,
             server_id=server.id,

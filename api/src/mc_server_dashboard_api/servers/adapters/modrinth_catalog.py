@@ -8,6 +8,8 @@ descriptive User-Agent.
 from __future__ import annotations
 
 import json
+from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -22,6 +24,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
+    FileTooLargeError,
 )
 
 _BASE_URL = "https://api.modrinth.com/v2"
@@ -29,6 +32,14 @@ _USER_AGENT = "mc-server-dashboard/2.0 (mmiura2351@gmail.com)"
 _METADATA_TIMEOUT = httpx.Timeout(15.0)
 _DOWNLOAD_TIMEOUT = httpx.Timeout(120.0)
 _MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB
+
+_ALLOWED_DOWNLOAD_HOSTS = frozenset(
+    {
+        "cdn.modrinth.com",
+        "github.com",
+        "objects.githubusercontent.com",
+    }
+)
 
 
 class ModrinthCatalog(CatalogProvider):
@@ -115,20 +126,33 @@ class ModrinthCatalog(CatalogProvider):
         return [self._parse_version(v) for v in data]
 
     async def download_file(self, url: str) -> bytes:
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            raise CatalogUnavailableError(f"download URL must use HTTPS: {url}")
+        if parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
+            raise CatalogUnavailableError(
+                f"download URL host not allowed: {parsed.hostname}"
+            )
         try:
             async with httpx.AsyncClient(
                 timeout=_DOWNLOAD_TIMEOUT,
                 headers=self._headers(),
                 follow_redirects=True,
             ) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                content = response.content
-                if len(content) > _MAX_DOWNLOAD_BYTES:
-                    raise CatalogUnavailableError(
-                        f"download exceeds {_MAX_DOWNLOAD_BYTES} bytes"
-                    )
-                return content
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > _MAX_DOWNLOAD_BYTES:
+                            raise FileTooLargeError(
+                                f"download exceeds {_MAX_DOWNLOAD_BYTES} bytes"
+                            )
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+        except FileTooLargeError:
+            raise
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise CatalogProjectNotFoundError(url) from exc
@@ -140,7 +164,7 @@ class ModrinthCatalog(CatalogProvider):
 
     async def _get_json(
         self, path: str, *, params: dict[str, str | int] | None = None
-    ) -> dict:  # type: ignore[type-arg]
+    ) -> Any:
         try:
             async with httpx.AsyncClient(
                 base_url=self._base_url,

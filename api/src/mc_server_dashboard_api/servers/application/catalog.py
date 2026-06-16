@@ -22,6 +22,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
+    InvalidFilePathError,
     PluginAlreadyExistsError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -129,7 +130,14 @@ class InstallFromCatalog:
         version_id: str,
         installed_by: uuid.UUID | None = None,
     ) -> ServerPlugin:
-        # Fetch version metadata to find the requested version.
+        # Phase 1: Read server metadata (no lock needed).
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+
+        content_dir = content_dir_for_server_type(server.server_type)
+        loader_type = loader_type_for_server_type(server.server_type)
+
+        # Phase 2: Fetch from catalog (no lock, no DB).
         versions = await self.catalog.list_versions(project_id)
         version = next((v for v in versions if v.version_id == version_id), None)
         if version is None:
@@ -145,31 +153,34 @@ class InstallFromCatalog:
             raise CatalogProjectNotFoundError(f"no files in version {version_id}")
         file = primary
 
-        # Fetch project metadata for display_name/description.
+        if not file.filename.lower().endswith(".jar"):
+            raise InvalidFilePathError(file.filename)
+
         project = await self.catalog.get_project(project_id)
 
+        # Phase 3: Download + verify (no lock, no DB).
+        content = await self.catalog.download_file(file.url)
+        if not file.sha512:
+            raise CatalogChecksumMismatchError("no sha512 hash provided by catalog")
+        computed_hash = hashlib.sha512(content).hexdigest()
+        if computed_hash != file.sha512:
+            raise CatalogChecksumMismatchError(
+                f"expected {file.sha512}, got {computed_hash}"
+            )
+
+        # Phase 4: At-rest gate + write (hold lock, short duration).
+        rel_path = f"{content_dir}/{file.filename}"
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 if not server.is_at_rest():
                     raise ServerFilesUnsettledError(str(server_id.value))
 
-                content_dir = content_dir_for_server_type(server.server_type)
-                loader_type = loader_type_for_server_type(server.server_type)
-                rel_path = f"{content_dir}/{file.filename}"
                 self.file_store.validate_rel_path(rel_path)
 
                 existing = await self.uow.plugins.get_by_rel_path(server_id, rel_path)
                 if existing is not None:
                     raise PluginAlreadyExistsError(rel_path)
-
-                # Download and verify checksum.
-                content = await self.catalog.download_file(file.url)
-                computed_hash = hashlib.sha512(content).hexdigest()
-                if file.sha512 and computed_hash != file.sha512:
-                    raise CatalogChecksumMismatchError(
-                        f"expected {file.sha512}, got {computed_hash}"
-                    )
 
                 await self.file_store.write_file(
                     community_id=community_id,
