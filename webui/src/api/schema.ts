@@ -1132,6 +1132,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Check Updates
+         * @description Batch check for plugin updates (plugin:read).
+         */
+        get: operations["check_updates_api_communities__community_id__servers__server_id__plugins_updates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}": {
         parameters: {
             query?: never;
@@ -1147,6 +1167,26 @@ export interface paths {
          * @description Remove an installed plugin (plugin:manage).
          */
         delete: operations["remove_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/dependencies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Plugin Dependencies
+         * @description List dependencies for an installed plugin (plugin:read).
+         */
+        get: operations["list_plugin_dependencies_api_communities__community_id__servers__server_id__plugins__plugin_id__dependencies_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1186,6 +1226,46 @@ export interface paths {
          * @description Enable a disabled plugin (plugin:manage).
          */
         post: operations["enable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__enable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Update Plugin
+         * @description Execute a plugin update to a specific version (plugin:manage).
+         */
+        post: operations["update_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__update_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Check Plugin Update
+         * @description Check for a single plugin update (plugin:read).
+         */
+        get: operations["check_plugin_update_api_communities__community_id__servers__server_id__plugins__plugin_id__updates_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1953,6 +2033,37 @@ export interface components {
             max_servers: number;
             resources: components["schemas"]["HostResourcesResponse"];
         };
+        /** CatalogDependencyItem */
+        CatalogDependencyItem: {
+            /** Dependency Type */
+            dependency_type: string;
+            /** Project Id */
+            project_id: string;
+            /** Version Id */
+            version_id: string | null;
+        };
+        /** CatalogDependencyResponse */
+        CatalogDependencyResponse: {
+            /** Dependency Type */
+            dependency_type: string;
+            /** Project Id */
+            project_id: string;
+            /** Version Id */
+            version_id: string | null;
+        };
+        /** CatalogFileItem */
+        CatalogFileItem: {
+            /** Filename */
+            filename: string;
+            /** Primary */
+            primary: boolean;
+            /** Sha512 */
+            sha512: string;
+            /** Size */
+            size: number;
+            /** Url */
+            url: string;
+        };
         /** CatalogFileResponse */
         CatalogFileResponse: {
             /** Filename */
@@ -2036,10 +2147,34 @@ export interface components {
             /** Title */
             title: string;
         };
+        /**
+         * CatalogVersionItem
+         * @description Inline catalog version response to avoid circular import with catalog.py.
+         */
+        CatalogVersionItem: {
+            /** Date Published */
+            date_published: string;
+            /** Dependencies */
+            dependencies: components["schemas"]["CatalogDependencyItem"][];
+            /** Files */
+            files: components["schemas"]["CatalogFileItem"][];
+            /** Game Versions */
+            game_versions: string[];
+            /** Loaders */
+            loaders: string[];
+            /** Name */
+            name: string;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: string;
+        };
         /** CatalogVersionResponse */
         CatalogVersionResponse: {
             /** Date Published */
             date_published: string;
+            /** Dependencies */
+            dependencies: components["schemas"]["CatalogDependencyResponse"][];
             /** Files */
             files: components["schemas"]["CatalogFileResponse"][];
             /** Game Versions */
@@ -2362,6 +2497,26 @@ export interface components {
             /** Uuid */
             uuid: string;
         };
+        /** PluginDependenciesResponse */
+        PluginDependenciesResponse: {
+            /** Dependencies */
+            dependencies: components["schemas"]["PluginDependencyResponse"][];
+        };
+        /** PluginDependencyResponse */
+        PluginDependencyResponse: {
+            /** Dependency Type */
+            dependency_type: string;
+            /** Installed */
+            installed: boolean;
+            /** Project Id */
+            project_id: string;
+            /** Project Slug */
+            project_slug: string | null;
+            /** Project Title */
+            project_title: string | null;
+            /** Version Id */
+            version_id: string | null;
+        };
         /** PluginListResponse */
         PluginListResponse: {
             /** Plugins */
@@ -2418,6 +2573,16 @@ export interface components {
             updated_at: string;
             /** Version Number */
             version_number: string | null;
+        };
+        /** PluginUpdateInfoResponse */
+        PluginUpdateInfoResponse: {
+            latest_version: components["schemas"]["CatalogVersionItem"] | null;
+            plugin: components["schemas"]["PluginResponse"];
+        };
+        /** PluginUpdatesResponse */
+        PluginUpdatesResponse: {
+            /** Updates */
+            updates: components["schemas"]["PluginUpdateInfoResponse"][];
         };
         /**
          * PortCheckResponse
@@ -2634,6 +2799,11 @@ export interface components {
              * @default bearer
              */
             token_type: string;
+        };
+        /** UpdatePluginRequest */
+        UpdatePluginRequest: {
+            /** Version Id */
+            version_id: string;
         };
         /** UpdateProfileRequest */
         UpdateProfileRequest: {
@@ -5157,6 +5327,38 @@ export interface operations {
             };
         };
     };
+    check_updates_api_communities__community_id__servers__server_id__plugins_updates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginUpdatesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     remove_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__delete: {
         parameters: {
             query?: never;
@@ -5176,6 +5378,39 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_plugin_dependencies_api_communities__community_id__servers__server_id__plugins__plugin_id__dependencies_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginDependenciesResponse"];
+                };
             };
             /** @description Validation Error */
             422: {
@@ -5241,6 +5476,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__update_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdatePluginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_plugin_update_api_communities__community_id__servers__server_id__plugins__plugin_id__updates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginUpdateInfoResponse"];
                 };
             };
             /** @description Validation Error */

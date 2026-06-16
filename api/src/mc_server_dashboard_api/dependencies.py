@@ -213,9 +213,13 @@ from mc_server_dashboard_api.servers.application.backups import (
     UploadBackup,
 )
 from mc_server_dashboard_api.servers.application.catalog import (
+    CheckPluginUpdate,
+    CheckUpdates,
     GetCatalogProject,
     InstallFromCatalog,
+    ListPluginDependencies,
     SearchCatalog,
+    UpdatePlugin,
 )
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
@@ -1946,6 +1950,62 @@ def get_install_from_catalog(
         file_store=file_store,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_check_updates(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> CheckUpdates:
+    """Assemble :class:`CheckUpdates` (plugin:read, issue #1152)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return CheckUpdates(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_check_plugin_update(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> CheckPluginUpdate:
+    """Assemble :class:`CheckPluginUpdate` (plugin:read, issue #1152)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return CheckPluginUpdate(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_update_plugin(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> UpdatePlugin:
+    """Assemble :class:`UpdatePlugin` (plugin:manage, issue #1152)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UpdatePlugin(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+        file_store=file_store,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_list_plugin_dependencies(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> ListPluginDependencies:
+    """Assemble :class:`ListPluginDependencies` (plugin:read, issue #1152)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListPluginDependencies(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
     )
 
 

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import httpx
 
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogDependency,
     CatalogFile,
     CatalogProject,
     CatalogProvider,
@@ -195,6 +196,14 @@ class ModrinthCatalog(CatalogProvider):
             )
             for f in v.get("files", [])
         ]
+        dependencies = [
+            CatalogDependency(
+                version_id=d.get("version_id"),
+                project_id=d.get("project_id", ""),
+                dependency_type=d.get("dependency_type", "required"),
+            )
+            for d in v.get("dependencies", [])
+        ]
         return CatalogVersion(
             version_id=v["id"],
             version_number=v.get("version_number", ""),
@@ -203,4 +212,5 @@ class ModrinthCatalog(CatalogProvider):
             loaders=v.get("loaders", []),
             files=files,
             date_published=v.get("date_published", ""),
+            dependencies=dependencies,
         )

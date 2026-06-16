@@ -44,3 +44,7 @@ class PluginRepository(abc.ABC):
     @abc.abstractmethod
     async def update(self, plugin: ServerPlugin) -> None:
         """Full entity update of the plugin row."""
+
+    @abc.abstractmethod
+    async def list_modrinth_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
+        """Return plugins with source=MODRINTH and a non-null source_project_id."""

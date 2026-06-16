@@ -24,6 +24,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
+    PluginNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
 )
@@ -212,3 +213,275 @@ class InstallFromCatalog:
                 await self.uow.plugins.add(plugin)
                 await self.uow.commit()
                 return plugin
+
+
+# -- Update check & dependency value objects --
+
+
+@dataclass(frozen=True)
+class PluginUpdateInfo:
+    """Update availability for one installed plugin."""
+
+    plugin: ServerPlugin
+    latest_version: CatalogVersion | None  # None = no newer version
+
+
+@dataclass(frozen=True)
+class PluginDependencyInfo:
+    """One dependency of an installed plugin version."""
+
+    project_id: str
+    version_id: str | None
+    dependency_type: str
+    project_title: str | None
+    project_slug: str | None
+    installed: bool
+
+
+# -- Update check use cases --
+
+
+@dataclass(frozen=True)
+class CheckUpdates:
+    """Batch check for newer Modrinth versions of all Modrinth-sourced plugins."""
+
+    uow: UnitOfWork
+    catalog: CatalogProvider
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> list[PluginUpdateInfo]:
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+            loader = modrinth_loader_for_server_type(server.server_type)
+            plugins = await self.uow.plugins.list_modrinth_plugins(server_id)
+
+        results: list[PluginUpdateInfo] = []
+        for plugin in plugins:
+            versions = await self.catalog.list_versions(
+                plugin.source_project_id or "",
+                loader=loader,
+                game_versions=[server.mc_version],
+            )
+            latest = versions[0] if versions else None
+            if latest and latest.version_id != plugin.source_version_id:
+                results.append(PluginUpdateInfo(plugin=plugin, latest_version=latest))
+            else:
+                results.append(PluginUpdateInfo(plugin=plugin, latest_version=None))
+        return results
+
+
+@dataclass(frozen=True)
+class CheckPluginUpdate:
+    """Single-plugin update check."""
+
+    uow: UnitOfWork
+    catalog: CatalogProvider
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        plugin_id: PluginId,
+    ) -> PluginUpdateInfo:
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+            plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
+        if plugin is None:
+            raise PluginNotFoundError(str(plugin_id.value))
+        if plugin.source is not PluginSource.MODRINTH:
+            return PluginUpdateInfo(plugin=plugin, latest_version=None)
+
+        loader = modrinth_loader_for_server_type(server.server_type)
+        versions = await self.catalog.list_versions(
+            plugin.source_project_id or "",
+            loader=loader,
+            game_versions=[server.mc_version],
+        )
+        latest = versions[0] if versions else None
+        if latest and latest.version_id != plugin.source_version_id:
+            return PluginUpdateInfo(plugin=plugin, latest_version=latest)
+        return PluginUpdateInfo(plugin=plugin, latest_version=None)
+
+
+@dataclass(frozen=True)
+class UpdatePlugin:
+    """Download a newer catalog version and replace the installed jar.
+
+    Follows the same phased pattern as :class:`InstallFromCatalog`.
+    """
+
+    uow: UnitOfWork
+    catalog: CatalogProvider
+    file_store: FileStore
+    clock: Clock
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        plugin_id: PluginId,
+        version_id: str,
+    ) -> ServerPlugin:
+        # Phase 1: Read server + plugin metadata (no lock).
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+            plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
+        if plugin is None:
+            raise PluginNotFoundError(str(plugin_id.value))
+        if plugin.source is not PluginSource.MODRINTH:
+            raise PluginNotFoundError(str(plugin_id.value))
+
+        content_dir = content_dir_for_server_type(server.server_type)
+        loader = modrinth_loader_for_server_type(server.server_type)
+
+        # Phase 2: Fetch version from catalog, select primary file, validate .jar.
+        versions = await self.catalog.list_versions(
+            plugin.source_project_id or "",
+            loader=loader,
+            game_versions=[server.mc_version],
+        )
+        version = next((v for v in versions if v.version_id == version_id), None)
+        if version is None:
+            raise CatalogProjectNotFoundError(
+                f"version {version_id} not found for project {plugin.source_project_id}"
+            )
+
+        primary = next((f for f in version.files if f.primary), None)
+        if primary is None and version.files:
+            primary = version.files[0]
+        if primary is None:
+            raise CatalogProjectNotFoundError(f"no files in version {version_id}")
+        file = primary
+
+        if not file.filename.lower().endswith(".jar"):
+            raise InvalidFilePathError(file.filename)
+
+        # Phase 3: Download + verify (no lock, no DB).
+        content = await self.catalog.download_file(file.url)
+        if not file.sha512:
+            raise CatalogChecksumMismatchError("no sha512 hash provided by catalog")
+        computed_hash = hashlib.sha512(content).hexdigest()
+        if computed_hash != file.sha512:
+            raise CatalogChecksumMismatchError(
+                f"expected {file.sha512}, got {computed_hash}"
+            )
+
+        # Phase 4: At-rest gate + write (hold lock, short duration).
+        new_rel_path = f"{content_dir}/{file.filename}"
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
+                if not server.is_at_rest():
+                    raise ServerFilesUnsettledError(str(server_id.value))
+
+                self.file_store.validate_rel_path(new_rel_path)
+
+                old_rel_path = plugin.rel_path
+                if new_rel_path != old_rel_path:
+                    existing = await self.uow.plugins.get_by_rel_path(
+                        server_id, new_rel_path
+                    )
+                    if existing is not None and existing.id != plugin_id:
+                        raise PluginAlreadyExistsError(new_rel_path)
+
+                await self.file_store.write_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=new_rel_path,
+                    content=content,
+                )
+
+                if new_rel_path != old_rel_path:
+                    await self.file_store.delete_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=old_rel_path,
+                    )
+
+                now = self.clock.now()
+                updated_plugin = ServerPlugin(
+                    id=plugin.id,
+                    server_id=plugin.server_id,
+                    rel_path=new_rel_path,
+                    filename=file.filename,
+                    display_name=plugin.display_name,
+                    description=plugin.description,
+                    loader_type=plugin.loader_type,
+                    source=plugin.source,
+                    source_project_id=plugin.source_project_id,
+                    source_version_id=version_id,
+                    version_number=version.version_number,
+                    checksum_sha512=computed_hash,
+                    size_bytes=len(content),
+                    enabled=plugin.enabled,
+                    installed_by=plugin.installed_by,
+                    created_at=plugin.created_at,
+                    updated_at=now,
+                )
+                await self.uow.plugins.update(updated_plugin)
+                await self.uow.commit()
+                return updated_plugin
+
+
+@dataclass(frozen=True)
+class ListPluginDependencies:
+    """List dependencies for an installed plugin version."""
+
+    uow: UnitOfWork
+    catalog: CatalogProvider
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        plugin_id: PluginId,
+    ) -> list[PluginDependencyInfo]:
+        async with self.uow:
+            await _load(self.uow, community_id, server_id)
+            plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
+            all_plugins = await self.uow.plugins.list_modrinth_plugins(server_id)
+        if plugin is None:
+            raise PluginNotFoundError(str(plugin_id.value))
+        if plugin.source is not PluginSource.MODRINTH:
+            return []
+
+        versions = await self.catalog.list_versions(plugin.source_project_id or "")
+        installed_version = next(
+            (v for v in versions if v.version_id == plugin.source_version_id),
+            None,
+        )
+        if installed_version is None:
+            return []
+
+        installed_project_ids = {
+            p.source_project_id for p in all_plugins if p.source_project_id
+        }
+        results: list[PluginDependencyInfo] = []
+        for dep in installed_version.dependencies:
+            project_title: str | None = None
+            project_slug: str | None = None
+            try:
+                proj = await self.catalog.get_project(dep.project_id)
+                project_title = proj.title
+                project_slug = proj.slug
+            except Exception:  # noqa: BLE001 - catalog may be unavailable
+                pass
+            results.append(
+                PluginDependencyInfo(
+                    project_id=dep.project_id,
+                    version_id=dep.version_id,
+                    dependency_type=dep.dependency_type,
+                    project_title=project_title,
+                    project_slug=project_slug,
+                    installed=dep.project_id in installed_project_ids,
+                )
+            )
+        return results

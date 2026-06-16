@@ -161,6 +161,7 @@ PLUGIN_INSTALL: Final = "plugin:install"
 PLUGIN_REMOVE: Final = "plugin:remove"
 PLUGIN_ENABLE: Final = "plugin:enable"
 PLUGIN_DISABLE: Final = "plugin:disable"
+PLUGIN_UPDATE: Final = "plugin:update"
 
 # Target-type names (the ``target_type`` column).
 TARGET_PLUGIN: Final = "plugin"
