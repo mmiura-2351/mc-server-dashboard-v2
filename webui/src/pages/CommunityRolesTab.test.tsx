@@ -137,7 +137,7 @@ describe("CommunityRolesTab", () => {
     expect(modRow.querySelector("button")).not.toBeNull();
   });
 
-  it("renders the full 30-code matrix grouped by family, derived from the catalog", async () => {
+  it("renders the full 33-code matrix grouped by family, derived from the catalog", async () => {
     await openEditor([]);
 
     // Every family has a select-all checkbox labelled from its family label,
