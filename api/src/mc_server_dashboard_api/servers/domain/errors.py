@@ -462,3 +462,24 @@ class PluginAlreadyExistsError(ServerError):
 
     The edge maps this to 409 ``plugin_already_exists``.
     """
+
+
+class CatalogUnavailableError(ServerError):
+    """External catalog API unreachable or errored.
+
+    The edge maps this to 502 ``catalog_unavailable``.
+    """
+
+
+class CatalogProjectNotFoundError(ServerError):
+    """Project/version not found on the catalog.
+
+    The edge maps this to 404 ``catalog_project_not_found``.
+    """
+
+
+class CatalogChecksumMismatchError(ServerError):
+    """Downloaded file SHA-512 doesn't match catalog's published hash.
+
+    The edge maps this to 502 ``checksum_mismatch``.
+    """

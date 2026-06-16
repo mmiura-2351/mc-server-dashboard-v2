@@ -109,3 +109,23 @@ def loader_type_for_server_type(server_type: ServerType) -> LoaderType:
     if server_type is ServerType.PAPER:
         return LoaderType.PLUGIN
     raise UnsupportedPluginServerTypeError(server_type.value)
+
+
+_MODRINTH_LOADER_MAP: dict[ServerType, str] = {
+    ServerType.FABRIC: "fabric",
+    ServerType.FORGE: "forge",
+    ServerType.PAPER: "paper",
+}
+
+
+def modrinth_loader_for_server_type(server_type: ServerType) -> str:
+    """Return the Modrinth ``loader`` facet string for ``server_type``.
+
+    Fabric -> ``"fabric"``, Forge -> ``"forge"``, Paper -> ``"paper"``.
+    Vanilla/Spigot raise :class:`UnsupportedPluginServerTypeError`.
+    """
+
+    loader = _MODRINTH_LOADER_MAP.get(server_type)
+    if loader is None:
+        raise UnsupportedPluginServerTypeError(server_type.value)
+    return loader
