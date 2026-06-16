@@ -35,12 +35,16 @@ class ObjectResourcePackStore(ResourcePackStore):
         async with self._client_factory() as client:
             await client.upload_multipart(key, stream)
 
-    async def open(  # type: ignore[override]
+    def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:
+        return self._open_gen(pack_id, filename)
+
+    async def _open_gen(
         self, pack_id: ResourcePackId, filename: str
     ) -> AsyncIterator[bytes]:
         key = _key(pack_id, filename)
         async with self._client_factory() as client:
-            return await client.get_object(key)
+            async for chunk in await client.get_object(key):
+                yield chunk
 
     async def delete(self, pack_id: ResourcePackId) -> None:
         prefix = f"resource-packs/{pack_id.value}/"

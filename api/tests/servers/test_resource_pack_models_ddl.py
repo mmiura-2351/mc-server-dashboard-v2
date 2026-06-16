@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from sqlalchemy import String, Table
+from sqlalchemy import DefaultClause, String, Table
 
 from mc_server_dashboard_api.servers.adapters.resource_pack_models import (
     ResourcePackModel,
@@ -75,7 +75,9 @@ def test_assignments_resource_pack_id_foreign_key() -> None:
 
 
 def test_assignments_require_resource_pack_default_false() -> None:
-    assert _ASSIGNMENTS.c.require_resource_pack.server_default is not None
+    server_default = _ASSIGNMENTS.c.require_resource_pack.server_default
+    assert isinstance(server_default, DefaultClause)
+    assert server_default.arg == "false"
 
 
 def test_assignments_resource_pack_prompt_nullable() -> None:
