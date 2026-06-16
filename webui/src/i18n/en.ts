@@ -1262,6 +1262,87 @@ export const en = {
   "admin.audit.communitiesTruncatedMid": " of ",
   "admin.audit.communitiesTruncatedSuffix": " communities.",
 
+  // Plugins tab (issue #1153). One contiguous block to keep merge conflicts
+  // with sibling i18n PRs minimal.
+  "serverDetail.tab.plugins": "Plugins",
+  "plugins.loading": "Loading plugins…",
+  "plugins.loadError": "Could not load plugins.",
+  "plugins.noRead": "You do not have permission to view plugins.",
+  "plugins.empty": "No plugins installed.",
+  "plugins.unsupported": "This server type does not support plugins or mods.",
+  "plugins.serverNotStopped": "Stop the server to manage plugins.",
+  // Table columns.
+  "plugins.col.name": "Name",
+  "plugins.col.version": "Version",
+  "plugins.col.source": "Source",
+  "plugins.col.status": "Status",
+  "plugins.col.size": "Size",
+  // Status / source labels.
+  "plugins.status.enabled": "Enabled",
+  "plugins.status.disabled": "Disabled",
+  "plugins.source.local": "Local",
+  "plugins.source.modrinth": "Modrinth",
+  // Actions.
+  "plugins.enable": "Enable",
+  "plugins.disable": "Disable",
+  "plugins.remove": "Remove",
+  "plugins.update": "Update",
+  "plugins.install": "Upload JAR",
+  "plugins.browse": "Browse Modrinth",
+  // Update indicators.
+  "plugins.updateAvailable": "Update available: ",
+  "plugins.upToDate": "Up to date",
+  // Remove dialog.
+  "plugins.removeDialog.title": "Remove plugin",
+  "plugins.removeDialog.body":
+    "This permanently removes the plugin file from the server. This cannot be undone.",
+  "plugins.removeDialog.confirm": "Remove plugin",
+  "plugins.removeDialog.prompt": "Type REMOVE to confirm",
+  "plugins.removeDialog.phrase": "REMOVE",
+  // Update dialog.
+  "plugins.updateDialog.title": "Update plugin",
+  "plugins.updateDialog.body":
+    "This replaces the current plugin file with the selected version. The server must be stopped.",
+  "plugins.updateDialog.confirm": "Update",
+  // Dependencies.
+  "plugins.dependencies": "Dependencies",
+  "plugins.dependencies.loading": "Loading dependencies…",
+  "plugins.dependencies.empty": "No dependencies.",
+  "plugins.dependencies.required": "required",
+  "plugins.dependencies.optional": "optional",
+  "plugins.dependencies.installed": "installed",
+  "plugins.dependencies.missing": "missing",
+  // Modrinth search modal.
+  "plugins.search.title": "Browse Modrinth",
+  "plugins.search.placeholder": "Search plugins or mods…",
+  "plugins.search.empty": "No results.",
+  "plugins.search.downloads": "downloads",
+  "plugins.search.by": "by",
+  "plugins.search.install": "Install",
+  "plugins.search.installing": "Installing…",
+  "plugins.search.versions": "Versions",
+  "plugins.search.back": "Back to search",
+  // Outcomes (toasts).
+  "plugins.enabled": "Plugin enabled.",
+  "plugins.disabled": "Plugin disabled.",
+  "plugins.removed": "Plugin removed.",
+  "plugins.updated": "Plugin updated.",
+  "plugins.installed": "Plugin installed.",
+  "plugins.catalogInstalled": "Plugin installed from Modrinth.",
+  "plugins.error.notStopped": "Stop the server before managing plugins.",
+  "plugins.error.generic": "Something went wrong. Please try again.",
+  // Permission family and code labels for the role/grant matrix.
+  "communitySettings.roles.family.plugin": "Plugins",
+  "communitySettings.roles.code.plugin:read": "Read",
+  "communitySettings.roles.code.plugin:manage": "Manage",
+  // Audit operation labels for plugin actions.
+  "communitySettings.audit.op.plugin:install": "Install plugin",
+  "communitySettings.audit.op.plugin:remove": "Remove plugin",
+  "communitySettings.audit.op.plugin:enable": "Enable plugin",
+  "communitySettings.audit.op.plugin:disable": "Disable plugin",
+  "communitySettings.audit.op.plugin:update": "Update plugin",
+  "communitySettings.audit.targetType.plugin": "Plugin",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".

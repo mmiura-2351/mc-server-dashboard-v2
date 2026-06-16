@@ -16,8 +16,9 @@
 
 /**
  * Community-axis codes grouped by family, in the order the role matrix renders
- * them (WEBUI_SPEC.md 2.2 — the 9 families, 30 codes, plus the session family
- * with session:read, issue #961). This is the single source of truth: the
+ * them (WEBUI_SPEC.md 2.2 — the 9 families, 30 codes, plus the plugin family
+ * with plugin:read/manage, and the session family with session:read). This is
+ * the single source of truth: the
  * `CommunityPermissionCode` union is derived from it.
  */
 export const COMMUNITY_PERMISSION_FAMILIES = [
@@ -69,6 +70,10 @@ export const COMMUNITY_PERMISSION_FAMILIES = [
     codes: ["community:read", "community:update", "community:delete"],
   },
   {
+    family: "plugin",
+    codes: ["plugin:read", "plugin:manage"],
+  },
+  {
     family: "audit",
     codes: ["audit:read"],
   },
@@ -78,7 +83,7 @@ export const COMMUNITY_PERMISSION_FAMILIES = [
   },
 ] as const;
 
-/** Community-axis codes (31) — the role/grant editor's source of truth. */
+/** Community-axis codes (33) — the role/grant editor's source of truth. */
 export type CommunityPermissionCode =
   (typeof COMMUNITY_PERMISSION_FAMILIES)[number]["codes"][number];
 
@@ -128,6 +133,8 @@ export const COMMUNITY_PERMISSION_CODES: readonly CommunityPermissionCode[] = [
   "community:read",
   "community:update",
   "community:delete",
+  "plugin:read",
+  "plugin:manage",
   "audit:read",
   "session:read",
 ];
