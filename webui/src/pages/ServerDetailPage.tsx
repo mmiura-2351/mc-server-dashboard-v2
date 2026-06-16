@@ -67,8 +67,8 @@ const TAB_LABEL: Record<Tab, TranslationKey> = {
   settings: "serverDetail.tab.settings",
 };
 
-/** Tabs hidden for vanilla servers (vanilla has no plugin/mod support). */
-const VANILLA_HIDDEN_TABS: ReadonlySet<Tab> = new Set(["plugins"]);
+/** Server types that do not support plugins/mods (no backend support). */
+const PLUGIN_UNSUPPORTED_TYPES = new Set(["vanilla", "spigot"]);
 
 export function ServerDetailPage() {
   const { cid, sid } = useParams();
@@ -110,9 +110,9 @@ function Loaded({
   }
 
   const server = query.data;
-  const isVanilla = server.server_type === "vanilla";
-  const visibleTabs = isVanilla
-    ? TABS.filter((name) => !VANILLA_HIDDEN_TABS.has(name))
+  const hidePlugins = PLUGIN_UNSUPPORTED_TYPES.has(server.server_type);
+  const visibleTabs = hidePlugins
+    ? TABS.filter((name) => name !== "plugins")
     : TABS;
   return (
     <>

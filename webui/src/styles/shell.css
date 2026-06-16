@@ -1284,6 +1284,10 @@ body.col-resizing {
   padding: 8px 10px;
   margin-bottom: 12px;
 }
+.plugins-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 .plugins-search-results {
   display: flex;
   flex-direction: column;
@@ -1306,6 +1310,10 @@ body.col-resizing {
 }
 .plugins-search-hit:hover {
   background: var(--bg-inset);
+}
+.plugins-search-hit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .plugins-search-icon {
   border-radius: var(--radius-sm);
