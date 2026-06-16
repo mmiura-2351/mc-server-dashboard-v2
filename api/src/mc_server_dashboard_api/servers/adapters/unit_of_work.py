@@ -37,6 +37,9 @@ from mc_server_dashboard_api.servers.adapters.group_repository import (
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
+from mc_server_dashboard_api.servers.adapters.resource_pack_repository import (
+    SqlAlchemyResourcePackRepository,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     ServerNameAlreadyExistsError,
@@ -86,6 +89,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.backups = SqlAlchemyBackupRepository(self._session)
         self.groups = SqlAlchemyGroupRepository(self._session)
         self.game_sessions = SqlAlchemyGameSessionRepository(self._session)
+        self.resource_packs = SqlAlchemyResourcePackRepository(self._session)
         return self
 
     async def __aexit__(

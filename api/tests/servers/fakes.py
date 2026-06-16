@@ -63,6 +63,14 @@ from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
 )
+from mc_server_dashboard_api.servers.domain.resource_pack import (
+    ResourcePack,
+    ResourcePackAssignment,
+    ResourcePackId,
+)
+from mc_server_dashboard_api.servers.domain.resource_pack_repository import (
+    ResourcePackRepository,
+)
 from mc_server_dashboard_api.servers.domain.store_generation import (
     StoreGenerationReader,
 )
@@ -638,6 +646,43 @@ class FakeGroupRepository(GroupRepository):
         ]
 
 
+class FakeResourcePackRepository(ResourcePackRepository):
+    def __init__(self) -> None:
+        self.packs: dict[ResourcePackId, ResourcePack] = {}
+        self.assignments: dict[ServerId, ResourcePackAssignment] = {}
+
+    async def add(self, pack: ResourcePack) -> None:
+        self.packs[pack.id] = pack
+
+    async def get_by_id(self, pack_id: ResourcePackId) -> ResourcePack | None:
+        return self.packs.get(pack_id)
+
+    async def list_all(self) -> list[ResourcePack]:
+        return sorted(
+            self.packs.values(),
+            key=lambda p: (p.display_name, str(p.id.value)),
+        )
+
+    async def delete(self, pack_id: ResourcePackId) -> None:
+        self.packs.pop(pack_id, None)
+
+    async def add_assignment(self, assignment: ResourcePackAssignment) -> None:
+        self.assignments[assignment.server_id] = assignment
+
+    async def get_assignment_by_server(
+        self, server_id: ServerId
+    ) -> ResourcePackAssignment | None:
+        return self.assignments.get(server_id)
+
+    async def delete_assignment(self, server_id: ServerId) -> None:
+        self.assignments.pop(server_id, None)
+
+    async def list_assignments_for_pack(
+        self, pack_id: ResourcePackId
+    ) -> list[ResourcePackAssignment]:
+        return [a for a in self.assignments.values() if a.resource_pack_id == pack_id]
+
+
 class FakeUnitOfWork(UnitOfWork):
     # Narrow the Port-declared attribute types to the concrete fakes so tests can
     # reach their inspection helpers without casts.
@@ -646,6 +691,7 @@ class FakeUnitOfWork(UnitOfWork):
     backups: FakeBackupRepository
     groups: FakeGroupRepository
     game_sessions: FakeGameSessionRepository
+    resource_packs: FakeResourcePackRepository
 
     def __init__(
         self,
@@ -654,12 +700,14 @@ class FakeUnitOfWork(UnitOfWork):
         backups: FakeBackupRepository | None = None,
         groups: FakeGroupRepository | None = None,
         game_sessions: FakeGameSessionRepository | None = None,
+        resource_packs: FakeResourcePackRepository | None = None,
     ) -> None:
         self.servers = servers or FakeServerRepository()
         self.resource_grants = resource_grants or FakeResourceGrantSweeper()
         self.backups = backups or FakeBackupRepository()
         self.groups = groups or FakeGroupRepository()
         self.game_sessions = game_sessions or FakeGameSessionRepository()
+        self.resource_packs = resource_packs or FakeResourcePackRepository()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":
