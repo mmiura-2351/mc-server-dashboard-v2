@@ -310,8 +310,18 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - History drawer per file: version list → rollback with confirm.
 - Edits against a running server show "live working set — may need restart"
   notice (Section 6.9 semantics). Creating a new file works while running too
-  (create-through to the live working set); a `422 invalid_path` means the path
-  itself is malformed, not that the file is new.
+  (create-through to the live working set).
+- File-API failure reasons (see `CONTROL_PLANE.md` Section 7.2 for the
+  authoritative catalog). The client switches on the `reason` field; the set is
+  additive — handle unknown reasons gracefully.
+
+  | HTTP | `reason` | Meaning |
+  |---|---|---|
+  | 422 | `invalid_path` | Path is malformed (absolute, `..`, traversal-unsafe) or an older Worker sent an unrefined denial. |
+  | 422 | `is_a_directory` | Read or edit targeted a directory. |
+  | 422 | `not_a_directory` | List targeted a regular file. |
+  | 422 | `symlink_refused` | Path contains or resolves to a symlink (escape-vector defence). |
+  | 413 | `file_too_large` | Read result or edit payload exceeds the file size cap. |
 
 ### 6.7 Server detail — Backups
 - Stats header (count, total size, newest/oldest).
