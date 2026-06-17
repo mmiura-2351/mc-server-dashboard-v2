@@ -216,7 +216,7 @@ func TestReadLoginStartOverlongName(t *testing.T) {
 func TestVarIntRoundTrip(t *testing.T) {
 	for _, v := range []int32{0, 1, 127, 128, 255, 25565, 2147483647, -1} {
 		enc := appendVarInt(nil, v)
-		got, n, err := readVarInt(bytes.NewReader(enc))
+		got, n, raw, err := readVarInt(bytes.NewReader(enc))
 		if err != nil {
 			t.Fatalf("readVarInt(%d): %v", v, err)
 		}
@@ -226,11 +226,35 @@ func TestVarIntRoundTrip(t *testing.T) {
 		if n != len(enc) {
 			t.Errorf("consumed %d bytes, encoded %d", n, len(enc))
 		}
+		if !bytes.Equal(raw, enc) {
+			t.Errorf("raw bytes %x != encoded %x", raw, enc)
+		}
+	}
+}
+
+func TestVarIntFiveByteMax(t *testing.T) {
+	// -1 encodes to the maximum 5 bytes: ff ff ff ff 0f.
+	enc := appendVarInt(nil, -1)
+	if len(enc) != 5 {
+		t.Fatalf("expected 5-byte encoding for -1, got %d bytes", len(enc))
+	}
+	got, n, raw, err := readVarInt(bytes.NewReader(enc))
+	if err != nil {
+		t.Fatalf("readVarInt(-1): %v", err)
+	}
+	if got != -1 {
+		t.Errorf("value = %d, want -1", got)
+	}
+	if n != 5 {
+		t.Errorf("consumed %d bytes, want 5", n)
+	}
+	if !bytes.Equal(raw, enc) {
+		t.Errorf("raw bytes %x != encoded %x", raw, enc)
 	}
 }
 
 func TestVarIntTooLong(t *testing.T) {
-	if _, _, err := readVarInt(bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff, 0xff})); err != ErrVarIntTooLong {
+	if _, _, _, err := readVarInt(bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff, 0xff})); err != ErrVarIntTooLong {
 		t.Errorf("expected ErrVarIntTooLong, got %v", err)
 	}
 }
