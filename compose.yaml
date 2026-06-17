@@ -144,7 +144,7 @@ services:
       # The HTTP data-plane base URL advertised to workers for hydrate/snapshot
       # transfers. On the compose network the worker reaches the api by service
       # name.
-      MCD_API_SERVER__PUBLIC_BASE_URL: http://api:8000
+      MCD_API_SERVER__PUBLIC_BASE_URL: ${MCD_API_SERVER__PUBLIC_BASE_URL:-http://api:8000}
       # Storage backend (issue #702): the shipped default is `object` on the
       # seaweedfs service. Set MCD_API_STORAGE__BACKEND=fs in .env to opt back to
       # the local-volume fs backend (the fs root + volume below stay wired so the
