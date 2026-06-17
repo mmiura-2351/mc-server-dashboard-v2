@@ -30,6 +30,7 @@ export const ja: Record<TranslationKey, string> = {
   "nav.adminWorkers": "Worker",
   "nav.adminVersions": "バージョンとJAR",
   "nav.adminAudit": "全体監査ログ",
+  "nav.sharedResources": "共有リソース",
 
   // Placeholder pages (Phase 1: routing skeleton only)
   "page.login": "サインイン",

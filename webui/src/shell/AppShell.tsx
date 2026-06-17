@@ -161,6 +161,7 @@ export function AppShell() {
           )}
         </nav>
         <nav className="nav-group">
+          <div className="nav-label">{t("nav.sharedResources")}</div>
           <NavItem
             to="/resource-packs"
             icon="📦"
