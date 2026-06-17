@@ -82,7 +82,7 @@ const ASSIGNMENT = {
   assigned_by: "user-1",
   require_resource_pack: false,
   resource_pack: PACK,
-  resource_pack_prompt: null,
+  resource_pack_prompt: null as string | null,
 };
 
 // Route api.get by path: server detail, resource-pack assignment, resource-packs
