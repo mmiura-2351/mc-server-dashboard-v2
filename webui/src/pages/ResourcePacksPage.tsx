@@ -19,6 +19,7 @@ import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { formatDateTime, humanizeBytes, shortId } from "../format.ts";
 import { t } from "../i18n/index.ts";
+import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 
 type ResourcePackResponse = components["schemas"]["ResourcePackResponse"];
 
@@ -27,6 +28,7 @@ const PACKS_KEY = ["resource-packs"] as const;
 export function ResourcePacksPage() {
   const { showToast } = useToast();
   const queryClient = useQueryClient();
+  const onForbidden = useOnForbidden();
   const currentUser = useCurrentUser();
   const isAdmin = currentUser.data?.is_platform_admin === true;
   const userId = currentUser.data?.id;
@@ -57,6 +59,7 @@ export function ResourcePacksPage() {
       refresh();
     },
     onError: (error) => {
+      if (onForbidden(error)) return;
       if (
         error instanceof ApiError &&
         error.reason === "resource_pack_in_use"
@@ -76,7 +79,8 @@ export function ResourcePacksPage() {
         }),
         pack.filename,
       ),
-    onError: () => {
+    onError: (error) => {
+      if (onForbidden(error)) return;
       showToast(t("resourcePacks.error.downloadFailed"), "error");
     },
   });
@@ -204,6 +208,7 @@ function UploadDialog({
   onClose: () => void;
 }) {
   const { showToast } = useToast();
+  const onForbidden = useOnForbidden();
   const [displayName, setDisplayName] = useState("");
   const [file, setFile] = useState<File | null>(null);
 
@@ -215,7 +220,8 @@ function UploadDialog({
       return api.postForm("/api/resource-packs", form);
     },
     onSuccess,
-    onError: () => {
+    onError: (error) => {
+      if (onForbidden(error)) return;
       showToast(t("resourcePacks.error.uploadFailed"), "error");
     },
   });
