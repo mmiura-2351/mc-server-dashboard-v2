@@ -150,7 +150,7 @@ function Loaded({ workers }: { workers: WorkerResponse[] }) {
                     {t("admin.workers.cpuCores")} ·{" "}
                     {humanizeBytes(w.capabilities.resources.memory_bytes)}
                   </td>
-                  <td>{heartbeatAge(w.last_heartbeat_at)}</td>
+                  <td>{heartbeatAge(w.last_heartbeat_at, t)}</td>
                   <td className="row-actions">
                     <button
                       type="button"

@@ -142,7 +142,7 @@ function Loaded({ workers, backups, jarPool }: LoadedProps) {
                   <td className="num">
                     {w.assigned_count} / {w.capabilities.max_servers}
                   </td>
-                  <td>{heartbeatAge(w.last_heartbeat_at)}</td>
+                  <td>{heartbeatAge(w.last_heartbeat_at, t)}</td>
                 </tr>
               ))}
             </tbody>
