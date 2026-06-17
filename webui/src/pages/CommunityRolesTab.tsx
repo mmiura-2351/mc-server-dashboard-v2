@@ -4,7 +4,7 @@ import { ApiError, api } from "../api/client.ts";
 import { membersKeys, rolesKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -150,13 +150,11 @@ export function CommunityRolesTab({
         />
       )}
 
-      <ConfirmDialog
+      <SimpleConfirmDialog
         open={deleting !== null}
         title={t("communitySettings.roles.deleteDialogTitle")}
         body={t("communitySettings.roles.deleteDialogBody")}
-        confirmPhrase={deleting?.name ?? ""}
         confirmLabel={t("communitySettings.roles.deleteConfirm")}
-        promptLabel={t("communitySettings.roles.deletePrompt")}
         onConfirm={() => {
           if (deleting !== null) {
             remove.mutate(deleting);

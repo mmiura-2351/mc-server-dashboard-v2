@@ -7,7 +7,7 @@ import {
 import { useState } from "react";
 import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
@@ -238,13 +238,11 @@ function JarPool() {
       </div>
       <div className="hint">{t("admin.versions.gcHint")}</div>
 
-      <ConfirmDialog
+      <SimpleConfirmDialog
         open={confirmOpen}
         title={t("admin.versions.gcDialog.title")}
         body={t("admin.versions.gcDialog.body")}
-        confirmPhrase="GC"
         confirmLabel={t("admin.versions.gcDialog.confirm")}
-        promptLabel={t("admin.versions.gcDialog.promptLabel")}
         onConfirm={() => {
           setConfirmOpen(false);
           gc.mutate();

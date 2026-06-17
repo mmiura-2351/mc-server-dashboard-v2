@@ -4,7 +4,7 @@ import { ApiError, api } from "../api/client.ts";
 import { membersKeys, rolesKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
@@ -144,13 +144,11 @@ export function CommunityMembersTab({
         />
       )}
 
-      <ConfirmDialog
+      <SimpleConfirmDialog
         open={removing !== null}
         title={t("communitySettings.members.removeDialogTitle")}
         body={t("communitySettings.members.removeDialogBody")}
-        confirmPhrase={removing?.username ?? ""}
         confirmLabel={t("communitySettings.members.removeConfirm")}
-        promptLabel={t("communitySettings.members.removePrompt")}
         onConfirm={() => {
           if (removing !== null) {
             remove.mutate(removing);

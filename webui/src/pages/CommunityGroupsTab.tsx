@@ -5,7 +5,7 @@ import { api } from "../api/client.ts";
 import { attachmentsKeys, groupsKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
@@ -203,13 +203,11 @@ export function CommunityGroupsTab({
         />
       )}
 
-      <ConfirmDialog
+      <SimpleConfirmDialog
         open={deleting !== null}
         title={t("communitySettings.groups.deleteDialogTitle")}
         body={t("communitySettings.groups.deleteDialogBody")}
-        confirmPhrase={deleting?.name ?? ""}
         confirmLabel={t("communitySettings.groups.deleteConfirm")}
-        promptLabel={t("communitySettings.groups.deletePrompt")}
         onConfirm={() => {
           if (deleting !== null) {
             remove.mutate(deleting);

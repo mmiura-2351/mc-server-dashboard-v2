@@ -32,7 +32,7 @@ import { ApiError, api } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -495,13 +495,11 @@ function Listing({
           onError={onError}
         />
       )}
-      <ConfirmDialog
+      <SimpleConfirmDialog
         open={deleting !== null}
         title={t("files.delete.dialogTitle")}
         body={t("files.delete.dialogBody")}
-        confirmPhrase={deleting?.name ?? ""}
         confirmLabel={t("files.delete.confirm")}
-        promptLabel={t("files.delete.prompt")}
         onConfirm={() => deleting !== null && remove.mutate(deleting)}
         onClose={() => setDeleting(null)}
       />
