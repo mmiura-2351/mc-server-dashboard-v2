@@ -1038,6 +1038,10 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.groups.playersEmpty":
     "このグループにはまだプレイヤーがいません。",
   "communitySettings.groups.removePlayer": "削除",
+  "communitySettings.groups.removePlayerDialogTitle": "プレイヤーを削除",
+  "communitySettings.groups.removePlayerDialogBody":
+    "このプレイヤーをグループから削除してもよろしいですか？",
+  "communitySettings.groups.removePlayerConfirm": "プレイヤーを削除",
   "communitySettings.groups.playerRemoved": "プレイヤーを削除しました。",
   "communitySettings.groups.addPlayer": "プレイヤーを追加",
   "communitySettings.groups.uuidLabel": "UUID",
@@ -1359,4 +1363,9 @@ export const ja: Record<TranslationKey, string> = {
   "permissions.denied": "この操作を行う権限がありません。",
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "不足している権限: ",
+
+  // Shared format strings — heartbeat age (#1214)
+  "format.secondsAgo": "{value}秒前",
+  "format.minutesAgo": "{value}分前",
+  "format.hoursAgo": "{value}時間前",
 } as const;

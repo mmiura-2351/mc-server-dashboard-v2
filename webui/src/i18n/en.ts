@@ -1028,6 +1028,10 @@ export const en = {
   "communitySettings.groups.playersHeading": "Players",
   "communitySettings.groups.playersEmpty": "No players in this group yet.",
   "communitySettings.groups.removePlayer": "Remove",
+  "communitySettings.groups.removePlayerDialogTitle": "Remove player",
+  "communitySettings.groups.removePlayerDialogBody":
+    "Are you sure you want to remove this player from the group?",
+  "communitySettings.groups.removePlayerConfirm": "Remove player",
   "communitySettings.groups.playerRemoved": "Player removed.",
   "communitySettings.groups.addPlayer": "Add player",
   "communitySettings.groups.uuidLabel": "UUID",
@@ -1348,4 +1352,9 @@ export const en = {
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "You lack: ",
+
+  // Shared format strings — heartbeat age (#1214)
+  "format.secondsAgo": "{value}s ago",
+  "format.minutesAgo": "{value}m ago",
+  "format.hoursAgo": "{value}h ago",
 } as const;
