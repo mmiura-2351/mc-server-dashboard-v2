@@ -7,11 +7,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { describe, expect, it } from "vitest";
-import {
-  useAuditFilterParams,
-  useOffsetParam,
-  useTabHash,
-} from "./urlState.ts";
+import { useFilterParams, useOffsetParam, useTabHash } from "./urlState.ts";
 
 const TABS = ["overview", "console", "settings"] as const;
 
@@ -61,7 +57,7 @@ function OffsetProbe() {
 const FILTER_KEYS = ["operation", "actor", "since", "until"] as const;
 
 function FilterProbe() {
-  const [filters, applyFilters] = useAuditFilterParams(FILTER_KEYS);
+  const [filters, applyFilters] = useFilterParams(FILTER_KEYS);
   const loc = useLocation();
   const navigate = useNavigate();
   return (
@@ -272,7 +268,7 @@ describe("useOffsetParam", () => {
   });
 });
 
-describe("useAuditFilterParams", () => {
+describe("useFilterParams", () => {
   it("defaults to empty filters with a clean (param-less) URL", () => {
     render(
       <MemoryRouter initialEntries={["/x"]}>
