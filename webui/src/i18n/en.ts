@@ -1026,6 +1026,10 @@ export const en = {
   "communitySettings.groups.playersHeading": "Players",
   "communitySettings.groups.playersEmpty": "No players in this group yet.",
   "communitySettings.groups.removePlayer": "Remove",
+  "communitySettings.groups.removePlayerDialogTitle": "Remove player",
+  "communitySettings.groups.removePlayerDialogBody":
+    "Are you sure you want to remove this player from the group?",
+  "communitySettings.groups.removePlayerConfirm": "Remove player",
   "communitySettings.groups.playerRemoved": "Player removed.",
   "communitySettings.groups.addPlayer": "Add player",
   "communitySettings.groups.uuidLabel": "UUID",
