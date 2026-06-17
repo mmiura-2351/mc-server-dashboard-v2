@@ -61,6 +61,7 @@ from mc_server_dashboard_api.servers.application.resource_packs import (
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
+    InvalidResourcePackError,
     PermissionDeniedError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
@@ -160,6 +161,8 @@ async def upload_resource_pack(
             content=content,
             uploaded_by=user.id.value,
         )
+    except InvalidResourcePackError as exc:
+        raise _unprocessable("invalid_resource_pack") from exc
     except FileTooLargeError as exc:
         raise _too_large() from exc
 
