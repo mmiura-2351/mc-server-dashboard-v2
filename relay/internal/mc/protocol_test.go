@@ -234,3 +234,44 @@ func TestVarIntTooLong(t *testing.T) {
 		t.Errorf("expected ErrVarIntTooLong, got %v", err)
 	}
 }
+
+func TestReadPacketPreservesOverlongVarInt(t *testing.T) {
+	// Build a handshake body with a canonical inner encoding.
+	var body []byte
+	body = appendVarInt(body, 0x00) // packet id
+	body = appendVarInt(body, 765)  // protocol version
+	body = appendString(body, "mc.example.com")
+	body = append(body, 0x63, 0xDD) // port 25565
+	body = appendVarInt(body, 2)    // next state: login
+
+	bodyLen := int32(len(body))
+
+	// Canonical encoding of bodyLen for reference.
+	canonical := appendVarInt(nil, bodyLen)
+
+	// 2-byte overlong: encode bodyLen as (bodyLen & 0x7F | 0x80), (bodyLen >> 7).
+	// This is valid but non-canonical when bodyLen < 128.
+	// For our body length (which will be > 20), the canonical is already 1 byte,
+	// so a 2-byte overlong uses the continuation bit unnecessarily.
+	overlong := []byte{byte(bodyLen&0x7F) | 0x80, byte(bodyLen >> 7)}
+
+	// Sanity: the overlong encoding must differ from canonical.
+	if bytes.Equal(overlong, canonical) {
+		t.Fatal("test setup: overlong encoding equals canonical")
+	}
+
+	// Wire packet with the overlong length prefix.
+	wire := append(overlong, body...)
+
+	r := bufio.NewReader(bytes.NewReader(wire))
+	hs, err := ReadHandshake(r)
+	if err != nil {
+		t.Fatalf("ReadHandshake with overlong VarInt: %v", err)
+	}
+	if !bytes.Equal(hs.Raw, wire) {
+		t.Errorf("Raw not preserved:\n got %x\nwant %x", hs.Raw, wire)
+	}
+	if hs.ServerAddress != "mc.example.com" {
+		t.Errorf("address = %q, want mc.example.com", hs.ServerAddress)
+	}
+}

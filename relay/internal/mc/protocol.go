@@ -278,6 +278,10 @@ func readPacket(r *bufio.Reader) (raw, body []byte, err error) {
 // MaxStatusResponseBytes for trusted tunnel-side reads that may carry a
 // server icon.
 func readPacketWithLimit(r *bufio.Reader, maxLen int) (raw, body []byte, err error) {
+	// Peek at the upcoming bytes so we can capture the original VarInt
+	// encoding verbatim (it may be non-canonical / overlong).
+	peeked, _ := r.Peek(maxVarIntBytes)
+
 	length, lenBytes, err := readVarInt(r)
 	if err != nil {
 		return nil, nil, err
@@ -290,7 +294,7 @@ func readPacketWithLimit(r *bufio.Reader, maxLen int) (raw, body []byte, err err
 		return nil, nil, err
 	}
 	raw = make([]byte, 0, lenBytes+int(length))
-	raw = appendVarInt(raw, length)
+	raw = append(raw, peeked[:lenBytes]...)
 	raw = append(raw, body...)
 	return raw, body, nil
 }
