@@ -533,6 +533,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Readiness flag for /readyz (issue #282): the control-plane gRPC server
         # has not started yet; flipped True once start() returns below.
         app.state.grpc_started = False
+        # Boot-time reachability probe for object storage (issue #945): a
+        # misconfigured or unreachable S3 endpoint must fail fast with a clear
+        # diagnostic rather than degrading silently at the first runtime op.
+        if isinstance(storage, ObjectStorage):
+            obj = settings.storage.object
+            assert obj.endpoint is not None
+            assert obj.bucket is not None
+            await storage.check_reachable(
+                endpoint=obj.endpoint, bucket=obj.bucket
+            )
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
         # note): reclaim any staging dir/prefix or superseded snapshot left by a
         # crash before this process serves. Idempotent and keyed off the live

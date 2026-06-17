@@ -791,3 +791,34 @@ async def test_fake_abort_multipart_upload_is_idempotent() -> None:
         await client.abort_multipart_upload("jars/x.jar", "upload-1")
         await client.abort_multipart_upload("jars/x.jar", "upload-1")
     assert "upload-1" not in store.multipart_uploads
+
+
+async def test_check_reachable_raises_on_unreachable_backend() -> None:
+    """Boot-time reachability probe (issue #945): an unreachable object store
+    must surface a RuntimeError naming the endpoint and bucket, so a
+    misconfigured deployment fails fast instead of degrading silently."""
+
+    class _UnreachableClient:
+        async def list_objects(self, prefix: str) -> list:
+            raise ConnectionError("Connection refused")
+
+    @asynccontextmanager
+    async def _unreachable_factory() -> AsyncIterator[S3Client]:
+        yield _UnreachableClient()  # type: ignore[arg-type]
+
+    storage = ObjectStorage(_unreachable_factory)
+    with pytest.raises(RuntimeError, match="Object storage unreachable") as exc_info:
+        await storage.check_reachable(
+            endpoint="http://bad-host:9333", bucket="test-bucket"
+        )
+    msg = str(exc_info.value)
+    assert "http://bad-host:9333" in msg
+    assert "test-bucket" in msg
+    assert "Connection refused" in msg
+
+
+async def test_check_reachable_succeeds_for_healthy_backend() -> None:
+    """A reachable object store does not raise (issue #945)."""
+
+    store, storage = _store_and_storage()
+    await storage.check_reachable(endpoint="http://localhost:8333", bucket="mcsdata")
