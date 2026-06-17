@@ -5,8 +5,8 @@ import { membersKeys } from "../api/communityQueryKeys.ts";
 import { labelQueryFn } from "../api/labelQuery.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import {

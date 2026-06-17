@@ -32,13 +32,7 @@ export function SimpleConfirmDialog({
           <button type="button" className="btn ghost" onClick={onClose}>
             {t("common.cancel")}
           </button>
-          <button
-            type="button"
-            className="btn danger"
-            onClick={() => {
-              onConfirm();
-            }}
-          >
+          <button type="button" className="btn danger" onClick={onConfirm}>
             {confirmLabel}
           </button>
         </>

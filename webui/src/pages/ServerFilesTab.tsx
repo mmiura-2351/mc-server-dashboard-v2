@@ -32,8 +32,8 @@ import { ApiError, api } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
@@ -402,6 +402,7 @@ function Listing({
       ),
     onSuccess: () => {
       showToast(t("files.deleted"), "success");
+      setDeleting(null);
       onChanged();
     },
     onError: (error) => {
