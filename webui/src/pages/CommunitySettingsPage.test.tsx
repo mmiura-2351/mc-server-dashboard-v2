@@ -176,4 +176,48 @@ describe("CommunitySettingsPage URL-driven tabs (#514)", () => {
       expect(activeTab()).toBe(t("communitySettings.tab.members")),
     );
   });
+
+  it("tab buttons carry aria-controls and the panel carries aria-labelledby (#1216)", async () => {
+    renderPage();
+    await screen.findAllByText("Sakura");
+
+    const membersTab = screen.getByRole("tab", {
+      name: t("communitySettings.tab.members"),
+    });
+    expect(membersTab).toHaveAttribute("aria-controls", "cs-panel-members");
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toHaveAttribute("id", "cs-panel-members");
+    expect(panel).toHaveAttribute("aria-labelledby", "cs-tab-members");
+  });
+
+  it("ArrowRight moves focus to the next tab (#1216)", async () => {
+    renderPage();
+    await screen.findAllByText("Sakura");
+
+    const membersTab = screen.getByRole("tab", {
+      name: t("communitySettings.tab.members"),
+    });
+    membersTab.focus();
+    fireEvent.keyDown(membersTab, { key: "ArrowRight" });
+
+    const rolesTab = screen.getByRole("tab", {
+      name: t("communitySettings.tab.roles"),
+    });
+    expect(rolesTab).toHaveFocus();
+    expect(rolesTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("inactive tabs have tabIndex -1 (roving tabindex, #1216)", async () => {
+    renderPage();
+    await screen.findAllByText("Sakura");
+
+    const membersTab = screen.getByRole("tab", {
+      name: t("communitySettings.tab.members"),
+    });
+    const rolesTab = screen.getByRole("tab", {
+      name: t("communitySettings.tab.roles"),
+    });
+    expect(membersTab).toHaveAttribute("tabindex", "0");
+    expect(rolesTab).toHaveAttribute("tabindex", "-1");
+  });
 });

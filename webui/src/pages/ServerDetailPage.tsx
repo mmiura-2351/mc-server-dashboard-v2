@@ -32,7 +32,7 @@ import {
   normalizeState,
   statePill,
 } from "./serverState.ts";
-import { useTabHash } from "./urlState.ts";
+import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
 import {
   type LogEntry,
@@ -118,46 +118,90 @@ function Loaded({
         {TABS.map((name) => (
           <button
             key={name}
+            id={tabId("sd", name)}
             type="button"
             role="tab"
             aria-selected={tab === name}
+            aria-controls={panelId("sd", name)}
+            tabIndex={tab === name ? 0 : -1}
             className={`tab${tab === name ? " active" : ""}`}
             onClick={() => setTab(name)}
+            onKeyDown={(e) => handleTabKeyDown(e, TABS, tab, setTab, "sd")}
           >
             {t(TAB_LABEL[name])}
           </button>
         ))}
       </div>
       {tab === "overview" && (
-        <Overview
-          server={server}
-          events={events}
-          onOpenConsole={() => setTab("console")}
-        />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "overview")}
+          aria-labelledby={tabId("sd", "overview")}
+        >
+          <Overview
+            server={server}
+            events={events}
+            onOpenConsole={() => setTab("console")}
+          />
+        </div>
       )}
       {tab === "console" && (
-        <Console
-          server={server}
-          communityId={communityId}
-          can={can}
-          events={events}
-        />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "console")}
+          aria-labelledby={tabId("sd", "console")}
+        >
+          <Console
+            server={server}
+            communityId={communityId}
+            can={can}
+            events={events}
+          />
+        </div>
       )}
       {tab === "files" && (
-        <ServerFilesTab server={server} communityId={communityId} can={can} />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "files")}
+          aria-labelledby={tabId("sd", "files")}
+        >
+          <ServerFilesTab server={server} communityId={communityId} can={can} />
+        </div>
       )}
       {tab === "backups" && (
-        <ServerBackupsTab server={server} communityId={communityId} can={can} />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "backups")}
+          aria-labelledby={tabId("sd", "backups")}
+        >
+          <ServerBackupsTab
+            server={server}
+            communityId={communityId}
+            can={can}
+          />
+        </div>
       )}
       {tab === "players" && (
-        <ServerPlayersTab
-          communityId={communityId}
-          serverId={server.id}
-          can={can}
-        />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "players")}
+          aria-labelledby={tabId("sd", "players")}
+        >
+          <ServerPlayersTab
+            communityId={communityId}
+            serverId={server.id}
+            can={can}
+          />
+        </div>
       )}
       {tab === "settings" && (
-        <Settings server={server} communityId={communityId} can={can} />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "settings")}
+          aria-labelledby={tabId("sd", "settings")}
+        >
+          <Settings server={server} communityId={communityId} can={can} />
+        </div>
       )}
     </>
   );

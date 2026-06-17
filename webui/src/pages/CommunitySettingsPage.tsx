@@ -11,7 +11,7 @@ import { CommunityGrantsTab } from "./CommunityGrantsTab.tsx";
 import { CommunityGroupsTab } from "./CommunityGroupsTab.tsx";
 import { CommunityMembersTab } from "./CommunityMembersTab.tsx";
 import { CommunityRolesTab } from "./CommunityRolesTab.tsx";
-import { useTabHash } from "./urlState.ts";
+import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 
 // Tab order mirrors the mockup (docs/ui/mockup/community-settings.html).
 const TABS = [
@@ -81,22 +81,32 @@ function Loaded({ communityId }: { communityId: string }) {
         {TABS.map((name) => (
           <button
             key={name}
+            id={tabId("cs", name)}
             type="button"
             role="tab"
             aria-selected={tab === name}
+            aria-controls={panelId("cs", name)}
+            tabIndex={tab === name ? 0 : -1}
             className={`tab${tab === name ? " active" : ""}`}
             onClick={() => setTab(name)}
+            onKeyDown={(e) => handleTabKeyDown(e, TABS, tab, setTab, "cs")}
           >
             {t(TAB_LABEL[name])}
           </button>
         ))}
       </div>
-      <TabContent
-        tab={tab}
-        communityId={communityId}
-        community={community}
-        can={can}
-      />
+      <div
+        role="tabpanel"
+        id={panelId("cs", tab)}
+        aria-labelledby={tabId("cs", tab)}
+      >
+        <TabContent
+          tab={tab}
+          communityId={communityId}
+          community={community}
+          can={can}
+        />
+      </div>
     </>
   );
 }
