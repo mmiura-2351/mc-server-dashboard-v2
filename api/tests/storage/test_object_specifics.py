@@ -28,7 +28,6 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     _POINTER,
     ObjectStorage,
     S3Client,
-    S3ClientFactory,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
@@ -40,7 +39,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     RelPath,
     ServerId,
 )
-from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
+from tests.storage.fake_s3 import FakeS3Store, close_tracking_factory, fake_s3_factory
 from tests.storage.helpers import (
     drain,
     healthy_region_bytes,
@@ -54,7 +53,7 @@ from tests.storage.helpers import (
 
 def _store_and_storage() -> tuple[FakeS3Store, ObjectStorage]:
     store = FakeS3Store()
-    return store, ObjectStorage(fake_s3_factory(store))
+    return store, ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
 
 
 def _server_prefix(community: CommunityId, server: ServerId) -> str:
@@ -74,61 +73,13 @@ async def _publish(
     await storage.commit_snapshot(handle, publisher=publisher)
 
 
-class _AfterCloseUseError(AssertionError):
-    """Raised when the adapter calls a client after its context manager exited."""
-
-
-class _CloseTrackingClient:
-    """Wrap an :class:`S3Client`, refusing every call made after close.
-
-    A factory hands one of these out per ``async with``; once the context exits,
-    any further method call on the (now dead) client raises — exactly the
-    use-after-close that, with the real aioboto3 client, leaks an aiohttp
-    ClientSession/connector on every snapshot publish (issue #948).
-    """
-
-    def __init__(self, inner: S3Client) -> None:
-        self._inner = inner
-        self._closed = False
-
-    def close(self) -> None:
-        self._closed = True
-
-    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
-        attr = getattr(self._inner, name)
-        if not callable(attr):
-            return attr
-
-        async def _guarded(*args: object, **kwargs: object) -> object:
-            if self._closed:
-                raise _AfterCloseUseError(
-                    f"client.{name} called after the client context closed"
-                )
-            return await attr(*args, **kwargs)
-
-        return _guarded
-
-
-def _close_tracking_factory(inner: S3ClientFactory) -> S3ClientFactory:
-    @asynccontextmanager
-    async def _factory() -> AsyncIterator[S3Client]:
-        async with inner() as real:
-            tracker = _CloseTrackingClient(real)
-            try:
-                yield tracker
-            finally:
-                tracker.close()
-
-    return _factory
-
-
 async def test_commit_does_not_use_the_client_after_its_context_closes() -> None:
     # Issue #948: the post-flip GC ran on a client whose context had already
     # exited, so with the real aioboto3 client it leaked one aiohttp
     # ClientSession + connector per publish. Refuse any client call made after the
     # client context closed; a publish must complete without one.
     store = FakeS3Store()
-    storage = ObjectStorage(_close_tracking_factory(fake_s3_factory(store)))
+    storage = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     community, server = new_scope()
 
     await _publish(
@@ -216,30 +167,30 @@ async def test_crash_before_pointer_flip_keeps_old_prefix_live(
     phase: PublishPhase,
 ) -> None:
     store = FakeS3Store()
-    seeded = ObjectStorage(fake_s3_factory(store))
+    seeded = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     community, server = new_scope()
     await _publish(seeded, community, server, {"f": b"OLD"})
 
-    crashed = ObjectStorage(fake_s3_factory(store), failure_seam=CrashAt(phase))
+    crashed = ObjectStorage(close_tracking_factory(fake_s3_factory(store)), failure_seam=CrashAt(phase))
     handle = await crashed.begin_snapshot(community, server)
     await crashed.write_snapshot(handle, tar_stream({"f": b"NEW"}))
     with pytest.raises(InjectedCrash):
         await crashed.commit_snapshot(handle)
 
     # Invariant: the pointer still resolves to the OLD complete snapshot.
-    reader = ObjectStorage(fake_s3_factory(store))
+    reader = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     blob = await drain(reader.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"OLD"}
 
 
 async def test_crash_after_pointer_flip_keeps_new_prefix_live() -> None:
     store = FakeS3Store()
-    seeded = ObjectStorage(fake_s3_factory(store))
+    seeded = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     community, server = new_scope()
     await _publish(seeded, community, server, {"f": b"OLD"})
 
     crashed = ObjectStorage(
-        fake_s3_factory(store), failure_seam=CrashAt(PublishPhase.AFTER_FLIP)
+        close_tracking_factory(fake_s3_factory(store)), failure_seam=CrashAt(PublishPhase.AFTER_FLIP)
     )
     handle = await crashed.begin_snapshot(community, server)
     await crashed.write_snapshot(handle, tar_stream({"f": b"NEW"}))
@@ -247,7 +198,7 @@ async def test_crash_after_pointer_flip_keeps_new_prefix_live() -> None:
         await crashed.commit_snapshot(handle)
 
     # The pointer PUT already happened, so the flip is the atomic point: NEW is live.
-    reader = ObjectStorage(fake_s3_factory(store))
+    reader = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     blob = await drain(reader.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"NEW"}
 
@@ -260,17 +211,17 @@ async def test_sweep_reclaims_orphan_prefixes_idempotently(
     phase: PublishPhase,
 ) -> None:
     store = FakeS3Store()
-    seeded = ObjectStorage(fake_s3_factory(store))
+    seeded = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     community, server = new_scope()
     await _publish(seeded, community, server, {"f": b"OLD"})
 
-    crashed = ObjectStorage(fake_s3_factory(store), failure_seam=CrashAt(phase))
+    crashed = ObjectStorage(close_tracking_factory(fake_s3_factory(store)), failure_seam=CrashAt(phase))
     handle = await crashed.begin_snapshot(community, server)
     await crashed.write_snapshot(handle, tar_stream({"f": b"NEW"}))
     with pytest.raises(InjectedCrash):
         await crashed.commit_snapshot(handle)
 
-    recovered = ObjectStorage(fake_s3_factory(store))
+    recovered = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     pointer_key = _server_prefix(community, server) + _POINTER
     generation_key = _server_prefix(community, server) + _GENERATION
     live_prefix = json.loads(store.objects[pointer_key])["snapshot"]
@@ -351,7 +302,7 @@ async def test_sweep_reread_skips_prefix_made_live_after_pointer_read() -> None:
 
     store = FakeS3Store()
     community, server = new_scope()
-    seeded = ObjectStorage(fake_s3_factory(store))
+    seeded = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     await _publish(seeded, community, server, {"f": b"OLD"})
 
     pointer_key = _server_prefix(community, server) + _POINTER
@@ -398,7 +349,7 @@ async def test_sweep_reread_skips_prefix_made_live_after_pointer_read() -> None:
 
     # The now-superseded OLD prefix (kept this pass because it read live before the
     # flip) is reclaimed by a later sweep with no concurrent publisher.
-    await ObjectStorage(fake_s3_factory(store)).sweep()
+    await ObjectStorage(close_tracking_factory(fake_s3_factory(store))).sweep()
     assert not any(k.startswith(old_prefix) for k in store.objects)
 
 
@@ -461,7 +412,7 @@ async def test_sweep_reclaims_crash_leftover_staging_with_no_handle() -> None:
     transfer (issue #160)."""
 
     store = FakeS3Store()
-    seeded = ObjectStorage(fake_s3_factory(store))
+    seeded = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     community, server = new_scope()
     await _publish(seeded, community, server, {"f": b"LIVE"})
 
@@ -470,7 +421,7 @@ async def test_sweep_reclaims_crash_leftover_staging_with_no_handle() -> None:
     incoming = _server_prefix(community, server) + "incoming/orphan-transfer/"
     store.objects[incoming + "f"] = b"PARTIAL"
 
-    recovered = ObjectStorage(fake_s3_factory(store))
+    recovered = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     await recovered.sweep()
     assert not any(
         k.startswith(_server_prefix(community, server) + "incoming/")
@@ -755,7 +706,7 @@ async def test_sweep_degrades_to_warn_when_list_multipart_unsupported(
     import logging
 
     store = FakeS3Store()
-    seeded = ObjectStorage(fake_s3_factory(store))
+    seeded = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     community, server = new_scope()
     await _publish(seeded, community, server, {"f": b"LIVE"})
 
@@ -765,7 +716,7 @@ async def test_sweep_degrades_to_warn_when_list_multipart_unsupported(
     store.objects[incoming] = b"PARTIAL"
     store.list_multipart_uploads_unsupported = True
 
-    storage = ObjectStorage(fake_s3_factory(store))
+    storage = ObjectStorage(close_tracking_factory(fake_s3_factory(store)))
     with caplog.at_level(logging.WARNING):
         await storage.sweep()
 

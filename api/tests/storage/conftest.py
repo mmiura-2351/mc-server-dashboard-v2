@@ -31,7 +31,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     ServerId,
 )
-from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
+from tests.storage.fake_s3 import FakeS3Store, close_tracking_factory, fake_s3_factory
 from tests.storage.helpers import tar_stream
 
 # The backends the Port contract is parametrized over (#105). ``remote-fs`` reuses
@@ -96,7 +96,7 @@ def build_harness(
         return StorageHarness(storage=storage, _sweep=_sweep)
 
     obj = ObjectStorage(
-        fake_s3_factory(FakeS3Store()),
+        close_tracking_factory(fake_s3_factory(FakeS3Store())),
         version_retention=version_retention,
         max_restore_bytes=cap,
     )
