@@ -673,6 +673,15 @@ async def _edit_delete_dir(
     return 1
 
 
+async def _edit_rename_dir(
+    harness: StorageHarness, community: CommunityId, server: ServerId
+) -> int:
+    await harness.storage.rename_dir(
+        community, server, RelPath("d"), RelPath("d_renamed")
+    )
+    return 1
+
+
 async def _edit_make_dir(
     harness: StorageHarness, community: CommunityId, server: ServerId
 ) -> int:
@@ -701,10 +710,11 @@ async def _edit_rollback_file(
         _edit_write_file,
         _edit_delete_file,
         _edit_delete_dir,
+        _edit_rename_dir,
         _edit_make_dir,
         _edit_rollback_file,
     ],
-    ids=["write_file", "delete_file", "delete_dir", "make_dir", "rollback_file"],
+    ids=["write_file", "delete_file", "delete_dir", "rename_dir", "make_dir", "rollback_file"],
 )
 async def test_authoritative_edit_bumps_generation_with_api_sentinel(
     harness: StorageHarness,
@@ -1455,6 +1465,57 @@ async def test_make_dir_then_write_file_under_it(harness: StorageHarness) -> Non
 
     entries = await harness.storage.list_dir(community, server, RelPath("plugins"))
     assert {e.name for e in entries} == {"p.jar"}
+
+
+async def test_rename_dir_moves_subtree(harness: StorageHarness) -> None:
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {
+            "world/level.dat": b"a",
+            "world/region/r.dat": b"b",
+            "server.properties": b"keep",
+        },
+    )
+
+    await harness.storage.rename_dir(
+        community, server, RelPath("world"), RelPath("new_world")
+    )
+
+    # The new directory has the files.
+    entries = await harness.storage.list_dir(community, server, RelPath("new_world"))
+    names = {e.name for e in entries}
+    assert "level.dat" in names
+    assert (
+        await harness.storage.read_file(
+            community, server, RelPath("new_world/level.dat")
+        )
+        == b"a"
+    )
+    assert (
+        await harness.storage.read_file(
+            community, server, RelPath("new_world/region/r.dat")
+        )
+        == b"b"
+    )
+    # The old directory is gone.
+    with pytest.raises(NotFoundError):
+        await harness.storage.list_dir(community, server, RelPath("world"))
+    # A sibling outside the renamed subtree survives.
+    assert (
+        await harness.storage.read_file(community, server, RelPath("server.properties"))
+        == b"keep"
+    )
+
+
+async def test_rename_missing_dir_is_not_found(harness: StorageHarness) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"x"})
+    with pytest.raises(NotFoundError):
+        await harness.storage.rename_dir(
+            community, server, RelPath("nope"), RelPath("dest")
+        )
 
 
 async def test_sweep_never_reclaims_live_snapshot(harness: StorageHarness) -> None:

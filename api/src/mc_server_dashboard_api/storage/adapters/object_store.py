@@ -1475,6 +1475,49 @@ class ObjectStorage(Storage):
                     API_EDIT_PUBLISHER,
                 )
 
+    async def rename_dir(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: RelPath,
+        to_path: RelPath,
+    ) -> None:
+        from_sub = self._safe_subkey(from_path)
+        to_sub = self._safe_subkey(to_path)
+        from_suffix = from_sub + "/" if from_sub else ""
+        to_suffix = to_sub + "/" if to_sub else ""
+        async with self._client_factory() as client:
+            # No per-file version capture (Port contract): whole-subtree recovery
+            # is the backups' job (Section 3.3). Copy every object to the new
+            # prefix, delete the originals, then re-write the pointer.
+            # Read the live pointer INSIDE the server lock (issue #899/#920).
+            async with self._server_lock(community_id, server_id):
+                snapshot_prefix = await self._live_snapshot_prefix(
+                    client, community_id, server_id
+                )
+                objs = await client.list_objects(snapshot_prefix + from_suffix)
+                if not objs:
+                    raise NotFoundError(
+                        f"directory not found: {from_path.value}"
+                    )
+                for obj in objs:
+                    rest = obj.key[len(snapshot_prefix + from_suffix) :]
+                    await client.copy_object(
+                        obj.key, snapshot_prefix + to_suffix + rest
+                    )
+                for obj in objs:
+                    await client.delete_object(obj.key)
+                await client.put_object(
+                    self._pointer_key(community_id, server_id),
+                    json.dumps({"snapshot": snapshot_prefix}).encode(),
+                )
+                # Authoritative edit -> bump the generation (issue #889).
+                await self._bump_generation(
+                    client,
+                    self._server_prefix(community_id, server_id),
+                    API_EDIT_PUBLISHER,
+                )
+
     async def make_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:

@@ -241,6 +241,16 @@ class FakeFileStore(FileStore):
     ) -> None:
         return None
 
+    async def rename_dir(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: str,
+        to_path: str,
+    ) -> None:
+        return None
+
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
