@@ -67,6 +67,7 @@ describe("heartbeatAge", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    setLanguage("en");
   });
 
   it("renders seconds below a minute", () => {
@@ -90,6 +91,5 @@ describe("heartbeatAge", () => {
     expect(heartbeatAge("2025-12-31T23:59:58Z", t)).toBe("2秒前");
     expect(heartbeatAge("2025-12-31T23:56:00Z", t)).toBe("4分前");
     expect(heartbeatAge("2025-12-31T21:00:00Z", t)).toBe("3時間前");
-    setLanguage("en");
   });
 });

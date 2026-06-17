@@ -7,6 +7,7 @@
 
 import { bench, describe } from "vitest";
 import { heartbeatAge, humanizeBytes, shortId, statusPill } from "./format.ts";
+import { t } from "./i18n/index.ts";
 
 describe("format", () => {
   bench("humanizeBytes", () => {
@@ -24,6 +25,6 @@ describe("format", () => {
   });
 
   bench("heartbeatAge", () => {
-    heartbeatAge(new Date(Date.now() - 45000).toISOString());
+    heartbeatAge(new Date(Date.now() - 45000).toISOString(), t);
   });
 });
