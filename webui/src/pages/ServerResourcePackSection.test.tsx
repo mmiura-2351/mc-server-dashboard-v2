@@ -592,6 +592,45 @@ describe("ServerResourcePackSection — version < 1.17 hides require/prompt", ()
     );
   });
 
+  it("forces safe defaults when editing an existing assignment on < 1.17", async () => {
+    routeGet({
+      srv: { mc_version: "1.16.4" },
+      assignment: {
+        ...ASSIGNMENT,
+        require_resource_pack: true,
+        resource_pack_prompt: "Hello",
+      },
+    });
+    mockApi.post.mockResolvedValue(ASSIGNMENT);
+    await openSettings();
+
+    // Open the assign (change) dialog
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("serverDetail.resourcePack.change"),
+      }),
+    );
+
+    const select = await screen.findByRole("combobox");
+    fireEvent.change(select, { target: { value: PACK.id } });
+    fireEvent.click(dialogSubmit());
+
+    // Even though the existing assignment had require=true and prompt="Hello",
+    // the mutation must send safe defaults because the server is < 1.17.
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/resource-pack`,
+        {
+          body: JSON.stringify({
+            resource_pack_id: PACK.id,
+            require_resource_pack: false,
+            resource_pack_prompt: null,
+          }),
+        },
+      ),
+    );
+  });
+
   it("shows require/prompt fields for 1.17+", async () => {
     routeGet({
       srv: { mc_version: "1.17" },

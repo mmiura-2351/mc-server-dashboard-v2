@@ -410,8 +410,10 @@ function AssignDialog({
         {
           body: JSON.stringify({
             resource_pack_id: selectedId,
-            require_resource_pack: requirePack,
-            resource_pack_prompt: prompt.trim() || null,
+            require_resource_pack: supportsRequirePrompt ? requirePack : false,
+            resource_pack_prompt: supportsRequirePrompt
+              ? prompt.trim() || null
+              : null,
           }),
         },
       ),
