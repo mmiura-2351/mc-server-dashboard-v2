@@ -102,7 +102,7 @@ export function useOffsetParam(): [number, (offset: number) => void] {
  * conversion happens at request-build time, not here, so the inputs round-trip
  * exactly.
  */
-export function useAuditFilterParams<K extends string>(
+export function useFilterParams<K extends string>(
   keys: readonly K[],
 ): [Record<K, string>, (next: Record<K, string>) => void] {
   const location = useLocation();

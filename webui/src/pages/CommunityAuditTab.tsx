@@ -15,7 +15,7 @@ import {
   isUuid,
   PAGE_SIZE,
 } from "./auditShared.tsx";
-import { useAuditFilterParams, useOffsetParam } from "./urlState.ts";
+import { useFilterParams, useOffsetParam } from "./urlState.ts";
 
 // The filter keys persisted in the URL query string (#563): the shared
 // operation/actor/since/until set (the community-scoped view has no community
@@ -70,7 +70,7 @@ function Loaded({ communityId }: { communityId: string }) {
   // Applied filters live in the URL query string (#563) so reloads and shared
   // links restore them; `urlFilters` is the applied set, `draft` the in-progress
   // input. The draft re-syncs to the URL on Back so the inputs follow history.
-  const [urlFilters, applyFilters] = useAuditFilterParams(FILTER_KEYS);
+  const [urlFilters, applyFilters] = useFilterParams(FILTER_KEYS);
   const filters: AuditFilters = { ...EMPTY_FILTERS, ...urlFilters };
   const [draft, setDraft] = useState<AuditFilters>(filters);
   // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
@@ -108,7 +108,7 @@ function Loaded({ communityId }: { communityId: string }) {
     }
     setActorError(false);
     // Applying writes the filters to the URL and resets offset to 0 in one
-    // history entry (useAuditFilterParams drops the offset param).
+    // history entry (useFilterParams drops the offset param).
     applyFilters(draft);
   };
 

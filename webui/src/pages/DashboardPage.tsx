@@ -28,7 +28,7 @@ import {
   type ObservedState,
   statePill,
 } from "./serverState.ts";
-import { useAuditFilterParams } from "./urlState.ts";
+import { useFilterParams } from "./urlState.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
@@ -292,7 +292,7 @@ function Loaded({ communityId }: { communityId: string }) {
   const degraded = useCommunityEvents(communityId);
   const [view, setView] = useViewMode();
   const [sort, setSort] = useSortPref();
-  const [filters, setFilters] = useAuditFilterParams(FILTER_KEYS);
+  const [filters, setFilters] = useFilterParams(FILTER_KEYS);
 
   // The search input uses a local draft so each keystroke does not push a
   // history entry. Filtering applies the draft immediately for instant
