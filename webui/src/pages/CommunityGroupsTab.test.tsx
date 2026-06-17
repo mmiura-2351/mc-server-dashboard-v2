@@ -225,9 +225,6 @@ describe("CommunityGroupsTab", () => {
         name: t("communitySettings.groups.delete"),
       }),
     );
-    fireEvent.change(screen.getByPlaceholderText("Admins"), {
-      target: { value: "Admins" },
-    });
     fireEvent.click(
       screen.getByRole("button", {
         name: t("communitySettings.groups.deleteConfirm"),

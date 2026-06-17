@@ -256,9 +256,6 @@ describe("CommunityRolesTab", () => {
         name: t("communitySettings.roles.delete"),
       }),
     );
-    fireEvent.change(screen.getByPlaceholderText("Moderator"), {
-      target: { value: "Moderator" },
-    });
     fireEvent.click(
       screen.getByRole("button", {
         name: t("communitySettings.roles.deleteConfirm"),
@@ -283,9 +280,6 @@ describe("CommunityRolesTab", () => {
         name: t("communitySettings.roles.delete"),
       }),
     );
-    fireEvent.change(screen.getByPlaceholderText("Moderator"), {
-      target: { value: "Moderator" },
-    });
     fireEvent.click(
       screen.getByRole("button", {
         name: t("communitySettings.roles.deleteConfirm"),

@@ -349,10 +349,6 @@ describe("ServerFilesTab operations", () => {
     await screen.findByText(/junk\.txt/);
 
     fireEvent.click(screen.getByRole("button", { name: t("files.delete") }));
-    // ConfirmDialog gates on typing the exact name.
-    fireEvent.change(screen.getByPlaceholderText("junk.txt"), {
-      target: { value: "junk.txt" },
-    });
     fireEvent.click(
       screen.getByRole("button", { name: t("files.delete.confirm") }),
     );
@@ -424,9 +420,6 @@ describe("ServerFilesTab permission gating", () => {
     await screen.findByText("x");
 
     fireEvent.click(screen.getByRole("button", { name: t("files.delete") }));
-    fireEvent.change(screen.getByPlaceholderText("x"), {
-      target: { value: "x" },
-    });
     fireEvent.click(
       screen.getByRole("button", { name: t("files.delete.confirm") }),
     );

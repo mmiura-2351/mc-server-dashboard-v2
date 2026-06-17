@@ -301,10 +301,6 @@ describe("CommunityMembersTab", () => {
     expect(
       screen.getByText(t("communitySettings.members.removeDialogBody")),
     ).toBeInTheDocument();
-    // Typed-confirm: typing the username enables the destructive button.
-    fireEvent.change(screen.getByPlaceholderText("alice"), {
-      target: { value: "alice" },
-    });
     fireEvent.click(
       screen.getByRole("button", {
         name: t("communitySettings.members.removeConfirm"),
@@ -329,9 +325,6 @@ describe("CommunityMembersTab", () => {
         name: t("communitySettings.members.remove"),
       }),
     );
-    fireEvent.change(screen.getByPlaceholderText("alice"), {
-      target: { value: "alice" },
-    });
     fireEvent.click(
       screen.getByRole("button", {
         name: t("communitySettings.members.removeConfirm"),

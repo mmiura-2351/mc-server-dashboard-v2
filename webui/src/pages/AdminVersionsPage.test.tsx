@@ -232,9 +232,6 @@ describe("admin versions JAR pool", () => {
     });
     fireEvent.click(gcButton);
 
-    // Typed-confirm: the confirm button enables only after typing the phrase.
-    const input = await screen.findByPlaceholderText("GC");
-    fireEvent.change(input, { target: { value: "GC" } });
     fireEvent.click(
       screen.getByRole("button", {
         name: t("admin.versions.gcDialog.confirm"),
@@ -269,8 +266,6 @@ describe("admin versions JAR pool", () => {
       name: t("admin.versions.gc"),
     });
     fireEvent.click(gcButton);
-    const input = await screen.findByPlaceholderText("GC");
-    fireEvent.change(input, { target: { value: "GC" } });
     fireEvent.click(
       screen.getByRole("button", {
         name: t("admin.versions.gcDialog.confirm"),
