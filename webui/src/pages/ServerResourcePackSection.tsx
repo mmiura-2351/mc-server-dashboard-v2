@@ -16,6 +16,7 @@ import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
+import { supportsResourcePackOptions } from "../mcVersion.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { atRest, normalizeState } from "./serverState.ts";
@@ -86,6 +87,7 @@ export function ServerResourcePackSection({
   const [removeOpen, setRemoveOpen] = useState(false);
 
   const canUpdate = can("server:update", { serverId });
+  const supportsRequirePrompt = supportsResourcePackOptions(server.mc_version);
   const serverAtRest = atRest(
     normalizeState(server.observed_state),
     normalizeState(server.desired_state),
@@ -176,6 +178,7 @@ export function ServerResourcePackSection({
           assignment={assignment}
           canUpdate={canUpdate}
           serverAtRest={serverAtRest}
+          supportsRequirePrompt={supportsRequirePrompt}
           onChange={() => setAssignOpen(true)}
           onRemove={() => setRemoveOpen(true)}
         />
@@ -187,6 +190,7 @@ export function ServerResourcePackSection({
           initialPackId={assignment?.resource_pack.id}
           initialRequire={assignment?.require_resource_pack}
           initialPrompt={assignment?.resource_pack_prompt ?? undefined}
+          supportsRequirePrompt={supportsRequirePrompt}
           onSuccess={() => {
             setAssignOpen(false);
             showToast(t("serverDetail.resourcePack.assigned"), "success");
@@ -262,12 +266,14 @@ function AssignedView({
   assignment,
   canUpdate,
   serverAtRest,
+  supportsRequirePrompt,
   onChange,
   onRemove,
 }: {
   assignment: ResourcePackAssignmentResponse;
   canUpdate: boolean;
   serverAtRest: boolean;
+  supportsRequirePrompt: boolean;
   onChange: () => void;
   onRemove: () => void;
 }) {
@@ -317,19 +323,23 @@ function AssignedView({
               : pack.download_url}
           </button>
         </dd>
-        <dt>{t("serverDetail.resourcePack.required")}</dt>
-        <dd>
-          {t(
-            assignment.require_resource_pack
-              ? "serverDetail.resourcePack.required"
-              : "serverDetail.resourcePack.notRequired",
-          )}
-        </dd>
-        <dt>{t("serverDetail.resourcePack.prompt")}</dt>
-        <dd>
-          {assignment.resource_pack_prompt ??
-            t("serverDetail.resourcePack.promptNone")}
-        </dd>
+        {supportsRequirePrompt && (
+          <>
+            <dt>{t("serverDetail.resourcePack.required")}</dt>
+            <dd>
+              {t(
+                assignment.require_resource_pack
+                  ? "serverDetail.resourcePack.required"
+                  : "serverDetail.resourcePack.notRequired",
+              )}
+            </dd>
+            <dt>{t("serverDetail.resourcePack.prompt")}</dt>
+            <dd>
+              {assignment.resource_pack_prompt ??
+                t("serverDetail.resourcePack.promptNone")}
+            </dd>
+          </>
+        )}
       </dl>
       {canUpdate && (
         <div className="actions">
@@ -366,6 +376,7 @@ function AssignDialog({
   initialPackId,
   initialRequire,
   initialPrompt,
+  supportsRequirePrompt,
   onSuccess,
   onClose,
 }: {
@@ -374,6 +385,7 @@ function AssignDialog({
   initialPackId?: string;
   initialRequire?: boolean;
   initialPrompt?: string;
+  supportsRequirePrompt: boolean;
   onSuccess: () => void;
   onClose: () => void;
 }) {
@@ -470,24 +482,28 @@ function AssignDialog({
               ))}
             </select>
           </label>
-          <label className="field">
-            <span className="field-inline">
-              <input
-                type="checkbox"
-                checked={requirePack}
-                onChange={(e) => setRequirePack(e.target.checked)}
-              />
-              {t("serverDetail.resourcePack.assignDialog.require")}
-            </span>
-          </label>
-          <label className="field">
-            {t("serverDetail.resourcePack.assignDialog.prompt")}
-            <input
-              type="text"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-          </label>
+          {supportsRequirePrompt && (
+            <>
+              <label className="field">
+                <span className="field-inline">
+                  <input
+                    type="checkbox"
+                    checked={requirePack}
+                    onChange={(e) => setRequirePack(e.target.checked)}
+                  />
+                  {t("serverDetail.resourcePack.assignDialog.require")}
+                </span>
+              </label>
+              <label className="field">
+                {t("serverDetail.resourcePack.assignDialog.prompt")}
+                <input
+                  type="text"
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                />
+              </label>
+            </>
+          )}
         </>
       )}
     </Modal>

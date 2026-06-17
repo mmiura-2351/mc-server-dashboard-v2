@@ -520,3 +520,88 @@ describe("ServerResourcePackSection — unassign flow", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("ServerResourcePackSection — version < 1.17 hides require/prompt", () => {
+  function dialogSubmit() {
+    const dialog = screen.getByRole("dialog");
+    return dialog.querySelector(
+      ".modal-foot .btn.primary",
+    ) as HTMLButtonElement;
+  }
+
+  it("hides Required and Prompt rows in assigned view for 1.16.4", async () => {
+    routeGet({
+      srv: { mc_version: "1.16.4" },
+      assignment: { ...ASSIGNMENT, require_resource_pack: true },
+    });
+    await openSettings();
+
+    // Pack details still visible
+    expect(await screen.findByText("My Texture Pack")).toBeInTheDocument();
+
+    // Required/Prompt rows should NOT appear
+    expect(
+      screen.queryByText(t("serverDetail.resourcePack.notRequired")),
+    ).not.toBeInTheDocument();
+    // The "Required" dt heading should not appear — on 1.21.6 there would be
+    // at least two elements (dt + dd); on 1.16.4 there should be none.
+    const requiredElements = screen.queryAllByText(
+      t("serverDetail.resourcePack.required"),
+    );
+    expect(requiredElements).toHaveLength(0);
+    expect(
+      screen.queryByText(t("serverDetail.resourcePack.promptNone")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides require checkbox and prompt input in assign dialog for 1.16.4", async () => {
+    routeGet({ srv: { mc_version: "1.16.4" }, assignment: null });
+    mockApi.post.mockResolvedValue(ASSIGNMENT);
+    await openSettings();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("serverDetail.resourcePack.assign"),
+      }),
+    );
+
+    // The pack select should still be present
+    const select = await screen.findByRole("combobox");
+    expect(select).toBeInTheDocument();
+
+    // Checkbox and text input should NOT be present
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.querySelector('input[type="text"]')).not.toBeInTheDocument();
+
+    // Submit should still work — sends defaults
+    fireEvent.change(select, { target: { value: PACK.id } });
+    fireEvent.click(dialogSubmit());
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/resource-pack`,
+        {
+          body: JSON.stringify({
+            resource_pack_id: PACK.id,
+            require_resource_pack: false,
+            resource_pack_prompt: null,
+          }),
+        },
+      ),
+    );
+  });
+
+  it("shows require/prompt fields for 1.17+", async () => {
+    routeGet({
+      srv: { mc_version: "1.17" },
+      assignment: ASSIGNMENT,
+    });
+    await openSettings();
+
+    // The prompt "None" text should be visible for a 1.17 server
+    expect(
+      await screen.findByText(t("serverDetail.resourcePack.promptNone")),
+    ).toBeInTheDocument();
+  });
+});
