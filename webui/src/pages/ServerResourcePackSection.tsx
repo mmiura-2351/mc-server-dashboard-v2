@@ -60,8 +60,10 @@ function resourcePackErrorMessage(
   fallback: TranslationKey,
 ): TranslationKey {
   if (error instanceof ApiError) {
-    if (error.reason === "server_unsettled") return "serverDetail.error.unsettled";
-    if (error.reason === "server_not_stopped") return "serverDetail.error.notStopped";
+    if (error.reason === "server_unsettled")
+      return "serverDetail.error.unsettled";
+    if (error.reason === "server_not_stopped")
+      return "serverDetail.error.notStopped";
   }
   return fallback;
 }
@@ -142,7 +144,15 @@ export function ServerResourcePackSection({
       if (onForbidden(error)) {
         return;
       }
-      showToast(t(resourcePackErrorMessage(error, "serverDetail.resourcePack.unassignError")), "error");
+      showToast(
+        t(
+          resourcePackErrorMessage(
+            error,
+            "serverDetail.resourcePack.unassignError",
+          ),
+        ),
+        "error",
+      );
     },
   });
 
@@ -399,7 +409,15 @@ function AssignDialog({
         onClose();
         return;
       }
-      showToast(t(resourcePackErrorMessage(error, "serverDetail.resourcePack.assignError")), "error");
+      showToast(
+        t(
+          resourcePackErrorMessage(
+            error,
+            "serverDetail.resourcePack.assignError",
+          ),
+        ),
+        "error",
+      );
     },
   });
 
