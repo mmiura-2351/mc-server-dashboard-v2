@@ -18,6 +18,9 @@ import uuid
 from dataclasses import dataclass
 from urllib.parse import quote
 
+from mc_server_dashboard_api.servers.application.resource_pack_zip import (
+    validate_and_normalize,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
@@ -82,6 +85,8 @@ class UploadResourcePack:
             raise ValueError("filename must end with .zip")
         if len(content) > MAX_RESOURCE_PACK_BYTES:
             raise FileTooLargeError(str(len(content)))
+
+        content = validate_and_normalize(content)
 
         sha1 = hashlib.sha1(content).hexdigest()
         sha256 = hashlib.sha256(content).hexdigest()

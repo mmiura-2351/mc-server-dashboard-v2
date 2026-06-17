@@ -440,6 +440,16 @@ class SlugExhaustedError(ServerError):
     """
 
 
+class InvalidResourcePackError(ServerError):
+    """The uploaded zip is not a valid Minecraft resource pack.
+
+    Raised when the zip cannot be normalized into a valid resource pack: not a
+    zip, no ``pack.mcmeta``, invalid ``pack.mcmeta`` content, ambiguous
+    structure, zip bomb, or path traversal. The edge maps this to 422
+    ``invalid_resource_pack``.
+    """
+
+
 class ResourcePackNotFoundError(ServerError):
     """A resource pack operation targeted a pack that does not exist.
 
