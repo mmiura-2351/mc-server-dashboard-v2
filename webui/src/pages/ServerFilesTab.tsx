@@ -784,6 +784,7 @@ function Toolbar({
   onChanged: () => void;
   onError: (error: unknown) => void;
 }) {
+  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
   const [mkdirOpen, setMkdirOpen] = useState(false);
   const [extract, setExtract] = useState(false);
@@ -844,7 +845,11 @@ function Toolbar({
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file !== undefined) {
-                upload.mutate(file);
+                if (file.size > MAX_UPLOAD_BYTES) {
+                  showToast(t("files.error.tooLarge"), "error");
+                } else {
+                  upload.mutate(file);
+                }
               }
               e.target.value = "";
             }}

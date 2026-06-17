@@ -207,6 +207,7 @@ function UploadDialog({
   onSuccess: () => void;
   onClose: () => void;
 }) {
+  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
   const [displayName, setDisplayName] = useState("");
@@ -244,6 +245,10 @@ function UploadDialog({
             disabled={nameEmpty || file === null || upload.isPending}
             onClick={() => {
               if (!nameEmpty && file !== null) {
+                if (file.size > MAX_UPLOAD_BYTES) {
+                  showToast(t("resourcePacks.error.tooLarge"), "error");
+                  return;
+                }
                 upload.mutate({ name: displayName.trim(), f: file });
               }
             }}
