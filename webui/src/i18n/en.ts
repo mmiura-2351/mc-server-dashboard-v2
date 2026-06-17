@@ -1349,4 +1349,9 @@ export const en = {
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "You lack: ",
+
+  // Shared format strings — heartbeat age (#1214)
+  "format.secondsAgo": "{value}s ago",
+  "format.minutesAgo": "{value}m ago",
+  "format.hoursAgo": "{value}h ago",
 } as const;

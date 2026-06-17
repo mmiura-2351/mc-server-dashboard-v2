@@ -1357,4 +1357,9 @@ export const ja: Record<TranslationKey, string> = {
   "permissions.denied": "この操作を行う権限がありません。",
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "不足している権限: ",
+
+  // Shared format strings — heartbeat age (#1214)
+  "format.secondsAgo": "{value}秒前",
+  "format.minutesAgo": "{value}分前",
+  "format.hoursAgo": "{value}時間前",
 } as const;

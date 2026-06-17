@@ -6,6 +6,7 @@ import {
   shortId,
   statusPill,
 } from "./format.ts";
+import { setLanguage, t } from "./i18n/index.ts";
 
 describe("humanizeBytes", () => {
   it("renders sub-KiB values as plain bytes", () => {
@@ -66,21 +67,29 @@ describe("heartbeatAge", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    setLanguage("en");
   });
 
   it("renders seconds below a minute", () => {
-    expect(heartbeatAge("2025-12-31T23:59:58Z")).toBe("2s ago");
+    expect(heartbeatAge("2025-12-31T23:59:58Z", t)).toBe("2s ago");
   });
 
   it("renders minutes below an hour", () => {
-    expect(heartbeatAge("2025-12-31T23:56:00Z")).toBe("4m ago");
+    expect(heartbeatAge("2025-12-31T23:56:00Z", t)).toBe("4m ago");
   });
 
   it("renders hours at and above an hour", () => {
-    expect(heartbeatAge("2025-12-31T21:00:00Z")).toBe("3h ago");
+    expect(heartbeatAge("2025-12-31T21:00:00Z", t)).toBe("3h ago");
   });
 
   it("clamps future timestamps to 0s", () => {
-    expect(heartbeatAge("2026-01-01T00:00:05Z")).toBe("0s ago");
+    expect(heartbeatAge("2026-01-01T00:00:05Z", t)).toBe("0s ago");
+  });
+
+  it("renders in Japanese when the locale is ja", () => {
+    setLanguage("ja");
+    expect(heartbeatAge("2025-12-31T23:59:58Z", t)).toBe("2秒前");
+    expect(heartbeatAge("2025-12-31T23:56:00Z", t)).toBe("4分前");
+    expect(heartbeatAge("2025-12-31T21:00:00Z", t)).toBe("3時間前");
   });
 });

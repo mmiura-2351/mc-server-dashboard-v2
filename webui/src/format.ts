@@ -1,5 +1,7 @@
 /** Small shared formatting helpers used across pages. */
 
+import type { TranslationKey } from "./i18n/index.ts";
+
 /** Human-readable byte size (binary units), e.g. 1610612736 → "1.5 GiB". */
 export function humanizeBytes(bytes: number): string {
   if (bytes < 1024) {
@@ -48,17 +50,25 @@ export function statusPill(status: string): string {
 // Compact heartbeat age, e.g. "2s ago" / "4m ago" / "3h ago". A negative or
 // missing delta falls back to seconds so the cell always renders.
 // Shared across the Overview and Workers fleet pages (#477).
-export function heartbeatAge(iso: string): string {
+// Accepts a translation function so the output respects the active locale
+// (#1214).
+export function heartbeatAge(
+  iso: string,
+  tr: (key: TranslationKey) => string,
+): string {
   const seconds = Math.max(
     0,
     Math.round((Date.now() - Date.parse(iso)) / 1000),
   );
   if (seconds < 60) {
-    return `${seconds}s ago`;
+    return tr("format.secondsAgo").replace("{value}", String(seconds));
   }
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) {
-    return `${minutes}m ago`;
+    return tr("format.minutesAgo").replace("{value}", String(minutes));
   }
-  return `${Math.round(minutes / 60)}h ago`;
+  return tr("format.hoursAgo").replace(
+    "{value}",
+    String(Math.round(minutes / 60)),
+  );
 }
