@@ -86,7 +86,7 @@ export function ResourcePacksPage() {
   }
 
   return (
-    <div className="admin-resource-packs">
+    <div className="resource-packs">
       <div className="page-head">
         <div>
           <h1>{t("page.resourcePacks")}</h1>
@@ -134,7 +134,7 @@ export function ResourcePacksPage() {
                     <td>{pack.display_name}</td>
                     <td>{pack.filename}</td>
                     <td className="num">{humanizeBytes(pack.size_bytes)}</td>
-                    <td title={pack.sha1_hash}>{shortId(pack.sha1_hash)}</td>
+                    <td title={pack.sha1_hash}>{pack.sha1_hash.slice(0, 8)}</td>
                     <td>{formatDateTime(pack.created_at)}</td>
                     <td title={pack.uploaded_by}>
                       {shortId(pack.uploaded_by)}
