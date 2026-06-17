@@ -1497,9 +1497,7 @@ class ObjectStorage(Storage):
                 )
                 objs = await client.list_objects(snapshot_prefix + from_suffix)
                 if not objs:
-                    raise NotFoundError(
-                        f"directory not found: {from_path.value}"
-                    )
+                    raise NotFoundError(f"directory not found: {from_path.value}")
                 for obj in objs:
                     rest = obj.key[len(snapshot_prefix + from_suffix) :]
                     await client.copy_object(
