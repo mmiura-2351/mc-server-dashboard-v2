@@ -28,6 +28,7 @@ const PACKS_KEY = ["resource-packs"] as const;
 export function ResourcePacksPage() {
   const { showToast } = useToast();
   const queryClient = useQueryClient();
+  const onForbidden = useOnForbidden();
   const currentUser = useCurrentUser();
   const isAdmin = currentUser.data?.is_platform_admin === true;
   const userId = currentUser.data?.id;
@@ -58,6 +59,7 @@ export function ResourcePacksPage() {
       refresh();
     },
     onError: (error) => {
+      if (onForbidden(error)) return;
       if (
         error instanceof ApiError &&
         error.reason === "resource_pack_in_use"
@@ -77,7 +79,8 @@ export function ResourcePacksPage() {
         }),
         pack.filename,
       ),
-    onError: () => {
+    onError: (error) => {
+      if (onForbidden(error)) return;
       showToast(t("resourcePacks.error.downloadFailed"), "error");
     },
   });
