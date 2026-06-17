@@ -6,7 +6,11 @@ Tests run against fakes (no database), following TESTING.md Section 4.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import io
+import json
 import uuid
+import zipfile
 
 import pytest
 
@@ -23,6 +27,7 @@ from mc_server_dashboard_api.servers.application.resource_packs import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
+    InvalidResourcePackError,
     PermissionDeniedError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
@@ -53,7 +58,20 @@ from tests.servers.fakes import (
 )
 
 _NOW = dt.datetime(2026, 6, 16, 12, 0, 0, tzinfo=dt.timezone.utc)
-_ZIP_CONTENT = b"PK\x03\x04" + b"\x00" * 100  # minimal zip-like content
+_VALID_MCMETA = json.dumps({"pack": {"pack_format": 15, "description": "Test"}})
+
+
+def _make_valid_zip(entries: dict[str, str | bytes] | None = None) -> bytes:
+    """Build a valid resource pack zip with pack.mcmeta at the root."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("pack.mcmeta", _VALID_MCMETA)
+        for name, data in (entries or {}).items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+_ZIP_CONTENT = _make_valid_zip({"assets/test.png": b"PNG"})
 
 
 def _make_upload(
@@ -115,6 +133,47 @@ class TestUploadResourcePack:
                 content=big,
                 uploaded_by=uuid.uuid4(),
             )
+
+    async def test_upload_rejects_invalid_pack(self) -> None:
+        """Not-a-zip content raises InvalidResourcePackError (issue #1192)."""
+        uc = _make_upload()
+        with pytest.raises(InvalidResourcePackError):
+            await uc(
+                filename="bad.zip",
+                display_name="Bad",
+                content=b"this is not a zip",
+                uploaded_by=uuid.uuid4(),
+            )
+
+    async def test_upload_normalizes_folder_wrapped(self) -> None:
+        """A folder-wrapped zip is normalized; hashes reflect repacked bytes."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("MyPack/pack.mcmeta", _VALID_MCMETA)
+            zf.writestr("MyPack/assets/test.png", b"PNG")
+        wrapped = buf.getvalue()
+
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        uc = _make_upload(uow=uow, store=store)
+
+        pack = await uc(
+            filename="mypack.zip",
+            display_name="My Pack",
+            content=wrapped,
+            uploaded_by=uuid.uuid4(),
+        )
+
+        # The stored hash must NOT match the original wrapped bytes.
+        assert pack.sha1_hash != hashlib.sha1(wrapped).hexdigest()
+        # The stored hash must match the normalized zip bytes.
+        stored_blob = store.blobs[pack.id]
+        assert pack.sha1_hash == hashlib.sha1(stored_blob).hexdigest()
+        assert pack.sha256_hash == hashlib.sha256(stored_blob).hexdigest()
+        assert pack.size_bytes == len(stored_blob)
+        # The normalized zip should have pack.mcmeta at root.
+        with zipfile.ZipFile(io.BytesIO(stored_blob)) as zf:
+            assert "pack.mcmeta" in zf.namelist()
 
 
 class TestListResourcePacks:
