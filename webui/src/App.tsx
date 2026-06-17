@@ -76,6 +76,11 @@ const ServerCreatePage = lazy(() =>
     default: m.ServerCreatePage,
   })),
 );
+const ResourcePacksPage = lazy(() =>
+  import("./pages/ResourcePacksPage.tsx").then((m) => ({
+    default: m.ResourcePacksPage,
+  })),
+);
 const ServerDetailPage = lazy(() =>
   import("./pages/ServerDetailPage.tsx").then((m) => ({
     default: m.ServerDetailPage,
@@ -211,6 +216,7 @@ export function App() {
             element={<CommunitySettingsPage />}
           />
           <Route path="/account" element={<AccountPage />} />
+          <Route path="/resource-packs" element={<ResourcePacksPage />} />
 
           <Route element={<RequireAdmin />}>
             <Route path="/admin" element={<AdminOverviewPage />} />

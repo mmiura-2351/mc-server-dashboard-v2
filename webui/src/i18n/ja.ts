@@ -1268,6 +1268,45 @@ export const ja: Record<TranslationKey, string> = {
   "admin.audit.communitiesTruncatedSuffix":
     " 件のコミュニティを表示しています。",
 
+  // Resource pack library (issue #1178).
+  "nav.resourcePacks": "リソースパック",
+  "page.resourcePacks": "リソースパック",
+  "resourcePacks.subtitle":
+    "Minecraftサーバーで使用するリソースパックのアップロードと管理。",
+  "resourcePacks.loading": "リソースパックを読み込んでいます…",
+  "resourcePacks.loadError": "リソースパックを読み込めませんでした。",
+  "resourcePacks.empty": "まだリソースパックがありません。",
+  "resourcePacks.upload": "パックをアップロード",
+  "resourcePacks.col.displayName": "名前",
+  "resourcePacks.col.filename": "ファイル名",
+  "resourcePacks.col.size": "サイズ",
+  "resourcePacks.col.sha1": "SHA-1",
+  "resourcePacks.col.uploaded": "アップロード日時",
+  "resourcePacks.col.uploader": "アップロード者",
+  "resourcePacks.download": "ダウンロード",
+  "resourcePacks.delete": "削除",
+  "resourcePacks.uploadDialog.title": "リソースパックをアップロード",
+  "resourcePacks.uploadDialog.displayName": "表示名",
+  "resourcePacks.uploadDialog.file": "ファイル（.zip）",
+  "resourcePacks.uploadDialog.submit": "アップロード",
+  "resourcePacks.uploadDialog.uploading": "アップロードしています…",
+  "resourcePacks.uploadDialog.nameRequired": "表示名を入力してください。",
+  "resourcePacks.uploadDialog.fileRequired": ".zipファイルを選択してください。",
+  "resourcePacks.uploaded": "リソースパックをアップロードしました。",
+  "resourcePacks.deleted": "リソースパックを削除しました。",
+  "resourcePacks.deleteDialog.title": "リソースパックを削除",
+  "resourcePacks.deleteDialog.body":
+    "リソースパックを完全に削除します。サーバーに割り当て済みのパックは削除できません。",
+  "resourcePacks.deleteDialog.confirm": "パックを削除",
+  "resourcePacks.deleteDialog.prompt": "削除を有効にするには表示名を入力",
+  "resourcePacks.error.uploadFailed":
+    "リソースパックをアップロードできませんでした。",
+  "resourcePacks.error.deleteFailed": "リソースパックを削除できませんでした。",
+  "resourcePacks.error.inUse":
+    "このリソースパックは1つ以上のサーバーに割り当てられているため、削除できません。",
+  "resourcePacks.error.downloadFailed":
+    "リソースパックをダウンロードできませんでした。",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "この操作を行う権限がありません。",
   // Composed with the missing permission code, e.g. "You lack: server:start".

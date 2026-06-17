@@ -1262,6 +1262,45 @@ export const en = {
   "admin.audit.communitiesTruncatedMid": " of ",
   "admin.audit.communitiesTruncatedSuffix": " communities.",
 
+  // Resource pack library (issue #1178). One contiguous block to keep merge
+  // conflicts with sibling i18n PRs minimal.
+  "nav.resourcePacks": "Resource packs",
+  "page.resourcePacks": "Resource packs",
+  "resourcePacks.subtitle":
+    "Upload and manage resource packs for use with Minecraft servers.",
+  "resourcePacks.loading": "Loading resource packs…",
+  "resourcePacks.loadError": "Could not load resource packs.",
+  "resourcePacks.empty": "No resource packs yet.",
+  "resourcePacks.upload": "Upload pack",
+  "resourcePacks.col.displayName": "Name",
+  "resourcePacks.col.filename": "Filename",
+  "resourcePacks.col.size": "Size",
+  "resourcePacks.col.sha1": "SHA-1",
+  "resourcePacks.col.uploaded": "Uploaded",
+  "resourcePacks.col.uploader": "Uploader",
+  "resourcePacks.download": "Download",
+  "resourcePacks.delete": "Delete",
+  "resourcePacks.uploadDialog.title": "Upload resource pack",
+  "resourcePacks.uploadDialog.displayName": "Display name",
+  "resourcePacks.uploadDialog.file": "File (.zip)",
+  "resourcePacks.uploadDialog.submit": "Upload",
+  "resourcePacks.uploadDialog.uploading": "Uploading…",
+  "resourcePacks.uploadDialog.nameRequired": "Enter a display name.",
+  "resourcePacks.uploadDialog.fileRequired": "Choose a .zip file.",
+  "resourcePacks.uploaded": "Resource pack uploaded.",
+  "resourcePacks.deleted": "Resource pack deleted.",
+  "resourcePacks.deleteDialog.title": "Delete resource pack",
+  "resourcePacks.deleteDialog.body":
+    "This permanently deletes the resource pack. Packs currently assigned to servers cannot be deleted.",
+  "resourcePacks.deleteDialog.confirm": "Delete pack",
+  "resourcePacks.deleteDialog.prompt":
+    "Type the display name to enable deletion",
+  "resourcePacks.error.uploadFailed": "Could not upload the resource pack.",
+  "resourcePacks.error.deleteFailed": "Could not delete the resource pack.",
+  "resourcePacks.error.inUse":
+    "This resource pack is assigned to one or more servers and cannot be deleted.",
+  "resourcePacks.error.downloadFailed": "Could not download the resource pack.",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
