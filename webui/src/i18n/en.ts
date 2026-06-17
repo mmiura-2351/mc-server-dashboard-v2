@@ -1301,6 +1301,45 @@ export const en = {
     "This resource pack is assigned to one or more servers and cannot be deleted.",
   "resourcePacks.error.downloadFailed": "Could not download the resource pack.",
 
+  // Server resource pack assignment (issue #1179). Displayed as a card in the
+  // server detail Settings tab.
+  "serverDetail.resourcePack.heading": "Resource pack",
+  "serverDetail.resourcePack.none": "No resource pack assigned.",
+  "serverDetail.resourcePack.assign": "Assign",
+  "serverDetail.resourcePack.change": "Change",
+  "serverDetail.resourcePack.remove": "Remove",
+  "serverDetail.resourcePack.name": "Name",
+  "serverDetail.resourcePack.filename": "Filename",
+  "serverDetail.resourcePack.size": "Size",
+  "serverDetail.resourcePack.sha1": "SHA-1",
+  "serverDetail.resourcePack.url": "Public URL",
+  "serverDetail.resourcePack.urlCopied": "Copied!",
+  "serverDetail.resourcePack.required": "Required",
+  "serverDetail.resourcePack.notRequired": "Optional",
+  "serverDetail.resourcePack.prompt": "Prompt",
+  "serverDetail.resourcePack.promptNone": "None",
+  "serverDetail.resourcePack.notAtRest":
+    "Stop the server to change resource pack settings.",
+  "serverDetail.resourcePack.assigned": "Resource pack assigned.",
+  "serverDetail.resourcePack.unassigned": "Resource pack unassigned.",
+  "serverDetail.resourcePack.assignError":
+    "Could not assign the resource pack.",
+  "serverDetail.resourcePack.unassignError":
+    "Could not unassign the resource pack.",
+  "serverDetail.resourcePack.assignDialog.title": "Assign resource pack",
+  "serverDetail.resourcePack.assignDialog.select": "Resource pack",
+  "serverDetail.resourcePack.assignDialog.selectPlaceholder": "Select a pack…",
+  "serverDetail.resourcePack.assignDialog.require": "Require resource pack",
+  "serverDetail.resourcePack.assignDialog.prompt":
+    "Custom prompt (shown to players)",
+  "serverDetail.resourcePack.assignDialog.submit": "Assign",
+  "serverDetail.resourcePack.assignDialog.loading": "Loading packs…",
+  "serverDetail.resourcePack.assignDialog.empty": "No packs available.",
+  "serverDetail.resourcePack.removeDialog.title": "Remove resource pack",
+  "serverDetail.resourcePack.removeDialog.body":
+    "Remove the resource pack assignment from this server?",
+  "serverDetail.resourcePack.removeDialog.confirm": "Remove",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".

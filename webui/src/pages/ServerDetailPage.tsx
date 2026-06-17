@@ -24,6 +24,7 @@ import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
 import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
+import { ServerResourcePackSection } from "./ServerResourcePackSection.tsx";
 import { serverKey } from "./serverKey.ts";
 import {
   actionApplies,
@@ -1570,6 +1571,12 @@ function Settings({
           {t("serverDetail.settings.save")}
         </button>
       </div>
+
+      <ServerResourcePackSection
+        server={server}
+        communityId={communityId}
+        can={can}
+      />
 
       <div className="card danger-zone">
         <h2>{t("serverDetail.danger.heading")}</h2>
