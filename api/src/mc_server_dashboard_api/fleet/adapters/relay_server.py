@@ -131,6 +131,7 @@ class RelayServicer(RelayServiceServicer):
         self, request: pb.ResolveJoinRequest, context: aio.ServicerContext
     ) -> pb.ResolveJoinResponse:
         await self._authenticate(context)
+        intent = request.intent
         route = await self._resolver.resolve_slug(request.slug)
         if route is None:
             return pb.ResolveJoinResponse(decision=pb.JOIN_DECISION_NOT_FOUND)
@@ -139,7 +140,10 @@ class RelayServicer(RelayServiceServicer):
                 decision=pb.JOIN_DECISION_STOPPED,
                 display_name=route.display_name,
             )
-        return await self._resolve_tunnel(route)
+        # Both STATUS and LOGIN intents dispatch TunnelDial for running servers.
+        # The relay needs the tunnel even for STATUS pings (cache miss) to fetch
+        # the real Minecraft status data (RELAY.md Section 7).
+        return await self._resolve_tunnel(route, intent=intent)
 
     async def ReportSessions(  # noqa: N802 (gRPC-generated method name)
         self, request: pb.ReportSessionsRequest, context: aio.ServicerContext
@@ -179,7 +183,9 @@ class RelayServicer(RelayServiceServicer):
         worker = self._registry.get(worker_id)
         return worker is not None and worker.status is WorkerStatus.ONLINE
 
-    async def _resolve_tunnel(self, route: ServerRoute) -> pb.ResolveJoinResponse:
+    async def _resolve_tunnel(
+        self, route: ServerRoute, *, intent: pb.JoinIntent.ValueType
+    ) -> pb.ResolveJoinResponse:
         # An assigned, online worker is guaranteed by _is_tunnelable.
         assert route.assigned_worker_id is not None
         worker_id = WorkerId(route.assigned_worker_id)
@@ -211,6 +217,14 @@ class RelayServicer(RelayServiceServicer):
                 decision=pb.JOIN_DECISION_STOPPED,
                 display_name=route.display_name,
             )
+        _LOG.debug(
+            "ResolveJoin TUNNEL dispatched",
+            extra={
+                "server_id": route.server_id,
+                "worker_id": str(worker_id),
+                "intent": pb.JoinIntent.Name(intent),
+            },
+        )
         return pb.ResolveJoinResponse(
             decision=pb.JOIN_DECISION_TUNNEL,
             token=token,
