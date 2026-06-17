@@ -132,6 +132,22 @@ class FileStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def rename_dir(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: str,
+        to_path: str,
+    ) -> None:
+        """Rename/move a directory atomically within ``current/`` (#1191).
+
+        No per-file version capture (the Storage Port contract); whole-subtree
+        recovery is the backups' job. Raises :class:`ServerFileNotFoundError`
+        for a missing source directory.
+        """
+
+    @abc.abstractmethod
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:

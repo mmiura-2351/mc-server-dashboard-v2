@@ -920,22 +920,24 @@ class MakeDir:
 
 @dataclass(frozen=True)
 class RenameFile:
-    """Rename/move a file at rest (file:edit, issue #259).
+    """Rename/move a file or directory at rest (file:edit, issue #259/#1191).
 
-    At rest only (running -> 409). Composed over the existing seam — read the
-    source, write the destination, delete the source — so versioning comes for
-    free (the destination write and the source delete each capture a version) with
-    no new Storage rename primitive. Both paths are traversal-validated; a missing
+    At rest only (running -> 409). Both paths are traversal-validated; a missing
     source is :class:`ServerFileNotFoundError` (404) and an existing destination is
     :class:`FileAlreadyExistsError` (409): rename never clobbers, so a typo cannot
-    silently overwrite data. Renaming a directory is out of scope for this slice
-    (the read/write seam is file-granular); ``from`` must name a file.
+    silently overwrite data.
 
-    The composition (write destination, then delete source) is not atomic: a crash
-    in the window between the two leaves BOTH the source and the destination
-    present. This favours never losing data (the source survives) over strict
-    move-once semantics; a caller seeing both can safely retry or delete the stale
-    source.
+    **File rename** is composed over the existing seam — read the source, write the
+    destination, delete the source — so versioning comes for free (the destination
+    write and the source delete each capture a version). The composition (write
+    destination, then delete source) is not atomic: a crash in the window between
+    the two leaves BOTH the source and the destination present. This favours never
+    losing data (the source survives) over strict move-once semantics; a caller
+    seeing both can safely retry or delete the stale source.
+
+    **Directory rename** delegates to :meth:`FileStore.rename_dir` which moves the
+    subtree atomically (fs ``os.rename``; object storage copy+delete). Like
+    :meth:`FileStore.delete_dir`, no per-file version capture.
     """
 
     uow: UnitOfWork
@@ -960,32 +962,42 @@ class RenameFile:
             if not server.is_at_rest():
                 raise ServerFilesUnsettledError(str(server_id.value))
 
+            is_dir = await _path_is_dir(
+                self.file_store, community_id, server_id, from_path
+            )
+
             if from_path == to_path:
-                # A no-op rename onto itself: confirm the source exists (404 if not),
-                # then return without rewriting (no spurious version).
-                await self.file_store.read_file(
-                    community_id=community_id, server_id=server_id, rel_path=from_path
-                )
+                # A no-op rename onto itself: _path_is_dir already confirmed the
+                # source exists (404 if not). Return without rewriting.
                 return
 
-            # Read the source first (404 if missing). A directory source raises here
-            # (read_file of a dir is NotFound), so a directory rename is refused as a
-            # missing file rather than partially moved.
-            content = await self.file_store.read_file(
-                community_id=community_id, server_id=server_id, rel_path=from_path
-            )
             if await _path_exists(self.file_store, community_id, server_id, to_path):
                 raise FileAlreadyExistsError(to_path)
 
-            await self.file_store.write_file(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path=to_path,
-                content=content,
-            )
-            await self.file_store.delete_file(
-                community_id=community_id, server_id=server_id, rel_path=from_path
-            )
+            if is_dir:
+                await self.file_store.rename_dir(
+                    community_id=community_id,
+                    server_id=server_id,
+                    from_path=from_path,
+                    to_path=to_path,
+                )
+            else:
+                content = await self.file_store.read_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=from_path,
+                )
+                await self.file_store.write_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=to_path,
+                    content=content,
+                )
+                await self.file_store.delete_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=from_path,
+                )
 
 
 @dataclass(frozen=True)
