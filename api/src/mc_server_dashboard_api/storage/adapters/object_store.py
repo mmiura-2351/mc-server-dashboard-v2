@@ -297,6 +297,24 @@ class ObjectStorage(Storage):
         # reopens this race.
         self._server_locks: dict[str, asyncio.Lock] = {}
 
+    async def check_reachable(self, *, endpoint: str, bucket: str) -> None:
+        """Probe the object store with a lightweight listing, failing fast.
+
+        Called at API boot (issue #945) before the crash-recovery sweep so a
+        misconfigured or unreachable backend surfaces immediately with a clear
+        diagnostic naming the endpoint and bucket, instead of degrading silently
+        and failing only at the first runtime storage operation.
+        """
+
+        try:
+            async with self._client_factory() as client:
+                await client.list_objects("")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Object storage unreachable at endpoint {endpoint!r}, "
+                f"bucket {bucket!r}: {exc}"
+            ) from exc
+
     def _server_lock(
         self, community_id: CommunityId, server_id: ServerId
     ) -> asyncio.Lock:
