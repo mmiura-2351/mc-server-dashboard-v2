@@ -55,28 +55,15 @@ function copyToClipboard(text: string): Promise<void> {
   });
 }
 
-function assignErrorMessage(error: unknown): TranslationKey {
+function resourcePackErrorMessage(
+  error: unknown,
+  fallback: TranslationKey,
+): TranslationKey {
   if (error instanceof ApiError) {
-    if (error.reason === "server_unsettled") {
-      return "serverDetail.error.unsettled";
-    }
-    if (error.reason === "server_not_stopped") {
-      return "serverDetail.error.notStopped";
-    }
+    if (error.reason === "server_unsettled") return "serverDetail.error.unsettled";
+    if (error.reason === "server_not_stopped") return "serverDetail.error.notStopped";
   }
-  return "serverDetail.resourcePack.assignError";
-}
-
-function unassignErrorMessage(error: unknown): TranslationKey {
-  if (error instanceof ApiError) {
-    if (error.reason === "server_unsettled") {
-      return "serverDetail.error.unsettled";
-    }
-    if (error.reason === "server_not_stopped") {
-      return "serverDetail.error.notStopped";
-    }
-  }
-  return "serverDetail.resourcePack.unassignError";
+  return fallback;
 }
 
 export function ServerResourcePackSection({
@@ -155,7 +142,7 @@ export function ServerResourcePackSection({
       if (onForbidden(error)) {
         return;
       }
-      showToast(t(unassignErrorMessage(error)), "error");
+      showToast(t(resourcePackErrorMessage(error, "serverDetail.resourcePack.unassignError")), "error");
     },
   });
 
@@ -187,6 +174,9 @@ export function ServerResourcePackSection({
         <AssignDialog
           communityId={communityId}
           serverId={serverId}
+          initialPackId={assignment?.resource_pack.id}
+          initialRequire={assignment?.require_resource_pack}
+          initialPrompt={assignment?.resource_pack_prompt ?? undefined}
           onSuccess={() => {
             setAssignOpen(false);
             showToast(t("serverDetail.resourcePack.assigned"), "success");
@@ -363,19 +353,25 @@ function AssignedView({
 function AssignDialog({
   communityId,
   serverId,
+  initialPackId,
+  initialRequire,
+  initialPrompt,
   onSuccess,
   onClose,
 }: {
   communityId: string;
   serverId: string;
+  initialPackId?: string;
+  initialRequire?: boolean;
+  initialPrompt?: string;
   onSuccess: () => void;
   onClose: () => void;
 }) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
-  const [selectedId, setSelectedId] = useState("");
-  const [require, setRequire] = useState(false);
-  const [prompt, setPrompt] = useState("");
+  const [selectedId, setSelectedId] = useState(initialPackId ?? "");
+  const [requirePack, setRequirePack] = useState(initialRequire ?? false);
+  const [prompt, setPrompt] = useState(initialPrompt ?? "");
 
   const packsQuery = useQuery({
     queryKey: ["resource-packs"],
@@ -392,7 +388,7 @@ function AssignDialog({
         {
           body: JSON.stringify({
             resource_pack_id: selectedId,
-            require_resource_pack: require,
+            require_resource_pack: requirePack,
             resource_pack_prompt: prompt.trim() || null,
           }),
         },
@@ -403,7 +399,7 @@ function AssignDialog({
         onClose();
         return;
       }
-      showToast(t(assignErrorMessage(error)), "error");
+      showToast(t(resourcePackErrorMessage(error, "serverDetail.resourcePack.assignError")), "error");
     },
   });
 
@@ -460,8 +456,8 @@ function AssignDialog({
             <span className="field-inline">
               <input
                 type="checkbox"
-                checked={require}
-                onChange={(e) => setRequire(e.target.checked)}
+                checked={requirePack}
+                onChange={(e) => setRequirePack(e.target.checked)}
               />
               {t("serverDetail.resourcePack.assignDialog.require")}
             </span>

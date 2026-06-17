@@ -19,6 +19,7 @@ import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { formatDateTime, humanizeBytes, shortId } from "../format.ts";
 import { t } from "../i18n/index.ts";
+import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 
 type ResourcePackResponse = components["schemas"]["ResourcePackResponse"];
 
@@ -204,6 +205,7 @@ function UploadDialog({
   onClose: () => void;
 }) {
   const { showToast } = useToast();
+  const onForbidden = useOnForbidden();
   const [displayName, setDisplayName] = useState("");
   const [file, setFile] = useState<File | null>(null);
 
@@ -215,7 +217,8 @@ function UploadDialog({
       return api.postForm("/api/resource-packs", form);
     },
     onSuccess,
-    onError: () => {
+    onError: (error) => {
+      if (onForbidden(error)) return;
       showToast(t("resourcePacks.error.uploadFailed"), "error");
     },
   });
