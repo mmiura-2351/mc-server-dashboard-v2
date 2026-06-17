@@ -147,3 +147,57 @@ def fake_s3_factory(store: FakeS3Store) -> S3ClientFactory:
         yield FakeS3Client(store)
 
     return _factory
+
+
+class _AfterCloseUseError(AssertionError):
+    """Raised when the adapter calls a client after its context manager exited."""
+
+
+class _CloseTrackingClient:
+    """Wrap an :class:`S3Client`, refusing every call made after close.
+
+    A factory hands one of these out per ``async with``; once the context exits,
+    any further method call on the (now dead) client raises — exactly the
+    use-after-close that, with the real aioboto3 client, leaks an aiohttp
+    ClientSession/connector on every snapshot publish (issue #948).
+    """
+
+    def __init__(self, inner: S3Client) -> None:
+        self._inner = inner
+        self._closed = False
+
+    def close(self) -> None:
+        self._closed = True
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        async def _guarded(*args: object, **kwargs: object) -> object:
+            if self._closed:
+                raise _AfterCloseUseError(
+                    f"client.{name} called after the client context closed"
+                )
+            return await attr(*args, **kwargs)
+
+        return _guarded
+
+
+def close_tracking_factory(inner: S3ClientFactory) -> S3ClientFactory:
+    """Wrap a client factory so every yielded client raises on use-after-close.
+
+    Used by the shared test harness to guard ALL adapter tests against the
+    use-after-close class (issue #952).
+    """
+
+    @asynccontextmanager
+    async def _factory() -> AsyncIterator[S3Client]:
+        async with inner() as real:
+            tracker = _CloseTrackingClient(real)
+            try:
+                yield tracker
+            finally:
+                tracker.close()
+
+    return _factory
