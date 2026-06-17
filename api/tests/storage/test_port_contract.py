@@ -714,7 +714,14 @@ async def _edit_rollback_file(
         _edit_make_dir,
         _edit_rollback_file,
     ],
-    ids=["write_file", "delete_file", "delete_dir", "rename_dir", "make_dir", "rollback_file"],
+    ids=[
+        "write_file",
+        "delete_file",
+        "delete_dir",
+        "rename_dir",
+        "make_dir",
+        "rollback_file",
+    ],
 )
 async def test_authoritative_edit_bumps_generation_with_api_sentinel(
     harness: StorageHarness,
