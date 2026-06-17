@@ -740,6 +740,10 @@ body.col-resizing {
   padding: 20px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
+.modal .modal-body {
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+}
 .modal .modal-foot {
   display: flex;
   justify-content: flex-end;
