@@ -25,6 +25,7 @@ export const en = {
   "nav.adminWorkers": "Workers",
   "nav.adminVersions": "Versions & JARs",
   "nav.adminAudit": "Global audit",
+  "nav.sharedResources": "Shared resources",
 
   // Placeholder pages (Phase 1: routing skeleton only)
   "page.login": "Sign in",
