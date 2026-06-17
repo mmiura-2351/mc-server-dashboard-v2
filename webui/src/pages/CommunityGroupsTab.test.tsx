@@ -271,7 +271,7 @@ describe("CommunityGroupsTab", () => {
     });
   });
 
-  it("removes a player with a DELETE to the player route", async () => {
+  it("removes a player with a DELETE after confirmation dialog", async () => {
     routeGet({
       groups: [group({ players: [{ uuid: "uuid-1", username: "steve" }] })],
       groupServers: [],
@@ -288,6 +288,13 @@ describe("CommunityGroupsTab", () => {
     fireEvent.click(
       await screen.findByRole("button", {
         name: t("communitySettings.groups.removePlayer"),
+      }),
+    );
+
+    // The confirm dialog must appear before the DELETE fires.
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("communitySettings.groups.removePlayerConfirm"),
       }),
     );
 
@@ -352,6 +359,11 @@ describe("CommunityGroupsTab", () => {
     fireEvent.click(
       await screen.findByRole("button", {
         name: t("communitySettings.groups.removePlayer"),
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("communitySettings.groups.removePlayerConfirm"),
       }),
     );
 
