@@ -1305,7 +1305,7 @@ export const ja: Record<TranslationKey, string> = {
   "resourcePacks.deleteDialog.confirm": "パックを削除",
   "resourcePacks.deleteDialog.prompt": "削除を有効にするには表示名を入力",
   "resourcePacks.error.tooLarge":
-    "ファイルサイズが512 MiBのアップロード上限を超えています。",
+    "ファイルサイズが256 MiBのアップロード上限を超えています。",
   "resourcePacks.error.uploadFailed":
     "リソースパックをアップロードできませんでした。",
   "resourcePacks.error.deleteFailed": "リソースパックを削除できませんでした。",

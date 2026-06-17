@@ -207,7 +207,7 @@ function UploadDialog({
   onSuccess: () => void;
   onClose: () => void;
 }) {
-  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
+  const MAX_UPLOAD_BYTES = 256 * 1024 * 1024;
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
   const [displayName, setDisplayName] = useState("");

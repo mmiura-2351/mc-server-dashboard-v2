@@ -1298,7 +1298,7 @@ export const en = {
   "resourcePacks.deleteDialog.confirm": "Delete pack",
   "resourcePacks.deleteDialog.prompt":
     "Type the display name to enable deletion",
-  "resourcePacks.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
+  "resourcePacks.error.tooLarge": "That file exceeds the 256 MiB upload limit.",
   "resourcePacks.error.uploadFailed": "Could not upload the resource pack.",
   "resourcePacks.error.deleteFailed": "Could not delete the resource pack.",
   "resourcePacks.error.inUse":
