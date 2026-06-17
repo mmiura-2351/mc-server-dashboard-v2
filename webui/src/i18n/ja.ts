@@ -1307,6 +1307,47 @@ export const ja: Record<TranslationKey, string> = {
   "resourcePacks.error.downloadFailed":
     "リソースパックをダウンロードできませんでした。",
 
+  // Server resource pack assignment (issue #1179).
+  "serverDetail.resourcePack.heading": "リソースパック",
+  "serverDetail.resourcePack.none": "リソースパックが割り当てられていません。",
+  "serverDetail.resourcePack.assign": "割り当て",
+  "serverDetail.resourcePack.change": "変更",
+  "serverDetail.resourcePack.remove": "解除",
+  "serverDetail.resourcePack.name": "名前",
+  "serverDetail.resourcePack.filename": "ファイル名",
+  "serverDetail.resourcePack.size": "サイズ",
+  "serverDetail.resourcePack.sha1": "SHA-1",
+  "serverDetail.resourcePack.url": "公開URL",
+  "serverDetail.resourcePack.urlCopied": "コピーしました！",
+  "serverDetail.resourcePack.required": "必須",
+  "serverDetail.resourcePack.notRequired": "任意",
+  "serverDetail.resourcePack.prompt": "プロンプト",
+  "serverDetail.resourcePack.promptNone": "なし",
+  "serverDetail.resourcePack.notAtRest":
+    "リソースパックの設定を変更するにはサーバーを停止してください。",
+  "serverDetail.resourcePack.assigned": "リソースパックを割り当てました。",
+  "serverDetail.resourcePack.unassigned":
+    "リソースパックの割り当てを解除しました。",
+  "serverDetail.resourcePack.assignError":
+    "リソースパックを割り当てできませんでした。",
+  "serverDetail.resourcePack.unassignError":
+    "リソースパックの割り当てを解除できませんでした。",
+  "serverDetail.resourcePack.assignDialog.title": "リソースパックを割り当て",
+  "serverDetail.resourcePack.assignDialog.select": "リソースパック",
+  "serverDetail.resourcePack.assignDialog.selectPlaceholder": "パックを選択…",
+  "serverDetail.resourcePack.assignDialog.require":
+    "リソースパックを必須にする",
+  "serverDetail.resourcePack.assignDialog.prompt":
+    "カスタムプロンプト（プレイヤーに表示）",
+  "serverDetail.resourcePack.assignDialog.submit": "割り当て",
+  "serverDetail.resourcePack.assignDialog.loading": "パックを読み込んでいます…",
+  "serverDetail.resourcePack.assignDialog.empty":
+    "利用可能なパックがありません。",
+  "serverDetail.resourcePack.removeDialog.title": "リソースパックを解除",
+  "serverDetail.resourcePack.removeDialog.body":
+    "このサーバーからリソースパックの割り当てを解除しますか？",
+  "serverDetail.resourcePack.removeDialog.confirm": "解除",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "この操作を行う権限がありません。",
   // Composed with the missing permission code, e.g. "You lack: server:start".

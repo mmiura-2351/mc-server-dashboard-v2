@@ -781,18 +781,28 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("checks port availability on blur and shows the taken hint", async () => {
-    mockApi.get.mockResolvedValueOnce(server({ observed_state: "stopped" }));
-    // The Settings tab fetches /api/meta for the memory-limit ceiling (#1069);
-    // supply a response so it does not consume the port-check mock below.
-    mockApi.get.mockResolvedValueOnce({
-      relay_enabled: false,
-      default_memory_limit_mb: null,
-      max_memory_limit_mb: null,
-    });
-    mockApi.get.mockResolvedValueOnce({
-      port: 25570,
-      in_range: true,
-      available: false,
+    // Route by path so that the resource-pack assignment query (#1179) and the
+    // meta query don't consume the port-check response.
+    const srv = server({ observed_state: "stopped" });
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/resource-pack")) {
+        return Promise.reject(new ApiError(404, { reason: "not_found" }));
+      }
+      if (path === "/api/meta") {
+        return Promise.resolve({
+          relay_enabled: false,
+          default_memory_limit_mb: null,
+          max_memory_limit_mb: null,
+        });
+      }
+      if (path.startsWith("/api/ports/check/")) {
+        return Promise.resolve({
+          port: 25570,
+          in_range: true,
+          available: false,
+        });
+      }
+      return Promise.resolve(srv);
     });
     renderPage();
 
