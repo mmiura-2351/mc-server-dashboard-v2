@@ -84,11 +84,13 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 | GET / POST | `/communities/{cid}/grants` | List (`?user_id=` filter) / create per-resource grant. `resource_type` = `server` only; permission families `server:*`, `file:*`, `backup:*`. |
 | DELETE | `/communities/{cid}/grants/{gid}` | Revoke. |
 
-Permission catalog (community axis, 31 codes — the role/grant editor's source
+Permission catalog (community axis, 32 codes — the role/grant editor's source
 of truth): `server:{create,read,update,delete,start,stop,restart,command}`,
 `file:{read,edit,history,rollback}`, `backup:{create,read,restore,delete,schedule}`,
 `member:{read,add,remove}`, `role:{read,manage}`, `grant:{read,manage}`,
-`group:{read,manage}`, `community:{read,update,delete}`, `audit:read`.
+`group:{read,manage}`, `community:{read,update,delete}`, `audit:read`,
+`session:read` (relay game-session moderation surface — player IPs are PII,
+RELAY.md Section 8; seeded on the Owner role by migration 0017).
 Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 `community:provision`, `platform:monitor`.
 
@@ -123,6 +125,15 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | POST / DELETE | `…/groups/{gid}/players[/{uuid}]` | Add / remove player (uuid + username). |
 | GET / PUT / DELETE | `…/groups/{gid}/servers[/{sid}]` | List / attach / detach server. |
 
+Server response fields: `id`, `community_id`, `name`, `mc_edition`,
+`mc_version`, `server_type`, `execution_backend`, `config` (full blob),
+`memory_limit_mb` (derived from `config['memory_limit_mb']`, null when unset),
+`cpu_millis` (derived from `config['cpu_millis']`, null when unset),
+`game_port`, `slug` (relay hostname prefix, auto-generated at create,
+renameable via PATCH), `join_hostname` (`<slug>.<base_domain>` when relay
+enabled, else null), `desired_state`, `observed_state`, `observed_at`,
+`assigned_worker_id`.
+
 Server state model: `desired_state` ∈ {running, stopped};
 `observed_state` ∈ {starting, running, stopping, stopped, restarting, crashed,
 unknown} + `observed_at` + `assigned_worker_id`.
@@ -144,8 +155,24 @@ Execution backends: `container` (the only shipped backend; the host-process driv
 | GET | `/communities/{cid}/audit` | Community-scoped audit (same filters minus `community`). |
 | GET | `/backups/statistics` `[A]` | Global backup statistics. |
 | GET | `/healthz` · `/readyz` · `/metrics` | Liveness / readiness / Prometheus (ops-facing, not UI-core). |
+| GET | `/meta` | Deployment facts the Web UI reads before a server exists (issue #1002): `{relay_enabled, default_memory_limit_mb, max_memory_limit_mb}`. Requires authentication. Used by the create wizard to decide whether to surface the game-port control (relay mode auto-allocates). |
 
-### 2.5 Real-time (WebSocket)
+### 2.5 Resource packs (issues #1176, #1177)
+
+Global resource pack library (not community-scoped) and per-server assignment.
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). |
+| GET | `/resource-packs` | List all resource packs (authenticated). |
+| DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). |
+| GET | `/resource-packs/{id}/download` | Download (authenticated). |
+| GET | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. |
+| POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. |
+| DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). |
+| GET | `…/{sid}/resource-pack` | Get the current assignment (`server:read`). |
+
+### 2.6 Real-time (WebSocket)
 
 | Path | Notes |
 |---|---|

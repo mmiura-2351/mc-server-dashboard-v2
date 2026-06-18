@@ -302,6 +302,7 @@ channel there is nothing to re-dispatch.
 |---|---|---|---|
 | `reconciler.interval_seconds` | `60` | | Loop resolution: how often the reconciler scans for diverged servers. Must be positive. |
 | `reconciler.grace_seconds` | `660` | | How long a divergence must persist (measured from the last Worker report) before it is acted on, so the normal in-flight lifecycle path has time to converge first. Must be positive and `> max(control.hydrate_timeout_seconds + control.command_timeout_seconds, control.snapshot_timeout_seconds, control.stop_timeout_seconds)` (the start round-trip budget, the held stop-snapshot budget, and the stop dispatch budget); below the floor the reconciler can re-dispatch a first start before it settles (risking a duplicate live instance), clear a still-healthy final-snapshot hold mid-upload (reopening the #847 race), or replay a stale stop before its first round-trip settles (#930) — a `WARN` fires on boot. The stock default (660) satisfies the stock floor (`max(600 + 30, 600, 600) = 630`). |
+| `reconciler.held_start_grace_seconds` | `90` | | The SHORTER grace applied only to a `redispatch_start` whose assigned Worker is connected AND already holds a fresh-enough working set, so the start skips hydrate and is command-only (issue #999). The long hydrate-based `grace_seconds` is pure dead waiting there, and the cross-worker duplicate-live-instance race cannot occur on a re-dispatch to the same already-connected Worker (its double-start guard rejects a second live start). All other paths keep the full `grace_seconds`. Must be positive and `<= grace_seconds`; a `WARN` fires on boot when violated. |
 | `reconciler.backoff_base_seconds` | `30` | | Base of the per-server exponential backoff after a failed re-dispatch; the wait doubles per consecutive failure. Must be positive. |
 | `reconciler.backoff_max_seconds` | `3600` | | Cap on the per-server backoff wait. Also doubles as the slack past `next_eligible_at` that keeps crash-loop damping alive across a slow (modded) boot's `starting` window. Must be positive, `>=` `backoff_base_seconds`, and `>= 600` (a smaller slack lets a still-diverged server expire and reset its failure count, re-arming the boot-crash loop). |
 
@@ -330,14 +331,25 @@ taken. A delete frees the server's port for reuse.
 | `ports.range_start` | `25565` | | Lowest assignable game port (inclusive). Must be `1..65535`. |
 | `ports.range_end` | `25664` | | Highest assignable game port (inclusive). Must be `1..65535` and `>=` `range_start`. |
 
-### 5.9 Observability
+### 5.9 Server memory limits
+
+Operator-configurable memory-limit defaults and ceiling for per-server allocations
+(issue #1069). Both default to unset (the hardcoded defaults apply). Surfaced to
+clients via `GET /api/meta` so the create wizard can pre-fill and cap the value.
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `memory_limit.default_mb` | *unset* | | Application-wide default memory allocation (MiB) for new servers when the create request omits `memory_limit_mb`. `None` (unset) preserves the current behaviour (blank / driver default). Must be at least 512 MiB; must not exceed `max_mb` when both are set; must not exceed the built-in ceiling (1 TiB) when `max_mb` is unset. |
+| `memory_limit.max_mb` | *unset* | | Operator-configurable ceiling that replaces the hardcoded 1 TiB max. `None` (unset) preserves the built-in ceiling. Must be at least 512 MiB. |
+
+### 5.10 Observability
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `log.level` | `info` | | Log verbosity. |
 | `log.format` | `json` | | Structured-log format; `json` keeps logs machine-parseable (REQUIREMENTS.md NFR-OBS-1). |
 
-### 5.10 Web UI serving
+### 5.11 Web UI serving
 
 The API can serve the built browser UI (`webui/dist`) from its own origin with an
 SPA fallback — no reverse proxy, no CORS, no separate service (WEBUI_SPEC 7.7,
@@ -349,7 +361,7 @@ proxies the API).
 |---|---|---|---|
 | `webui.dist_dir` | *unset* | | Directory of the built SPA to serve at `/`. When set, the API mounts it after every router (so API routes and WS endpoints take precedence) and falls back to `index.html` for unmatched paths so deep links/reloads resolve. Must be an existing directory containing `index.html`; otherwise startup fails fast. When unset, nothing is mounted. |
 
-### 5.11 Game-ingress relay
+### 5.12 Game-ingress relay
 
 The game-ingress relay (RELAY.md, epic #659) lets players join at
 `<slug>.<base_domain>` with no port. It is **config-selectable and default off**
@@ -366,6 +378,8 @@ missing, per the secret-blank rule above).
 | `relay.enabled` | `false` | | Master switch: serve `RelayService`, expose `join_hostname`, and run the prune loop (RELAY.md Section 9). |
 | `relay.credential` | *required when enabled* | secret | Shared credential the relay must present (`authorization: Bearer <credential>` metadata) to authenticate its gRPC calls (REQUIREMENTS.md NFR-SEC-1). A **separate** credential from `control.worker_credential` so relay and Worker credentials rotate independently (RELAY.md Section 6). |
 | `relay.base_domain` | *required when enabled* | | Routing domain (e.g. `mc.example.com`); used to build `join_hostname` (`<slug>.<base_domain>`) and returned to the relay on `Register` (RELAY.md Sections 3, 6). |
+| `relay.game_port` | `25565` | | The relay container's published game-listener host port (RELAY.md Section 13): the port players join on (fixed at 25565 to keep joins port-less). When the relay is enabled the allocator excludes any of these relay ports that fall inside the assignable game-port range so a server is never assigned a port the relay already holds on the host (issue #1002). Must be 1..65535. |
+| `relay.tunnel_port` | `25665` | | The relay container's published tunnel-listener host port (RELAY.md Section 13): the Worker dial-back tunnel endpoint. When the relay is enabled the allocator excludes it like `relay.game_port`. Must be 1..65535. |
 | `relay.session_retention_days` | `90` | | `game_session` prune window in days (RELAY.md Section 8; consumed by issue #957). Must be positive. |
 
 ---

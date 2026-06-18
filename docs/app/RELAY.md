@@ -506,6 +506,7 @@ config, wiring at the edge.
 | `api.grpc_endpoint` / `api.credential` / `api.tls.{ca_file,insecure}` | — | Same shape as the Worker's API connection config. |
 | `game.listen` | `:25565` | Public player listener. |
 | `game.status_cache_seconds` | `5` | Status-ping cache TTL. |
+| `game.status_cache_max_entries` | `1024` | Maximum entries in the per-slug status-ping cache; oldest entry is evicted when the limit is exceeded. Must be positive. |
 | `game.max_conns_per_ip` / `game.joins_per_ip_per_second` | `32` / `10` | Hygiene caps (Section 11). |
 | `tunnel.listen` | `:25665` | Worker dial-back listener (TLS). |
 | `tunnel.max_conns_per_ip` | `64` | Per-IP concurrent-connection cap on the tunnel listener (Section 11). |
