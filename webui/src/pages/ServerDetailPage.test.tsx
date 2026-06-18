@@ -253,6 +253,53 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
       expect(activeTab()).toBe(t("serverDetail.tab.overview")),
     );
   });
+
+  it("tab buttons carry aria-controls and the panel carries aria-labelledby (#1216)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+    await screen.findByText("survival");
+
+    const overviewTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.overview"),
+    });
+    expect(overviewTab).toHaveAttribute("aria-controls", "sd-panel-overview");
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toHaveAttribute("id", "sd-panel-overview");
+    expect(panel).toHaveAttribute("aria-labelledby", "sd-tab-overview");
+  });
+
+  it("ArrowRight moves focus to the next tab (#1216)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+    await screen.findByText("survival");
+
+    const overviewTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.overview"),
+    });
+    overviewTab.focus();
+    fireEvent.keyDown(overviewTab, { key: "ArrowRight" });
+
+    const consoleTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.console"),
+    });
+    expect(consoleTab).toHaveFocus();
+    expect(consoleTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("inactive tabs have tabIndex -1 (roving tabindex, #1216)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+    await screen.findByText("survival");
+
+    const overviewTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.overview"),
+    });
+    const settingsTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.settings"),
+    });
+    expect(overviewTab).toHaveAttribute("tabindex", "0");
+    expect(settingsTab).toHaveAttribute("tabindex", "-1");
+  });
 });
 
 describe("ServerDetailPage lifecycle controls", () => {

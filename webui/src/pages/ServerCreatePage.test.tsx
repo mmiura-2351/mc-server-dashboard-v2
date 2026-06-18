@@ -846,4 +846,48 @@ describe("create-vs-import tab in the URL (#540)", () => {
     expect(activeTab()).toBe(t("serverCreate.tab.new"));
     expect(lastHash).toBe("");
   });
+
+  it("tab buttons carry aria-controls and the panel carries aria-labelledby (#1216)", async () => {
+    renderPage();
+    await screen.findByText(t("serverCreate.typeHeading"));
+
+    const newTab = screen.getByRole("tab", {
+      name: t("serverCreate.tab.new"),
+    });
+    expect(newTab).toHaveAttribute("aria-controls", "sc-panel-new");
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toHaveAttribute("id", "sc-panel-new");
+    expect(panel).toHaveAttribute("aria-labelledby", "sc-tab-new");
+  });
+
+  it("ArrowRight moves focus to the import tab (#1216)", async () => {
+    renderPage();
+    await screen.findByText(t("serverCreate.typeHeading"));
+
+    const newTab = screen.getByRole("tab", {
+      name: t("serverCreate.tab.new"),
+    });
+    newTab.focus();
+    fireEvent.keyDown(newTab, { key: "ArrowRight" });
+
+    const importTab = screen.getByRole("tab", {
+      name: t("serverCreate.tab.import"),
+    });
+    expect(importTab).toHaveFocus();
+    expect(importTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("inactive tabs have tabIndex -1 (roving tabindex, #1216)", async () => {
+    renderPage();
+    await screen.findByText(t("serverCreate.typeHeading"));
+
+    const newTab = screen.getByRole("tab", {
+      name: t("serverCreate.tab.new"),
+    });
+    const importTab = screen.getByRole("tab", {
+      name: t("serverCreate.tab.import"),
+    });
+    expect(newTab).toHaveAttribute("tabindex", "0");
+    expect(importTab).toHaveAttribute("tabindex", "-1");
+  });
 });

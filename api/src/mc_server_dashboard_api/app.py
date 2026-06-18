@@ -540,9 +540,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             obj = settings.storage.object
             assert obj.endpoint is not None
             assert obj.bucket is not None
-            await storage.check_reachable(
-                endpoint=obj.endpoint, bucket=obj.bucket
-            )
+            await storage.check_reachable(endpoint=obj.endpoint, bucket=obj.bucket)
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
         # note): reclaim any staging dir/prefix or superseded snapshot left by a
         # crash before this process serves. Idempotent and keyed off the live
