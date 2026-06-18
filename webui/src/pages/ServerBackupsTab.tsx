@@ -13,7 +13,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
@@ -468,6 +468,11 @@ function ScheduleField({
   const [hours, setHours] = useState(
     typeof current === "number" ? String(current) : "",
   );
+
+  // Re-sync when the server config changes externally (#1212).
+  useEffect(() => {
+    setHours(typeof current === "number" ? String(current) : "");
+  }, [current]);
 
   const save = useMutation({
     mutationFn: () => {
