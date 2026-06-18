@@ -1364,6 +1364,12 @@ export const ja: Record<TranslationKey, string> = {
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "不足している権限: ",
 
+  // Error boundary (#1211)
+  "errorBoundary.title": "問題が発生しました",
+  "errorBoundary.body":
+    "予期しないエラーが発生しました。ページを再読み込みすると復旧することがあります。",
+  "errorBoundary.reload": "ページを再読み込み",
+
   // Shared format strings — heartbeat age (#1214)
   "format.secondsAgo": "{value}秒前",
   "format.minutesAgo": "{value}分前",
