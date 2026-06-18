@@ -41,14 +41,17 @@ def validate_and_normalize(content: bytes, *, _depth: int = 0) -> bytes:
             raise InvalidResourcePackError("too many entries")
 
         # Safety: path traversal and decompressed size.
+        # Count actual decompressed bytes — ``info.file_size`` is attacker-
+        # controllable (zip header field), so it must not be trusted (#1221).
         total_size = 0
         for info in infos:
             name = info.filename
             if name.startswith("/") or ".." in name.split("/"):
                 raise InvalidResourcePackError(f"path traversal: {name}")
-            total_size += info.file_size
-            if total_size > _MAX_DECOMPRESSED_BYTES:
-                raise InvalidResourcePackError("decompressed size exceeds limit")
+            if not info.is_dir():
+                total_size += len(zf.read(name))
+                if total_size > _MAX_DECOMPRESSED_BYTES:
+                    raise InvalidResourcePackError("decompressed size exceeds limit")
 
         # Step 2: Check for zip-in-zip (single entry that is a .zip file).
         non_dir = [i for i in infos if not i.is_dir()]
