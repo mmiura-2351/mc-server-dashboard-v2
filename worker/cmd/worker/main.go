@@ -305,7 +305,7 @@ func buildTLSConfig(tlsCfg config.TLSConfig) (*tls.Config, error) {
 		return nil, fmt.Errorf("CA file %q contained no usable certificates", tlsCfg.CAFile)
 	}
 
-	out := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	out := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}
 
 	if tlsCfg.ClientCertFile != "" && tlsCfg.ClientKeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(tlsCfg.ClientCertFile, tlsCfg.ClientKeyFile)
