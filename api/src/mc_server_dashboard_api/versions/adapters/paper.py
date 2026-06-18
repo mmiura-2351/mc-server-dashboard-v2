@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.errors import UnknownVersionError
@@ -47,13 +48,14 @@ class PaperCatalog(VersionCatalog):
 
     async def resolve(self, server_type: ServerType, version: str) -> JarSource:
         _require_paper(server_type)
-        version_detail = await self.fetcher.get_json(f"{_BASE}/versions/{version}")
+        version_q = quote(version, safe="")
+        version_detail = await self.fetcher.get_json(f"{_BASE}/versions/{version_q}")
         builds = _int_list(version_detail, "builds")
         if not builds:
             raise UnknownVersionError(f"paper {version}")
         build = max(builds)
         build_detail = await self.fetcher.get_json(
-            f"{_BASE}/versions/{version}/builds/{build}"
+            f"{_BASE}/versions/{version_q}/builds/{build}"
         )
         application = _application(build_detail)
         if application is None:
@@ -62,7 +64,7 @@ class PaperCatalog(VersionCatalog):
         return JarSource(
             server_type=ServerType.PAPER,
             version=version,
-            url=f"{_BASE}/versions/{version}/builds/{build}/downloads/{name}",
+            url=f"{_BASE}/versions/{version_q}/builds/{build}/downloads/{name}",
             expected_hash=str(application["sha256"]),
             hash_algorithm=HashAlgorithm.SHA256,
         )
