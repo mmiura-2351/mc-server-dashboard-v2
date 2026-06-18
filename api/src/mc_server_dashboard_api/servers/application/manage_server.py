@@ -155,6 +155,14 @@ _RESERVED_CONFIG_KEYS = frozenset(
         CPU_ALLOCATION_CONFIG_KEY,
         SNAPSHOT_INTERVAL_CONFIG_KEY,
         BACKUP_INTERVAL_CONFIG_KEY,
+        # Platform-managed server.properties keys (issue #1243). These are set
+        # by _seed_initial_working_set (create) and _rewrite_server_port
+        # (update); user config must not override them via the properties
+        # override path.
+        "server-port",
+        "enable-rcon",
+        "rcon.port",
+        "rcon.password",
     }
 )
 

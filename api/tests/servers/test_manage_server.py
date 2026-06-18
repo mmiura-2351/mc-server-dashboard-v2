@@ -698,6 +698,45 @@ async def test_create_skips_reserved_keys_in_properties_overrides() -> None:
     assert "motd=hi" in props_text
 
 
+async def test_create_skips_platform_managed_properties_keys() -> None:
+    # Platform-managed server.properties keys (server-port, enable-rcon,
+    # rcon.port, rcon.password) must NOT be overridable via the config dict
+    # (#1243). They are set by _seed_initial_working_set and must not be
+    # clobbered by user-supplied config values.
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={
+            "server-port": "99999",
+            "enable-rcon": "false",
+            "rcon.port": "11111",
+            "rcon.password": "hacked",
+            "motd": "hello",
+        },
+    )
+    props_text = file_store.files["server.properties"].decode()
+    # The platform-assigned values must survive, not the user overrides.
+    assert "server-port=25565" in props_text
+    assert "enable-rcon=true" in props_text
+    assert "rcon.port=25575" in props_text
+    assert "rcon.password=tok" in props_text
+    # Legitimate user overrides still apply.
+    assert "motd=hello" in props_text
+
+
 async def test_create_with_empty_config_seeds_no_overrides() -> None:
     # An empty config dict produces the standard seeded properties, no extras.
     uow = FakeUnitOfWork()
@@ -1640,6 +1679,43 @@ async def test_update_config_overrides_skips_reserved_keys_in_file() -> None:
     assert updated.config[MEMORY_LIMIT_CONFIG_KEY] == 2048
     props_text = file_store.files["server.properties"].decode()
     assert "memory_limit_mb" not in props_text
+    assert uow.commits == 1
+
+
+async def test_update_config_overrides_skips_platform_managed_keys() -> None:
+    # Platform-managed server.properties keys (server-port, enable-rcon,
+    # rcon.port, rcon.password) must NOT be written into server.properties via
+    # config overrides (#1243). They are managed by platform seeding and the
+    # port-rewrite path; a user config must not clobber them.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = (
+        b"server-port=25565\nenable-rcon=true\nrcon.port=25575\n"
+        b"rcon.password=secret\nmotd=hi\n"
+    )
+    await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "bye",
+            "server-port": "99999",
+            "enable-rcon": "false",
+            "rcon.port": "11111",
+            "rcon.password": "hacked",
+        },
+    )
+    # The config dict stores all keys (the DB row is the source of truth for
+    # non-properties keys), but the file must not contain the overridden values.
+    props_text = file_store.files["server.properties"].decode()
+    assert "server-port=25565" in props_text
+    assert "enable-rcon=true" in props_text
+    assert "rcon.port=25575" in props_text
+    assert "rcon.password=secret" in props_text
+    assert "motd=bye" in props_text
     assert uow.commits == 1
 
 
