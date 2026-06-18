@@ -310,9 +310,9 @@ hooks-check:
 	_fail=0; \
 	if [ "$$(git config core.hooksPath)" != ".githooks" ]; then \
 		_gitdir="$$(git rev-parse --git-dir 2>/dev/null)"; \
-		if [ -L "$$_gitdir/hooks/post-checkout" ] && \
-		   [ -L "$$_gitdir/hooks/pre-commit" ] && \
-		   [ -L "$$_gitdir/hooks/pre-push" ]; then \
+		if [ -x "$$_gitdir/hooks/post-checkout" ] && \
+		   [ -x "$$_gitdir/hooks/pre-commit" ] && \
+		   [ -x "$$_gitdir/hooks/pre-push" ]; then \
 			echo "WARN: core.hooksPath is not '.githooks' but symlinks exist in .git/hooks/ -- hooks will fire."; \
 			echo "  Run 'make hooks-install' to also fix the config value."; \
 		else \

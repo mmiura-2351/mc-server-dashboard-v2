@@ -26,20 +26,29 @@ fail_test() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 # ---------------------------------------------------------------------------
 run_hooks_check() {
 	# Caller may set: CI, _FORCE_TOPLEVEL, _FORCE_HOOKSPATH, _FORCE_NAME,
-	# _FORCE_EMAIL.  All default to values that pass.
+	# _FORCE_EMAIL, _FORCE_GITDIR.  All default to values that pass.
 	local ci="${CI:-false}"
 	local toplevel="${_FORCE_TOPLEVEL:-/some/normal/repo}"
 	local hookspath="${_FORCE_HOOKSPATH-.githooks}"
 	local name="${_FORCE_NAME:-Real Name}"
 	local email="${_FORCE_EMAIL:-real@example.com}"
+	local gitdir="${_FORCE_GITDIR:-}"
 
 	[ "$ci" = "true" ] && return 0
 	case "$toplevel" in */.claude/worktrees/*) return 0 ;; esac
 	local _fail=0
 	if [ "$hookspath" != ".githooks" ]; then
-		echo "FAIL: git core.hooksPath is not '.githooks'"
-		echo "  current: ${hookspath:-<unset>}"
-		_fail=1
+		if [ -n "$gitdir" ] && \
+		   [ -x "$gitdir/hooks/post-checkout" ] && \
+		   [ -x "$gitdir/hooks/pre-commit" ] && \
+		   [ -x "$gitdir/hooks/pre-push" ]; then
+			echo "WARN: core.hooksPath is not '.githooks' but symlinks exist in .git/hooks/ -- hooks will fire."
+			echo "  Run 'make hooks-install' to also fix the config value."
+		else
+			echo "FAIL: git core.hooksPath is not '.githooks'"
+			echo "  current: ${hookspath:-<unset>}"
+			_fail=1
+		fi
 	fi
 	if [ "$name" = "Test" ] || [ "$email" = "test@example.com" ]; then
 		echo "FAIL: git identity is the test identity (Test/test@example.com)."
@@ -169,7 +178,78 @@ echo "=== hooks-check tests ==="
 	fi
 }
 
-# --- 8. Both wrong hooksPath and test identity: exits non-zero ---
+# --- 8. Wrong hooksPath + all symlinks present: exits 0 (WARN) ---
+{
+	tmpdir="$(mktemp -d)"
+	mkdir -p "$tmpdir/hooks"
+	# Create executable symlink targets (real files, simulating .githooks/).
+	for h in post-checkout pre-commit pre-push; do
+		printf '#!/bin/sh\n' > "$tmpdir/$h"
+		chmod +x "$tmpdir/$h"
+		ln -s "../$h" "$tmpdir/hooks/$h"
+	done
+	exit_code=0
+	out="$(
+		CI=false \
+		_FORCE_TOPLEVEL="/home/user/repo" \
+		_FORCE_HOOKSPATH="/home/user/repo/.git/hooks" \
+		_FORCE_GITDIR="$tmpdir" \
+		run_hooks_check 2>/dev/null
+	)" || exit_code=$?
+	if [ "$exit_code" -eq 0 ] && echo "$out" | grep -q "WARN"; then
+		ok "wrong hooksPath + symlinks present: exits 0 (WARN)"
+	else
+		fail_test "wrong hooksPath + symlinks present: expected exit 0 + WARN, got exit=$exit_code output=$out"
+	fi
+	rm -rf "$tmpdir"
+}
+
+# --- 9. Wrong hooksPath + no symlinks: exits non-zero (FAIL) ---
+{
+	tmpdir="$(mktemp -d)"
+	mkdir -p "$tmpdir/hooks"
+	exit_code=0
+	(
+		CI=false \
+		_FORCE_TOPLEVEL="/home/user/repo" \
+		_FORCE_HOOKSPATH="/home/user/repo/.git/hooks" \
+		_FORCE_GITDIR="$tmpdir" \
+		run_hooks_check 2>/dev/null
+	) || exit_code=$?
+	if [ "$exit_code" -ne 0 ]; then
+		ok "wrong hooksPath + no symlinks: exits non-zero (FAIL)"
+	else
+		fail_test "wrong hooksPath + no symlinks: expected non-zero, got 0"
+	fi
+	rm -rf "$tmpdir"
+}
+
+# --- 10. Wrong hooksPath + partial symlinks (2 of 3): exits non-zero (FAIL) ---
+{
+	tmpdir="$(mktemp -d)"
+	mkdir -p "$tmpdir/hooks"
+	for h in post-checkout pre-commit; do
+		printf '#!/bin/sh\n' > "$tmpdir/$h"
+		chmod +x "$tmpdir/$h"
+		ln -s "../$h" "$tmpdir/hooks/$h"
+	done
+	exit_code=0
+	(
+		CI=false \
+		_FORCE_TOPLEVEL="/home/user/repo" \
+		_FORCE_HOOKSPATH="/home/user/repo/.git/hooks" \
+		_FORCE_GITDIR="$tmpdir" \
+		run_hooks_check 2>/dev/null
+	) || exit_code=$?
+	if [ "$exit_code" -ne 0 ]; then
+		ok "wrong hooksPath + partial symlinks (2/3): exits non-zero (FAIL)"
+	else
+		fail_test "wrong hooksPath + partial symlinks: expected non-zero, got 0"
+	fi
+	rm -rf "$tmpdir"
+}
+
+# --- 11. Both wrong hooksPath and test identity: exits non-zero ---
 {
 	exit_code=0
 	(
