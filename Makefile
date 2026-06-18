@@ -287,7 +287,10 @@ bootstrap: $(GOLANGCI)
 # Point git at the checked-in hooks. One command, no external dependency.
 hooks-install:
 	git config core.hooksPath .githooks
-	@echo "git hooks installed (core.hooksPath -> .githooks)"
+	@for h in post-checkout pre-commit pre-push; do \
+		ln -sf "../../.githooks/$$h" ".git/hooks/$$h"; \
+	done
+	@echo "git hooks installed (core.hooksPath -> .githooks, symlinks in .git/hooks/)"
 
 # Preflight for `make check`: assert core.hooksPath and git identity on the
 # PRIMARY checkout; skip silently on CI runners and on agent worktrees (which
