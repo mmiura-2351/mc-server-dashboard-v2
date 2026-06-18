@@ -484,6 +484,7 @@ export const en = {
     "No worker is available to take the backup right now.",
   "backups.error.invalidSchedule":
     "backup_interval_hours must be a whole number of hours of at least 1.",
+  "backups.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "backups.error.generic": "Something went wrong. Please try again.",
 
   // Files tab (WEBUI_SPEC.md 6.6). One contiguous block to keep merge
@@ -548,6 +549,7 @@ export const en = {
   "files.rolledBack": "Rolled back to the selected version.",
   "files.error.serverMustBeStopped":
     "Stop the server before uploading files or creating folders.",
+  "files.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "files.error.generic": "Something went wrong. Please try again.",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
@@ -1026,6 +1028,10 @@ export const en = {
   "communitySettings.groups.playersHeading": "Players",
   "communitySettings.groups.playersEmpty": "No players in this group yet.",
   "communitySettings.groups.removePlayer": "Remove",
+  "communitySettings.groups.removePlayerDialogTitle": "Remove player",
+  "communitySettings.groups.removePlayerDialogBody":
+    "Are you sure you want to remove this player from the group?",
+  "communitySettings.groups.removePlayerConfirm": "Remove player",
   "communitySettings.groups.playerRemoved": "Player removed.",
   "communitySettings.groups.addPlayer": "Add player",
   "communitySettings.groups.uuidLabel": "UUID",
@@ -1296,6 +1302,7 @@ export const en = {
   "resourcePacks.deleteDialog.confirm": "Delete pack",
   "resourcePacks.deleteDialog.prompt":
     "Type the display name to enable deletion",
+  "resourcePacks.error.tooLarge": "That file exceeds the 256 MiB upload limit.",
   "resourcePacks.error.uploadFailed": "Could not upload the resource pack.",
   "resourcePacks.error.deleteFailed": "Could not delete the resource pack.",
   "resourcePacks.error.inUse":
@@ -1345,4 +1352,9 @@ export const en = {
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "You lack: ",
+
+  // Shared format strings — heartbeat age (#1214)
+  "format.secondsAgo": "{value}s ago",
+  "format.minutesAgo": "{value}m ago",
+  "format.hoursAgo": "{value}h ago",
 } as const;

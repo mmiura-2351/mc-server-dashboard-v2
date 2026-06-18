@@ -491,6 +491,8 @@ export const ja: Record<TranslationKey, string> = {
     "現在、バックアップを取得できるWorkerがありません。",
   "backups.error.invalidSchedule":
     "backup_interval_hours は1以上の整数の時間数である必要があります。",
+  "backups.error.tooLarge":
+    "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "backups.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Files tab (WEBUI_SPEC.md 6.6).
@@ -556,6 +558,8 @@ export const ja: Record<TranslationKey, string> = {
   "files.rolledBack": "選択したバージョンにロールバックしました。",
   "files.error.serverMustBeStopped":
     "ファイルのアップロードやフォルダの作成を行う前にサーバーを停止してください。",
+  "files.error.tooLarge":
+    "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
@@ -1034,6 +1038,10 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.groups.playersEmpty":
     "このグループにはまだプレイヤーがいません。",
   "communitySettings.groups.removePlayer": "削除",
+  "communitySettings.groups.removePlayerDialogTitle": "プレイヤーを削除",
+  "communitySettings.groups.removePlayerDialogBody":
+    "このプレイヤーをグループから削除してもよろしいですか？",
+  "communitySettings.groups.removePlayerConfirm": "プレイヤーを削除",
   "communitySettings.groups.playerRemoved": "プレイヤーを削除しました。",
   "communitySettings.groups.addPlayer": "プレイヤーを追加",
   "communitySettings.groups.uuidLabel": "UUID",
@@ -1300,6 +1308,8 @@ export const ja: Record<TranslationKey, string> = {
     "リソースパックを完全に削除します。サーバーに割り当て済みのパックは削除できません。",
   "resourcePacks.deleteDialog.confirm": "パックを削除",
   "resourcePacks.deleteDialog.prompt": "削除を有効にするには表示名を入力",
+  "resourcePacks.error.tooLarge":
+    "ファイルサイズが256 MiBのアップロード上限を超えています。",
   "resourcePacks.error.uploadFailed":
     "リソースパックをアップロードできませんでした。",
   "resourcePacks.error.deleteFailed": "リソースパックを削除できませんでした。",
@@ -1353,4 +1363,9 @@ export const ja: Record<TranslationKey, string> = {
   "permissions.denied": "この操作を行う権限がありません。",
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "不足している権限: ",
+
+  // Shared format strings — heartbeat age (#1214)
+  "format.secondsAgo": "{value}秒前",
+  "format.minutesAgo": "{value}分前",
+  "format.hoursAgo": "{value}時間前",
 } as const;

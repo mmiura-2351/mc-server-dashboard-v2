@@ -12,6 +12,7 @@ import { ApiError, api } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
+import { copyToClipboard } from "../clipboard.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -208,32 +209,6 @@ function Loaded({
 }
 
 // ── Overview header + lifecycle controls ────────────────────────────────────
-
-// Copy text to clipboard with an execCommand fallback for insecure contexts.
-function copyToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  return new Promise((resolve, reject) => {
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      const ok = document.execCommand("copy");
-      document.body.removeChild(ta);
-      if (ok) {
-        resolve();
-      } else {
-        reject();
-      }
-    } catch {
-      reject();
-    }
-  });
-}
 
 function Header({
   server,
