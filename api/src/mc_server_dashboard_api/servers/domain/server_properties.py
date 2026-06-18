@@ -158,6 +158,21 @@ def set_resource_pack_properties(
     return ("\n".join(lines) + "\n").encode()
 
 
+def apply_overrides(content: bytes, overrides: dict[str, str]) -> bytes:
+    """Return ``content`` with each ``key=value`` pair in *overrides* applied.
+
+    Each key is set via the same rewrite-or-append logic as the other helpers:
+    the first live (non-comment) ``key=...`` line is rewritten in place; if none
+    exists, ``key=value`` is appended. Other lines and their order are preserved;
+    the result ends with a single trailing newline (issue #1209).
+    """
+
+    lines = _split_content_lines(content)
+    for key, value in overrides.items():
+        lines = _set_property(lines, key, value)
+    return ("\n".join(lines) + "\n").encode()
+
+
 def clear_resource_pack_properties(content: bytes) -> bytes:
     """Return ``content`` with the 4 resource pack keys removed (issue #1177).
 

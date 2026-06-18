@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mc_server_dashboard_api.servers.domain.server_properties import (
     RCON_PORT,
+    apply_overrides,
     clear_resource_pack_properties,
     set_rcon_properties,
     set_resource_pack_properties,
@@ -192,3 +193,34 @@ def test_clear_resource_pack_ignores_commented_keys() -> None:
     content = b"#resource-pack=url\nresource-pack=real-url\nmotd=hi\n"
     out = clear_resource_pack_properties(content)
     assert out == b"#resource-pack=url\nmotd=hi\n"
+
+
+# --- apply_overrides (issue #1209) -------------------------------------------
+
+
+def test_apply_overrides_appends_new_keys_to_empty_content() -> None:
+    out = apply_overrides(b"", {"motd": "Hello World", "pvp": "true"})
+    assert out == b"motd=Hello World\npvp=true\n"
+
+
+def test_apply_overrides_rewrites_existing_keys_in_place() -> None:
+    content = b"motd=old\nmax-players=20\n"
+    out = apply_overrides(content, {"motd": "new"})
+    assert out == b"motd=new\nmax-players=20\n"
+
+
+def test_apply_overrides_mixes_rewrite_and_append() -> None:
+    content = b"motd=old\n"
+    out = apply_overrides(content, {"motd": "new", "pvp": "false"})
+    assert out == b"motd=new\npvp=false\n"
+
+
+def test_apply_overrides_preserves_other_lines() -> None:
+    content = b"#comment\nserver-port=25565\nmotd=hi\n"
+    out = apply_overrides(content, {"motd": "bye"})
+    assert out == b"#comment\nserver-port=25565\nmotd=bye\n"
+
+
+def test_apply_overrides_empty_dict_is_noop() -> None:
+    content = b"motd=hi\n"
+    assert apply_overrides(content, {}) == b"motd=hi\n"
