@@ -159,7 +159,7 @@ func dial(api config.APIConfig, logger *slog.Logger) (*grpc.ClientConn, error) {
 		if !pool.AppendCertsFromPEM(caPEM) {
 			return nil, fmt.Errorf("CA file %q contained no usable certificates", api.TLS.CAFile)
 		}
-		creds = credentials.NewTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})
+		creds = credentials.NewTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13})
 	}
 
 	conn, err := grpc.NewClient(api.GRPCEndpoint, grpc.WithTransportCredentials(creds))
