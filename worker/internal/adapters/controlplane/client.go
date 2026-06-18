@@ -97,6 +97,10 @@ func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) e
 				Capabilities: &controlplanev1.WorkerCapabilities{
 					Drivers:    mapDrivers(caps.Drivers),
 					MaxServers: caps.MaxServers,
+					Resources: &controlplanev1.HostResources{
+						CpuCores:    caps.Resources.CPUCores,
+						MemoryBytes: caps.Resources.MemoryBytes,
+					},
 				},
 			},
 		},
