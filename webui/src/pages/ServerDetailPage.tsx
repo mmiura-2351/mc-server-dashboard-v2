@@ -1308,6 +1308,33 @@ function Settings({
   const [portHint, setPortHint] = useState<TranslationKey | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
+  // Re-sync form state when the server prop changes (e.g. after a save +
+  // cache invalidation or an external edit) so the form never submits stale
+  // values that silently overwrite concurrent changes (#1212).
+  useEffect(() => {
+    setName(server.name);
+    setSlug(server.slug);
+    setSlugError(null);
+    setPortHint(null);
+    setPort(server.game_port !== null ? String(server.game_port) : "");
+    setRows(toRows(server.config as Record<string, unknown>));
+    setMemoryLimit(
+      typeof server.memory_limit_mb === "number"
+        ? String(server.memory_limit_mb)
+        : "",
+    );
+    setCpuAllocation(
+      typeof server.cpu_millis === "number" ? String(server.cpu_millis) : "",
+    );
+  }, [
+    server.name,
+    server.slug,
+    server.game_port,
+    server.config,
+    server.memory_limit_mb,
+    server.cpu_millis,
+  ]);
+
   // Operator-configurable memory-limit ceiling from /meta (issue #1069). The
   // meta query is shared with the create page via react-query's cache.
   const metaQuery = useQuery({
