@@ -102,7 +102,7 @@ function renderPage(path = `/communities/${CID}/servers/${SID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
@@ -117,6 +117,7 @@ function renderPage(path = `/communities/${CID}/servers/${SID}`) {
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 beforeEach(() => {
@@ -1118,6 +1119,50 @@ describe("ServerDetailPage settings", () => {
     expect(
       screen.getByRole("button", { name: t("serverDetail.settings.save") }),
     ).toBeDisabled();
+  });
+
+  it("re-syncs form fields when the server prop changes (#1212)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        name: "old-name",
+        slug: "old-slug",
+        game_port: 25565,
+        memory_limit_mb: 1024,
+        cpu_millis: 1000,
+        config: { motd: "hello" },
+        observed_state: "stopped",
+      }),
+    );
+    const { queryClient } = renderPage();
+
+    await screen.findByText("old-name");
+    openSettings();
+    expect(screen.getByDisplayValue("old-name")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("25565")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("1024")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("1000")).toBeInTheDocument();
+
+    // Simulate a react-query refetch returning updated server data.
+    mockApi.get.mockResolvedValue(
+      server({
+        name: "new-name",
+        slug: "new-slug",
+        game_port: 25570,
+        memory_limit_mb: 2048,
+        cpu_millis: 1500,
+        config: { motd: "bye" },
+        observed_state: "stopped",
+      }),
+    );
+    await act(() => queryClient.invalidateQueries());
+
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("new-name")).toBeInTheDocument(),
+    );
+    expect(screen.getByDisplayValue("25570")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("2048")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("1500")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("bye")).toBeInTheDocument();
   });
 });
 

@@ -1315,6 +1315,7 @@ function Settings({
     setName(server.name);
     setSlug(server.slug);
     setSlugError(null);
+    setPortHint(null);
     setPort(server.game_port !== null ? String(server.game_port) : "");
     setRows(toRows(server.config as Record<string, unknown>));
     setMemoryLimit(
