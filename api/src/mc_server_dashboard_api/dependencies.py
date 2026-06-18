@@ -1303,7 +1303,11 @@ def get_delete_group(
     """
 
     session_factory = create_session_factory(get_engine(request))
-    return DeleteGroup(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return DeleteGroup(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_add_player(
@@ -1313,7 +1317,11 @@ def get_add_player(
     """Assemble the :class:`AddPlayer` use case (group:manage)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return AddPlayer(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return AddPlayer(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_remove_player(
@@ -1323,7 +1331,11 @@ def get_remove_player(
     """Assemble the :class:`RemovePlayer` use case (group:manage)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return RemovePlayer(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return RemovePlayer(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_attach_group(
@@ -1333,7 +1345,11 @@ def get_attach_group(
     """Assemble the :class:`AttachGroup` use case (group:manage)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return AttachGroup(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return AttachGroup(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_detach_group(
@@ -1343,7 +1359,11 @@ def get_detach_group(
     """Assemble the :class:`DetachGroup` use case (group:manage)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return DetachGroup(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return DetachGroup(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_list_group_servers(request: Request) -> ListGroupServers:
