@@ -171,7 +171,10 @@ async def test_crash_before_pointer_flip_keeps_old_prefix_live(
     community, server = new_scope()
     await _publish(seeded, community, server, {"f": b"OLD"})
 
-    crashed = ObjectStorage(close_tracking_factory(fake_s3_factory(store)), failure_seam=CrashAt(phase))
+    crashed = ObjectStorage(
+        close_tracking_factory(fake_s3_factory(store)),
+        failure_seam=CrashAt(phase),
+    )
     handle = await crashed.begin_snapshot(community, server)
     await crashed.write_snapshot(handle, tar_stream({"f": b"NEW"}))
     with pytest.raises(InjectedCrash):
@@ -190,7 +193,8 @@ async def test_crash_after_pointer_flip_keeps_new_prefix_live() -> None:
     await _publish(seeded, community, server, {"f": b"OLD"})
 
     crashed = ObjectStorage(
-        close_tracking_factory(fake_s3_factory(store)), failure_seam=CrashAt(PublishPhase.AFTER_FLIP)
+        close_tracking_factory(fake_s3_factory(store)),
+        failure_seam=CrashAt(PublishPhase.AFTER_FLIP),
     )
     handle = await crashed.begin_snapshot(community, server)
     await crashed.write_snapshot(handle, tar_stream({"f": b"NEW"}))
@@ -215,7 +219,10 @@ async def test_sweep_reclaims_orphan_prefixes_idempotently(
     community, server = new_scope()
     await _publish(seeded, community, server, {"f": b"OLD"})
 
-    crashed = ObjectStorage(close_tracking_factory(fake_s3_factory(store)), failure_seam=CrashAt(phase))
+    crashed = ObjectStorage(
+        close_tracking_factory(fake_s3_factory(store)),
+        failure_seam=CrashAt(phase),
+    )
     handle = await crashed.begin_snapshot(community, server)
     await crashed.write_snapshot(handle, tar_stream({"f": b"NEW"}))
     with pytest.raises(InjectedCrash):
@@ -750,12 +757,12 @@ async def test_check_reachable_raises_on_unreachable_backend() -> None:
     misconfigured deployment fails fast instead of degrading silently."""
 
     class _UnreachableClient:
-        async def list_objects(self, prefix: str) -> list:
+        async def list_objects(self, prefix: str) -> list[object]:
             raise ConnectionError("Connection refused")
 
     @asynccontextmanager
     async def _unreachable_factory() -> AsyncIterator[S3Client]:
-        yield _UnreachableClient()  # type: ignore[arg-type]
+        yield _UnreachableClient()  # type: ignore[misc]
 
     storage = ObjectStorage(_unreachable_factory)
     with pytest.raises(RuntimeError, match="Object storage unreachable") as exc_info:
