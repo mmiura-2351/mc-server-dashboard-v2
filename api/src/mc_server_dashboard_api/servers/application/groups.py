@@ -57,6 +57,10 @@ from mc_server_dashboard_api.servers.domain.groups import (
     render_ops_json,
     render_whitelist_json,
 )
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -188,6 +192,7 @@ class DeleteGroup:
 
     uow: UnitOfWork
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(self, *, community_id: CommunityId, group_id: GroupId) -> None:
         async with self.uow:
@@ -199,7 +204,13 @@ class DeleteGroup:
         # merge excludes it). Done after commit so the file reflects the persisted
         # attachment set; best-effort across servers (see helper docstring).
         await _sync_servers_best_effort(
-            self.uow, self.file_store, community_id, server_ids, group_id, group.kind
+            self.uow,
+            self.file_store,
+            self.lifecycle_lock,
+            community_id,
+            server_ids,
+            group_id,
+            group.kind,
         )
 
 
@@ -209,6 +220,7 @@ class AddPlayer:
 
     uow: UnitOfWork
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -226,7 +238,13 @@ class AddPlayer:
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
             await self.uow.commit()
         await _sync_servers_best_effort(
-            self.uow, self.file_store, community_id, server_ids, group_id, group.kind
+            self.uow,
+            self.file_store,
+            self.lifecycle_lock,
+            community_id,
+            server_ids,
+            group_id,
+            group.kind,
         )
         return group
 
@@ -237,6 +255,7 @@ class RemovePlayer:
 
     uow: UnitOfWork
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -252,7 +271,13 @@ class RemovePlayer:
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
             await self.uow.commit()
         await _sync_servers_best_effort(
-            self.uow, self.file_store, community_id, server_ids, group_id, group.kind
+            self.uow,
+            self.file_store,
+            self.lifecycle_lock,
+            community_id,
+            server_ids,
+            group_id,
+            group.kind,
         )
         return group
 
@@ -263,6 +288,7 @@ class AttachGroup:
 
     uow: UnitOfWork
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self, *, community_id: CommunityId, group_id: GroupId, server_id: ServerId
@@ -273,7 +299,12 @@ class AttachGroup:
             await self.uow.groups.attach(group_id, server_id)
             await self.uow.commit()
         await _sync_server_file(
-            self.uow, self.file_store, community_id, server_id, group.kind
+            self.uow,
+            self.file_store,
+            self.lifecycle_lock,
+            community_id,
+            server_id,
+            group.kind,
         )
 
 
@@ -283,6 +314,7 @@ class DetachGroup:
 
     uow: UnitOfWork
     file_store: FileStore
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self, *, community_id: CommunityId, group_id: GroupId, server_id: ServerId
@@ -295,7 +327,12 @@ class DetachGroup:
                 raise GroupAttachmentNotFoundError(str(group_id.value))
             await self.uow.commit()
         await _sync_server_file(
-            self.uow, self.file_store, community_id, server_id, group.kind
+            self.uow,
+            self.file_store,
+            self.lifecycle_lock,
+            community_id,
+            server_id,
+            group.kind,
         )
 
 
@@ -330,6 +367,7 @@ class ListGroupServers:
 async def _sync_servers_best_effort(
     uow: UnitOfWork,
     file_store: FileStore,
+    lifecycle_lock: LifecycleLock,
     community_id: CommunityId,
     server_ids: list[ServerId],
     group_id: GroupId,
@@ -349,7 +387,9 @@ async def _sync_servers_best_effort(
 
     for server_id in server_ids:
         try:
-            await _sync_server_file(uow, file_store, community_id, server_id, kind)
+            await _sync_server_file(
+                uow, file_store, lifecycle_lock, community_id, server_id, kind
+            )
         except Exception:
             _logger.warning(
                 "group file sync failed for one attached server; other servers "
@@ -366,6 +406,7 @@ async def _sync_servers_best_effort(
 async def _sync_server_file(
     uow: UnitOfWork,
     file_store: FileStore,
+    lifecycle_lock: LifecycleLock,
     community_id: CommunityId,
     server_id: ServerId,
     kind: GroupKind,
@@ -375,20 +416,25 @@ async def _sync_server_file(
     Only at-rest servers are written (issue #276 posture a): a running/unsettled
     server is skipped and ships the authoritative copy on its next hydrate. The
     file is the union-merge of every attached group of ``kind``, ordered by uuid.
+
+    The per-server lifecycle lock is held across the at-rest check and the Storage
+    write (issue #1222), matching every other at-rest write path, so a concurrent
+    ``StartServer`` cannot flip desired=running between the check and the write.
     """
 
-    async with uow:
-        server = await uow.servers.get_by_id(server_id)
-        if server is None or server.community_id != community_id:
+    async with lifecycle_lock.hold(server_id):
+        async with uow:
+            server = await uow.servers.get_by_id(server_id)
+            if server is None or server.community_id != community_id:
+                return
+            at_rest = server.is_at_rest()
+            groups = await uow.groups.list_groups_for_server_kind(server_id, kind)
+        if not at_rest:
             return
-        at_rest = server.is_at_rest()
-        groups = await uow.groups.list_groups_for_server_kind(server_id, kind)
-    if not at_rest:
-        return
-    players = merge_players(groups)
-    await file_store.write_file(
-        community_id=community_id,
-        server_id=server_id,
-        rel_path=kind.target_file,
-        content=_render(kind, players),
-    )
+        players = merge_players(groups)
+        await file_store.write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=kind.target_file,
+            content=_render(kind, players),
+        )

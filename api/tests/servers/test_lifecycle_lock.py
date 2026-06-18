@@ -1,12 +1,13 @@
-"""Lock-adoption tests for the per-server lifecycle lock (issue #827).
+"""Lock-adoption tests for the per-server lifecycle lock (issue #827, #1222).
 
 The at-rest-gated use cases (RestoreBackup, the file mutations, UpdateServer,
-DeleteServer, DeleteBackup) check ``is_at_rest()`` in one transaction, mutate
-Storage over seconds-to-minutes, then commit a second transaction. A start
-committed in that window operates on data being mutated underneath it. These
-tests pin that each gated use case — and StartServer's desired-state flip — takes
-the shared per-server :class:`LifecycleLock` AROUND its work, so the lock
-serializes a start against a gated operation.
+DeleteServer, DeleteBackup, and the group file-sync helpers) check
+``is_at_rest()`` in one transaction, mutate Storage over seconds-to-minutes, then
+commit a second transaction. A start committed in that window operates on data
+being mutated underneath it. These tests pin that each gated use case — and
+StartServer's desired-state flip — takes the shared per-server
+:class:`LifecycleLock` AROUND its work, so the lock serializes a start against a
+gated operation.
 
 The serialization itself (a start blocked until the gated op releases) is pinned
 at the integration layer against a real PostgreSQL advisory lock in
@@ -34,6 +35,13 @@ from mc_server_dashboard_api.servers.application.files import (
     UploadFile,
     WriteFile,
 )
+from mc_server_dashboard_api.servers.application.groups import (
+    AddPlayer,
+    AttachGroup,
+    DeleteGroup,
+    DetachGroup,
+    RemovePlayer,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import StartServer
 from mc_server_dashboard_api.servers.application.manage_server import (
     DeleteServer,
@@ -49,6 +57,13 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.groups import (
+    GroupId,
+    GroupKind,
+    GroupName,
+    Player,
+    PlayerGroup,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -384,5 +399,90 @@ async def test_create_backup_takes_lock_around_its_work() -> None:
         clock=FakeClock(_NOW),
         lifecycle_lock=lock,
     )(community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL)
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+# --- Group file-sync use cases (issue #1222) --------------------------------
+
+
+def _seed_group(uow: FakeUnitOfWork, *, kind: GroupKind = GroupKind.OP) -> PlayerGroup:
+    group = PlayerGroup(
+        id=GroupId.new(),
+        community_id=_COMMUNITY,
+        name=GroupName("admins"),
+        kind=kind,
+        players=[Player(uuid.uuid4(), "alice")],
+    )
+    uow.groups.seed(group)
+    return group
+
+
+async def test_attach_group_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    uow = FakeUnitOfWork(servers=repo)
+    group = _seed_group(uow)
+    await AttachGroup(uow=uow, file_store=FakeFileStore(), lifecycle_lock=lock)(
+        community_id=_COMMUNITY, group_id=group.id, server_id=server.id
+    )
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_detach_group_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    uow = FakeUnitOfWork(servers=repo)
+    group = _seed_group(uow)
+    await uow.groups.attach(group.id, server.id)
+    await DetachGroup(uow=uow, file_store=FakeFileStore(), lifecycle_lock=lock)(
+        community_id=_COMMUNITY, group_id=group.id, server_id=server.id
+    )
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_add_player_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    uow = FakeUnitOfWork(servers=repo)
+    group = _seed_group(uow)
+    await uow.groups.attach(group.id, server.id)
+    await AddPlayer(uow=uow, file_store=FakeFileStore(), lifecycle_lock=lock)(
+        community_id=_COMMUNITY,
+        group_id=group.id,
+        player_uuid=uuid.uuid4(),
+        username="bob",
+    )
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_remove_player_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    uow = FakeUnitOfWork(servers=repo)
+    pid = uuid.uuid4()
+    group = PlayerGroup(
+        id=GroupId.new(),
+        community_id=_COMMUNITY,
+        name=GroupName("ops"),
+        kind=GroupKind.OP,
+        players=[Player(pid, "alice")],
+    )
+    uow.groups.seed(group)
+    await uow.groups.attach(group.id, server.id)
+    await RemovePlayer(uow=uow, file_store=FakeFileStore(), lifecycle_lock=lock)(
+        community_id=_COMMUNITY, group_id=group.id, player_uuid=pid
+    )
+
+    assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
+
+
+async def test_delete_group_takes_lock_around_its_work() -> None:
+    server, repo, lock = _seeded()
+    uow = FakeUnitOfWork(servers=repo)
+    group = _seed_group(uow)
+    await uow.groups.attach(group.id, server.id)
+    await DeleteGroup(uow=uow, file_store=FakeFileStore(), lifecycle_lock=lock)(
+        community_id=_COMMUNITY, group_id=group.id
+    )
 
     assert lock.events == [(server.id, e) for e in _ACQUIRE_RELEASE]
