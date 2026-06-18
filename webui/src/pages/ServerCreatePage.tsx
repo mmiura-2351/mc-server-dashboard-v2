@@ -10,7 +10,7 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { useCanCode } from "../permissions/useCan.ts";
 import { dashboardPath } from "../routes.ts";
-import { useTabHash } from "./urlState.ts";
+import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 
 // Server create wizard (WEBUI_SPEC.md 6.3). Three steps for a fresh server
 // (type & version → runtime → config & EULA) plus an "Import ZIP" tab that
@@ -174,28 +174,48 @@ function Wizard({ communityId }: { communityId: string }) {
     <Chrome>
       <div className="tabs" role="tablist">
         <button
+          id={tabId("sc", "new")}
           type="button"
           role="tab"
           aria-selected={tab === "new"}
+          aria-controls={panelId("sc", "new")}
+          tabIndex={tab === "new" ? 0 : -1}
           className={`tab${tab === "new" ? " active" : ""}`}
           onClick={() => setTab("new")}
+          onKeyDown={(e) => handleTabKeyDown(e, TABS, tab, setTab, "sc")}
         >
           {t("serverCreate.tab.new")}
         </button>
         <button
+          id={tabId("sc", "import")}
           type="button"
           role="tab"
           aria-selected={tab === "import"}
+          aria-controls={panelId("sc", "import")}
+          tabIndex={tab === "import" ? 0 : -1}
           className={`tab${tab === "import" ? " active" : ""}`}
           onClick={() => setTab("import")}
+          onKeyDown={(e) => handleTabKeyDown(e, TABS, tab, setTab, "sc")}
         >
           {t("serverCreate.tab.import")}
         </button>
       </div>
       {tab === "new" ? (
-        <NewServerWizard communityId={communityId} />
+        <div
+          role="tabpanel"
+          id={panelId("sc", "new")}
+          aria-labelledby={tabId("sc", "new")}
+        >
+          <NewServerWizard communityId={communityId} />
+        </div>
       ) : (
-        <ImportForm communityId={communityId} />
+        <div
+          role="tabpanel"
+          id={panelId("sc", "import")}
+          aria-labelledby={tabId("sc", "import")}
+        >
+          <ImportForm communityId={communityId} />
+        </div>
       )}
     </Chrome>
   );
