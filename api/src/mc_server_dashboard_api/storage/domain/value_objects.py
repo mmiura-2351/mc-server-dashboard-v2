@@ -91,6 +91,13 @@ class SnapshotId:
         return cls(uuid.uuid4().hex)
 
 
+# Version ids are minted by _new_version_id (digits + hex), so only
+# alphanumerics, hyphens and underscores are legitimate.  Rejecting everything
+# else blocks path-traversal payloads (e.g. ``../../../etc/passwd``) before the
+# value reaches a filesystem or object-store path join.
+_VERSION_ID_RE = re.compile(r"\A[a-zA-Z0-9_-]+\Z")
+
+
 @dataclass(frozen=True)
 class VersionId:
     """An opaque id naming one retained prior content of a file.
@@ -99,6 +106,10 @@ class VersionId:
     """
 
     value: str
+
+    def __post_init__(self) -> None:
+        if not _VERSION_ID_RE.match(self.value):
+            raise ValueError(f"invalid version id: {self.value!r}")
 
 
 @dataclass(frozen=True)
