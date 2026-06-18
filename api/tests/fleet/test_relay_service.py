@@ -425,6 +425,41 @@ async def test_resolve_join_tunnel_mints_token_and_dispatches(
         await harness.stop()
 
 
+async def test_resolve_join_status_intent_dispatches_tunnel_dial(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    # STATUS pings on cache miss still need a TunnelDial so the relay can fetch
+    # the real Minecraft status through the tunnel (RELAY.md Section 7). The API
+    # dispatches TunnelDial for both STATUS and LOGIN intents on running servers.
+    _register_online_worker(registry)
+    control_plane = ControlPlaneState()
+    queue = control_plane.open_session(WorkerId(_WORKER_ID), session=0)
+    registration = RelayRegistration()
+    registration.set(endpoint="relay:25665", ca_pem="CA-PEM")
+    harness, stub = await _make_harness(
+        resolver=FakeResolver({"slug": _running_route()}),
+        registry=registry,
+        control_plane=control_plane,
+        registration=registration,
+    )
+    try:
+        resp = await stub.ResolveJoin(
+            pb.ResolveJoinRequest(slug="slug", intent=pb.JOIN_INTENT_STATUS),
+            metadata=_auth(),
+        )
+        assert resp.decision == pb.JOIN_DECISION_TUNNEL
+        assert resp.server_id == _SERVER_ID
+        assert len(resp.token) == 32
+        # TunnelDial dispatched even for STATUS intent — the relay needs the
+        # tunnel to fetch real status data on cache miss.
+        message = await queue.get()
+        dial = message.api_command.tunnel_dial
+        assert dial.endpoint == "relay:25665"
+        assert dial.token == resp.token
+    finally:
+        await harness.stop()
+
+
 async def test_report_sessions_rejects_missing_credential(
     registry: InMemoryWorkerRegistry,
 ) -> None:

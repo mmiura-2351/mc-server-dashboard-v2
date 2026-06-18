@@ -73,10 +73,12 @@ message RegisterResponse {
 // ResolveJoin (RELAY.md Sections 4 and 6)
 // ---------------------------------------------------------------------------
 
-// JoinIntent distinguishes a status ping from a login attempt. The API uses
-// it to decide whether to dispatch a TunnelDial command: STATUS pings that
-// hit a running server are routed through the tunnel just like logins, but
-// stopped-server handling differs (RELAY.md Section 7).
+// JoinIntent distinguishes a status ping from a login attempt. Both intents
+// dispatch a TunnelDial for running servers — the relay needs the tunnel even
+// for STATUS pings (cache miss) to fetch the real Minecraft status data
+// (RELAY.md Section 7). The relay uses the intent on its side to decide how
+// to handle the tunneled connection (one-shot status exchange vs full login
+// splice) and the stopped-server in-protocol response.
 enum JoinIntent {
   JOIN_INTENT_UNSPECIFIED = 0;
   // STATUS is a server-list status ping (next_state = 1 in the Minecraft
