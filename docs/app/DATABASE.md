@@ -26,7 +26,7 @@
 5. [Communities, membership & roles](#5-communities-membership--roles)
 6. [Authorization grants](#6-authorization-grants)
 7. [Servers & workers](#7-servers--workers)
-8. [Backups & file history](#8-backups--file-history)
+8. [Backups, file history, sessions & resource packs](#8-backups-file-history-sessions--resource-packs)
 9. [Audit log](#9-audit-log)
 10. [Cascade behavior on member removal](#10-cascade-behavior-on-member-removal)
 11. [Related documents](#11-related-documents)
@@ -126,11 +126,16 @@ it lands with epic #3.
    │community│────────▶│  server  │    a soft reference to the in-memory fleet
    └────────┘          └────┬─────┘    registry (no `worker` table at M1, Section 7)
                             │ 1
-                ┌───────────┼────────────────┐
-                │ N         │ N
-          ┌─────┴─────┐ ┌───┴──────────────┐
-          │  backup   │ │ file_edit_history │
-          └───────────┘ └───────────────────┘
+                ┌───────────┼────────────────┬────────────────────────┐
+                │ N         │ N              │ 0..1                   │ N
+          ┌─────┴─────┐ ┌───┴────────────┐ ┌┴──────────────────────┐ ┌┴──────────┐
+          │  backup   │ │ game_session   │ │ server_resource_pack_ │ │ (versions │
+          └───────────┘ └────────────────┘ │ assignments           │ │  in       │
+                                           └───────────┬───────────┘ │  Storage) │
+                                                       │ FK          └───────────┘
+                                              ┌────────┴────────┐
+                                              │ resource_packs  │ (global, not community-scoped)
+                                              └─────────────────┘
 ```
 
 Reading aids:
@@ -192,7 +197,7 @@ revocation/expiry record.
 | `issued_at` | timestamptz | |
 | `expires_at` | timestamptz | |
 | `revoked_at` | timestamptz nullable | set on logout; non-null ⇒ invalid |
-| `revoked_reason` | text nullable | why revoked (`rotated` / `family` / `logout` / `user_revoked` / `superseded`); null exactly when `revoked_at` is null |
+| `revoked_reason` | text nullable | why revoked (`rotated` / `family` / `logout` / `user_revoked` / `superseded`); null exactly when `revoked_at` is null. **No CHECK constraint** — unlike other enum-like columns (Section 2), this column is a plain `text` validated in application code; the migration (0014) added it as a bare `String` column. The null-exactly-when pairing is an application invariant, not a DB constraint |
 
 Constraints: `UNIQUE(token_hash)`. Index on `(user_id)` for "revoke all sessions"
 and a partial index on `expires_at` for expiry sweeps. A token is valid iff
@@ -497,7 +502,7 @@ reload) is deferred.
 
 ---
 
-## 8. Backups & file history
+## 8. Backups, file history, sessions & resource packs
 
 ### `backup`
 
@@ -537,29 +542,81 @@ newest+oldest from these rows.
 > rows with their `created_at`). A separate `backup_schedule` table is only needed
 > if multiple named schedules per server are required; M1 does not.
 
-### `file_edit_history`
+### `file_edit_history` — Storage-layer only (no DB table)
 
 Versioned file changes for rollback (FR-FILE-3, Appendix B). Each edit retains the
 prior version so a file can be rolled back to any retained version.
 
+**Implementation note.** This entity has **no database table**. The original
+design above described a relational version index; the actual implementation
+stores prior file versions entirely in the `Storage` layer as immutable blobs
+under `versions/<relative-file-path>/<version-id>` inside each server's
+authoritative namespace (STORAGE.md Section 5). Version listing and rollback
+are `Storage` Port operations (`list_file_versions`, `read_file_version`,
+`rollback_file` — STORAGE.md Section 3.5), not database queries. The per-file
+retention count is bounded by `storage.version_retention` (CONFIGURATION.md
+Section 5.2). There is no `file_edit_history` table in the migration set.
+
+### Game sessions (issue #957)
+
+Relay-originated player session records (RELAY.md Section 8, Section 14). One row
+per accepted **login** session recorded by the relay; status pings are not
+recorded. Populated via `ReportSessions` (RELAY.md Section 6). `username` /
+`player_uuid` are the values *claimed* in Login Start — pre-authentication (with
+`online-mode` on, a session of meaningful duration implies a verified identity;
+the column is labelled "claimed identity" in the UI).
+
+#### `game_session`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | Relay-minted session id (the `ReportSessions` idempotency key) |
+| `server_id` | uuid FK → `server.id` nullable | `ON DELETE CASCADE`; indexed with `started_at` for newest-first listing. Nullable so a `SessionEnd` arriving before its `SessionStart` (an out-of-order batch retry) can create a placeholder row |
+| `hostname` | text nullable | The slug actually used at join (slugs are renameable; this is the historical value) |
+| `player_ip` | inet nullable | The player's source address as seen by the relay |
+| `username` | text nullable | Claimed in Login Start (RELAY.md Section 8) |
+| `player_uuid` | uuid nullable | Claimed; present on protocols that send it |
+| `started_at` | timestamptz nullable | |
+| `ended_at` | timestamptz nullable | NULL = still open (or relay crashed; healed on `Register`) |
+
+Index: `(server_id, started_at)` for the newest-first paginated listing.
+Rows cascade away when their server is deleted. A retention prune loop
+(`relay.session_retention_days`, default 90) deletes rows older than the window.
+
+Access is gated by the `session:read` permission (RELAY.md Section 8, Appendix A);
+player IPs are PII so the data is role-restricted.
+
+### Resource packs (issue #1175)
+
+Global resource pack library (not community-scoped) and per-server assignment. Two
+tables added by migration 0018.
+
+#### `resource_packs`
+
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | |
-| `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
-| `path` | text | server-relative file path (path-traversal-safe, FR-FILE-4) |
-| `version` | int | monotonically increasing per `(server_id, path)` |
-| `content_ref` | text | locator of the retained content in `Storage` |
-| `edited_by` | uuid FK → `user.id` nullable | `ON DELETE SET NULL` (keep history if user gone) |
-| `created_at` | timestamptz | |
+| `filename` | text | original upload filename |
+| `display_name` | text | operator-chosen display name |
+| `description` | text nullable | optional description |
+| `sha1_hash` | text(40) | SHA-1 digest (used by the Minecraft client for resource pack verification) |
+| `sha256_hash` | text(64) | SHA-256 digest |
+| `size_bytes` | bigint | archive size |
+| `uploaded_by` | uuid | **soft reference** (no FK) — the row survives the actor's deletion |
+| `created_at` / `updated_at` | timestamptz | |
 
-Constraints: `UNIQUE(server_id, path, version)`; index on `(server_id, path,
-version DESC)` for "latest version" and rollback listing.
+#### `server_resource_pack_assignments`
 
-> Retained file contents are bytes and so belong behind `Storage` (#17), not
-> inline in the DB; this table is the **version index** that points at them.
-> Small text files could alternatively be stored inline, but keeping all artifact
-> bytes in one place (`Storage`) keeps the DB metadata-only, consistent with the
-> document's scope.
+At most one resource pack per server (the primary key is `server_id`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `server_id` | uuid PK, FK → `server.id` | `ON DELETE CASCADE` |
+| `resource_pack_id` | uuid FK → `resource_packs.id` | |
+| `require_resource_pack` | bool | whether the client must accept the pack; default false |
+| `resource_pack_prompt` | text nullable | optional prompt message shown to the player |
+| `assigned_by` | uuid | **soft reference** (no FK) |
+| `created_at` / `updated_at` | timestamptz | |
 
 ---
 
