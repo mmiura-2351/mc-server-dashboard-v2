@@ -1772,6 +1772,28 @@ async def test_update_config_overrides_file_failure_aborts_without_commit() -> N
     assert uow.commits == 0
 
 
+async def test_update_config_removing_override_clears_key_from_file() -> None:
+    # When a user removes a key from config overrides, the corresponding line
+    # must be removed from server.properties (issue #1242).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi", "pvp": "true"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"server-port=25565\nmotd=hi\npvp=true\n"
+    updated = await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hi"},
+    )
+    assert updated.config == {"motd": "hi"}
+    props_text = file_store.files["server.properties"].decode()
+    assert "motd=hi" in props_text
+    assert "pvp" not in props_text
+    assert "server-port=25565" in props_text
+
+
 # --- update: game port (#311) ----------------------------------------------
 
 

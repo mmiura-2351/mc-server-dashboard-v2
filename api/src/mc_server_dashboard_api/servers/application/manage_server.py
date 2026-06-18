@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -67,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.ports import (
 )
 from mc_server_dashboard_api.servers.domain.server_properties import (
     apply_overrides,
+    remove_keys,
     set_rcon_properties,
     set_server_port,
 )
@@ -606,15 +608,19 @@ class UpdateServer:
                     server.name = new_name
                 if config is not None:
                     # Sync changed server.properties overrides to the file
-                    # (#1209). Only non-reserved keys are properties overrides;
-                    # compare old vs new to avoid a needless file rewrite.
+                    # (#1209, #1242). Only non-reserved keys are properties
+                    # overrides; compare old vs new to avoid a needless file
+                    # rewrite. Keys in old but not new must be removed from
+                    # the file so stale overrides do not survive (#1242).
                     old_overrides = _properties_overrides(server.config)
                     new_overrides = _properties_overrides(config)
                     if new_overrides != old_overrides:
+                        removed_keys = old_overrides.keys() - new_overrides.keys()
                         await self._rewrite_properties_overrides(
                             community_id=community_id,
                             server_id=server_id,
                             overrides=new_overrides,
+                            removed_keys=removed_keys,
                         )
                     server.config = config
                 if game_port is not None and game_port != server.game_port:
@@ -735,15 +741,16 @@ class UpdateServer:
         community_id: CommunityId,
         server_id: ServerId,
         overrides: dict[str, str],
+        removed_keys: AbstractSet[str] = frozenset(),
     ) -> None:
         """Sync config-carried server.properties overrides into the file (#1209).
 
         Reads the current ``server.properties``, applies the overrides via
-        :func:`apply_overrides`, and writes it back. A legacy server with no
-        properties file is handled by treating the absent file as empty. A
-        storage failure is surfaced as :class:`WorkingSetSeedFailedError`
-        (mapped to 503): it is raised before the DB commit, so the config and
-        the file do not drift.
+        :func:`apply_overrides`, removes lines for keys in *removed_keys*
+        (#1242), and writes it back. A legacy server with no properties file is
+        handled by treating the absent file as empty. A storage failure is
+        surfaced as :class:`WorkingSetSeedFailedError` (mapped to 503): it is
+        raised before the DB commit, so the config and the file do not drift.
         """
 
         try:
@@ -755,11 +762,14 @@ class UpdateServer:
         except ServerFileNotFoundError:
             current = b""
         try:
+            updated = apply_overrides(current, overrides)
+            if removed_keys:
+                updated = remove_keys(updated, removed_keys)
             await self.file_store.write_file(
                 community_id=community_id,
                 server_id=server_id,
                 rel_path=_PROPERTIES_REL_PATH,
-                content=apply_overrides(current, overrides),
+                content=updated,
             )
         except Exception as exc:
             _logger.warning(
