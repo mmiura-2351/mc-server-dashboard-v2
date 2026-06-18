@@ -1353,6 +1353,13 @@ export const en = {
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "You lack: ",
 
+  // Error boundary (#1211): shown when an unhandled rendering error crashes a
+  // component subtree instead of the default white-screen unmount.
+  "errorBoundary.title": "Something went wrong",
+  "errorBoundary.body":
+    "An unexpected error occurred. Reloading usually fixes it.",
+  "errorBoundary.reload": "Reload page",
+
   // Shared format strings — heartbeat age (#1214)
   "format.secondsAgo": "{value}s ago",
   "format.minutesAgo": "{value}m ago",
