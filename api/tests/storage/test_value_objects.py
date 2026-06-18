@@ -9,7 +9,11 @@ from __future__ import annotations
 import pytest
 
 from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
-from mc_server_dashboard_api.storage.domain.value_objects import JarKey, RelPath
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    JarKey,
+    RelPath,
+    VersionId,
+)
 
 
 def test_relpath_normalises_dot_and_redundant_separators() -> None:
@@ -79,3 +83,35 @@ def test_jarkey_accepts_valid_sha256() -> None:
 def test_jarkey_rejects_non_sha256(bad: str) -> None:
     with pytest.raises(ValueError):
         JarKey(bad)
+
+
+# --- VersionId ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "vid",
+    [
+        "00000001718345678900-a1b2c3d4",  # real _new_version_id shape
+        "abc123",
+        "ABC-def_456",
+        "a",
+    ],
+)
+def test_versionid_accepts_valid_ids(vid: str) -> None:
+    assert VersionId(vid).value == vid
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "../../../etc/passwd",  # parent traversal
+        "foo/bar",  # forward slash
+        "foo\\bar",  # backslash
+        "",  # empty string
+        "hello world",  # space
+        "foo.bar",  # dot (could be used in traversal)
+    ],
+)
+def test_versionid_rejects_path_traversal_and_invalid_chars(bad: str) -> None:
+    with pytest.raises(ValueError):
+        VersionId(bad)
