@@ -210,6 +210,31 @@ class TestZipBomb:
         finally:
             mod._MAX_DECOMPRESSED_BYTES = original
 
+    def test_repack_counts_actual_bytes(self) -> None:
+        """Repacking a prefix-wrapped zip must enforce the decompressed limit.
+
+        Before the fix, ``_repack_stripping_prefix`` called ``zf.read()``
+        without any cumulative byte counting — only the header-based pre-scan
+        guarded size, and it could be bypassed.  This test uses a
+        prefix-wrapped zip whose total decompressed content exceeds the
+        (lowered) limit and asserts the guard fires during repacking.
+        """
+        import mc_server_dashboard_api.servers.application.resource_pack_zip as mod
+
+        content = _make_zip(
+            {
+                "SomePack/pack.mcmeta": _VALID_MCMETA,
+                "SomePack/assets/big.bin": b"x" * 1000,
+            }
+        )
+        original = mod._MAX_DECOMPRESSED_BYTES
+        mod._MAX_DECOMPRESSED_BYTES = 100  # artificially low
+        try:
+            with pytest.raises(InvalidResourcePackError, match="decompressed size"):
+                validate_and_normalize(content)
+        finally:
+            mod._MAX_DECOMPRESSED_BYTES = original
+
     def test_exceeds_entry_count(self) -> None:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
