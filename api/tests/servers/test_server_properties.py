@@ -6,6 +6,7 @@ from mc_server_dashboard_api.servers.domain.server_properties import (
     RCON_PORT,
     apply_overrides,
     clear_resource_pack_properties,
+    remove_keys,
     set_rcon_properties,
     set_resource_pack_properties,
     set_server_port,
@@ -224,3 +225,36 @@ def test_apply_overrides_preserves_other_lines() -> None:
 def test_apply_overrides_empty_dict_is_noop() -> None:
     content = b"motd=hi\n"
     assert apply_overrides(content, {}) == b"motd=hi\n"
+
+
+# --- remove_keys (issue #1242) ------------------------------------------------
+
+
+def test_remove_keys_deletes_matching_lines() -> None:
+    content = b"motd=hi\npvp=true\nmax-players=20\n"
+    out = remove_keys(content, {"pvp"})
+    assert out == b"motd=hi\nmax-players=20\n"
+
+
+def test_remove_keys_preserves_other_lines_and_comments() -> None:
+    content = b"#comment\nserver-port=25565\nmotd=hi\npvp=true\n"
+    out = remove_keys(content, {"motd"})
+    assert out == b"#comment\nserver-port=25565\npvp=true\n"
+
+
+def test_remove_keys_multiple_keys() -> None:
+    content = b"motd=hi\npvp=true\nmax-players=20\n"
+    out = remove_keys(content, {"motd", "max-players"})
+    assert out == b"pvp=true\n"
+
+
+def test_remove_keys_absent_key_is_noop() -> None:
+    content = b"motd=hi\n"
+    out = remove_keys(content, {"pvp"})
+    assert out == b"motd=hi\n"
+
+
+def test_remove_keys_empty_set_is_noop() -> None:
+    content = b"motd=hi\n"
+    out = remove_keys(content, set())
+    assert out == b"motd=hi\n"

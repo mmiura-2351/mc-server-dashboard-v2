@@ -235,6 +235,32 @@ class TestZipBomb:
         finally:
             mod._MAX_DECOMPRESSED_BYTES = original
 
+    def test_single_entry_bomb_caught_during_chunked_read(self) -> None:
+        """A single entry larger than the limit is caught mid-read (#1252).
+
+        With chunked reads, the size cap fires after a few 64 KiB chunks
+        rather than after the full entry is decompressed into memory.
+        """
+        import mc_server_dashboard_api.servers.application.resource_pack_zip as mod
+
+        # A single highly-compressible entry (200 KiB of zeros).
+        big_data = b"\x00" * (200 * 1024)
+        content = _make_zip(
+            {
+                "pack.mcmeta": _VALID_MCMETA,
+                "assets/bomb.bin": big_data,
+            }
+        )
+        original_max = mod._MAX_DECOMPRESSED_BYTES
+        # Set limit below the entry size but above the chunk size (64 KiB)
+        # so the check fires after a few chunks, not after full read.
+        mod._MAX_DECOMPRESSED_BYTES = 100 * 1024  # 100 KiB
+        try:
+            with pytest.raises(InvalidResourcePackError, match="decompressed size"):
+                validate_and_normalize(content)
+        finally:
+            mod._MAX_DECOMPRESSED_BYTES = original_max
+
     def test_exceeds_entry_count(self) -> None:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:

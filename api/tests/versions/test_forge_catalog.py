@@ -191,6 +191,22 @@ async def test_resolve_legacy_suffix_with_retry_cache_error() -> None:
     assert source.version == "1.7.10"
 
 
+def test_installer_url_encodes_special_characters() -> None:
+    """Defense-in-depth: special chars in full_version are percent-encoded."""
+    url = _installer_url("1.21.8-58.1.0")
+    assert "/1.21.8-58.1.0/" in url  # normal version passes through unchanged
+
+    url = _installer_url("1.21/../etc")
+    assert "1.21%2F..%2Fetc" in url
+    assert "1.21/../etc" not in url
+
+
+def test_installer_sha1_url_encodes_special_characters() -> None:
+    url = _installer_sha1_url("1.21/../etc")
+    assert "1.21%2F..%2Fetc" in url
+    assert "1.21/../etc" not in url
+
+
 @pytest.mark.asyncio
 async def test_non_forge_request_rejected() -> None:
     catalog, _ = _catalog()
