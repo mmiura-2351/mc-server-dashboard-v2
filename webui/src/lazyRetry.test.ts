@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // Capture the factory that lazyRetry passes to React.lazy so we can invoke it
 // directly and verify the retry logic without a full render cycle.
-let capturedFactory: (() => Promise<{ default: unknown }>) | undefined;
+let capturedFactory: () => Promise<{ default: unknown }>;
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
@@ -19,18 +19,13 @@ vi.mock("react", async (importOriginal) => {
 const { lazyRetry } = await import("./lazyRetry.ts");
 
 describe("lazyRetry", () => {
-  afterEach(() => {
-    capturedFactory = undefined;
-  });
-
   it("resolves on first attempt when the import succeeds", async () => {
     const Comp = () => null;
     const factory = vi.fn().mockResolvedValue({ default: Comp });
 
     lazyRetry(factory);
 
-    expect(capturedFactory).toBeDefined();
-    const result = await capturedFactory!();
+    const result = await capturedFactory();
     expect(result.default).toBe(Comp);
     expect(factory).toHaveBeenCalledTimes(1);
   });
@@ -44,8 +39,7 @@ describe("lazyRetry", () => {
 
     lazyRetry(factory);
 
-    expect(capturedFactory).toBeDefined();
-    const result = await capturedFactory!();
+    const result = await capturedFactory();
     expect(result.default).toBe(Comp);
     expect(factory).toHaveBeenCalledTimes(2);
   });
@@ -58,8 +52,7 @@ describe("lazyRetry", () => {
 
     lazyRetry(factory);
 
-    expect(capturedFactory).toBeDefined();
-    await expect(capturedFactory!()).rejects.toThrow("second");
+    await expect(capturedFactory()).rejects.toThrow("second");
     expect(factory).toHaveBeenCalledTimes(2);
   });
 });
