@@ -56,6 +56,7 @@ type fakeServer struct {
 	registers   int
 	heartbeats  int
 	heldServers []*controlplanev1.HeldServer
+	resources   *controlplanev1.HostResources
 }
 
 func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) error {
@@ -75,6 +76,7 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 	s.mu.Lock()
 	s.registers++
 	s.heldServers = first.GetRegister().GetHeldServers()
+	s.resources = first.GetRegister().GetCapabilities().GetResources()
 	s.mu.Unlock()
 
 	if err := stream.Send(acceptAck(s.heartbeatEvery)); err != nil {
@@ -128,6 +130,12 @@ func (s *fakeServer) reportedHeldServers() []*controlplanev1.HeldServer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.heldServers
+}
+
+func (s *fakeServer) reportedResources() *controlplanev1.HostResources {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.resources
 }
 
 func acceptAck(every time.Duration) *controlplanev1.ApiMessage {
@@ -317,4 +325,43 @@ func TestServerDropTriggersReconnect(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+// TestRegisterAdvertisesResources proves the adapter maps the domain
+// Capabilities.Resources onto the wire WorkerCapabilities.resources
+// (issue #1218), so the API's placement logic can enforce memory/CPU gates.
+func TestRegisterAdvertisesResources(t *testing.T) {
+	srv := &fakeServer{
+		wantCredential: "the-secret",
+		heartbeatEvery: 20 * time.Millisecond,
+	}
+	conn := startServer(t, srv)
+
+	caps := testCaps()
+	caps.Resources = session.HostResources{
+		CPUCores:    8,
+		MemoryBytes: 16 * 1024 * 1024 * 1024, // 16 GiB
+	}
+	dialer := controlplane.NewDialer(conn, "the-secret", realClock{})
+	runner := session.NewRunner(dialer, caps, realClock{}, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = runner.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool { return srv.registerCount() == 1 })
+	got := srv.reportedResources()
+	cancel()
+	<-done
+
+	if got == nil {
+		t.Fatal("resources is nil, want non-nil HostResources")
+	}
+	if got.GetCpuCores() != 8 {
+		t.Errorf("cpu_cores = %d, want 8", got.GetCpuCores())
+	}
+	if got.GetMemoryBytes() != 16*1024*1024*1024 {
+		t.Errorf("memory_bytes = %d, want %d", got.GetMemoryBytes(), uint64(16*1024*1024*1024))
+	}
 }
