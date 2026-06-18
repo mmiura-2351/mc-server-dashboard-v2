@@ -16,6 +16,8 @@ sufficient (we never need to parse values or escapes).
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
+
 _PORT_KEY = "server-port"
 _ENABLE_RCON_KEY = "enable-rcon"
 _RCON_PORT_KEY = "rcon.port"
@@ -170,6 +172,20 @@ def apply_overrides(content: bytes, overrides: dict[str, str]) -> bytes:
     lines = _split_content_lines(content)
     for key, value in overrides.items():
         lines = _set_property(lines, key, value)
+    return ("\n".join(lines) + "\n").encode()
+
+
+def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
+    """Return ``content`` with every line matching a key in *keys* removed.
+
+    Each key's first live (non-comment) ``key=...`` line is deleted entirely.
+    Other lines and their order are preserved; the result ends with a single
+    trailing newline (issue #1242).
+    """
+
+    lines = _split_content_lines(content)
+    for key in keys:
+        lines = _clear_property(lines, key)
     return ("\n".join(lines) + "\n").encode()
 
 
