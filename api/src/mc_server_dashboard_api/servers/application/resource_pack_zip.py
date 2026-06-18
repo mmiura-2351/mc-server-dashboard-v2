@@ -18,6 +18,31 @@ from mc_server_dashboard_api.servers.domain.errors import InvalidResourcePackErr
 _MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MiB
 _MAX_ENTRY_COUNT = 10_000
 _MAX_ZIP_IN_ZIP_DEPTH = 3
+_CHUNK_SIZE = 64 * 1024  # 64 KiB
+
+
+def _read_entry_chunked(
+    zf: zipfile.ZipFile,
+    name: str,
+    cumulative: int,
+) -> tuple[bytes, int]:
+    """Read a zip entry in chunks, enforcing the cumulative size cap.
+
+    Returns ``(data, new_cumulative)``.  Raises
+    :class:`InvalidResourcePackError` as soon as ``_MAX_DECOMPRESSED_BYTES``
+    is exceeded — before the full entry is materialised in memory.
+    """
+    chunks: list[bytes] = []
+    with zf.open(name) as f:
+        while True:
+            chunk = f.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            cumulative += len(chunk)
+            if cumulative > _MAX_DECOMPRESSED_BYTES:
+                raise InvalidResourcePackError("decompressed size exceeds limit")
+            chunks.append(chunk)
+    return b"".join(chunks), cumulative
 
 
 def validate_and_normalize(content: bytes, *, _depth: int = 0) -> bytes:
@@ -41,22 +66,21 @@ def validate_and_normalize(content: bytes, *, _depth: int = 0) -> bytes:
             raise InvalidResourcePackError("too many entries")
 
         # Safety: path traversal and decompressed size.
-        # Count actual decompressed bytes — ``info.file_size`` is attacker-
-        # controllable (zip header field), so it must not be trusted (#1221).
+        # Count actual decompressed bytes via chunked reads so a single
+        # entry with an extreme compression ratio cannot allocate beyond
+        # the cap before the check fires (#1252).
         total_size = 0
         for info in infos:
             name = info.filename
             if name.startswith("/") or ".." in name.split("/"):
                 raise InvalidResourcePackError(f"path traversal: {name}")
             if not info.is_dir():
-                total_size += len(zf.read(name))
-                if total_size > _MAX_DECOMPRESSED_BYTES:
-                    raise InvalidResourcePackError("decompressed size exceeds limit")
+                _, total_size = _read_entry_chunked(zf, name, total_size)
 
         # Step 2: Check for zip-in-zip (single entry that is a .zip file).
         non_dir = [i for i in infos if not i.is_dir()]
         if len(non_dir) == 1 and non_dir[0].filename.lower().endswith(".zip"):
-            inner = zf.read(non_dir[0].filename)
+            inner, _ = _read_entry_chunked(zf, non_dir[0].filename, 0)
             return validate_and_normalize(inner, _depth=_depth + 1)
 
         # Step 3: Find pack.mcmeta entries.
@@ -120,6 +144,7 @@ def _repack_stripping_prefix(zf: zipfile.ZipFile, prefix: str) -> bytes:
     """
     prefix_slash = prefix + "/"
     buf = io.BytesIO()
+    cumulative = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as out:
         for info in zf.infolist():
             if not info.filename.startswith(prefix_slash):
@@ -127,5 +152,6 @@ def _repack_stripping_prefix(zf: zipfile.ZipFile, prefix: str) -> bytes:
             new_name = info.filename[len(prefix_slash) :]
             if not new_name:
                 continue  # skip the directory entry for the prefix itself
-            out.writestr(new_name, zf.read(info.filename))
+            data, cumulative = _read_entry_chunked(zf, info.filename, cumulative)
+            out.writestr(new_name, data)
     return buf.getvalue()
