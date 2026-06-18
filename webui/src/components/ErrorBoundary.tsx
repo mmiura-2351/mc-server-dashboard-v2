@@ -25,7 +25,6 @@ export class ErrorBoundary extends Component<Props, State> {
 
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
     // Log for diagnostics; no telemetry endpoint yet.
-    // eslint-disable-next-line no-console
     console.error("ErrorBoundary caught:", error, info);
   }
 

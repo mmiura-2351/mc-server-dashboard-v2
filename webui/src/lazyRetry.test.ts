@@ -1,24 +1,38 @@
-import { describe, expect, it, vi } from "vitest";
-import { lazyRetry } from "./lazyRetry.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-// lazyRetry wraps React.lazy, which is hard to exercise in isolation without
-// rendering. These tests verify the retry logic by inspecting the returned
-// component's internal promise behaviour (the factory passed to React.lazy).
+// Capture the factory that lazyRetry passes to React.lazy so we can invoke it
+// directly and verify the retry logic without a full render cycle.
+let capturedFactory: (() => Promise<{ default: unknown }>) | undefined;
+
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    lazy: (factory: () => Promise<{ default: unknown }>) => {
+      capturedFactory = factory;
+      return { $$typeof: Symbol.for("react.lazy") };
+    },
+  };
+});
+
+// Import after the mock is set up.
+const { lazyRetry } = await import("./lazyRetry.ts");
 
 describe("lazyRetry", () => {
+  afterEach(() => {
+    capturedFactory = undefined;
+  });
+
   it("resolves on first attempt when the import succeeds", async () => {
     const Comp = () => null;
     const factory = vi.fn().mockResolvedValue({ default: Comp });
 
-    // lazyRetry returns a React.lazy component; the factory is invoked when
-    // React first renders it. We cannot render here without a full React test
-    // harness, but we can verify it returns a lazy component without throwing.
-    const LazyComp = lazyRetry(factory);
-    expect(LazyComp).toBeDefined();
-    // The lazy wrapper type has $$typeof for React.lazy.
-    expect(
-      (LazyComp as unknown as { $$typeof: symbol }).$$typeof,
-    ).toBeDefined();
+    lazyRetry(factory);
+
+    expect(capturedFactory).toBeDefined();
+    const result = await capturedFactory!();
+    expect(result.default).toBe(Comp);
+    expect(factory).toHaveBeenCalledTimes(1);
   });
 
   it("retries once on failure then resolves", async () => {
@@ -28,15 +42,10 @@ describe("lazyRetry", () => {
       .mockRejectedValueOnce(new Error("network error"))
       .mockResolvedValueOnce({ default: Comp });
 
-    // Manually invoke the inner factory that lazyRetry passes to React.lazy.
-    // React.lazy calls the factory once; we simulate that by calling the
-    // factory wrapper directly. Since lazyRetry wraps the factory inside lazy,
-    // we need to peek at the internal _payload to get the wrapped function.
-    // Instead, test the retry logic standalone:
-    const retryFactory = () =>
-      factory().catch(() => factory()) as Promise<{ default: typeof Comp }>;
+    lazyRetry(factory);
 
-    const result = await retryFactory();
+    expect(capturedFactory).toBeDefined();
+    const result = await capturedFactory!();
     expect(result.default).toBe(Comp);
     expect(factory).toHaveBeenCalledTimes(2);
   });
@@ -47,10 +56,10 @@ describe("lazyRetry", () => {
       .mockRejectedValueOnce(new Error("first"))
       .mockRejectedValueOnce(new Error("second"));
 
-    const retryFactory = () =>
-      factory().catch(() => factory()) as Promise<{ default: unknown }>;
+    lazyRetry(factory);
 
-    await expect(retryFactory()).rejects.toThrow("second");
+    expect(capturedFactory).toBeDefined();
+    await expect(capturedFactory!()).rejects.toThrow("second");
     expect(factory).toHaveBeenCalledTimes(2);
   });
 });
