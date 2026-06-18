@@ -757,12 +757,12 @@ async def test_check_reachable_raises_on_unreachable_backend() -> None:
     misconfigured deployment fails fast instead of degrading silently."""
 
     class _UnreachableClient:
-        async def list_objects(self, prefix: str) -> list:
+        async def list_objects(self, prefix: str) -> list[object]:
             raise ConnectionError("Connection refused")
 
     @asynccontextmanager
     async def _unreachable_factory() -> AsyncIterator[S3Client]:
-        yield _UnreachableClient()  # type: ignore[arg-type]
+        yield _UnreachableClient()  # type: ignore[misc]
 
     storage = ObjectStorage(_unreachable_factory)
     with pytest.raises(RuntimeError, match="Object storage unreachable") as exc_info:
