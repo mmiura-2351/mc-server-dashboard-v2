@@ -163,6 +163,12 @@ _RESERVED_CONFIG_KEYS = frozenset(
         "enable-rcon",
         "rcon.port",
         "rcon.password",
+        # Resource-pack keys managed by set_resource_pack_properties /
+        # clear_resource_pack_properties (issue #1253).
+        "resource-pack",
+        "resource-pack-sha1",
+        "require-resource-pack",
+        "resource-pack-prompt",
     }
 )
 

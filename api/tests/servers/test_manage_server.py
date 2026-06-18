@@ -737,6 +737,45 @@ async def test_create_skips_platform_managed_properties_keys() -> None:
     assert "motd=hello" in props_text
 
 
+async def test_create_skips_resource_pack_properties_keys() -> None:
+    # Resource-pack keys (resource-pack, resource-pack-sha1,
+    # require-resource-pack, resource-pack-prompt) are platform-managed via
+    # set_resource_pack_properties and must NOT be overridable via the config
+    # dict (#1253).
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={
+            "resource-pack": "http://evil.example.com/pack.zip",
+            "resource-pack-sha1": "deadbeef",
+            "require-resource-pack": "true",
+            "resource-pack-prompt": "Install now!",
+            "motd": "hello",
+        },
+    )
+    props_text = file_store.files["server.properties"].decode()
+    # None of the resource-pack keys should appear in server.properties.
+    assert "resource-pack=" not in props_text
+    assert "resource-pack-sha1=" not in props_text
+    assert "require-resource-pack=" not in props_text
+    assert "resource-pack-prompt=" not in props_text
+    # Legitimate user overrides still apply.
+    assert "motd=hello" in props_text
+
+
 async def test_create_with_empty_config_seeds_no_overrides() -> None:
     # An empty config dict produces the standard seeded properties, no extras.
     uow = FakeUnitOfWork()
@@ -1715,6 +1754,39 @@ async def test_update_config_overrides_skips_platform_managed_keys() -> None:
     assert "enable-rcon=true" in props_text
     assert "rcon.port=25575" in props_text
     assert "rcon.password=secret" in props_text
+    assert "motd=bye" in props_text
+    assert uow.commits == 1
+
+
+async def test_update_config_overrides_skips_resource_pack_keys() -> None:
+    # Resource-pack keys are platform-managed via set_resource_pack_properties
+    # and must NOT be written into server.properties via config overrides
+    # (#1253).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"server-port=25565\nmotd=hi\n"
+    await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "bye",
+            "resource-pack": "http://evil.example.com/pack.zip",
+            "resource-pack-sha1": "deadbeef",
+            "require-resource-pack": "true",
+            "resource-pack-prompt": "Install now!",
+        },
+    )
+    props_text = file_store.files["server.properties"].decode()
+    # None of the resource-pack keys should appear in server.properties.
+    assert "resource-pack=" not in props_text
+    assert "resource-pack-sha1=" not in props_text
+    assert "require-resource-pack=" not in props_text
+    assert "resource-pack-prompt=" not in props_text
+    # Legitimate user overrides still apply.
     assert "motd=bye" in props_text
     assert uow.commits == 1
 
