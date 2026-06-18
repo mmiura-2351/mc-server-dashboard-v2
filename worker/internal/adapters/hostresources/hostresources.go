@@ -4,7 +4,6 @@ package hostresources
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"os"
 	"runtime"
@@ -58,9 +57,4 @@ func parseMemTotal(r io.Reader) uint64 {
 		return 0
 	}
 	return 0
-}
-
-// String returns a human-readable summary suitable for startup logs.
-func String(cpuCores uint32, memoryBytes uint64) string {
-	return fmt.Sprintf("cpu_cores=%d memory_bytes=%d", cpuCores, memoryBytes)
 }
