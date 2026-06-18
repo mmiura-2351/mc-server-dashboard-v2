@@ -22,6 +22,20 @@ type Capabilities struct {
 	// would clobber the Worker's live, newer working set with the last authoritative
 	// snapshot). It generalizes the presence-only HeldServerIDs of issue #696.
 	HeldServers []HeldServer
+	// Resources advertises the host's hardware resources (CPU cores and total
+	// memory) for the API's placement logic (FR-WRK-3, issue #1218). When
+	// MemoryBytes is 0 the API skips the memory hard-gate, so this must be
+	// populated from the actual host values at startup.
+	Resources HostResources
+}
+
+// HostResources is a coarse description of a Worker host's hardware resources,
+// used by the API's placement logic to enforce memory/CPU gates (issue #1218).
+type HostResources struct {
+	// CPUCores is the number of logical CPUs available to the Worker.
+	CPUCores uint32
+	// MemoryBytes is the total physical memory available to the Worker.
+	MemoryBytes uint64
 }
 
 // HeldServer is one working set this Worker holds in local scratch, with the

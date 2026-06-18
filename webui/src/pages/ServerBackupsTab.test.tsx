@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -118,7 +119,7 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter initialEntries={[`/communities/${CID}/servers/${SID}`]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
@@ -132,14 +133,16 @@ function renderPage() {
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 async function openBackups() {
-  renderPage();
+  const { queryClient } = renderPage();
   await screen.findByText("survival");
   fireEvent.click(
     screen.getByRole("tab", { name: t("serverDetail.tab.backups") }),
   );
+  return { queryClient };
 }
 
 let restoreWs: () => void;
@@ -586,6 +589,20 @@ describe("ServerBackupsTab schedule field", () => {
     expect(
       screen.queryByLabelText(t("backups.schedule.label")),
     ).not.toBeInTheDocument();
+  });
+
+  it("re-syncs the hours field when the server config changes (#1212)", async () => {
+    routeGet({ srv: { config: { backup_interval_hours: 12 } } });
+    const { queryClient } = await openBackups();
+
+    const input = (await screen.findByDisplayValue("12")) as HTMLInputElement;
+    expect(input.value).toBe("12");
+
+    // Simulate a react-query refetch returning a changed schedule.
+    routeGet({ srv: { config: { backup_interval_hours: 48 } } });
+    await act(() => queryClient.invalidateQueries());
+
+    await waitFor(() => expect(input.value).toBe("48"));
   });
 });
 
