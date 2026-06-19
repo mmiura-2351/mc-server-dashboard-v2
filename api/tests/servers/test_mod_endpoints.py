@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import uuid
+import zipfile
 from collections.abc import AsyncIterator
 
 from fastapi.testclient import TestClient
@@ -32,6 +33,7 @@ from mc_server_dashboard_api.dependencies import (
     get_upload_mod,
     require_server_update_in_any_community,
 )
+from mc_server_dashboard_api.servers.application.mods import UploadMod
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     ModNotFoundError,
@@ -40,7 +42,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.mod import Mod, ModId
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.identity.fakes import make_user
-from tests.servers.fakes import FakeModStore
+from tests.servers.fakes import FakeClock, FakeModStore, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 16, 12, 0, 0, tzinfo=dt.timezone.utc)
 _MOD_ID = ModId(uuid.UUID("11111111-1111-1111-1111-111111111111"))
@@ -230,6 +232,33 @@ class TestUploadEndpoint:
                 },
             )
         assert resp.status_code == 413
+
+    def test_upload_unrecognized_jar_422(self) -> None:
+        # A readable jar with no recognized manifest reaches the real use case,
+        # which rejects it (no determinable loader); the edge maps it to 422.
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("README.txt", "no manifest here")
+        uc = UploadMod(
+            uow=FakeUnitOfWork(),
+            store=FakeModStore(),
+            clock=FakeClock(_NOW),
+        )
+        app = _app(upload=uc)  # type: ignore[arg-type]
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                "/api/mods",
+                data={"display_name": "Plain"},
+                files={
+                    "file": (
+                        "plain.jar",
+                        io.BytesIO(buf.getvalue()),
+                        "application/java-archive",
+                    )
+                },
+            )
+        assert resp.status_code == 422
+        assert resp.json()["reason"] == "invalid_mod_jar"
 
     def test_upload_denied_403(self) -> None:
         uc = _FakeUseCase()

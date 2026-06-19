@@ -193,22 +193,27 @@ class TestUploadMod:
                 uploaded_by=uuid.uuid4(),
             )
 
-    async def test_upload_unknown_manifest_stored_as_unknown(self) -> None:
-        """A readable jar with no recognized manifest stores loader 'unknown'."""
-        uc = _make_upload()
+    async def test_upload_rejects_unrecognized_manifest(self) -> None:
+        """A readable jar with no recognized manifest is rejected, not stored.
+
+        Its loader is undeterminable, so it can't be deployed and the DB CHECK
+        would reject a "unknown" loader_type. The guard fires before the blob is
+        stored, so nothing is orphaned.
+        """
+        uow = FakeUnitOfWork()
+        store = FakeModStore()
+        uc = _make_upload(uow=uow, store=store)
         jar = _make_jar({"README.txt": "no manifest here"})
-        mod = await uc(
-            filename="plain.jar",
-            display_name="Plain",
-            content=jar,
-            uploaded_by=uuid.uuid4(),
-        )
-        # The parser returns "unknown" for an unreadable/absent manifest; the
-        # Mod.loader_type Literal does not include it, so compare via str().
-        assert str(mod.loader_type) == "unknown"
-        assert mod.mod_identifier == ""
-        # Undetectable side -> safe default both.
-        assert mod.side == "both"
+        with pytest.raises(InvalidModJarError):
+            await uc(
+                filename="plain.jar",
+                display_name="Plain",
+                content=jar,
+                uploaded_by=uuid.uuid4(),
+            )
+        # Nothing stored or committed.
+        assert store.blobs == {}
+        assert uow.commits == 0
 
 
 class TestListMods:

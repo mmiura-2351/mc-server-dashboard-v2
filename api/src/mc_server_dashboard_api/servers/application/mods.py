@@ -21,6 +21,7 @@ from mc_server_dashboard_api.servers.application.mod_manifest import parse_manif
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
+    InvalidModJarError,
     ModNotFoundError,
     PermissionDeniedError,
 )
@@ -74,6 +75,15 @@ class UploadMod:
 
         sha512 = hashlib.sha512(content).hexdigest()
         parsed = parse_manifest(content)
+        # A readable jar with no recognized manifest parses as "unknown". Such a
+        # mod has no determinable loader, so it cannot be deployed (mods/ vs
+        # plugins/) and the ck_mods_loader_type CHECK would reject it; reject it
+        # here, before the blob is stored, so nothing is orphaned.
+        if parsed.loader_type == "unknown":
+            raise InvalidModJarError(
+                "unrecognized mod jar: no fabric/forge/neoforge/quilt/paper "
+                "manifest found"
+            )
         now = self.clock.now()
 
         mod_id = ModId.new()
@@ -82,11 +92,7 @@ class UploadMod:
             filename=filename,
             display_name=display_name,
             description=None,
-            # The parser returns "unknown" for an unreadable/absent manifest; the
-            # column type narrows to ModLoader, so an unknown loader is not a valid
-            # library entry yet -- but the foundation keeps it permissive and the
-            # caller may override later (epic #1258). Persist the parsed value.
-            loader_type=parsed.loader_type,  # type: ignore[arg-type]
+            loader_type=parsed.loader_type,
             mod_identifier=parsed.mod_identifier,
             provides=parsed.provides,
             version_number=parsed.version_number,
