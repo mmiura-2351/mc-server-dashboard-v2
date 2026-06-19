@@ -651,6 +651,17 @@ def _fabric_api_jar(*, version: str = "0.92.0") -> bytes:
     )
 
 
+def _fabric_jar(*, mod_id: str, version: str = "0.92.0") -> bytes:
+    """A fabric jar whose manifest declares ``mod_id`` (for identity-mismatch)."""
+    return _make_jar(
+        {
+            "fabric.mod.json": json.dumps(
+                {"id": mod_id, "version": version, "depends": {"minecraft": "*"}}
+            )
+        }
+    )
+
+
 class TestSelectImportVersion:
     """Version selection against MC / loader / required-range (#1295)."""
 
@@ -896,6 +907,87 @@ class TestResolveImportsFromCatalog:
         assert by_id["fabric-api"].status == "needs_import"
         assert by_id["fabric-api"].will_import is not None
 
+    async def test_no_exact_slug_match_stays_unresolvable(self) -> None:
+        # The search returns a hit whose slug != the dep id (and no hit matches
+        # exactly). Modrinth slugs frequently differ from manifest ids, so the
+        # resolver must NOT blindly take the top hit: the dep stays unresolvable
+        # and nothing is selected for import.
+        consumer = _mod(mod_identifier="sodium", dependencies=[_dep("fabric-api")])
+        plan = resolve_dependencies(
+            server_type="fabric", mc_version="1.21", assigned=[consumer], library=[]
+        )
+
+        # The (only) hit's slug is an unrelated project; the dep id does not match.
+        project = _catalog_project(
+            project_id="UNRELATED",
+            slug="some-other-mod",
+            versions=[_catalog_version(version_number="0.95.0", download_url="u")],
+        )
+        provider = FakeCatalogProvider(
+            projects={"UNRELATED": project},
+            results={
+                "fabric-api": CatalogSearchResult(
+                    hits=[_search_hit(project_id="UNRELATED", slug="some-other-mod")],
+                    total=1,
+                )
+            },
+        )
+        enriched = await resolve_imports_from_catalog(
+            plan,
+            catalog=provider,
+            server_type="fabric",
+            mc_version="1.21",
+            assigned=[consumer],
+        )
+        assert enriched.entries[0].status == "unresolvable"
+        assert enriched.entries[0].will_import is None
+
+    async def test_forge_server_resolves_neoforge_only_project(self) -> None:
+        # A forge server's search must not be over-constrained to the "forge"
+        # loader facet: a NeoForge-only project the server can run (forge/neoforge
+        # are loader-compatible) must still surface and resolve.
+        consumer = _mod(
+            mod_identifier="sodium",
+            loader_type="forge",
+            dependencies=[_dep("some-lib")],
+        )
+        plan = resolve_dependencies(
+            server_type="forge", mc_version="1.21", assigned=[consumer], library=[]
+        )
+        assert plan.entries[0].status == "unresolvable"
+
+        project = _catalog_project(
+            project_id="SOMELIB",
+            slug="some-lib",
+            versions=[
+                _catalog_version(
+                    project_id="SOMELIB",
+                    version_number="1.0.0",
+                    loaders=["neoforge"],
+                    download_url="u",
+                )
+            ],
+        )
+        provider = FakeCatalogProvider(
+            projects={"SOMELIB": project},
+            results={
+                "some-lib": CatalogSearchResult(
+                    hits=[_search_hit(project_id="SOMELIB", slug="some-lib")], total=1
+                )
+            },
+        )
+        enriched = await resolve_imports_from_catalog(
+            plan,
+            catalog=provider,
+            server_type="forge",
+            mc_version="1.21",
+            assigned=[consumer],
+        )
+        entry = enriched.entries[0]
+        assert entry.status == "needs_import"
+        assert entry.will_import is not None
+        assert entry.will_import.project_id == "SOMELIB"
+
 
 class TestApplyImportsFromModrinth:
     """Apply imports the will_import deps into the library and assigns them."""
@@ -1018,6 +1110,47 @@ class TestApplyImportsFromModrinth:
         ]
         assert len(imported) == 1
         assert imported[0].id in applied
+
+    async def test_apply_identity_mismatch_not_assigned(self) -> None:
+        # An exact-slug project resolves, but the downloaded jar's manifest id is
+        # an UNRELATED mod (slug matched, manifest id did not). The post-download
+        # identity guard must refuse to assign it and record the dep as a failed
+        # import instead of silently assigning the wrong jar.
+        server = _server()
+        uow, file_store, store = _ctx(server)
+        consumer = _mod(mod_identifier="sodium", dependencies=[_dep("fabric-api")])
+        _seed_assigned(uow, store, server, consumer)
+
+        # The jar bytes declare "not-fabric-api" — neither the id nor a provides
+        # entry matches the dep id "fabric-api".
+        jar = _fabric_jar(mod_id="not-fabric-api")
+        version = _catalog_version(download_url="https://cdn.modrinth.com/fa.jar")
+        project = _catalog_project(versions=[version])
+        provider = FakeCatalogProvider(
+            projects={"FABRICAPI": project},
+            results={"fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1)},
+            versions={"VER1": version},
+            blobs={"https://cdn.modrinth.com/fa.jar": jar},
+        )
+
+        plan, applied, failed = await self._apply(uow, file_store, store, provider)(
+            community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
+        )
+
+        # The mismatching jar is recorded as a failed import and never assigned.
+        assert failed == ["fabric-api"]
+        mismatched = [
+            m for m in uow.mods.mods.values() if m.mod_identifier == "not-fabric-api"
+        ]
+        # Even though the jar may persist in the library, it must not be assigned.
+        mismatched_ids = {m.id for m in mismatched}
+        assert all(
+            a.mod_id not in mismatched_ids for a in uow.mods.assignments.values()
+        )
+        assert all(mid not in applied for mid in mismatched_ids)
+        # The dep is still an open finding (nothing satisfied it).
+        entry = next(e for e in plan.entries if e.dep_identifier == "fabric-api")
+        assert entry.status in ("needs_import", "unresolvable")
 
     async def test_get_plan_does_not_import(self) -> None:
         # GET (ResolveServerMods) enriches with will_import but never downloads.

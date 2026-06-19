@@ -389,30 +389,30 @@ async def _locate_project(
     *,
     dep_identifier: str,
     project_id: str | None,
-    server_type: str,
     mc_version: str,
 ) -> CatalogProject | None:
     """Locate the Modrinth project for a dep, by captured id else by search.
 
     With a captured ``project_id`` the project is fetched directly. Otherwise a
-    search by ``dep_identifier`` (faceted by loader/MC) picks the hit whose slug
-    equals the dep id (slugs usually match the manifest id, e.g. ``fabric-api``),
-    falling back to the first hit. ``None`` when nothing is found.
+    search by ``dep_identifier`` accepts only a hit whose ``slug`` *exactly*
+    equals the dep id — a Modrinth slug frequently differs from a manifest id, so
+    a loose top-hit fallback could import an unrelated project. ``None`` when no
+    hit's slug matches (the dep stays ``unresolvable``).
+
+    The search is not faceted to a single loader: a server's compatible loader
+    set can hold more than one loader (e.g. ``forge``/``neoforge``), and faceting
+    to just one would hide projects the server can run. Authoritative loader/MC
+    filtering happens in :func:`_select_import_version` over the project's
+    versions.
     """
 
     if project_id is not None:
         return await catalog.get_project(project_id)
 
-    loaders = _LOADER_COMPAT.get(server_type, frozenset())
-    loader = next(iter(sorted(loaders)), None)
-    result = await catalog.search(
-        query=dep_identifier, loader=loader, game_version=mc_version
-    )
-    if not result.hits:
+    result = await catalog.search(query=dep_identifier, game_version=mc_version)
+    chosen = next((hit for hit in result.hits if hit.slug == dep_identifier), None)
+    if chosen is None:
         return None
-    chosen = next(
-        (hit for hit in result.hits if hit.slug == dep_identifier), result.hits[0]
-    )
     return await catalog.get_project(chosen.project_id)
 
 
@@ -494,7 +494,6 @@ async def _resolve_will_import(
             catalog,
             dep_identifier=dep_identifier,
             project_id=project_id,
-            server_type=server_type,
             mc_version=mc_version,
         )
     except CatalogError:
@@ -698,6 +697,22 @@ class ApplyServerModResolution:
                     wi.project_id,
                     wi.version_id,
                     exc,
+                )
+                continue
+            # Identity guard: a matching slug does not guarantee the jar's manifest
+            # id matches the dep. The imported jar must actually provide the dep id
+            # (its own ``mod_identifier`` or a ``provides`` alias); otherwise an
+            # unrelated mod could be assigned silently. Record it as a failed import
+            # and never assign it.
+            if not _provides(mod, entry.dep_identifier):
+                failed.append(entry.dep_identifier)
+                _LOGGER.warning(
+                    "modrinth import for dep %s (%s@%s) provides %s, not the dep id"
+                    " — refusing to assign",
+                    entry.dep_identifier,
+                    wi.project_id,
+                    wi.version_id,
+                    mod.mod_identifier,
                 )
                 continue
             await self.assign_mods(
