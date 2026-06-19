@@ -54,8 +54,12 @@ closure** (:func:`resolve_closure`):
   rather than recursed. Each entry carries its ``depth`` and ``required_by`` so the
   transitive chain is visible in the plan.
 * **Conflict detection spans the whole closure**: a resolved dep whose mod would
-  break — or be broken by — a mod present or being added is marked ``blocked``.
-  A blocked entry is reported (so the user decides) but apply never auto-adds it.
+  break — or be broken by — a mod present or being added is marked ``blocked``,
+  and the subtree that exists *only* because a blocked mod required it is pruned
+  (also ``blocked``), so a transitive conflict blocks its whole orphaned subtree.
+  Blocking and pruning iterate to a fixpoint — pruning a dep can change what
+  conflicts another mod. A blocked entry is reported (so the user decides) but
+  apply never auto-adds it.
 
 Scope (per #1296): presence + per-edge range satisfaction across the closure; no
 full SAT / optimal cross-graph version selection.
@@ -644,16 +648,22 @@ async def resolve_closure(
     :data:`MAX_RESOLUTION_DEPTH`, beyond which a frontier dep is reported
     ``depth_exceeded`` rather than recursed.
 
-    After the walk, conflict detection runs over the closure: a resolved entry
-    whose mod would break — or be broken by — another mod present or added is
-    marked ``blocked`` so apply does not auto-add it. The validation block is
-    recomputed over the full closure so transitive findings (missing, version,
-    conflict) surface, not just the directly-assigned set.
+    After the walk, :func:`_block_and_prune` runs conflict detection over the
+    closure: a resolved entry whose mod would break — or be broken by — another
+    mod present or added is marked ``blocked``, and the orphaned subtree that
+    exists only because a blocked mod required it is pruned (``blocked`` too), so
+    apply auto-adds neither. The validation block is recomputed over the surviving
+    set (the orphans excluded) so transitive findings (missing, version, conflict)
+    surface without an orphan skewing them.
     """
 
     closure: list[Mod] = list(assigned)
     entries: list[ResolutionEntry] = []
     visited: set[str] = set()
+    # Every requirer (by added-id, or ``None`` for the assigned root) that pulled in
+    # each dep id — a dep can have more than one requirer, but is classified once.
+    # Drives orphan-of-blocked pruning: a dep survives if any requirer survives.
+    requirers: dict[str, set[str | None]] = {}
     frontier: list[_FrontierDep] = []
     for mod in assigned:
         frontier.extend(_frontier_from_mod(mod, depth=0, required_by=None))
@@ -662,6 +672,7 @@ async def resolve_closure(
         next_frontier: list[_FrontierDep] = []
         provided = _provided_versions(closure)
         for dep in frontier:
+            requirers.setdefault(dep.identifier, set()).add(dep.required_by)
             if dep.identifier in visited:
                 continue
             visited.add(dep.identifier)
@@ -726,9 +737,11 @@ async def resolve_closure(
                 )
         frontier = next_frontier
 
-    entries = _block_conflicting_entries(entries, assigned=assigned)
+    entries, validation_mods = _block_and_prune(
+        entries, assigned=assigned, requirers=requirers
+    )
     validation = validate_mod_set(
-        server_type=server_type, mc_version=mc_version, mods=closure
+        server_type=server_type, mc_version=mc_version, mods=validation_mods
     )
     return ResolutionPlan(entries=entries, validation=validation)
 
@@ -829,56 +842,143 @@ async def _frontier_from_will_import(
     return frontier
 
 
-def _block_conflicting_entries(
+def _block_and_prune(
     entries: list[ResolutionEntry],
     *,
     assigned: list[Mod],
-) -> list[ResolutionEntry]:
-    """Mark a resolved entry ``blocked`` when adding it would introduce a conflict.
+    requirers: dict[str, set[str | None]],
+) -> tuple[list[ResolutionEntry], list[Mod]]:
+    """Block conflicting adds and prune the orphans they leave behind (#1296).
 
-    The conflict surface spans the whole would-be-present set: the assigned mods,
-    every ``resolvable_from_library`` pick, and (best-effort, by slug) every
-    Modrinth ``will_import``. An entry is blocked when the mod it would add either
-    declares a ``conflict`` edge against an id present/added, or is itself the
-    target of such an edge from another present/added mod. A blocked entry is left
-    in the plan (so the user sees it) but apply skips it.
+    Two reasons an added entry must not be auto-added:
+
+    * **Conflict** — the mod it would add either declares a ``conflict`` edge
+      against an id present/added, or is itself the target of such an edge from
+      another present/added mod.
+    * **Orphan-of-blocked** — it exists in the closure *only* because a blocked
+      mod required it: none of its requirers (``requirers`` maps each dep id to
+      every requirer that pulled it in) is the assigned root or a surviving
+      (non-blocked) added entry. A dep required by both a blocked and a surviving
+      mod keeps a valid requirer and is not pruned.
+
+    Blocking one mod and pruning its subtree changes which ids are present, which
+    can change conflict detection for other mods (a pruned dep may have been
+    someone's conflict target). So this iterates to a fixpoint: detect conflicts
+    over the surviving set, mark them blocked, prune the orphans-of-blocked,
+    recompute the present set, and repeat until the blocked set stops growing. The
+    blocked set only grows and the closure is finite, so the loop terminates.
+
+    Returns the entries (with ``blocked`` set on every conflicting/orphaned one)
+    and the mod set for the validation block. Conflict detection excludes *all*
+    blocked entries (an orphan must not pollute ``present_ids``), but the
+    validation set keeps the conflict-blocked picks — so the conflict that caused
+    the block still surfaces to the user — while dropping the silent orphans.
     """
 
-    # Ids that will be present if the plan is applied as-is.
-    present_ids: set[str] = set()
+    assigned_ids: set[str] = set()
     for mod in assigned:
-        present_ids.add(mod.mod_identifier)
-        present_ids.update(mod.provides)
-    added_mods: list[Mod] = []
-    for entry in entries:
+        assigned_ids.add(mod.mod_identifier)
+        assigned_ids.update(mod.provides)
+
+    conflict_blocked: set[int] = set()
+    orphan_blocked: set[int] = set()
+    while True:
+        blocked = conflict_blocked | orphan_blocked
+        present_ids = _present_ids(entries, assigned_ids, blocked)
+        edges = _conflict_edges(_surviving_mods(entries, assigned, blocked))
+        broken_ids = {target for _d, target in edges if target in present_ids}
+        breaking_ids = {decl for decl, target in edges if target in present_ids}
+        conflict_ids = broken_ids | breaking_ids
+
+        added_ids = {
+            added_id
+            for idx, entry in enumerate(entries)
+            if idx not in blocked and (added_id := _entry_added_id(entry)) is not None
+        }
+
+        new_conflict: set[int] = set()
+        new_orphan: set[int] = set()
+        for idx, entry in enumerate(entries):
+            if idx in blocked:
+                continue
+            added_id = _entry_added_id(entry)
+            if added_id is None:
+                continue
+            # A direct conflict participant is blocked outright.
+            if added_id in conflict_ids:
+                new_conflict.add(idx)
+                continue
+            # Otherwise it survives only if some requirer survives: the assigned
+            # root (``None``), an assigned id, or a still-added entry's id. A dep
+            # shared by a blocked and a surviving requirer keeps a valid requirer.
+            edge_requirers = requirers.get(entry.dep_identifier, {entry.required_by})
+            if any(
+                req is None or req in assigned_ids or req in added_ids
+                for req in edge_requirers
+            ):
+                continue
+            new_orphan.add(idx)
+
+        if not new_conflict and not new_orphan:
+            break
+        conflict_blocked |= new_conflict
+        orphan_blocked |= new_orphan
+
+    blocked = conflict_blocked | orphan_blocked
+    # Validation keeps the conflict-blocked picks (so the conflict reports) but
+    # not the orphans (their requirer is gone — reporting them would be noise).
+    validation_mods = _surviving_mods(entries, assigned, orphan_blocked)
+    return _mark_blocked(entries, blocked), validation_mods
+
+
+def _present_ids(
+    entries: list[ResolutionEntry],
+    assigned_ids: set[str],
+    blocked: set[int],
+) -> set[str]:
+    """Every id present if the plan applies, excluding the blocked entries.
+
+    A blocked entry adds nothing, so its id is left out — neither a conflict-blocked
+    pick nor an orphan pollutes the conflict-detection present set.
+    """
+
+    present_ids: set[str] = set(assigned_ids)
+    for idx, entry in enumerate(entries):
+        if idx in blocked:
+            continue
         if entry.status == "resolvable_from_library" and entry.mod is not None:
-            added_mods.append(entry.mod)
             present_ids.add(entry.mod.mod_identifier)
             present_ids.update(entry.mod.provides)
         elif entry.status == "needs_import" and entry.will_import is not None:
             present_ids.add(entry.will_import.slug)
+    return present_ids
 
-    # All conflict edges declared by anything present or being added. (Library
-    # picks carry their own ``dependencies``; Modrinth will_imports do not expose
-    # manifest conflict edges here, so they participate only as targets.)
-    edges = _conflict_edges(assigned + added_mods)
-    # ``broken_ids`` is every id some present/added mod declares a break against.
-    broken_ids = {target for _declarer, target in edges if target in present_ids}
-    # ``breaking_ids`` is every present/added mod whose break-target is present.
-    breaking_ids = {declarer for declarer, target in edges if target in present_ids}
 
-    blocked_ids = broken_ids | breaking_ids
-    if not blocked_ids:
-        return entries
+def _surviving_mods(
+    entries: list[ResolutionEntry],
+    assigned: list[Mod],
+    excluded: set[int],
+) -> list[Mod]:
+    """The assigned mods plus every library pick whose entry is not ``excluded``."""
 
-    blocked_entries: list[ResolutionEntry] = []
-    for entry in entries:
-        added_id = _entry_added_id(entry)
-        if added_id is not None and added_id in blocked_ids:
-            blocked_entries.append(_replace_entry_blocked(entry))
-        else:
-            blocked_entries.append(entry)
-    return blocked_entries
+    mods: list[Mod] = list(assigned)
+    for idx, entry in enumerate(entries):
+        if idx in excluded:
+            continue
+        if entry.status == "resolvable_from_library" and entry.mod is not None:
+            mods.append(entry.mod)
+    return mods
+
+
+def _mark_blocked(
+    entries: list[ResolutionEntry], blocked: set[int]
+) -> list[ResolutionEntry]:
+    """A copy of ``entries`` with ``blocked`` set on every index in ``blocked``."""
+
+    return [
+        _replace_entry_blocked(entry) if idx in blocked else entry
+        for idx, entry in enumerate(entries)
+    ]
 
 
 def _entry_added_id(entry: ResolutionEntry) -> str | None:

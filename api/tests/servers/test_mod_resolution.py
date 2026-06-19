@@ -34,6 +34,7 @@ from mc_server_dashboard_api.servers.application.server_mods import (
     UnassignMod,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogDependency,
     CatalogProject,
     CatalogSearchHit,
     CatalogSearchResult,
@@ -588,6 +589,7 @@ def _catalog_version(
     loaders: list[str] | None = None,
     game_versions: list[str] | None = None,
     filename: str = "fabric-api.jar",
+    dependencies: list[CatalogDependency] | None = None,
 ) -> CatalogVersion:
     return CatalogVersion(
         version_id=version_id,
@@ -599,7 +601,7 @@ def _catalog_version(
         sha512=None,
         loaders=loaders if loaders is not None else ["fabric"],
         game_versions=game_versions if game_versions is not None else ["1.21"],
-        dependencies=[],
+        dependencies=dependencies if dependencies is not None else [],
     )
 
 
@@ -1385,6 +1387,69 @@ class TestTransitiveConflict:
         assert mod_b.id not in applied
         assert all(a.mod_id != mod_b.id for a in uow.mods.assignments.values())
 
+    async def test_blocked_mod_transitive_dep_is_pruned(self) -> None:
+        # A requires B; B breaks present C; B requires D. Resolving B introduces a
+        # conflict, so B is blocked — and D exists ONLY because blocked-B required
+        # it, so D must be pruned too (not added, not assigned).
+        server = _server()
+        uow, file_store, store = _ctx(server)
+        mod_a = _mod(mod_identifier="mod-a", dependencies=[_dep("mod-b")])
+        mod_c = _mod(mod_identifier="mod-c")
+        _seed_assigned(uow, store, server, mod_a)
+        _seed_assigned(uow, store, server, mod_c)
+        mod_b = _mod(
+            mod_identifier="mod-b",
+            dependencies=[_dep("mod-c", conflict=True), _dep("mod-d")],
+        )
+        mod_d = _mod(mod_identifier="mod-d")
+        _seed_library(uow, store, mod_b)
+        _seed_library(uow, store, mod_d)
+
+        plan, applied, _failed = await _apply_use_case(uow, file_store, store)(
+            community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        # B is blocked (conflict with C).
+        assert by_id["mod-b"].blocked is True
+        # D only existed because blocked-B required it: it must be pruned, so it is
+        # blocked in the plan and never assigned to the server.
+        assert by_id["mod-d"].blocked is True
+        assert mod_b.id not in applied
+        assert mod_d.id not in applied
+        assert all(a.mod_id != mod_d.id for a in uow.mods.assignments.values())
+
+    async def test_dep_shared_by_blocked_and_unblocked_survives(self) -> None:
+        # D is required by BOTH blocked-B (conflicts with present C) and unblocked-E.
+        # D has a valid non-blocked requirer (E), so it must survive (not over-pruned).
+        server = _server()
+        uow, file_store, store = _ctx(server)
+        mod_a = _mod(
+            mod_identifier="mod-a", dependencies=[_dep("mod-b"), _dep("mod-e")]
+        )
+        mod_c = _mod(mod_identifier="mod-c")
+        _seed_assigned(uow, store, server, mod_a)
+        _seed_assigned(uow, store, server, mod_c)
+        mod_b = _mod(
+            mod_identifier="mod-b",
+            dependencies=[_dep("mod-c", conflict=True), _dep("mod-d")],
+        )
+        mod_e = _mod(mod_identifier="mod-e", dependencies=[_dep("mod-d")])
+        mod_d = _mod(mod_identifier="mod-d")
+        _seed_library(uow, store, mod_b)
+        _seed_library(uow, store, mod_e)
+        _seed_library(uow, store, mod_d)
+
+        plan, applied, _failed = await _apply_use_case(uow, file_store, store)(
+            community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        assert by_id["mod-b"].blocked is True
+        # D survives: E (not blocked) also requires it.
+        assert by_id["mod-d"].blocked is False
+        assert mod_d.id in applied
+        assert mod_e.id in applied
+        assert mod_b.id not in applied
+
 
 class TestTransitiveApply:
     """Apply assigns the full transitive closure (#1296)."""
@@ -1439,3 +1504,107 @@ class TestTransitiveApply:
         assert len(imported) == 1
         assert imported[0].id in applied
         assert plan.validation.missing_deps == []
+
+
+class TestModrinthTransitiveClosure:
+    """A Modrinth ``will_import`` version's own catalog deps are walked (#1296)."""
+
+    async def test_modrinth_chain_resolved_transitively(self) -> None:
+        # A (assigned) requires fabric-api (Modrinth). The selected fabric-api
+        # version carries a required CatalogDependency on a deeper project
+        # (DEEPLIB), so ``_frontier_from_will_import`` walks PAST depth 0: DEEPLIB
+        # must surface as a transitive will_import (depth 1).
+        server = _server()
+        uow, _file_store, store = _ctx(server)
+        mod_a = _mod(mod_identifier="mod-a", dependencies=[_dep("fabric-api")])
+        _seed_assigned(uow, store, server, mod_a)
+
+        deep_version = _catalog_version(
+            version_id="DEEPVER",
+            project_id="DEEPLIB",
+            version_number="1.0.0",
+            download_url="https://cdn.modrinth.com/deep.jar",
+        )
+        deep_project = _catalog_project(
+            project_id="DEEPLIB", slug="deeplib", versions=[deep_version]
+        )
+        fa_version = _catalog_version(
+            download_url="https://cdn.modrinth.com/fa.jar",
+            dependencies=[
+                CatalogDependency(
+                    project_id="DEEPLIB",
+                    version_id=None,
+                    dependency_type="required",
+                )
+            ],
+        )
+        fa_project = _catalog_project(versions=[fa_version])
+        provider = FakeCatalogProvider(
+            projects={"FABRICAPI": fa_project, "DEEPLIB": deep_project},
+            results={"fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1)},
+            versions={"VER1": fa_version, "DEEPVER": deep_version},
+        )
+
+        plan = await ResolveServerMods(uow, provider)(
+            community_id=_COMMUNITY_ID, server_id=server.id
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        assert by_id["fabric-api"].status == "needs_import"
+        assert by_id["fabric-api"].depth == 0
+        # DEEPLIB surfaced transitively through fabric-api's catalog deps.
+        deep = by_id["DEEPLIB"]
+        assert deep.status == "needs_import"
+        assert deep.depth == 1
+        assert deep.required_by == "fabric-api"
+        assert deep.will_import is not None
+        assert deep.will_import.project_id == "DEEPLIB"
+
+    async def test_blocked_modrinth_chain_is_pruned(self) -> None:
+        # A (assigned) requires fabric-api (Modrinth); a present mod conflicts with
+        # fabric-api, so fabric-api is blocked. fabric-api requires DEEPLIB
+        # (Modrinth) — DEEPLIB exists only because blocked fabric-api needed it, so
+        # it must be pruned (blocked, not added).
+        server = _server()
+        uow, _file_store, store = _ctx(server)
+        mod_a = _mod(mod_identifier="mod-a", dependencies=[_dep("fabric-api")])
+        conflicter = _mod(
+            mod_identifier="conflicter",
+            dependencies=[_dep("fabric-api", conflict=True)],
+        )
+        _seed_assigned(uow, store, server, mod_a)
+        _seed_assigned(uow, store, server, conflicter)
+
+        deep_version = _catalog_version(
+            version_id="DEEPVER",
+            project_id="DEEPLIB",
+            version_number="1.0.0",
+            download_url="https://cdn.modrinth.com/deep.jar",
+        )
+        deep_project = _catalog_project(
+            project_id="DEEPLIB", slug="deeplib", versions=[deep_version]
+        )
+        fa_version = _catalog_version(
+            download_url="https://cdn.modrinth.com/fa.jar",
+            dependencies=[
+                CatalogDependency(
+                    project_id="DEEPLIB",
+                    version_id=None,
+                    dependency_type="required",
+                )
+            ],
+        )
+        fa_project = _catalog_project(versions=[fa_version])
+        provider = FakeCatalogProvider(
+            projects={"FABRICAPI": fa_project, "DEEPLIB": deep_project},
+            results={"fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1)},
+            versions={"VER1": fa_version, "DEEPVER": deep_version},
+        )
+
+        plan = await ResolveServerMods(uow, provider)(
+            community_id=_COMMUNITY_ID, server_id=server.id
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        # fabric-api is blocked (conflicter breaks it).
+        assert by_id["fabric-api"].blocked is True
+        # DEEPLIB only existed because blocked fabric-api required it: pruned.
+        assert by_id["DEEPLIB"].blocked is True
