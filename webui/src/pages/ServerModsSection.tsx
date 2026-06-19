@@ -6,11 +6,14 @@
  * The user can multi-select-assign from the library, unassign, and toggle a
  * mod enabled/disabled. A dependency/compatibility checklist renders the
  * validation findings from the same `GET .../mods` response, and a button
- * bulk-downloads the client modpack zip.
+ * bulk-downloads the client modpack zip. A "Resolve dependencies" action
+ * (issue #1297) previews the auto-resolution plan from `GET .../mods/resolve`
+ * — what would be added from the library, imported from Modrinth, blocked by a
+ * conflict, or left unresolvable — and applies it via `POST .../mods/resolve`.
  *
  * Mutating actions are gated on server:update and server-at-rest (the API
- * otherwise answers 409 server_unsettled); reads (list, validation, download)
- * are always allowed. Mirrors ServerResourcePackSection.
+ * otherwise answers 409 server_unsettled); reads (list, validation, download,
+ * the resolution plan) are always allowed. Mirrors ServerResourcePackSection.
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -31,6 +34,8 @@ type ServerModListResponse = components["schemas"]["ServerModListResponse"];
 type ServerModResponse = components["schemas"]["ServerModResponse"];
 type ModValidationResponse = components["schemas"]["ModValidationResponse"];
 type ModResponse = components["schemas"]["ModResponse"];
+type ResolutionPlanResponse = components["schemas"]["ResolutionPlanResponse"];
+type ResolutionEntryResponse = components["schemas"]["ResolutionEntryResponse"];
 
 // The library `side` axis (issue #1258), rendered as a localized badge.
 // Anything outside the known set falls back to the raw value.
@@ -98,6 +103,7 @@ export function ServerModsSection({
   const queryClient = useQueryClient();
 
   const [assignOpen, setAssignOpen] = useState(false);
+  const [resolveOpen, setResolveOpen] = useState(false);
 
   const canUpdate = can("server:update", { serverId });
   const serverAtRest = atRest(
@@ -265,6 +271,15 @@ export function ServerModsSection({
             {t("serverMods.assign")}
           </button>
         )}
+        {canUpdate && (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setResolveOpen(true)}
+          >
+            {t("serverMods.resolve.action")}
+          </button>
+        )}
         <button
           type="button"
           className="btn"
@@ -290,6 +305,20 @@ export function ServerModsSection({
             refresh();
           }}
           onClose={() => setAssignOpen(false)}
+        />
+      )}
+
+      {resolveOpen && (
+        <ResolveDialog
+          communityId={communityId}
+          serverId={serverId}
+          serverAtRest={serverAtRest}
+          onApplied={() => {
+            setResolveOpen(false);
+            showToast(t("serverMods.resolve.applied"), "success");
+            refresh();
+          }}
+          onClose={() => setResolveOpen(false)}
         />
       )}
     </div>
@@ -418,6 +447,222 @@ function ValidationChecklist({
         </ul>
       )}
     </div>
+  );
+}
+
+// The plan groups an entry falls into. `blocked` wins over its status (apply
+// never auto-adds a blocked entry), so it is checked first.
+type ResolveGroup = "library" | "import" | "blocked" | "unresolvable";
+
+function groupOf(entry: ResolutionEntryResponse): ResolveGroup | null {
+  if (entry.status === "already_satisfied") return null;
+  if (entry.blocked) return "blocked";
+  if (entry.status === "resolvable_from_library") return "library";
+  if (entry.status === "needs_import" && entry.will_import !== null)
+    return "import";
+  // `unresolvable`, `depth_exceeded`, and a `needs_import` with no Modrinth
+  // match all need manual resolution.
+  return "unresolvable";
+}
+
+// One plan entry, with its transitive provenance (required_by) and any extra
+// detail for its group (import target, replaced mods, why it is not addable).
+function ResolveEntry({ entry }: { entry: ResolutionEntryResponse }) {
+  const group = groupOf(entry);
+  // The chosen library mod, for a library add: "Name (version)".
+  const pick =
+    entry.mod !== null
+      ? `${entry.mod.display_name} (${entry.mod.version_number})`
+      : entry.dep_identifier;
+  const detail: string | null =
+    group === "import" && entry.will_import !== null
+      ? t("serverMods.resolve.import")
+          .replace("{project}", entry.will_import.slug)
+          .replace("{version}", entry.will_import.version_number)
+      : group === "library" && entry.replaces.length > 0
+        ? t("serverMods.resolve.upgrade")
+            .replace("{from}", entry.replaces[0].display_name)
+            .replace("{to}", pick)
+        : group === "library"
+          ? pick
+          : group === "blocked"
+            ? t("serverMods.resolve.blockedReason")
+            : entry.status === "depth_exceeded"
+              ? t("serverMods.resolve.depthExceededReason")
+              : group === "unresolvable"
+                ? t("serverMods.resolve.unresolvableReason")
+                : null;
+
+  return (
+    <li>
+      <span className="resolve-dep">{entry.dep_identifier}</span>{" "}
+      <span className="resolve-range">({entry.required_range})</span>
+      {detail !== null && <span className="resolve-detail"> — {detail}</span>}
+      {entry.required_by !== null && (
+        <span className="resolve-detail">
+          {" · "}
+          {t("serverMods.resolve.requiredBy").replace(
+            "{parent}",
+            entry.required_by,
+          )}
+        </span>
+      )}
+    </li>
+  );
+}
+
+function ResolveGroupList({
+  heading,
+  entries,
+  error,
+}: {
+  heading: TranslationKey;
+  entries: ResolutionEntryResponse[];
+  error: boolean;
+}) {
+  if (entries.length === 0) return null;
+  return (
+    <div className="resolve-group">
+      <h3 className={error ? "field-error" : undefined}>{t(heading)}</h3>
+      <ul>
+        {entries.map((entry) => (
+          <ResolveEntry
+            key={`${entry.dep_identifier}-${entry.depth}`}
+            entry={entry}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ResolveDialog({
+  communityId,
+  serverId,
+  serverAtRest,
+  onApplied,
+  onClose,
+}: {
+  communityId: string;
+  serverId: string;
+  serverAtRest: boolean;
+  onApplied: () => void;
+  onClose: () => void;
+}) {
+  const { showToast } = useToast();
+  const onForbidden = useOnForbidden();
+
+  const planQuery = useQuery({
+    queryKey: ["server-mods-resolve", communityId, serverId],
+    queryFn: (): Promise<ResolutionPlanResponse> =>
+      api.get(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/mods/resolve",
+          { community_id: communityId, server_id: serverId },
+        ),
+      ),
+  });
+
+  const apply = useMutation({
+    mutationFn: (): Promise<ResolutionPlanResponse> =>
+      api.post(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/mods/resolve",
+          { community_id: communityId, server_id: serverId },
+        ),
+      ),
+    onSuccess: (result) => {
+      if (result.failed_imports.length > 0) {
+        showToast(
+          t("serverMods.resolve.failedImports").replace(
+            "{deps}",
+            result.failed_imports.join(", "),
+          ),
+          "error",
+        );
+      }
+      onApplied();
+    },
+    onError: (error) => {
+      if (onForbidden(error)) {
+        onClose();
+        return;
+      }
+      showToast(
+        t(modsErrorMessage(error, "serverMods.resolve.applyError")),
+        "error",
+      );
+    },
+  });
+
+  const entries = planQuery.data?.entries ?? [];
+  const library = entries.filter((e) => groupOf(e) === "library");
+  const imports = entries.filter((e) => groupOf(e) === "import");
+  const blocked = entries.filter((e) => groupOf(e) === "blocked");
+  const unresolvable = entries.filter((e) => groupOf(e) === "unresolvable");
+  // Anything apply would act on: library picks and Modrinth imports. Blocked and
+  // manual entries are reported but not added, so they do not enable apply.
+  const actionable = library.length + imports.length > 0;
+
+  return (
+    <Modal
+      open={true}
+      title={t("serverMods.resolve.dialog.title")}
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="btn ghost" onClick={onClose}>
+            {t("common.cancel")}
+          </button>
+          {actionable && (
+            <button
+              type="button"
+              className="btn primary"
+              disabled={!serverAtRest || apply.isPending}
+              onClick={() => apply.mutate()}
+            >
+              {t("serverMods.resolve.apply")}
+            </button>
+          )}
+        </>
+      }
+    >
+      {planQuery.isPending ? (
+        <p className="sub">{t("serverMods.resolve.loading")}</p>
+      ) : planQuery.isError ? (
+        <p className="field-error" role="alert">
+          {t("serverMods.resolve.loadError")}
+        </p>
+      ) : !actionable && blocked.length === 0 && unresolvable.length === 0 ? (
+        <p className="sub">{t("serverMods.resolve.nothing")}</p>
+      ) : (
+        <div className="resolve-plan">
+          <ResolveGroupList
+            heading="serverMods.resolve.group.library"
+            entries={library}
+            error={false}
+          />
+          <ResolveGroupList
+            heading="serverMods.resolve.group.import"
+            entries={imports}
+            error={false}
+          />
+          <ResolveGroupList
+            heading="serverMods.resolve.group.blocked"
+            entries={blocked}
+            error={true}
+          />
+          <ResolveGroupList
+            heading="serverMods.resolve.group.unresolvable"
+            entries={unresolvable}
+            error={true}
+          />
+          {!serverAtRest && actionable && (
+            <p className="field-hint">{t("serverMods.resolve.notAtRest")}</p>
+          )}
+        </div>
+      )}
+    </Modal>
   );
 }
 

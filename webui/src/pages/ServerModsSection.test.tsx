@@ -112,21 +112,51 @@ const EMPTY_VALIDATION: ModValidation = {
 
 // Route api.get by path: server detail, server mod set, the global library, and
 // meta (consumed by the Settings tab).
+type ResolutionEntry = components["schemas"]["ResolutionEntryResponse"];
+type ResolutionPlan = components["schemas"]["ResolutionPlanResponse"];
+
+// A resolution-plan entry with sane defaults; override per-status as needed.
+function resolveEntry(
+  overrides: Partial<ResolutionEntry> = {},
+): ResolutionEntry {
+  return {
+    dep_identifier: "cloth-config",
+    required_range: ">=10.0.0",
+    status: "resolvable_from_library",
+    depth: 0,
+    required_by: null,
+    blocked: false,
+    replaces: [],
+    will_import: null,
+    mod: null,
+    ...overrides,
+  };
+}
+
 function routeGet(
   opts: {
     srv?: Record<string, unknown>;
     mods?: ReturnType<typeof serverMod>[];
     validation?: ModValidation;
     library?: ReturnType<typeof mod>[];
+    plan?: ResolutionPlan;
   } = {},
 ) {
   const srv = server(opts.srv);
   const mods = opts.mods ?? [];
   const validation = opts.validation ?? EMPTY_VALIDATION;
   const library = opts.library ?? [];
+  const plan = opts.plan ?? {
+    entries: [],
+    validation: EMPTY_VALIDATION,
+    failed_imports: [],
+  };
   mockApi.get.mockImplementation((path: string) => {
     if (path.endsWith("/resource-pack")) {
       return Promise.reject(new ApiError(404, { reason: "not_found" }));
+    }
+    if (path.endsWith(`/servers/${SID}/mods/resolve`)) {
+      return Promise.resolve(plan);
     }
     if (path.endsWith(`/servers/${SID}/mods`)) {
       return Promise.resolve({ mods, validation });
@@ -586,5 +616,310 @@ describe("ServerModsSection — client modpack download", () => {
         "survival-client-mods.zip",
       ),
     );
+  });
+});
+
+describe("ServerModsSection — resolve dependencies", () => {
+  async function openResolve() {
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("serverMods.resolve.action"),
+      }),
+    );
+    return screen.findByRole("dialog");
+  }
+
+  it("renders the plan grouped by library add, Modrinth import, blocked, and unresolvable", async () => {
+    routeGet({
+      mods: [serverMod()],
+      plan: {
+        failed_imports: [],
+        validation: EMPTY_VALIDATION,
+        entries: [
+          // Library add with an upgrade replacement.
+          resolveEntry({
+            dep_identifier: "fabric-api",
+            status: "resolvable_from_library",
+            mod: mod({
+              id: "lib-1",
+              display_name: "Fabric API",
+              version_number: "0.110.0",
+            }),
+            replaces: [mod({ id: "old-1", display_name: "Fabric API 0.80" })],
+          }),
+          // Transitive Modrinth import.
+          resolveEntry({
+            dep_identifier: "cloth-config",
+            status: "needs_import",
+            depth: 1,
+            required_by: "fabric-api",
+            will_import: {
+              project_id: "p1",
+              version_id: "v1",
+              slug: "cloth-config",
+              version_number: "11.0.0",
+            },
+          }),
+          // Blocked by a conflict.
+          resolveEntry({
+            dep_identifier: "conflicty",
+            status: "resolvable_from_library",
+            blocked: true,
+            mod: mod({ id: "lib-2", display_name: "Conflicty" }),
+          }),
+          // Unresolvable.
+          resolveEntry({
+            dep_identifier: "mystery-lib",
+            status: "unresolvable",
+          }),
+        ],
+      },
+    });
+    await openSettings();
+    await openResolve();
+
+    expect(
+      await screen.findByText(t("serverMods.resolve.group.library")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(t("serverMods.resolve.group.import")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(t("serverMods.resolve.group.blocked")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(t("serverMods.resolve.group.unresolvable")),
+    ).toBeInTheDocument();
+
+    // Library upgrade detail: "upgrades X → Y".
+    expect(
+      screen.getByText(/Fabric API 0\.80.*Fabric API \(0\.110\.0\)/),
+    ).toBeInTheDocument();
+    // Modrinth import target rendered as project @ version, with required-by.
+    expect(screen.getByText(/cloth-config @ 11\.0\.0/)).toBeInTheDocument();
+    expect(screen.getByText(/required by.*fabric-api/)).toBeInTheDocument();
+  });
+
+  it("shows the chosen library mod for a plain (non-upgrade) add", async () => {
+    routeGet({
+      mods: [serverMod()],
+      plan: {
+        failed_imports: [],
+        validation: EMPTY_VALIDATION,
+        entries: [
+          resolveEntry({
+            dep_identifier: "sodium",
+            status: "resolvable_from_library",
+            mod: mod({
+              id: "lib-9",
+              display_name: "Sodium",
+              version_number: "0.6.0",
+            }),
+          }),
+        ],
+      },
+    });
+    await openSettings();
+    await openResolve();
+
+    expect(await screen.findByText(/Sodium \(0\.6\.0\)/)).toBeInTheDocument();
+  });
+
+  it("shows the empty message and no apply button when everything is already satisfied", async () => {
+    routeGet({
+      mods: [serverMod()],
+      plan: {
+        failed_imports: [],
+        validation: EMPTY_VALIDATION,
+        entries: [resolveEntry({ status: "already_satisfied" })],
+      },
+    });
+    await openSettings();
+    await openResolve();
+
+    expect(
+      await screen.findByText(t("serverMods.resolve.nothing")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: t("serverMods.resolve.apply") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("applies the plan, refreshes the mod set, and closes", async () => {
+    routeGet({
+      mods: [serverMod()],
+      plan: {
+        failed_imports: [],
+        validation: EMPTY_VALIDATION,
+        entries: [resolveEntry({ status: "resolvable_from_library" })],
+      },
+    });
+    mockApi.post.mockResolvedValue({
+      entries: [],
+      validation: EMPTY_VALIDATION,
+      failed_imports: [],
+    });
+    await openSettings();
+    await openResolve();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("serverMods.resolve.apply"),
+      }),
+    );
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/mods/resolve`,
+      ),
+    );
+    // Success toast + dialog dismissed.
+    expect(
+      await screen.findByText(t("serverMods.resolve.applied")),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    // The mod set is re-fetched after apply (initial detail load + refresh).
+    await waitFor(() => {
+      const modsGets = mockApi.get.mock.calls.filter(
+        (c) => c[0] === `/api/communities/${CID}/servers/${SID}/mods`,
+      );
+      expect(modsGets.length).toBeGreaterThan(1);
+    });
+  });
+
+  it("surfaces failed imports after applying", async () => {
+    routeGet({
+      mods: [serverMod()],
+      plan: {
+        failed_imports: [],
+        validation: EMPTY_VALIDATION,
+        entries: [
+          resolveEntry({
+            status: "needs_import",
+            will_import: {
+              project_id: "p1",
+              version_id: "v1",
+              slug: "cloth-config",
+              version_number: "11.0.0",
+            },
+          }),
+        ],
+      },
+    });
+    mockApi.post.mockResolvedValue({
+      entries: [],
+      validation: EMPTY_VALIDATION,
+      failed_imports: ["cloth-config"],
+    });
+    await openSettings();
+    await openResolve();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("serverMods.resolve.apply"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        t("serverMods.resolve.failedImports").replace("{deps}", "cloth-config"),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a 409 server_unsettled error on apply", async () => {
+    routeGet({
+      mods: [serverMod()],
+      plan: {
+        failed_imports: [],
+        validation: EMPTY_VALIDATION,
+        entries: [resolveEntry({ status: "resolvable_from_library" })],
+      },
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_unsettled" }),
+    );
+    await openSettings();
+    await openResolve();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("serverMods.resolve.apply"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(t("serverDetail.error.unsettled")),
+    ).toBeInTheDocument();
+  });
+
+  it("disables apply while the server is running but still shows the plan", async () => {
+    routeGet({
+      srv: { observed_state: "running", desired_state: "running" },
+      mods: [serverMod()],
+      plan: {
+        failed_imports: [],
+        validation: EMPTY_VALIDATION,
+        entries: [resolveEntry({ status: "resolvable_from_library" })],
+      },
+    });
+    await openSettings();
+    await openResolve();
+
+    // The read-only plan still renders while running.
+    expect(
+      await screen.findByText(t("serverMods.resolve.group.library")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("serverMods.resolve.apply") }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(t("serverMods.resolve.notAtRest")),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the resolve action without server:update", async () => {
+    mockCan = (code) => code !== "server:update";
+    routeGet({ mods: [serverMod()] });
+    await openSettings();
+
+    await screen.findByText("Fabric API");
+    expect(
+      screen.queryByRole("button", { name: t("serverMods.resolve.action") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces a plan load error", async () => {
+    routeGet({ mods: [serverMod()] });
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/resource-pack")) {
+        return Promise.reject(new ApiError(404, { reason: "not_found" }));
+      }
+      if (path.endsWith(`/servers/${SID}/mods/resolve`)) {
+        return Promise.reject(new ApiError(500, {}));
+      }
+      if (path.endsWith(`/servers/${SID}/mods`)) {
+        return Promise.resolve({
+          mods: [serverMod()],
+          validation: EMPTY_VALIDATION,
+        });
+      }
+      if (path === "/api/meta") {
+        return Promise.resolve({
+          relay_enabled: false,
+          default_memory_limit_mb: null,
+          max_memory_limit_mb: null,
+        });
+      }
+      return Promise.resolve(server());
+    });
+    await openSettings();
+    await openResolve();
+
+    expect(
+      await screen.findByText(t("serverMods.resolve.loadError")),
+    ).toBeInTheDocument();
   });
 });

@@ -1461,6 +1461,31 @@ export const ja: Record<TranslationKey, string> = {
   "serverMods.assignDialog.loading": "Modを読み込んでいます…",
   "serverMods.assignDialog.empty": "割り当て可能なModがありません。",
   "serverMods.assignDialog.submit": "割り当て",
+  "serverMods.resolve.action": "依存関係を解決",
+  "serverMods.resolve.dialog.title": "依存関係を解決",
+  "serverMods.resolve.loading": "解決プランを作成しています…",
+  "serverMods.resolve.loadError": "解決プランを作成できませんでした。",
+  "serverMods.resolve.nothing":
+    "必要な依存関係はすべて満たされています。追加する項目はありません。",
+  "serverMods.resolve.group.library": "ライブラリから追加",
+  "serverMods.resolve.group.import": "Modrinthからインポート",
+  "serverMods.resolve.group.blocked": "競合により追加できません",
+  "serverMods.resolve.group.unresolvable": "手動での対応が必要",
+  "serverMods.resolve.requiredBy": "{parent} が必要とします",
+  "serverMods.resolve.upgrade": "{from} → {to} に更新",
+  "serverMods.resolve.import": "{project} @ {version}",
+  "serverMods.resolve.blockedReason": "追加すると現在の構成と競合します",
+  "serverMods.resolve.unresolvableReason":
+    "ライブラリにもModrinthにも一致するModがありません",
+  "serverMods.resolve.depthExceededReason":
+    "依存ツリーが深すぎるため自動解決できません",
+  "serverMods.resolve.notAtRest":
+    "これらの依存関係を追加するにはサーバーを停止してください。",
+  "serverMods.resolve.apply": "依存関係を追加",
+  "serverMods.resolve.applied": "依存関係を解決しました。",
+  "serverMods.resolve.applyError": "依存関係を解決できませんでした。",
+  "serverMods.resolve.failedImports":
+    "一部の依存関係をインポートできませんでした: {deps}。",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "この操作を行う権限がありません。",

@@ -1450,6 +1450,30 @@ export const en = {
   "serverMods.assignDialog.loading": "Loading mods…",
   "serverMods.assignDialog.empty": "No compatible mods available.",
   "serverMods.assignDialog.submit": "Assign",
+  "serverMods.resolve.action": "Resolve dependencies",
+  "serverMods.resolve.dialog.title": "Resolve dependencies",
+  "serverMods.resolve.loading": "Building the resolution plan…",
+  "serverMods.resolve.loadError": "Could not build the resolution plan.",
+  "serverMods.resolve.nothing":
+    "Every required dependency is already satisfied. Nothing to add.",
+  "serverMods.resolve.group.library": "Will add from library",
+  "serverMods.resolve.group.import": "Will import from Modrinth",
+  "serverMods.resolve.group.blocked": "Blocked by a conflict",
+  "serverMods.resolve.group.unresolvable": "Needs manual resolution",
+  "serverMods.resolve.requiredBy": "required by {parent}",
+  "serverMods.resolve.upgrade": "upgrades {from} → {to}",
+  "serverMods.resolve.import": "{project} @ {version}",
+  "serverMods.resolve.blockedReason":
+    "adding this would conflict with the current set",
+  "serverMods.resolve.unresolvableReason": "no library mod or Modrinth match",
+  "serverMods.resolve.depthExceededReason":
+    "too deep in the dependency tree to resolve automatically",
+  "serverMods.resolve.notAtRest": "Stop the server to add these dependencies.",
+  "serverMods.resolve.apply": "Add dependencies",
+  "serverMods.resolve.applied": "Dependencies resolved.",
+  "serverMods.resolve.applyError": "Could not resolve the dependencies.",
+  "serverMods.resolve.failedImports":
+    "Some dependencies could not be imported: {deps}.",
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",

@@ -971,6 +971,33 @@ body.col-resizing {
   flex-direction: column;
   gap: 6px;
 }
+/* Resolve-dependencies plan — also inside the portaled Modal, so unscoped. */
+.resolve-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.resolve-group h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.resolve-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.resolve-dep {
+  font-family: var(--font-mono);
+}
+.resolve-range,
+.resolve-detail {
+  color: var(--text-faint);
+}
 /* ---------- Server create wizard (WEBUI_SPEC.md 6.3) ---------- */
 .wizard-steps {
   display: flex;
