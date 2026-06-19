@@ -167,11 +167,12 @@ RESOURCE_PACK_DOWNLOAD: Final = "resource_pack:download"
 RESOURCE_PACK_ASSIGN: Final = "resource_pack:assign"
 RESOURCE_PACK_UNASSIGN: Final = "resource_pack:unassign"
 
-# Mod library upload / delete / download (issue #1261). Names the operation, not
-# a permission code — upload is gated by server:update in any community, delete by
-# uploader-or-admin, download by authenticated. The ``operation`` column is free
-# text (see module docstring).
+# Mod library upload / import / delete / download (issues #1261, #1264). Names the
+# operation, not a permission code — upload/import are gated by server:update in any
+# community, delete by uploader-or-admin, download by authenticated. The
+# ``operation`` column is free text (see module docstring).
 MOD_UPLOAD: Final = "mod:upload"
+MOD_IMPORT: Final = "mod:import"
 MOD_DELETE: Final = "mod:delete"
 MOD_DOWNLOAD: Final = "mod:download"
 # Mod assignment / unassignment / enable / disable (issue #1262). Gated by

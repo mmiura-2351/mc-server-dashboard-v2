@@ -638,6 +638,274 @@
         "title": "CapabilitiesResponse",
         "type": "object"
       },
+      "CatalogDependencyResponse": {
+        "properties": {
+          "dependency_type": {
+            "title": "Dependency Type",
+            "type": "string"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          }
+        },
+        "required": [
+          "project_id",
+          "version_id",
+          "dependency_type"
+        ],
+        "title": "CatalogDependencyResponse",
+        "type": "object"
+      },
+      "CatalogProjectResponse": {
+        "description": "A catalog project's detail plus its versions.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "game_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Game Versions",
+            "type": "array"
+          },
+          "loaders": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Loaders",
+            "type": "array"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "project_type": {
+            "title": "Project Type",
+            "type": "string"
+          },
+          "side": {
+            "title": "Side",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogVersionResponse"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_id",
+          "slug",
+          "title",
+          "description",
+          "project_type",
+          "side",
+          "loaders",
+          "game_versions",
+          "versions"
+        ],
+        "title": "CatalogProjectResponse",
+        "type": "object"
+      },
+      "CatalogSearchHitResponse": {
+        "description": "One project in a catalog search result.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "downloads": {
+            "title": "Downloads",
+            "type": "integer"
+          },
+          "game_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Game Versions",
+            "type": "array"
+          },
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon Url"
+          },
+          "loaders": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Loaders",
+            "type": "array"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "project_type": {
+            "title": "Project Type",
+            "type": "string"
+          },
+          "side": {
+            "title": "Side",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "slug",
+          "title",
+          "description",
+          "project_type",
+          "side",
+          "loaders",
+          "game_versions",
+          "downloads",
+          "icon_url"
+        ],
+        "title": "CatalogSearchHitResponse",
+        "type": "object"
+      },
+      "CatalogSearchResponse": {
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogSearchHitResponse"
+            },
+            "title": "Hits",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "hits",
+          "total"
+        ],
+        "title": "CatalogSearchResponse",
+        "type": "object"
+      },
+      "CatalogVersionResponse": {
+        "description": "One downloadable version of a catalog project.",
+        "properties": {
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogDependencyResponse"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "game_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Game Versions",
+            "type": "array"
+          },
+          "loaders": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Loaders",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "sha512": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha512"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version_id",
+          "project_id",
+          "name",
+          "version_number",
+          "filename",
+          "download_url",
+          "sha512",
+          "loaders",
+          "game_versions",
+          "dependencies"
+        ],
+        "title": "CatalogVersionResponse",
+        "type": "object"
+      },
       "ChangePasswordRequest": {
         "properties": {
           "current_password": {
@@ -1238,6 +1506,41 @@
           "memory_bytes"
         ],
         "title": "HostResourcesResponse",
+        "type": "object"
+      },
+      "ImportModRequest": {
+        "description": "Import a Modrinth project/version into the library.\n\n``side`` optionally overrides the Modrinth-derived deployment side; when\nomitted the manifest's auto-detected value is used.",
+        "properties": {
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "side": {
+            "anyOf": [
+              {
+                "enum": [
+                  "server",
+                  "client",
+                  "both"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Side"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "version_id"
+        ],
+        "title": "ImportModRequest",
         "type": "object"
       },
       "JarPoolGcResponse": {
@@ -3334,6 +3637,151 @@
           }
         ],
         "summary": "Global Backup Statistics"
+      }
+    },
+    "/api/catalog/projects/{project_id}": {
+      "get": {
+        "description": "Catalog project detail + versions (authenticated, issue #1264).",
+        "operationId": "catalog_project_api_catalog_projects__project_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogProjectResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Catalog Project"
+      }
+    },
+    "/api/catalog/search": {
+      "get": {
+        "description": "Search the Modrinth catalog (authenticated, issue #1264).",
+        "operationId": "catalog_search_api_catalog_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "query",
+            "required": true,
+            "schema": {
+              "title": "Query",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "loader",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Loader"
+            }
+          },
+          {
+            "in": "query",
+            "name": "game_version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Game Version"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogSearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Catalog Search"
       }
     },
     "/api/communities": {
@@ -7660,6 +8108,50 @@
           }
         ],
         "summary": "Upload Mod"
+      }
+    },
+    "/api/mods/import": {
+      "post": {
+        "description": "Import a Modrinth project/version into the library (issue #1264).\n\nGated like upload (server:update in any community). Downloads the version's\njar, re-parses its manifest, dedups on SHA-256 (an identical jar resolves to\nthe existing entry), and persists with ``source=modrinth``.",
+        "operationId": "import_mod_api_mods_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportModRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Import Mod"
       }
     },
     "/api/mods/{mod_id}": {

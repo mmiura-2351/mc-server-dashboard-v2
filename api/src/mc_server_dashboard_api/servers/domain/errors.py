@@ -470,6 +470,16 @@ class ModNotFoundError(ServerError):
     """
 
 
+class ModIntegrityError(ServerError):
+    """An imported jar's bytes did not match the catalog-published digest (#1264).
+
+    Raised by ``ImportMod`` when the downloaded version's SHA-512 differs from the
+    digest the catalog published for that file — a corrupted download or a tampered
+    CDN object. Fail closed: nothing is stored. The edge maps this to 502 (the
+    failure is upstream, not a client error).
+    """
+
+
 class ModInUseError(ServerError):
     """A library mod cannot be deleted because it is assigned to servers.
 

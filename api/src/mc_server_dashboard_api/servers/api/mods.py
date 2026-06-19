@@ -11,8 +11,12 @@ per server (``server:update`` for assign/unassign/toggle, ``server:read`` for
 list). Every assignment mutation is at-rest gated (409 ``server_unsettled`` while
 the server is running) and physically (un)deploys the jar into the working set.
 
-Modrinth import and the client modpack are later sub-issues of epic #1258 and are
-not served here.
+The catalog routes (issue #1264) live under ``/catalog`` and serve keyless
+Modrinth search and project detail (authenticated). ``POST /mods/import`` imports
+a chosen project/version into the global library (gated like upload:
+``server:update`` in any community).
+
+The client modpack is a later sub-issue of epic #1258 and is not served here.
 """
 
 from __future__ import annotations
@@ -35,9 +39,11 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.dependencies import (
     get_assign_mods,
     get_audit_recorder,
+    get_catalog_provider,
     get_current_user,
     get_delete_mod,
     get_download_mod,
+    get_import_mod,
     get_list_mods,
     get_list_server_mods,
     get_set_mod_enabled,
@@ -54,6 +60,7 @@ from mc_server_dashboard_api.servers.application.mods import (
     MAX_MOD_BYTES,
     DeleteMod,
     DownloadMod,
+    ImportMod,
     ListMods,
     UploadMod,
 )
@@ -64,10 +71,19 @@ from mc_server_dashboard_api.servers.application.server_mods import (
     SetModEnabled,
     UnassignMod,
 )
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogProject,
+    CatalogProjectNotFoundError,
+    CatalogProvider,
+    CatalogSearchResult,
+    CatalogUnavailableError,
+    CatalogVersion,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidModJarError,
     ModAssignmentNotFoundError,
+    ModIntegrityError,
     ModInUseError,
     ModNotFoundError,
     PermissionDeniedError,
@@ -84,6 +100,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 
 router = APIRouter()
 assignment_router = APIRouter()
+catalog_router = APIRouter()
 
 # Chunked read buffer for the upload body (same pattern as resource_packs.py).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
@@ -264,6 +281,221 @@ async def download_mod(
     )
 
 
+# ---------------------------------------------------------------------------
+# Modrinth catalog + import (issue #1264)
+# ---------------------------------------------------------------------------
+
+
+class CatalogSearchHitResponse(BaseModel):
+    """One project in a catalog search result."""
+
+    project_id: str
+    slug: str
+    title: str
+    description: str
+    project_type: str
+    side: str
+    loaders: list[str]
+    game_versions: list[str]
+    downloads: int
+    icon_url: str | None
+
+
+class CatalogSearchResponse(BaseModel):
+    hits: list[CatalogSearchHitResponse]
+    total: int
+
+    @classmethod
+    def from_result(cls, result: CatalogSearchResult) -> "CatalogSearchResponse":
+        return cls(
+            hits=[
+                CatalogSearchHitResponse(
+                    project_id=h.project_id,
+                    slug=h.slug,
+                    title=h.title,
+                    description=h.description,
+                    project_type=h.project_type,
+                    side=h.side,
+                    loaders=h.loaders,
+                    game_versions=h.game_versions,
+                    downloads=h.downloads,
+                    icon_url=h.icon_url,
+                )
+                for h in result.hits
+            ],
+            total=result.total,
+        )
+
+
+class CatalogDependencyResponse(BaseModel):
+    project_id: str | None
+    version_id: str | None
+    dependency_type: str
+
+
+class CatalogVersionResponse(BaseModel):
+    """One downloadable version of a catalog project."""
+
+    version_id: str
+    project_id: str
+    name: str
+    version_number: str
+    filename: str
+    download_url: str
+    sha512: str | None
+    loaders: list[str]
+    game_versions: list[str]
+    dependencies: list[CatalogDependencyResponse]
+
+    @classmethod
+    def from_version(cls, version: CatalogVersion) -> "CatalogVersionResponse":
+        return cls(
+            version_id=version.version_id,
+            project_id=version.project_id,
+            name=version.name,
+            version_number=version.version_number,
+            filename=version.filename,
+            download_url=version.download_url,
+            sha512=version.sha512,
+            loaders=version.loaders,
+            game_versions=version.game_versions,
+            dependencies=[
+                CatalogDependencyResponse(
+                    project_id=d.project_id,
+                    version_id=d.version_id,
+                    dependency_type=d.dependency_type,
+                )
+                for d in version.dependencies
+            ],
+        )
+
+
+class CatalogProjectResponse(BaseModel):
+    """A catalog project's detail plus its versions."""
+
+    project_id: str
+    slug: str
+    title: str
+    description: str
+    project_type: str
+    side: str
+    loaders: list[str]
+    game_versions: list[str]
+    versions: list[CatalogVersionResponse]
+
+    @classmethod
+    def from_project(cls, project: CatalogProject) -> "CatalogProjectResponse":
+        return cls(
+            project_id=project.project_id,
+            slug=project.slug,
+            title=project.title,
+            description=project.description,
+            project_type=project.project_type,
+            side=project.side,
+            loaders=project.loaders,
+            game_versions=project.game_versions,
+            versions=[CatalogVersionResponse.from_version(v) for v in project.versions],
+        )
+
+
+class ImportModRequest(BaseModel):
+    """Import a Modrinth project/version into the library.
+
+    ``side`` optionally overrides the Modrinth-derived deployment side; when
+    omitted the manifest's auto-detected value is used.
+    """
+
+    project_id: str
+    version_id: str
+    side: ModSide | None = None
+
+
+@catalog_router.get("/catalog/search")
+async def catalog_search(
+    _user: Annotated[User, Depends(get_current_user)],
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+    query: Annotated[str, Query()],
+    loader: Annotated[str | None, Query()] = None,
+    game_version: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> CatalogSearchResponse:
+    """Search the Modrinth catalog (authenticated, issue #1264)."""
+
+    try:
+        result = await catalog.search(
+            query=query,
+            loader=loader,
+            game_version=game_version,
+            limit=limit,
+            offset=offset,
+        )
+    except CatalogUnavailableError as exc:
+        raise _bad_gateway() from exc
+    return CatalogSearchResponse.from_result(result)
+
+
+@catalog_router.get("/catalog/projects/{project_id}")
+async def catalog_project(
+    project_id: str,
+    _user: Annotated[User, Depends(get_current_user)],
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> CatalogProjectResponse:
+    """Catalog project detail + versions (authenticated, issue #1264)."""
+
+    try:
+        project = await catalog.get_project(project_id)
+    except CatalogProjectNotFoundError as exc:
+        raise _not_found() from exc
+    except CatalogUnavailableError as exc:
+        raise _bad_gateway() from exc
+    return CatalogProjectResponse.from_project(project)
+
+
+@router.post("/mods/import", status_code=status.HTTP_201_CREATED)
+async def import_mod(
+    body: ImportModRequest,
+    user: Annotated[User, Depends(require_server_update_in_any_community)],
+    use_case: Annotated[ImportMod, Depends(get_import_mod)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> ModResponse:
+    """Import a Modrinth project/version into the library (issue #1264).
+
+    Gated like upload (server:update in any community). Downloads the version's
+    jar, re-parses its manifest, dedups on SHA-256 (an identical jar resolves to
+    the existing entry), and persists with ``source=modrinth``.
+    """
+
+    try:
+        mod = await use_case(
+            project_id=body.project_id,
+            version_id=body.version_id,
+            imported_by=user.id.value,
+            side=body.side,
+        )
+    except CatalogProjectNotFoundError as exc:
+        raise _not_found() from exc
+    except (InvalidModJarError, ValueError) as exc:
+        raise _unprocessable("invalid_mod_jar") from exc
+    except FileTooLargeError as exc:
+        raise _too_large() from exc
+    except ModIntegrityError as exc:
+        raise _bad_gateway("import_integrity") from exc
+    except CatalogUnavailableError as exc:
+        raise _bad_gateway() from exc
+
+    await recorder.record(
+        AuditEvent(
+            operation=ops.MOD_IMPORT,
+            outcome=Outcome.SUCCESS,
+            actor_id=user.id.value,
+            target_type=ops.TARGET_MOD,
+            target_id=mod.id.value,
+        )
+    )
+    return ModResponse.from_mod(mod)
+
+
 async def _read_capped_upload(file: UploadFile) -> bytes:
     """Pull the multipart body in chunks, aborting with 413 past the cap."""
 
@@ -308,6 +540,10 @@ def _unprocessable(reason: str) -> ProblemException:
 
 def _conflict(reason: str) -> ProblemException:
     return problem(status.HTTP_409_CONFLICT, reason)
+
+
+def _bad_gateway(reason: str = "catalog_unavailable") -> ProblemException:
+    return problem(status.HTTP_502_BAD_GATEWAY, reason)
 
 
 # ---------------------------------------------------------------------------

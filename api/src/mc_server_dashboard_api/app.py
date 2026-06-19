@@ -81,6 +81,9 @@ from mc_server_dashboard_api.servers.adapters.backup_loop import run_backup_loop
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.catalog_http import (
+    HttpxCatalogHttpClient,
+)
 from mc_server_dashboard_api.servers.adapters.clock import (
     SystemClock as ServersSystemClock,
 )
@@ -101,6 +104,10 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
 )
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.mod_store import ObjectModStore
+from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
+    MODRINTH_ALLOWED_HOSTS,
+    ModrinthCatalogProvider,
+)
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
     run_reconciler_loop,
 )
@@ -522,6 +529,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Build the mod store (issue #1261): same object-backend-only constraint.
     mod_store = _build_mod_store(settings)
 
+    # Build the process-wide keyless Modrinth catalog provider (issue #1264) over a
+    # single httpx client. No external secret is required, so it cannot fail at
+    # boot; stored on app state below. Source-agnostic seam for a future CurseForge
+    # adapter (#1269).
+    catalog_provider = ModrinthCatalogProvider(
+        http=HttpxCatalogHttpClient(allowed_hosts=MODRINTH_ALLOWED_HOSTS)
+    )
+
     # Build the process-wide version catalog now so its in-process manifest cache
     # is shared across requests (FR-VER-2). No external secret is required, so it
     # cannot fail at boot; it is stored on app state below.
@@ -556,6 +571,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.storage = storage
         app.state.resource_pack_store = resource_pack_store
         app.state.mod_store = mod_store
+        app.state.catalog_provider = catalog_provider
         app.state.version_catalog = version_catalog
         # The catalog's manifest-cache invalidator + per-type source prefixes, for
         # the platform-admin manual refresh (issue #286).
@@ -974,6 +990,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(server_resource_packs.assignment_router)
     api_router.include_router(server_mods.router)
     api_router.include_router(server_mods.assignment_router)
+    api_router.include_router(server_mods.catalog_router)
     api_router.include_router(workers.router)
     api_router.include_router(server_events.router)
     api_router.include_router(transfers.router)

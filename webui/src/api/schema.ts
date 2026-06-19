@@ -216,6 +216,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalog/projects/{project_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Catalog Project
+         * @description Catalog project detail + versions (authenticated, issue #1264).
+         */
+        get: operations["catalog_project_api_catalog_projects__project_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalog/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Catalog Search
+         * @description Search the Modrinth catalog (authenticated, issue #1264).
+         */
+        get: operations["catalog_search_api_catalog_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities": {
         parameters: {
             query?: never;
@@ -1421,6 +1461,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/mods/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import Mod
+         * @description Import a Modrinth project/version into the library (issue #1264).
+         *
+         *     Gated like upload (server:update in any community). Downloads the version's
+         *     jar, re-parses its manifest, dedups on SHA-256 (an identical jar resolves to
+         *     the existing entry), and persists with ``source=modrinth``.
+         */
+        post: operations["import_mod_api_mods_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/mods/{mod_id}": {
         parameters: {
             query?: never;
@@ -2106,6 +2170,98 @@ export interface components {
             max_servers: number;
             resources: components["schemas"]["HostResourcesResponse"];
         };
+        /** CatalogDependencyResponse */
+        CatalogDependencyResponse: {
+            /** Dependency Type */
+            dependency_type: string;
+            /** Project Id */
+            project_id: string | null;
+            /** Version Id */
+            version_id: string | null;
+        };
+        /**
+         * CatalogProjectResponse
+         * @description A catalog project's detail plus its versions.
+         */
+        CatalogProjectResponse: {
+            /** Description */
+            description: string;
+            /** Game Versions */
+            game_versions: string[];
+            /** Loaders */
+            loaders: string[];
+            /** Project Id */
+            project_id: string;
+            /** Project Type */
+            project_type: string;
+            /** Side */
+            side: string;
+            /** Slug */
+            slug: string;
+            /** Title */
+            title: string;
+            /** Versions */
+            versions: components["schemas"]["CatalogVersionResponse"][];
+        };
+        /**
+         * CatalogSearchHitResponse
+         * @description One project in a catalog search result.
+         */
+        CatalogSearchHitResponse: {
+            /** Description */
+            description: string;
+            /** Downloads */
+            downloads: number;
+            /** Game Versions */
+            game_versions: string[];
+            /** Icon Url */
+            icon_url: string | null;
+            /** Loaders */
+            loaders: string[];
+            /** Project Id */
+            project_id: string;
+            /** Project Type */
+            project_type: string;
+            /** Side */
+            side: string;
+            /** Slug */
+            slug: string;
+            /** Title */
+            title: string;
+        };
+        /** CatalogSearchResponse */
+        CatalogSearchResponse: {
+            /** Hits */
+            hits: components["schemas"]["CatalogSearchHitResponse"][];
+            /** Total */
+            total: number;
+        };
+        /**
+         * CatalogVersionResponse
+         * @description One downloadable version of a catalog project.
+         */
+        CatalogVersionResponse: {
+            /** Dependencies */
+            dependencies: components["schemas"]["CatalogDependencyResponse"][];
+            /** Download Url */
+            download_url: string;
+            /** Filename */
+            filename: string;
+            /** Game Versions */
+            game_versions: string[];
+            /** Loaders */
+            loaders: string[];
+            /** Name */
+            name: string;
+            /** Project Id */
+            project_id: string;
+            /** Sha512 */
+            sha512: string | null;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: string;
+        };
         /** ChangePasswordRequest */
         ChangePasswordRequest: {
             /** Current Password */
@@ -2337,6 +2493,21 @@ export interface components {
             cpu_cores: number;
             /** Memory Bytes */
             memory_bytes: number;
+        };
+        /**
+         * ImportModRequest
+         * @description Import a Modrinth project/version into the library.
+         *
+         *     ``side`` optionally overrides the Modrinth-derived deployment side; when
+         *     omitted the manifest's auto-detected value is used.
+         */
+        ImportModRequest: {
+            /** Project Id */
+            project_id: string;
+            /** Side */
+            side?: ("server" | "client" | "both") | null;
+            /** Version Id */
+            version_id: string;
         };
         /**
          * JarPoolGcResponse
@@ -3348,6 +3519,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BackupStatisticsResponse"];
+                };
+            };
+        };
+    };
+    catalog_project_api_catalog_projects__project_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogProjectResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    catalog_search_api_catalog_search_get: {
+        parameters: {
+            query: {
+                query: string;
+                loader?: string | null;
+                game_version?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogSearchResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -5759,6 +5996,39 @@ export interface operations {
         requestBody: {
             content: {
                 "multipart/form-data": components["schemas"]["Body_upload_mod_api_mods_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_mod_api_mods_import_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportModRequest"];
             };
         };
         responses: {
