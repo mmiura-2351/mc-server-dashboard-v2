@@ -9,8 +9,12 @@ loader mismatch, MC mismatch -- plus a fully-valid set that yields nothing.
 from __future__ import annotations
 
 import datetime as dt
+import io
+import json
 import uuid
+import zipfile
 
+from mc_server_dashboard_api.servers.application.mod_manifest import parse_manifest
 from mc_server_dashboard_api.servers.application.mod_validation import (
     ModValidation,
     validate_mod_set,
@@ -18,6 +22,15 @@ from mc_server_dashboard_api.servers.application.mod_validation import (
 from mc_server_dashboard_api.servers.domain.mod import Mod, ModId, ModLoader, ModSide
 
 _NOW = dt.datetime(2026, 6, 19, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+
+def _jar(entries: dict[str, str]) -> bytes:
+    """Build a jar (zip) in memory from {path: content} pairs."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
 
 
 def _mod(
@@ -156,6 +169,57 @@ class TestConflicts:
             ],
         )
         result = validate_mod_set(server_type="fabric", mc_version="1.21", mods=[mod_a])
+
+        assert result.conflicts == []
+
+    def test_parsed_break_against_present_mod_is_flagged(self) -> None:
+        """End-to-end: a jar that declares a break (#1281) is reported."""
+
+        breaking = _mod(
+            mod_identifier="optifabric",
+            dependencies=parse_manifest(
+                _jar(
+                    {
+                        "fabric.mod.json": json.dumps(
+                            {
+                                "id": "optifabric",
+                                "version": "1.0.0",
+                                "breaks": {"sodium": "*"},
+                            }
+                        )
+                    }
+                )
+            ).dependencies,
+        )
+        sodium = _mod(mod_identifier="sodium")
+        result = validate_mod_set(
+            server_type="fabric", mc_version="1.21", mods=[breaking, sodium]
+        )
+
+        assert len(result.conflicts) == 1
+        assert result.conflicts[0].mod_id == "optifabric"
+        assert result.conflicts[0].conflicts_with == "sodium"
+
+    def test_parsed_break_against_absent_mod_is_not_flagged(self) -> None:
+        breaking = _mod(
+            mod_identifier="optifabric",
+            dependencies=parse_manifest(
+                _jar(
+                    {
+                        "fabric.mod.json": json.dumps(
+                            {
+                                "id": "optifabric",
+                                "version": "1.0.0",
+                                "breaks": {"sodium": "*"},
+                            }
+                        )
+                    }
+                )
+            ).dependencies,
+        )
+        result = validate_mod_set(
+            server_type="fabric", mc_version="1.21", mods=[breaking]
+        )
 
         assert result.conflicts == []
 

@@ -94,6 +94,7 @@ class TestFabric:
             "mod_identifier": "fabric-api",
             "version_range": ">=0.90.0",
             "required": True,
+            "conflict": False,
         }
 
     def test_recommends_are_optional_dependencies(self) -> None:
@@ -105,6 +106,31 @@ class TestFabric:
         meta = parse_manifest(_make_jar({"fabric.mod.json": json.dumps(manifest)}))
         deps = {d["mod_identifier"]: d for d in meta.dependencies}
         assert deps["modmenu"]["required"] is False
+
+    def test_breaks_become_conflict_entries(self) -> None:
+        manifest = {
+            "id": "m",
+            "version": "1.0.0",
+            "breaks": {"oldmod": "<1.0.0"},
+        }
+        meta = parse_manifest(_make_jar({"fabric.mod.json": json.dumps(manifest)}))
+        deps = {d["mod_identifier"]: d for d in meta.dependencies}
+        assert deps["oldmod"] == {
+            "mod_identifier": "oldmod",
+            "version_range": "<1.0.0",
+            "required": False,
+            "conflict": True,
+        }
+
+    def test_normal_deps_are_not_conflicts(self) -> None:
+        manifest = {
+            "id": "m",
+            "version": "1.0.0",
+            "depends": {"fabric-api": "*"},
+        }
+        meta = parse_manifest(_make_jar({"fabric.mod.json": json.dumps(manifest)}))
+        deps = {d["mod_identifier"]: d for d in meta.dependencies}
+        assert deps["fabric-api"]["conflict"] is False
 
     def test_environment_client_is_client_side(self) -> None:
         manifest = {"id": "m", "version": "1.0.0", "environment": "client"}
@@ -167,6 +193,23 @@ class TestQuilt:
         meta = parse_manifest(_make_jar({"quilt.mod.json": json.dumps(manifest)}))
         assert meta.provides == ["alias"]
 
+    def test_breaks_become_conflict_entries(self) -> None:
+        manifest = {
+            "quilt_loader": {
+                "id": "m",
+                "version": "1.0.0",
+                "breaks": [{"id": "oldmod", "versions": "<1.0.0"}],
+            }
+        }
+        meta = parse_manifest(_make_jar({"quilt.mod.json": json.dumps(manifest)}))
+        deps = {d["mod_identifier"]: d for d in meta.dependencies}
+        assert deps["oldmod"] == {
+            "mod_identifier": "oldmod",
+            "version_range": "<1.0.0",
+            "required": False,
+            "conflict": True,
+        }
+
 
 class TestForge:
     def test_extracts_core_fields(self) -> None:
@@ -211,6 +254,7 @@ side = "BOTH"
             "mod_identifier": "jei",
             "version_range": "*",
             "required": False,
+            "conflict": False,
         }
 
     def test_side_defaults_to_both_even_with_hints(self) -> None:
@@ -228,6 +272,59 @@ side = "CLIENT"
 """
         meta = parse_manifest(_make_jar({"META-INF/mods.toml": toml}))
         assert meta.side == "both"
+
+    def test_incompatible_dependency_becomes_conflict(self) -> None:
+        # NeoForge-style ``type = "incompatible"`` (also accepted in Forge
+        # toolchains) marks a hard break, not just an optional dependency.
+        toml = """
+[[mods]]
+modId = "m"
+version = "1.0.0"
+
+[[dependencies.m]]
+modId = "oldmod"
+type = "incompatible"
+versionRange = "[1.0,2.0)"
+"""
+        meta = parse_manifest(_make_jar({"META-INF/mods.toml": toml}))
+        deps = {d["mod_identifier"]: d for d in meta.dependencies}
+        assert deps["oldmod"] == {
+            "mod_identifier": "oldmod",
+            "version_range": "[1.0,2.0)",
+            "required": False,
+            "conflict": True,
+        }
+
+    def test_discouraged_dependency_becomes_conflict(self) -> None:
+        toml = """
+[[mods]]
+modId = "m"
+version = "1.0.0"
+
+[[dependencies.m]]
+modId = "shaky"
+type = "discouraged"
+versionRange = "*"
+"""
+        meta = parse_manifest(_make_jar({"META-INF/mods.toml": toml}))
+        deps = {d["mod_identifier"]: d for d in meta.dependencies}
+        assert deps["shaky"]["conflict"] is True
+
+    def test_optional_dependency_is_not_conflict(self) -> None:
+        toml = """
+[[mods]]
+modId = "m"
+version = "1.0.0"
+
+[[dependencies.m]]
+modId = "jei"
+mandatory = false
+versionRange = "*"
+"""
+        meta = parse_manifest(_make_jar({"META-INF/mods.toml": toml}))
+        deps = {d["mod_identifier"]: d for d in meta.dependencies}
+        assert deps["jei"]["conflict"] is False
+        assert deps["jei"]["required"] is False
 
     def test_version_placeholder_kept_verbatim(self) -> None:
         # Forge jars commonly carry ``${file.jarVersion}``; the parser does not
@@ -286,6 +383,22 @@ versionRange = "*"
         meta = parse_manifest(_make_jar({"META-INF/neoforge.mods.toml": toml}))
         deps = {d["mod_identifier"]: d for d in meta.dependencies}
         assert deps["somelib"]["required"] is False
+
+    def test_neoforge_incompatible_becomes_conflict(self) -> None:
+        toml = """
+[[mods]]
+modId = "neomod"
+version = "1.0.0"
+
+[[dependencies.neomod]]
+modId = "oldmod"
+type = "incompatible"
+versionRange = "*"
+"""
+        meta = parse_manifest(_make_jar({"META-INF/neoforge.mods.toml": toml}))
+        deps = {d["mod_identifier"]: d for d in meta.dependencies}
+        assert deps["oldmod"]["conflict"] is True
+        assert deps["oldmod"]["required"] is False
 
 
 class TestPaper:
