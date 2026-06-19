@@ -30,6 +30,28 @@ class CatalogHttpError(Exception):
         self.status = status
 
 
+class CatalogHostNotAllowedError(CatalogHttpError):
+    """A request URL's host was not on the client's allowlist (SSRF guard).
+
+    The download URL (and the JSON base) come from a third-party API response, so
+    a crafted/compromised payload — or a redirect — could point at an internal
+    address. The client rejects any URL whose host is not allowlisted before the
+    request is made, so the server never fetches it. A subclass of
+    :class:`CatalogHttpError` (carrying no status) so the adapter maps it to
+    ``CatalogUnavailableError`` like any other non-not-found failure.
+    """
+
+
+class CatalogTooLargeError(CatalogHttpError):
+    """A streamed download crossed the byte cap and was aborted mid-stream.
+
+    The body is streamed and aborted the moment it exceeds the cap, so an
+    oversized/runaway upstream file is rejected without buffering it whole. The
+    adapter maps this to the same too-large error the upload path uses (a 413),
+    not to an unavailable source.
+    """
+
+
 class CatalogHttpClient(abc.ABC):
     """Port: GET a catalog URL as JSON or as raw bytes."""
 
@@ -39,12 +61,15 @@ class CatalogHttpClient(abc.ABC):
     ) -> object:
         """Fetch ``url`` (with optional query ``params``) and return parsed JSON.
 
-        Raises :class:`CatalogHttpError` on failure.
+        Raises :class:`CatalogHttpError` on failure, or
+        :class:`CatalogHostNotAllowedError` if ``url``'s host is not allowlisted.
         """
 
     @abc.abstractmethod
-    async def get_bytes(self, url: str) -> bytes:
-        """Fetch ``url`` and return the response body as bytes.
+    async def get_bytes(self, url: str, *, max_bytes: int) -> bytes:
+        """Fetch ``url``, streaming the body and aborting past ``max_bytes``.
 
-        Raises :class:`CatalogHttpError` on failure.
+        Raises :class:`CatalogHttpError` on failure,
+        :class:`CatalogHostNotAllowedError` if ``url``'s host is not allowlisted,
+        or :class:`CatalogTooLargeError` if the body exceeds ``max_bytes``.
         """

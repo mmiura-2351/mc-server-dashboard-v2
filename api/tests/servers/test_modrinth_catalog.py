@@ -15,14 +15,17 @@ import pytest
 from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
     ModrinthCatalogProvider,
 )
+from mc_server_dashboard_api.servers.application.mods import MAX_MOD_BYTES
 from mc_server_dashboard_api.servers.domain.catalog_http import (
     CatalogHttpClient,
     CatalogHttpError,
+    CatalogTooLargeError,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
 )
+from mc_server_dashboard_api.servers.domain.errors import FileTooLargeError
 
 _BASE = "https://api.modrinth.com/v2"
 
@@ -42,6 +45,7 @@ class FakeHttpClient(CatalogHttpClient):
         self.fail = fail
         self.json_calls: list[tuple[str, dict[str, str] | None]] = []
         self.byte_calls: list[str] = []
+        self.byte_caps: list[int] = []
 
     async def get_json(
         self, url: str, *, params: dict[str, str] | None = None
@@ -53,8 +57,9 @@ class FakeHttpClient(CatalogHttpClient):
             raise CatalogHttpError(f"no fixture for {url}")
         return self._json[url]
 
-    async def get_bytes(self, url: str) -> bytes:
+    async def get_bytes(self, url: str, *, max_bytes: int) -> bytes:
         self.byte_calls.append(url)
+        self.byte_caps.append(max_bytes)
         if self.fail:
             raise CatalogHttpError(f"forced failure for {url}")
         if url not in self._bytes:
@@ -332,6 +337,23 @@ class TestDownload:
         data = await _provider(client).download(url)
         assert data == b"jar-bytes"
         assert client.byte_calls == [url]
+
+    async def test_download_passes_size_cap_to_client(self) -> None:
+        """The 256 MiB library cap is pushed down so the client aborts mid-stream."""
+        url = "https://cdn.modrinth.com/data/AABBCCDD/sodium.jar"
+        client = FakeHttpClient(byte_payloads={url: b"jar-bytes"})
+        await _provider(client).download(url)
+        assert client.byte_caps == [MAX_MOD_BYTES]
+
+    async def test_download_too_large_maps_to_file_too_large(self) -> None:
+        """An over-cap abort surfaces as the upload path's too-large 413, not 5xx."""
+
+        class TooLargeClient(FakeHttpClient):
+            async def get_bytes(self, url: str, *, max_bytes: int) -> bytes:
+                raise CatalogTooLargeError("aborted")
+
+        with pytest.raises(FileTooLargeError):
+            await _provider(TooLargeClient()).download("https://cdn.modrinth.com/x.jar")
 
     async def test_download_failure(self) -> None:
         client = FakeHttpClient(fail=True)

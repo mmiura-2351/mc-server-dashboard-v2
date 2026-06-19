@@ -153,10 +153,12 @@ def _app(
     import_: _FakeUseCase | None = None,
     recorder: RecordingAuditRecorder | None = None,
     require_upload_perm: bool = True,
+    authenticated: bool = True,
 ) -> object:
     app = create_app()
     user = make_user()
-    app.dependency_overrides[get_current_user] = lambda: user
+    if authenticated:
+        app.dependency_overrides[get_current_user] = lambda: user
     if require_upload_perm:
         app.dependency_overrides[require_server_update_in_any_community] = lambda: user
     else:
@@ -242,6 +244,12 @@ class TestCatalogSearchEndpoint:
             resp = client.get("/api/catalog/search")
         assert resp.status_code == 422
 
+    def test_search_requires_authentication_401(self) -> None:
+        app = _app(provider=FakeCatalogProvider(), authenticated=False)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get("/api/catalog/search", params={"query": "x"})
+        assert resp.status_code == 401
+
 
 class TestCatalogProjectEndpoint:
     def test_project_200(self) -> None:
@@ -272,6 +280,15 @@ class TestCatalogProjectEndpoint:
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get("/api/catalog/projects/x")
         assert resp.status_code == 502
+
+    def test_project_requires_authentication_401(self) -> None:
+        app = _app(
+            provider=FakeCatalogProvider(projects={"sodium": _project()}),
+            authenticated=False,
+        )
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get("/api/catalog/projects/sodium")
+        assert resp.status_code == 401
 
 
 class TestImportEndpoint:

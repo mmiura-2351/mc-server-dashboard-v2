@@ -25,9 +25,11 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from mc_server_dashboard_api.servers.application.mods import MAX_MOD_BYTES
 from mc_server_dashboard_api.servers.domain.catalog_http import (
     CatalogHttpClient,
     CatalogHttpError,
+    CatalogTooLargeError,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
@@ -39,9 +41,17 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogUnavailableError,
     CatalogVersion,
 )
+from mc_server_dashboard_api.servers.domain.errors import FileTooLargeError
 from mc_server_dashboard_api.servers.domain.mod import ModSide
 
 _BASE_URL = "https://api.modrinth.com/v2"
+
+# Hosts the keyless Modrinth adapter may fetch from (SSRF allowlist passed to the
+# HTTP client). The API host serves JSON (search / project / version) and the CDN
+# host serves the downloadable jar (``files[].url`` is documented as
+# ``https://cdn.modrinth.com/data/...``). Any other host — including a redirect
+# target — is rejected before the request.
+MODRINTH_ALLOWED_HOSTS = frozenset({"api.modrinth.com", "cdn.modrinth.com"})
 
 # Modrinth side values that mean "this mod runs on / is needed by this side".
 _SUPPORTED = frozenset({"required", "optional"})
@@ -104,7 +114,11 @@ class ModrinthCatalogProvider(CatalogProvider):
 
     async def download(self, url: str) -> bytes:
         try:
-            return await self.http.get_bytes(url)
+            return await self.http.get_bytes(url, max_bytes=MAX_MOD_BYTES)
+        except CatalogTooLargeError as exc:
+            # An oversized upstream file: reject with the same too-large 413 the
+            # upload path uses, not as a source outage.
+            raise FileTooLargeError(str(exc)) from exc
         except CatalogHttpError as exc:
             raise CatalogUnavailableError(str(exc)) from exc
 

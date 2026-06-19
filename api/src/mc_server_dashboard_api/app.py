@@ -105,6 +105,7 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.mod_store import ObjectModStore
 from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
+    MODRINTH_ALLOWED_HOSTS,
     ModrinthCatalogProvider,
 )
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
@@ -532,7 +533,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # single httpx client. No external secret is required, so it cannot fail at
     # boot; stored on app state below. Source-agnostic seam for a future CurseForge
     # adapter (#1269).
-    catalog_provider = ModrinthCatalogProvider(http=HttpxCatalogHttpClient())
+    catalog_provider = ModrinthCatalogProvider(
+        http=HttpxCatalogHttpClient(allowed_hosts=MODRINTH_ALLOWED_HOSTS)
+    )
 
     # Build the process-wide version catalog now so its in-process manifest cache
     # is shared across requests (FR-VER-2). No external secret is required, so it
