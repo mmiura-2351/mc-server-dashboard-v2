@@ -44,6 +44,7 @@ from mc_server_dashboard_api.servers.adapters.resource_pack_repository import (
     SqlAlchemyResourcePackRepository,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    ModAlreadyExistsError,
     PortAlreadyTakenError,
     ServerNameAlreadyExistsError,
     SlugAlreadyTakenError,
@@ -59,6 +60,9 @@ from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 _SERVER_NAME_CONSTRAINTS = frozenset({"uq_server_community_name"})
 _GAME_PORT_CONSTRAINTS = frozenset({"uq_server_game_port"})
 _SLUG_CONSTRAINTS = frozenset({"uq_server_slug"})
+# ``uq_mods_sha256_hash`` (migration for #1261) is the content-address backstop: a
+# concurrent identical upload that loses the race surfaces here (issue #1276).
+_MOD_SHA256_CONSTRAINTS = frozenset({"uq_mods_sha256_hash"})
 
 
 class _ResourceGrantSweeperAdapter(ResourceGrantSweeper):
@@ -133,6 +137,8 @@ def _translate_integrity_error(exc: IntegrityError) -> None:
         raise PortAlreadyTakenError(str(constraint)) from exc
     if constraint in _SLUG_CONSTRAINTS:
         raise SlugAlreadyTakenError(str(constraint)) from exc
+    if constraint in _MOD_SHA256_CONSTRAINTS:
+        raise ModAlreadyExistsError(str(constraint)) from exc
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:

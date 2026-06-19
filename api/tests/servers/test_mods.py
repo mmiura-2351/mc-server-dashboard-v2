@@ -24,11 +24,12 @@ from mc_server_dashboard_api.servers.application.mods import (
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidModJarError,
+    ModAlreadyExistsError,
     ModInUseError,
     ModNotFoundError,
     PermissionDeniedError,
 )
-from mc_server_dashboard_api.servers.domain.mod import ModId
+from mc_server_dashboard_api.servers.domain.mod import Mod, ModId
 from mc_server_dashboard_api.servers.domain.server_mod import (
     ServerModAssignment,
     ServerModId,
@@ -68,6 +69,54 @@ def _make_upload(
         store=store or FakeModStore(),
         clock=clock or FakeClock(_NOW),
     )
+
+
+def _mod_for_content(content: bytes) -> Mod:
+    """An existing library Mod whose sha256 matches ``content`` (the race winner)."""
+    return Mod(
+        id=ModId.new(),
+        filename="winner.jar",
+        display_name="Winner",
+        description=None,
+        loader_type="fabric",
+        mod_identifier="examplemod",
+        provides=[],
+        version_number="1.2.3",
+        mc_versions=["~1.20.4"],
+        side="client",
+        dependencies=[],
+        sha256_hash=hashlib.sha256(content).hexdigest(),
+        sha512_hash=hashlib.sha512(content).hexdigest(),
+        size_bytes=len(content),
+        source="local",
+        source_project_id=None,
+        source_version_id=None,
+        uploaded_by=uuid.uuid4(),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+class _RaceUnitOfWork(FakeUnitOfWork):
+    """A UoW whose first commit loses the sha256 unique race.
+
+    The dedup pre-read sees nothing (the repo starts empty), but the first
+    ``commit`` raises ``ModAlreadyExistsError`` (as the real UoW does after
+    translating ``uq_mods_sha256_hash``) and seeds the winner's row so the
+    use case's re-fetch by sha256 finds it.
+    """
+
+    def __init__(self, *, existing_after_commit: Mod) -> None:
+        super().__init__()
+        self._winner = existing_after_commit
+        self.commit_attempts = 0
+
+    async def commit(self) -> None:
+        self.commit_attempts += 1
+        # The real UoW rolls back on the IntegrityError, discarding this caller's
+        # staged row; only the concurrent winner's committed row remains.
+        self.mods.mods = {self._winner.id: self._winner}
+        raise ModAlreadyExistsError("uq_mods_sha256_hash")
 
 
 class TestUploadMod:
@@ -198,6 +247,33 @@ class TestUploadMod:
                 content=b"this is not a jar",
                 uploaded_by=uuid.uuid4(),
             )
+
+    async def test_upload_race_returns_existing_on_unique_violation(self) -> None:
+        """A concurrent identical upload that loses the sha256 unique race returns
+        the existing entry instead of 500ing (issue #1276).
+
+        Models the race: the dedup pre-read sees nothing, but by the time this
+        upload commits, the concurrent uploader's row is already in. The commit
+        then hits ``uq_mods_sha256_hash`` (surfaced as ``ModAlreadyExistsError``);
+        the use case re-fetches by sha256 and returns the winner's entry.
+        """
+        store = FakeModStore()
+        winner = _mod_for_content(_JAR_CONTENT)
+        uow = _RaceUnitOfWork(existing_after_commit=winner)
+        uc = _make_upload(uow=uow, store=store)
+
+        result = await uc(
+            filename="loser.jar",
+            display_name="Loser",
+            content=_JAR_CONTENT,
+            uploaded_by=uuid.uuid4(),
+        )
+
+        # The losing upload resolves to the winner's existing entry, not a 500.
+        assert result.id == winner.id
+        assert result.display_name == "Winner"
+        # The commit was attempted (and rejected) exactly once.
+        assert uow.commit_attempts == 1
 
     async def test_upload_rejects_unrecognized_manifest(self) -> None:
         """A readable jar with no recognized manifest is rejected, not stored.

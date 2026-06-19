@@ -25,6 +25,7 @@ them as a single zip. Read-only, so no at-rest gate and no audit mutation code.
 from __future__ import annotations
 
 import uuid
+from pathlib import PurePosixPath
 from typing import Annotated
 from urllib.parse import quote
 
@@ -180,7 +181,9 @@ async def upload_mod(
     resolves to the existing library entry (returned 201, no duplicate stored).
     """
 
-    filename = file.filename or "upload.jar"
+    filename = _basename(file.filename or "upload.jar")
+    if filename in ("", ".", ".."):
+        raise _unprocessable("filename_not_jar")
     if not filename.lower().endswith(".jar"):
         raise _unprocessable("filename_not_jar")
 
@@ -517,6 +520,18 @@ async def _read_capped_upload(file: UploadFile) -> bytes:
             raise _too_large()
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _basename(filename: str) -> str:
+    """Reduce an uploaded filename to a bare basename (issue #1278).
+
+    A path-like upload filename (``a/b.jar``, ``../x.jar``, ``a\\b.jar``) must not
+    reach the deploy target or the ``Content-Disposition`` header as a path, or it
+    mis-deploys (wrong dir, jar never loads) or 500s on assign. Treat both forward
+    and backslashes as separators, then take the last component.
+    """
+
+    return PurePosixPath(filename.replace("\\", "/")).name
 
 
 def _content_disposition(filename: str) -> str:

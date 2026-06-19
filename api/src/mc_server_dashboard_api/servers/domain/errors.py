@@ -480,6 +480,17 @@ class ModIntegrityError(ServerError):
     """
 
 
+class ModAlreadyExistsError(ServerError):
+    """A concurrent upload lost the SHA-256 unique race (issue #1276).
+
+    Raised when an insert violates ``uq_mods_sha256_hash``: two identical uploads
+    both passed the dedup pre-read and the second commit hit the unique index. The
+    upload use case catches this and re-fetches the existing entry, so the loser
+    resolves to the same return-existing result the happy-path dedup gives — not a
+    500.
+    """
+
+
 class ModInUseError(ServerError):
     """A library mod cannot be deleted because it is assigned to servers.
 

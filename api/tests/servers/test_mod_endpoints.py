@@ -227,6 +227,54 @@ class TestUploadEndpoint:
         assert resp.status_code == 201
         assert uc.calls[0]["side"] == "server"
 
+    def test_upload_basename_constrains_path_like_filename(self) -> None:
+        # A path-like filename is reduced to a bare basename before it reaches the
+        # use case, so the deploy target / Content-Disposition never see a path
+        # (issue #1278).
+        for raw, expected in [
+            ("a/b.jar", "b.jar"),
+            ("../x.jar", "x.jar"),
+            ("/abs/path/mod.jar", "mod.jar"),
+            ("a\\b.jar", "b.jar"),
+        ]:
+            uc = _FakeUseCase(result=_mod())
+            app = _app(upload=uc)
+            with TestClient(app) as client:  # type: ignore[arg-type]
+                resp = client.post(
+                    "/api/mods",
+                    data={"display_name": "My Mod"},
+                    files={
+                        "file": (
+                            raw,
+                            io.BytesIO(b"PK\x03\x04"),
+                            "application/java-archive",
+                        )
+                    },
+                )
+            assert resp.status_code == 201, raw
+            assert uc.calls[0]["filename"] == expected, raw
+
+    def test_upload_rejects_filename_with_no_basename(self) -> None:
+        # A filename that reduces to nothing usable (empty / "." / "..") is a clean
+        # 4xx, never forwarded as a path (issue #1278).
+        for raw in ["..", "foo/.."]:
+            uc = _FakeUseCase(result=_mod())
+            app = _app(upload=uc)
+            with TestClient(app) as client:  # type: ignore[arg-type]
+                resp = client.post(
+                    "/api/mods",
+                    data={"display_name": "Bad"},
+                    files={
+                        "file": (
+                            raw,
+                            io.BytesIO(b"PK\x03\x04"),
+                            "application/java-archive",
+                        )
+                    },
+                )
+            assert resp.status_code == 422, raw
+            assert uc.calls == [], raw
+
     def test_upload_non_jar_422(self) -> None:
         uc = _FakeUseCase()
         app = _app(upload=uc)
