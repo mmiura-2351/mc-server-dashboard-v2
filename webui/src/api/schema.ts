@@ -2123,6 +2123,16 @@ export interface components {
             /** Name */
             name: string;
         };
+        /**
+         * ConflictResponse
+         * @description An assigned mod that conflicts with another present mod.
+         */
+        ConflictResponse: {
+            /** Conflicts With */
+            conflicts_with: string;
+            /** Mod Id */
+            mod_id: string;
+        };
         /** CreateGrantRequest */
         CreateGrantRequest: {
             /** Permissions */
@@ -2350,6 +2360,18 @@ export interface components {
             /** Total Bytes */
             total_bytes: number;
         };
+        /**
+         * LoaderMismatchResponse
+         * @description An assigned mod whose loader the server cannot run.
+         */
+        LoaderMismatchResponse: {
+            /** Mod Id */
+            mod_id: string;
+            /** Mod Loader */
+            mod_loader: string;
+            /** Server Loader */
+            server_loader: string;
+        };
         /** LoginRequest */
         LoginRequest: {
             /** Password */
@@ -2361,6 +2383,18 @@ export interface components {
         LogoutRequest: {
             /** Refresh Token */
             refresh_token?: string | null;
+        };
+        /**
+         * McMismatchResponse
+         * @description An assigned mod that does not list the server's MC version.
+         */
+        McMismatchResponse: {
+            /** Mod Id */
+            mod_id: string;
+            /** Mod Mc Versions */
+            mod_mc_versions: string[];
+            /** Server Mc Version */
+            server_mc_version: string;
         };
         /**
          * MemberResponse
@@ -2402,6 +2436,18 @@ export interface components {
             max_memory_limit_mb: number | null;
             /** Relay Enabled */
             relay_enabled: boolean;
+        };
+        /**
+         * MissingDependencyResponse
+         * @description A required dependency that nothing in the mod set provides.
+         */
+        MissingDependencyResponse: {
+            /** Depends On */
+            depends_on: string;
+            /** Mod Id */
+            mod_id: string;
+            /** Version Range */
+            version_range: string;
         };
         /** ModListResponse */
         ModListResponse: {
@@ -2463,6 +2509,24 @@ export interface components {
             uploaded_by: string;
             /** Version Number */
             version_number: string;
+        };
+        /**
+         * ModValidationResponse
+         * @description The phase-B validation checklist for a server's mod set (issue #1263).
+         *
+         *     Display-only: empty lists mean the set is fully valid. ``conflicts`` is empty
+         *     for jars uploaded today (the manifest parser does not yet capture break
+         *     entries); the field is present so it populates once breaks are parsed.
+         */
+        ModValidationResponse: {
+            /** Conflicts */
+            conflicts: components["schemas"]["ConflictResponse"][];
+            /** Loader Mismatch */
+            loader_mismatch: components["schemas"]["LoaderMismatchResponse"][];
+            /** Mc Mismatch */
+            mc_mismatch: components["schemas"]["McMismatchResponse"][];
+            /** Missing Deps */
+            missing_deps: components["schemas"]["MissingDependencyResponse"][];
         };
         /** PlatformAdminRequest */
         PlatformAdminRequest: {
@@ -2672,6 +2736,7 @@ export interface components {
         ServerModListResponse: {
             /** Mods */
             mods: components["schemas"]["ServerModResponse"][];
+            validation: components["schemas"]["ModValidationResponse"];
         };
         /**
          * ServerModResponse

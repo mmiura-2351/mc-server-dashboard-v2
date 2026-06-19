@@ -678,6 +678,25 @@
         "title": "CommunityResponse",
         "type": "object"
       },
+      "ConflictResponse": {
+        "description": "An assigned mod that conflicts with another present mod.",
+        "properties": {
+          "conflicts_with": {
+            "title": "Conflicts With",
+            "type": "string"
+          },
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "conflicts_with"
+        ],
+        "title": "ConflictResponse",
+        "type": "object"
+      },
       "CreateGrantRequest": {
         "properties": {
           "permissions": {
@@ -1264,6 +1283,30 @@
         "title": "JarPoolStatsResponse",
         "type": "object"
       },
+      "LoaderMismatchResponse": {
+        "description": "An assigned mod whose loader the server cannot run.",
+        "properties": {
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "mod_loader": {
+            "title": "Mod Loader",
+            "type": "string"
+          },
+          "server_loader": {
+            "title": "Server Loader",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "mod_loader",
+          "server_loader"
+        ],
+        "title": "LoaderMismatchResponse",
+        "type": "object"
+      },
       "LoginRequest": {
         "properties": {
           "password": {
@@ -1300,6 +1343,33 @@
           }
         },
         "title": "LogoutRequest",
+        "type": "object"
+      },
+      "McMismatchResponse": {
+        "description": "An assigned mod that does not list the server's MC version.",
+        "properties": {
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "mod_mc_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mod Mc Versions",
+            "type": "array"
+          },
+          "server_mc_version": {
+            "title": "Server Mc Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "mod_mc_versions",
+          "server_mc_version"
+        ],
+        "title": "McMismatchResponse",
         "type": "object"
       },
       "MemberResponse": {
@@ -1396,6 +1466,30 @@
           "max_memory_limit_mb"
         ],
         "title": "MetaResponse",
+        "type": "object"
+      },
+      "MissingDependencyResponse": {
+        "description": "A required dependency that nothing in the mod set provides.",
+        "properties": {
+          "depends_on": {
+            "title": "Depends On",
+            "type": "string"
+          },
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "version_range": {
+            "title": "Version Range",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "depends_on",
+          "version_range"
+        ],
+        "title": "MissingDependencyResponse",
         "type": "object"
       },
       "ModListResponse": {
@@ -1539,6 +1633,47 @@
           "updated_at"
         ],
         "title": "ModResponse",
+        "type": "object"
+      },
+      "ModValidationResponse": {
+        "description": "The phase-B validation checklist for a server's mod set (issue #1263).\n\nDisplay-only: empty lists mean the set is fully valid. ``conflicts`` is empty\nfor jars uploaded today (the manifest parser does not yet capture break\nentries); the field is present so it populates once breaks are parsed.",
+        "properties": {
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/ConflictResponse"
+            },
+            "title": "Conflicts",
+            "type": "array"
+          },
+          "loader_mismatch": {
+            "items": {
+              "$ref": "#/components/schemas/LoaderMismatchResponse"
+            },
+            "title": "Loader Mismatch",
+            "type": "array"
+          },
+          "mc_mismatch": {
+            "items": {
+              "$ref": "#/components/schemas/McMismatchResponse"
+            },
+            "title": "Mc Mismatch",
+            "type": "array"
+          },
+          "missing_deps": {
+            "items": {
+              "$ref": "#/components/schemas/MissingDependencyResponse"
+            },
+            "title": "Missing Deps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "missing_deps",
+          "conflicts",
+          "loader_mismatch",
+          "mc_mismatch"
+        ],
+        "title": "ModValidationResponse",
         "type": "object"
       },
       "PlatformAdminRequest": {
@@ -2025,10 +2160,14 @@
             },
             "title": "Mods",
             "type": "array"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/ModValidationResponse"
           }
         },
         "required": [
-          "mods"
+          "mods",
+          "validation"
         ],
         "title": "ServerModListResponse",
         "type": "object"
