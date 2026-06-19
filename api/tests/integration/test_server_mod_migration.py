@@ -42,7 +42,7 @@ _INSERT_SERVER = text(
     "INSERT INTO server (id, community_id, name, mc_edition, mc_version, "
     "server_type, execution_backend, config, slug, desired_state, observed_state, "
     "created_at, updated_at) VALUES "
-    "(:id, :community_id, :name, 'java', '1.21.1', 'fabric', 'container', '{}', "
+    "(:id, :community_id, :name, 'java', '1.21.1', 'forge', 'container', '{}', "
     ":slug, 'stopped', 'unknown', now(), now())"
 )
 
@@ -164,10 +164,6 @@ async def test_delete_server_cascades_to_assignments() -> None:
                 {"id": server_id},
             )
             assert remaining == 0
-            # Remove the fabric server-type artefacts before teardown (see
-            # test_server_migration for why a lingering fabric row breaks 0010).
-            await conn.execute(text("DELETE FROM mods"))
-            await conn.execute(text("DELETE FROM community"))
     finally:
         await engine.dispose()
         await downgrade_base(_DB_URL)
