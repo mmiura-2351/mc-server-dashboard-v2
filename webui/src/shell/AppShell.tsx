@@ -167,6 +167,7 @@ export function AppShell() {
             icon="📦"
             labelKey="nav.resourcePacks"
           />
+          <NavItem to="/mods" icon="🧩" labelKey="nav.mods" />
         </nav>
         {isAdmin && (
           <nav className="nav-group">
