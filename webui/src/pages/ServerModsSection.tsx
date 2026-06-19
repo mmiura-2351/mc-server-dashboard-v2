@@ -60,6 +60,7 @@ function SideBadge({ side }: { side: string }) {
 
 const EMPTY_VALIDATION: ModValidationResponse = {
   missing_deps: [],
+  version_unsatisfied: [],
   conflicts: [],
   loader_mismatch: [],
   mc_mismatch: [],
@@ -353,6 +354,7 @@ function ValidationChecklist({
 }) {
   const total =
     validation.missing_deps.length +
+    validation.version_unsatisfied.length +
     validation.conflicts.length +
     validation.loader_mismatch.length +
     validation.mc_mismatch.length;
@@ -373,6 +375,18 @@ function ValidationChecklist({
                 .replace("{mod}", nameOf(finding.mod_id))
                 .replace("{dependency}", finding.depends_on)
                 .replace("{range}", finding.version_range)}
+            </li>
+          ))}
+          {validation.version_unsatisfied.map((finding) => (
+            <li
+              key={`version-${finding.mod_id}-${finding.depends_on}`}
+              className="field-error"
+            >
+              {t("serverMods.validation.versionUnsatisfied")
+                .replace("{mod}", nameOf(finding.mod_id))
+                .replace("{dependency}", finding.depends_on)
+                .replace("{range}", finding.version_range)
+                .replace("{present}", finding.present_version)}
             </li>
           ))}
           {validation.conflicts.map((finding) => (

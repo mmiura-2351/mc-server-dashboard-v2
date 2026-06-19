@@ -4,15 +4,19 @@ A pure function over (server loader + MC version, the assigned library mods) tha
 surfaces a checklist of problems the operator should fix by hand. **Display only**
 -- it never mutates the mod set; auto-resolution is phase C (#1268).
 
-Four finding kinds:
+Five finding kinds:
 
 * ``missing_deps`` -- a required dependency of an assigned mod whose target
-  ``mod_identifier`` is not satisfied anywhere in the set. v1 is a **presence
-  check**: a dependency is satisfied when its id appears as some assigned mod's
-  ``mod_identifier`` *or* in that mod's ``provides`` list. The required
-  ``version_range`` is surfaced for the human but **not** range-checked (full
-  version-range satisfaction is phase C, #1268). This catches the canonical
-  "Fabric API entirely absent" failure without a constraint solver.
+  ``mod_identifier`` is not present anywhere in the set. A dependency's id is
+  present when it appears as some assigned mod's ``mod_identifier`` *or* in that
+  mod's ``provides`` list. This catches the canonical "Fabric API entirely
+  absent" failure.
+* ``version_unsatisfied`` -- the dependency's target id **is** present, but the
+  present mod's ``version_number`` does not satisfy the required ``version_range``
+  (phase C, #1293). The range is evaluated by
+  :func:`version_range.version_satisfies` in the depending mod's loader dialect;
+  an empty/unparseable range is treated as "any" and never flagged. This is the
+  range-satisfaction upgrade over the phase-B presence-only check.
 * ``conflicts`` -- a dependency entry explicitly marked as a break/conflict whose
   target id is present in the set. The manifest parser now emits these entries
   (#1288): a declared ``breaks``/incompatible relation is stored as a dependency
@@ -33,6 +37,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from mc_server_dashboard_api.servers.application.version_range import version_satisfies
 from mc_server_dashboard_api.servers.domain.mod import Mod
 
 # Which library mod loaders a server loader can run. The server loader is the
@@ -67,6 +72,20 @@ class MissingDependency:
     """The unsatisfied dependency's target ``mod_identifier``."""
     version_range: str
     """The required range, surfaced for the human (not range-checked in v1)."""
+
+
+@dataclass(frozen=True)
+class VersionUnsatisfied:
+    """A required dependency that is present but at a version outside its range."""
+
+    mod_id: str
+    """The assigned mod (its ``mod_identifier``) that declares the dependency."""
+    depends_on: str
+    """The dependency's target ``mod_identifier``, which is present in the set."""
+    version_range: str
+    """The required range the present version fails to satisfy."""
+    present_version: str
+    """The version of the present mod that satisfies the dependency's id."""
 
 
 @dataclass(frozen=True)
@@ -108,6 +127,7 @@ class ModValidation:
     """The full checklist for a server's mod set; all-empty == fully valid."""
 
     missing_deps: list[MissingDependency] = field(default_factory=list)
+    version_unsatisfied: list[VersionUnsatisfied] = field(default_factory=list)
     conflicts: list[Conflict] = field(default_factory=list)
     loader_mismatch: list[LoaderMismatch] = field(default_factory=list)
     mc_mismatch: list[McMismatch] = field(default_factory=list)
@@ -118,45 +138,71 @@ def validate_mod_set(
 ) -> ModValidation:
     """Run the phase-B validation pass over a server's selected mod set."""
 
-    provided = _provided_identifiers(mods)
+    provided = _provided_versions(mods)
+    missing_deps, version_unsatisfied = _required_dep_findings(mods, provided)
     return ModValidation(
-        missing_deps=_missing_deps(mods, provided),
-        conflicts=_conflicts(mods, provided),
+        missing_deps=missing_deps,
+        version_unsatisfied=version_unsatisfied,
+        conflicts=_conflicts(mods, set(provided)),
         loader_mismatch=_loader_mismatch(mods, server_type),
         mc_mismatch=_mc_mismatch(mods, mc_version),
     )
 
 
-def _provided_identifiers(mods: list[Mod]) -> set[str]:
-    """Every id the set satisfies: each mod's id plus everything it ``provides``."""
+def _provided_versions(mods: list[Mod]) -> dict[str, str]:
+    """Map every id the set satisfies to a providing mod's ``version_number``.
 
-    provided: set[str] = set()
+    An id is provided by a mod's own ``mod_identifier`` or by its ``provides``
+    list; a provided id inherits the providing jar's version (the best version
+    information available for it). When two mods provide the same id the last one
+    wins -- presence is what matters and a multi-provider set is itself unusual.
+    """
+
+    provided: dict[str, str] = {}
     for mod in mods:
-        provided.add(mod.mod_identifier)
-        provided.update(mod.provides)
+        provided[mod.mod_identifier] = mod.version_number
+        for pid in mod.provides:
+            provided[pid] = mod.version_number
     return provided
 
 
-def _missing_deps(mods: list[Mod], provided: set[str]) -> list[MissingDependency]:
-    findings: list[MissingDependency] = []
+def _required_dep_findings(
+    mods: list[Mod], provided: dict[str, str]
+) -> tuple[list[MissingDependency], list[VersionUnsatisfied]]:
+    """Split required-dependency problems into absent vs present-but-out-of-range."""
+
+    missing: list[MissingDependency] = []
+    unsatisfied: list[VersionUnsatisfied] = []
     for mod in mods:
         for dep in mod.dependencies:
             if not dep.get("required"):
                 continue
             target = dep.get("mod_identifier")
-            if not isinstance(target, str) or target in provided:
+            if not isinstance(target, str):
                 continue
-            version_range = dep.get("version_range")
-            findings.append(
-                MissingDependency(
+            raw_range = dep.get("version_range")
+            version_range = raw_range if isinstance(raw_range, str) else ""
+            if target not in provided:
+                missing.append(
+                    MissingDependency(
+                        mod_id=mod.mod_identifier,
+                        depends_on=target,
+                        version_range=version_range,
+                    )
+                )
+                continue
+            present_version = provided[target]
+            if version_satisfies(present_version, version_range, mod.loader_type):
+                continue
+            unsatisfied.append(
+                VersionUnsatisfied(
                     mod_id=mod.mod_identifier,
                     depends_on=target,
-                    version_range=version_range
-                    if isinstance(version_range, str)
-                    else "",
+                    version_range=version_range,
+                    present_version=present_version,
                 )
             )
-    return findings
+    return missing, unsatisfied
 
 
 def _conflicts(mods: list[Mod], provided: set[str]) -> list[Conflict]:

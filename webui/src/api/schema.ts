@@ -2733,9 +2733,11 @@ export interface components {
          * ModValidationResponse
          * @description The phase-B validation checklist for a server's mod set (issue #1263).
          *
-         *     Display-only: empty lists mean the set is fully valid. ``conflicts`` is empty
-         *     for jars uploaded today (the manifest parser does not yet capture break
-         *     entries); the field is present so it populates once breaks are parsed.
+         *     Display-only: empty lists mean the set is fully valid. ``version_unsatisfied``
+         *     flags a required dependency that is present but at a version outside the
+         *     required range (issue #1293). ``conflicts`` is empty for jars uploaded today
+         *     (the manifest parser does not yet capture break entries); the field is present
+         *     so it populates once breaks are parsed.
          */
         ModValidationResponse: {
             /** Conflicts */
@@ -2746,6 +2748,8 @@ export interface components {
             mc_mismatch: components["schemas"]["McMismatchResponse"][];
             /** Missing Deps */
             missing_deps: components["schemas"]["MissingDependencyResponse"][];
+            /** Version Unsatisfied */
+            version_unsatisfied: components["schemas"]["VersionUnsatisfiedResponse"][];
         };
         /** PlatformAdminRequest */
         PlatformAdminRequest: {
@@ -3127,6 +3131,20 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /**
+         * VersionUnsatisfiedResponse
+         * @description A required dependency present at a version outside its required range.
+         */
+        VersionUnsatisfiedResponse: {
+            /** Depends On */
+            depends_on: string;
+            /** Mod Id */
+            mod_id: string;
+            /** Present Version */
+            present_version: string;
+            /** Version Range */
+            version_range: string;
         };
         /**
          * VersionsResponse

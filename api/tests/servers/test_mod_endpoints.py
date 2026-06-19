@@ -44,6 +44,7 @@ from mc_server_dashboard_api.servers.application.mod_validation import (
     McMismatch,
     MissingDependency,
     ModValidation,
+    VersionUnsatisfied,
 )
 from mc_server_dashboard_api.servers.application.mods import UploadMod
 from mc_server_dashboard_api.servers.application.server_mods import ServerModSet
@@ -535,6 +536,7 @@ class TestAssignEndpoint:
         assert body["mods"][0]["enabled"] is True
         assert body["validation"] == {
             "missing_deps": [],
+            "version_unsatisfied": [],
             "conflicts": [],
             "loader_mismatch": [],
             "mc_mismatch": [],
@@ -662,6 +664,14 @@ class TestListServerModsEndpoint:
                     version_range=">=0.90.0",
                 )
             ],
+            version_unsatisfied=[
+                VersionUnsatisfied(
+                    mod_id="examplemod",
+                    depends_on="forge-lib",
+                    version_range="[2.0,)",
+                    present_version="1.5",
+                )
+            ],
             loader_mismatch=[
                 LoaderMismatch(
                     mod_id="examplemod",
@@ -702,6 +712,14 @@ class TestListServerModsEndpoint:
                 "mod_id": "examplemod",
                 "mod_mc_versions": ["1.20.4"],
                 "server_mc_version": "1.21",
+            }
+        ]
+        assert block["version_unsatisfied"] == [
+            {
+                "mod_id": "examplemod",
+                "depends_on": "forge-lib",
+                "version_range": "[2.0,)",
+                "present_version": "1.5",
             }
         ]
         assert block["conflicts"] == []

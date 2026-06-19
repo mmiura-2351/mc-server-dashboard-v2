@@ -1439,6 +1439,8 @@ export const en = {
   "serverMods.validation.ok": "No issues found.",
   "serverMods.validation.missingDep":
     "{mod} requires {dependency} ({range}), which is not assigned.",
+  "serverMods.validation.versionUnsatisfied":
+    "{mod} requires {dependency} ({range}), but the assigned {present} does not satisfy it.",
   "serverMods.validation.conflict": "{mod} conflicts with {other}.",
   "serverMods.validation.loaderMismatch":
     "{mod} is a {modLoader} mod, but the server runs {serverLoader}.",

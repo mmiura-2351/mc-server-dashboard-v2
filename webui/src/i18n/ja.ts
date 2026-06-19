@@ -1450,6 +1450,8 @@ export const ja: Record<TranslationKey, string> = {
   "serverMods.validation.ok": "問題は見つかりませんでした。",
   "serverMods.validation.missingDep":
     "{mod} は {dependency}（{range}）を必要としますが、割り当てられていません。",
+  "serverMods.validation.versionUnsatisfied":
+    "{mod} は {dependency}（{range}）を必要としますが、割り当て済みの {present} は条件を満たしません。",
   "serverMods.validation.conflict": "{mod} は {other} と競合します。",
   "serverMods.validation.loaderMismatch":
     "{mod} は {modLoader} 用のModですが、サーバーは {serverLoader} で動作しています。",
