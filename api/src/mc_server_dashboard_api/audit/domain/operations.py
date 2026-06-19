@@ -174,6 +174,12 @@ RESOURCE_PACK_UNASSIGN: Final = "resource_pack:unassign"
 MOD_UPLOAD: Final = "mod:upload"
 MOD_DELETE: Final = "mod:delete"
 MOD_DOWNLOAD: Final = "mod:download"
+# Mod assignment / unassignment / enable / disable (issue #1262). Gated by
+# server:update on the target server; names the operation, not a permission code.
+MOD_ASSIGN: Final = "mod:assign"
+MOD_UNASSIGN: Final = "mod:unassign"
+MOD_ENABLE: Final = "mod:enable"
+MOD_DISABLE: Final = "mod:disable"
 
 # Target-type names (the ``target_type`` column).
 TARGET_COMMUNITY: Final = "community"

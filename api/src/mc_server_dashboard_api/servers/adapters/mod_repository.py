@@ -7,10 +7,11 @@ Rows are translated to/from the framework-free domain entity here.
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.mod_models import ModModel
+from mc_server_dashboard_api.servers.adapters.server_mod_models import ServerModModel
 from mc_server_dashboard_api.servers.domain.mod import (
     Mod,
     ModId,
@@ -18,6 +19,11 @@ from mc_server_dashboard_api.servers.domain.mod import (
     ModSide,
 )
 from mc_server_dashboard_api.servers.domain.mod_repository import ModRepository
+from mc_server_dashboard_api.servers.domain.server_mod import (
+    ServerModAssignment,
+    ServerModId,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 
 def _to_mod(row: ModModel) -> Mod:
@@ -40,6 +46,18 @@ def _to_mod(row: ModModel) -> Mod:
         source_project_id=row.source_project_id,
         source_version_id=row.source_version_id,
         uploaded_by=row.uploaded_by,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_assignment(row: ServerModModel) -> ServerModAssignment:
+    return ServerModAssignment(
+        id=ServerModId(row.id),
+        server_id=ServerId(row.server_id),
+        mod_id=ModId(row.mod_id),
+        enabled=row.enabled,
+        assigned_by=row.assigned_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -107,4 +125,60 @@ class SqlAlchemyModRepository(ModRepository):
 
     async def delete(self, mod_id: ModId) -> None:
         stmt = delete(ModModel).where(ModModel.id == mod_id.value)
+        await self._session.execute(stmt)
+
+    async def add_assignment(self, assignment: ServerModAssignment) -> None:
+        self._session.add(
+            ServerModModel(
+                id=assignment.id.value,
+                server_id=assignment.server_id.value,
+                mod_id=assignment.mod_id.value,
+                enabled=assignment.enabled,
+                assigned_by=assignment.assigned_by,
+                created_at=assignment.created_at,
+                updated_at=assignment.updated_at,
+            )
+        )
+
+    async def get_assignment(
+        self, server_id: ServerId, mod_id: ModId
+    ) -> ServerModAssignment | None:
+        stmt = select(ServerModModel).where(
+            ServerModModel.server_id == server_id.value,
+            ServerModModel.mod_id == mod_id.value,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_assignment(row) if row is not None else None
+
+    async def list_assignments_for_server(
+        self, server_id: ServerId
+    ) -> list[ServerModAssignment]:
+        stmt = (
+            select(ServerModModel)
+            .where(ServerModModel.server_id == server_id.value)
+            .order_by(ServerModModel.created_at, ServerModModel.id)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_assignment(row) for row in rows]
+
+    async def list_assignments_for_mod(
+        self, mod_id: ModId
+    ) -> list[ServerModAssignment]:
+        stmt = select(ServerModModel).where(ServerModModel.mod_id == mod_id.value)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_assignment(row) for row in rows]
+
+    async def set_assignment_enabled(self, assignment: ServerModAssignment) -> None:
+        stmt = (
+            update(ServerModModel)
+            .where(ServerModModel.id == assignment.id.value)
+            .values(enabled=assignment.enabled, updated_at=assignment.updated_at)
+        )
+        await self._session.execute(stmt)
+
+    async def delete_assignment(self, server_id: ServerId, mod_id: ModId) -> None:
+        stmt = delete(ServerModModel).where(
+            ServerModModel.server_id == server_id.value,
+            ServerModModel.mod_id == mod_id.value,
+        )
         await self._session.execute(stmt)

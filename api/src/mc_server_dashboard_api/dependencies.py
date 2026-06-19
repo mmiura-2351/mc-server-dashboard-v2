@@ -278,6 +278,12 @@ from mc_server_dashboard_api.servers.application.resource_packs import (
     UnassignResourcePack,
     UploadResourcePack,
 )
+from mc_server_dashboard_api.servers.application.server_mods import (
+    AssignMods,
+    ListServerMods,
+    SetModEnabled,
+    UnassignMod,
+)
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
 )
@@ -2027,6 +2033,63 @@ def get_download_mod(
         uow=ServersUnitOfWork(session_factory),
         store=store,
     )
+
+
+def get_assign_mods(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    store: Annotated[ModStore, Depends(get_mod_store)],
+) -> AssignMods:
+    """Assemble the :class:`AssignMods` use case (issue #1262)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return AssignMods(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        store=store,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_unassign_mod(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    store: Annotated[ModStore, Depends(get_mod_store)],
+) -> UnassignMod:
+    """Assemble the :class:`UnassignMod` use case (issue #1262)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UnassignMod(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        store=store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_set_mod_enabled(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    store: Annotated[ModStore, Depends(get_mod_store)],
+) -> SetModEnabled:
+    """Assemble the :class:`SetModEnabled` use case (issue #1262)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SetModEnabled(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        store=store,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_list_server_mods(request: Request) -> ListServerMods:
+    """Assemble the :class:`ListServerMods` use case (issue #1262)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListServerMods(uow=ServersUnitOfWork(session_factory))
 
 
 async def require_server_update_in_any_community(

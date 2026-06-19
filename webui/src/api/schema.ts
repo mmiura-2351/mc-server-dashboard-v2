@@ -1048,6 +1048,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/mods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Server Mods
+         * @description List a server's mod set (server:read, issue #1262).
+         */
+        get: operations["list_server_mods_api_communities__community_id__servers__server_id__mods_get"];
+        put?: never;
+        /**
+         * Assign Mods
+         * @description Assign one or more mods to a server (server:update, issue #1262).
+         */
+        post: operations["assign_mods_api_communities__community_id__servers__server_id__mods_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/mods/{mod_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Unassign Mod
+         * @description Unassign a mod from a server (server:update, issue #1262).
+         */
+        delete: operations["unassign_mod_api_communities__community_id__servers__server_id__mods__mod_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/mods/{mod_id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable Mod
+         * @description Disable an assigned mod, renaming its jar (server:update, issue #1262).
+         */
+        post: operations["disable_mod_api_communities__community_id__servers__server_id__mods__mod_id__disable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/mods/{mod_id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enable Mod
+         * @description Enable an assigned mod, redeploying its jar (server:update, issue #1262).
+         */
+        post: operations["enable_mod_api_communities__community_id__servers__server_id__mods__mod_id__enable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/resource-pack": {
         parameters: {
             query?: never;
@@ -1860,6 +1944,14 @@ export interface components {
             /** Username */
             username: string;
         };
+        /**
+         * AssignModsRequest
+         * @description Multi-select assign: the library mod ids to add to the server's mod set.
+         */
+        AssignModsRequest: {
+            /** Mod Ids */
+            mod_ids: string[];
+        };
         /** AssignResourcePackRequest */
         AssignResourcePackRequest: {
             /**
@@ -2575,6 +2667,30 @@ export interface components {
         ServerCommandResponse: {
             /** Output */
             output: string;
+        };
+        /** ServerModListResponse */
+        ServerModListResponse: {
+            /** Mods */
+            mods: components["schemas"]["ServerModResponse"][];
+        };
+        /**
+         * ServerModResponse
+         * @description One entry of a server's mod set: the assignment plus its library mod.
+         */
+        ServerModResponse: {
+            /**
+             * Assigned At
+             * Format: date-time
+             */
+            assigned_at: string;
+            /**
+             * Assigned By
+             * Format: uuid
+             */
+            assigned_by: string;
+            /** Enabled */
+            enabled: boolean;
+            mod: components["schemas"]["ModResponse"];
         };
         /**
          * ServerResponse
@@ -5000,6 +5116,167 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GroupResponse"][];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_server_mods_api_communities__community_id__servers__server_id__mods_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerModListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    assign_mods_api_communities__community_id__servers__server_id__mods_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssignModsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerModListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unassign_mod_api_communities__community_id__servers__server_id__mods__mod_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                mod_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disable_mod_api_communities__community_id__servers__server_id__mods__mod_id__disable_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                mod_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    enable_mod_api_communities__community_id__servers__server_id__mods__mod_id__enable_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                mod_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

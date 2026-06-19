@@ -22,6 +22,7 @@ from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidModJarError,
+    ModInUseError,
     ModNotFoundError,
     PermissionDeniedError,
 )
@@ -144,11 +145,11 @@ class ListMods:
 
 @dataclass(frozen=True)
 class DeleteMod:
-    """Delete a mod from the library after ownership validation.
+    """Delete a mod from the library after ownership and in-use validation.
 
-    Issue #1262 will add the "refuse delete while assigned to a server" guard; the
-    ``server_mods`` assignment table does not exist yet, so this deletes
-    unconditionally.
+    A mod assigned to any server cannot be deleted (issue #1262): the caller must
+    unassign it everywhere first, so a deployed jar never references a vanished
+    library entry.
     """
 
     uow: UnitOfWork
@@ -169,6 +170,10 @@ class DeleteMod:
             # Only the uploader or a platform admin may delete.
             if mod.uploaded_by != caller_id and not is_platform_admin:
                 raise PermissionDeniedError(str(mod_id.value))
+
+            assignments = await self.uow.mods.list_assignments_for_mod(mod_id)
+            if assignments:
+                raise ModInUseError(str(mod_id.value))
 
             await self.store.delete(mod_id)
             await self.uow.mods.delete(mod_id)

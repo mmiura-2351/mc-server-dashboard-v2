@@ -204,6 +204,24 @@
         "title": "AdminUserResponse",
         "type": "object"
       },
+      "AssignModsRequest": {
+        "description": "Multi-select assign: the library mod ids to add to the server's mod set.",
+        "properties": {
+          "mod_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Mod Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mod_ids"
+        ],
+        "title": "AssignModsRequest",
+        "type": "object"
+      },
       "AssignResourcePackRequest": {
         "properties": {
           "require_resource_pack": {
@@ -1997,6 +2015,52 @@
           "output"
         ],
         "title": "ServerCommandResponse",
+        "type": "object"
+      },
+      "ServerModListResponse": {
+        "properties": {
+          "mods": {
+            "items": {
+              "$ref": "#/components/schemas/ServerModResponse"
+            },
+            "title": "Mods",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mods"
+        ],
+        "title": "ServerModListResponse",
+        "type": "object"
+      },
+      "ServerModResponse": {
+        "description": "One entry of a server's mod set: the assignment plus its library mod.",
+        "properties": {
+          "assigned_at": {
+            "format": "date-time",
+            "title": "Assigned At",
+            "type": "string"
+          },
+          "assigned_by": {
+            "format": "uuid",
+            "title": "Assigned By",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "mod": {
+            "$ref": "#/components/schemas/ModResponse"
+          }
+        },
+        "required": [
+          "mod",
+          "enabled",
+          "assigned_by",
+          "assigned_at"
+        ],
+        "title": "ServerModResponse",
         "type": "object"
       },
       "ServerResponse": {
@@ -6372,6 +6436,303 @@
           }
         ],
         "summary": "List Server Groups"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/mods": {
+      "get": {
+        "description": "List a server's mod set (server:read, issue #1262).",
+        "operationId": "list_server_mods_api_communities__community_id__servers__server_id__mods_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerModListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Server Mods"
+      },
+      "post": {
+        "description": "Assign one or more mods to a server (server:update, issue #1262).",
+        "operationId": "assign_mods_api_communities__community_id__servers__server_id__mods_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignModsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerModListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Assign Mods"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/mods/{mod_id}": {
+      "delete": {
+        "description": "Unassign a mod from a server (server:update, issue #1262).",
+        "operationId": "unassign_mod_api_communities__community_id__servers__server_id__mods__mod_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "mod_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Mod Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Unassign Mod"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/mods/{mod_id}/disable": {
+      "post": {
+        "description": "Disable an assigned mod, renaming its jar (server:update, issue #1262).",
+        "operationId": "disable_mod_api_communities__community_id__servers__server_id__mods__mod_id__disable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "mod_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Mod Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Disable Mod"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/mods/{mod_id}/enable": {
+      "post": {
+        "description": "Enable an assigned mod, redeploying its jar (server:update, issue #1262).",
+        "operationId": "enable_mod_api_communities__community_id__servers__server_id__mods__mod_id__enable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "mod_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Mod Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Enable Mod"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/resource-pack": {

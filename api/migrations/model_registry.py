@@ -26,6 +26,9 @@ from mc_server_dashboard_api.servers.adapters import models as _servers_models
 from mc_server_dashboard_api.servers.adapters import (
     resource_pack_models as _resource_pack_models,
 )
+from mc_server_dashboard_api.servers.adapters import (
+    server_mod_models as _server_mod_models,
+)
 
 # Importing the models registers their tables on ``Base.metadata`` for autogenerate.
 _ = (
@@ -37,6 +40,7 @@ _ = (
     _group_models,
     _resource_pack_models,
     _mod_models,
+    _server_mod_models,
     _audit_models,
 )
 

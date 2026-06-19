@@ -82,6 +82,10 @@ from mc_server_dashboard_api.servers.domain.resource_pack_repository import (
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
 )
+from mc_server_dashboard_api.servers.domain.server_mod import (
+    ServerModAssignment,
+    ServerModId,
+)
 from mc_server_dashboard_api.servers.domain.store_generation import (
     StoreGenerationReader,
 )
@@ -707,6 +711,7 @@ class FakeResourcePackRepository(ResourcePackRepository):
 class FakeModRepository(ModRepository):
     def __init__(self) -> None:
         self.mods: dict[ModId, Mod] = {}
+        self.assignments: dict[ServerModId, ServerModAssignment] = {}
 
     async def add(self, mod: Mod) -> None:
         self.mods[mod.id] = mod
@@ -738,6 +743,40 @@ class FakeModRepository(ModRepository):
 
     async def delete(self, mod_id: ModId) -> None:
         self.mods.pop(mod_id, None)
+
+    async def add_assignment(self, assignment: ServerModAssignment) -> None:
+        self.assignments[assignment.id] = assignment
+
+    async def get_assignment(
+        self, server_id: ServerId, mod_id: ModId
+    ) -> ServerModAssignment | None:
+        for a in self.assignments.values():
+            if a.server_id == server_id and a.mod_id == mod_id:
+                return a
+        return None
+
+    async def list_assignments_for_server(
+        self, server_id: ServerId
+    ) -> list[ServerModAssignment]:
+        rows = [a for a in self.assignments.values() if a.server_id == server_id]
+        return sorted(rows, key=lambda a: (a.created_at, str(a.id.value)))
+
+    async def list_assignments_for_mod(
+        self, mod_id: ModId
+    ) -> list[ServerModAssignment]:
+        return [a for a in self.assignments.values() if a.mod_id == mod_id]
+
+    async def set_assignment_enabled(self, assignment: ServerModAssignment) -> None:
+        self.assignments[assignment.id] = assignment
+
+    async def delete_assignment(self, server_id: ServerId, mod_id: ModId) -> None:
+        to_drop = [
+            aid
+            for aid, a in self.assignments.items()
+            if a.server_id == server_id and a.mod_id == mod_id
+        ]
+        for aid in to_drop:
+            self.assignments.pop(aid, None)
 
 
 class FakeUnitOfWork(UnitOfWork):

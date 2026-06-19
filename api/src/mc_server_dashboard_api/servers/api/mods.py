@@ -1,12 +1,18 @@
-"""HTTP edge for the global mod library (issue #1261).
+"""HTTP edge for the global mod library and server assignment (issues #1261, #1262).
 
-Mods are global (not community-scoped). The authenticated routes live under
-``/mods``. Upload requires ``server:update`` in at least one community; delete
-requires the caller to be the uploader or a platform admin; list and download
-require only authentication.
+Mods are global (not community-scoped). The authenticated library routes live
+under ``/mods``. Upload requires ``server:update`` in at least one community;
+delete requires the caller to be the uploader or a platform admin; list and
+download require only authentication.
 
-Server assignment, Modrinth import, and the client modpack are later sub-issues
-of epic #1258 and are not served here.
+Assignment routes (issue #1262) live under
+``/communities/{community_id}/servers/{server_id}/mods`` and are permission-gated
+per server (``server:update`` for assign/unassign/toggle, ``server:read`` for
+list). Every assignment mutation is at-rest gated (409 ``server_unsettled`` while
+the server is running) and physically (un)deploys the jar into the working set.
+
+Modrinth import and the client modpack are later sub-issues of epic #1258 and are
+not served here.
 """
 
 from __future__ import annotations
@@ -22,13 +28,22 @@ from pydantic import BaseModel
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
+from mc_server_dashboard_api.community.domain.value_objects import (
+    AuthUser,
+    Permission,
+)
 from mc_server_dashboard_api.dependencies import (
+    get_assign_mods,
     get_audit_recorder,
     get_current_user,
     get_delete_mod,
     get_download_mod,
     get_list_mods,
+    get_list_server_mods,
+    get_set_mod_enabled,
+    get_unassign_mod,
     get_upload_mod,
+    require_permission,
     require_server_update_in_any_community,
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
@@ -41,15 +56,32 @@ from mc_server_dashboard_api.servers.application.mods import (
     ListMods,
     UploadMod,
 )
+from mc_server_dashboard_api.servers.application.server_mods import (
+    AssignMods,
+    ListServerMods,
+    SetModEnabled,
+    UnassignMod,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidModJarError,
+    ModAssignmentNotFoundError,
+    ModInUseError,
     ModNotFoundError,
     PermissionDeniedError,
+    ServerBusyError,
+    ServerFilesUnsettledError,
+    ServerNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.mod import Mod, ModId, ModSide
+from mc_server_dashboard_api.servers.domain.server_mod import ServerModAssignment
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
+    ServerId,
+)
 
 router = APIRouter()
+assignment_router = APIRouter()
 
 # Chunked read buffer for the upload body (same pattern as resource_packs.py).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
@@ -186,6 +218,8 @@ async def delete_mod(
         raise _not_found() from exc
     except PermissionDeniedError as exc:
         raise _forbidden() from exc
+    except ModInUseError as exc:
+        raise _conflict("mod_in_use") from exc
 
     await recorder.record(
         AuditEvent(
@@ -268,3 +302,261 @@ def _too_large() -> ProblemException:
 
 def _unprocessable(reason: str) -> ProblemException:
     return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, reason)
+
+
+def _conflict(reason: str) -> ProblemException:
+    return problem(status.HTTP_409_CONFLICT, reason)
+
+
+# ---------------------------------------------------------------------------
+# Assignment routes (issue #1262)
+# ---------------------------------------------------------------------------
+
+_ASSIGNMENT_BASE = "/communities/{community_id}/servers/{server_id}/mods"
+_SERVER_RESOURCE_TYPE = "server"
+
+
+class AssignModsRequest(BaseModel):
+    """Multi-select assign: the library mod ids to add to the server's mod set."""
+
+    mod_ids: list[uuid.UUID]
+
+
+class ServerModResponse(BaseModel):
+    """One entry of a server's mod set: the assignment plus its library mod."""
+
+    mod: ModResponse
+    enabled: bool
+    assigned_by: uuid.UUID
+    assigned_at: UtcDatetime
+
+    @classmethod
+    def from_assignment(
+        cls, assignment: ServerModAssignment, mod: Mod
+    ) -> "ServerModResponse":
+        return cls(
+            mod=ModResponse.from_mod(mod),
+            enabled=assignment.enabled,
+            assigned_by=assignment.assigned_by,
+            assigned_at=assignment.created_at,
+        )
+
+
+class ServerModListResponse(BaseModel):
+    mods: list[ServerModResponse]
+
+
+def _server_update_guard() -> object:
+    return require_permission(
+        Permission("server:update"),
+        resource_type=_SERVER_RESOURCE_TYPE,
+        resource_id_param="server_id",
+    )
+
+
+def _server_read_guard() -> object:
+    return require_permission(
+        Permission("server:read"),
+        resource_type=_SERVER_RESOURCE_TYPE,
+        resource_id_param="server_id",
+    )
+
+
+@assignment_router.post(_ASSIGNMENT_BASE, status_code=status.HTTP_201_CREATED)
+async def assign_mods(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    body: AssignModsRequest,
+    auth_user: Annotated[AuthUser, Depends(_server_update_guard())],
+    use_case: Annotated[AssignMods, Depends(get_assign_mods)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    list_use_case: Annotated[ListServerMods, Depends(get_list_server_mods)],
+) -> ServerModListResponse:
+    """Assign one or more mods to a server (server:update, issue #1262)."""
+
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            mod_ids=[ModId(m) for m in body.mod_ids],
+            assigned_by=auth_user.user_id.value,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ModNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFilesUnsettledError as exc:
+        raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        raise _conflict("server_busy") from exc
+
+    await recorder.record(
+        AuditEvent(
+            operation=ops.MOD_ASSIGN,
+            outcome=Outcome.SUCCESS,
+            actor_id=auth_user.user_id.value,
+            target_type=ops.TARGET_SERVER,
+            target_id=server_id,
+        )
+    )
+
+    mod_set = await list_use_case(
+        community_id=CommunityId(community_id),
+        server_id=ServerId(server_id),
+    )
+    return ServerModListResponse(
+        mods=[ServerModResponse.from_assignment(a, m) for a, m in mod_set]
+    )
+
+
+@assignment_router.delete(
+    _ASSIGNMENT_BASE + "/{mod_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def unassign_mod(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    mod_id: uuid.UUID,
+    auth_user: Annotated[AuthUser, Depends(_server_update_guard())],
+    use_case: Annotated[UnassignMod, Depends(get_unassign_mod)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> None:
+    """Unassign a mod from a server (server:update, issue #1262)."""
+
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            mod_id=ModId(mod_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ModAssignmentNotFoundError as exc:
+        raise _not_found() from exc
+    except ModNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFilesUnsettledError as exc:
+        raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        raise _conflict("server_busy") from exc
+
+    await recorder.record(
+        AuditEvent(
+            operation=ops.MOD_UNASSIGN,
+            outcome=Outcome.SUCCESS,
+            actor_id=auth_user.user_id.value,
+            target_type=ops.TARGET_SERVER,
+            target_id=server_id,
+        )
+    )
+
+
+@assignment_router.post(
+    _ASSIGNMENT_BASE + "/{mod_id}/enable",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def enable_mod(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    mod_id: uuid.UUID,
+    auth_user: Annotated[AuthUser, Depends(_server_update_guard())],
+    use_case: Annotated[SetModEnabled, Depends(get_set_mod_enabled)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> None:
+    """Enable an assigned mod, redeploying its jar (server:update, issue #1262)."""
+
+    await _toggle_status(
+        community_id=community_id,
+        server_id=server_id,
+        mod_id=mod_id,
+        enabled=True,
+        auth_user=auth_user,
+        use_case=use_case,
+        recorder=recorder,
+    )
+
+
+@assignment_router.post(
+    _ASSIGNMENT_BASE + "/{mod_id}/disable",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def disable_mod(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    mod_id: uuid.UUID,
+    auth_user: Annotated[AuthUser, Depends(_server_update_guard())],
+    use_case: Annotated[SetModEnabled, Depends(get_set_mod_enabled)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> None:
+    """Disable an assigned mod, renaming its jar (server:update, issue #1262)."""
+
+    await _toggle_status(
+        community_id=community_id,
+        server_id=server_id,
+        mod_id=mod_id,
+        enabled=False,
+        auth_user=auth_user,
+        use_case=use_case,
+        recorder=recorder,
+    )
+
+
+async def _toggle_status(
+    *,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    mod_id: uuid.UUID,
+    enabled: bool,
+    auth_user: AuthUser,
+    use_case: SetModEnabled,
+    recorder: AuditRecorder,
+) -> None:
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            mod_id=ModId(mod_id),
+            enabled=enabled,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ModAssignmentNotFoundError as exc:
+        raise _not_found() from exc
+    except ModNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFilesUnsettledError as exc:
+        raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        raise _conflict("server_busy") from exc
+
+    await recorder.record(
+        AuditEvent(
+            operation=ops.MOD_ENABLE if enabled else ops.MOD_DISABLE,
+            outcome=Outcome.SUCCESS,
+            actor_id=auth_user.user_id.value,
+            target_type=ops.TARGET_SERVER,
+            target_id=server_id,
+        )
+    )
+
+
+@assignment_router.get(_ASSIGNMENT_BASE)
+async def list_server_mods(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _auth_user: Annotated[AuthUser, Depends(_server_read_guard())],
+    use_case: Annotated[ListServerMods, Depends(get_list_server_mods)],
+) -> ServerModListResponse:
+    """List a server's mod set (server:read, issue #1262)."""
+
+    try:
+        mod_set = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+
+    return ServerModListResponse(
+        mods=[ServerModResponse.from_assignment(a, m) for a, m in mod_set]
+    )

@@ -12,6 +12,11 @@ import datetime as dt
 import uuid
 
 from mc_server_dashboard_api.servers.domain.mod import Mod, ModId
+from mc_server_dashboard_api.servers.domain.server_mod import (
+    ServerModAssignment,
+    ServerModId,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.servers.fakes import FakeModRepository
 
 
@@ -106,3 +111,77 @@ async def test_delete_removes_row() -> None:
     await repo.add(mod)
     await repo.delete(mod.id)
     assert await repo.get_by_id(mod.id) is None
+
+
+def _make_assignment(
+    server_id: ServerId, mod_id: ModId, *, enabled: bool = True
+) -> ServerModAssignment:
+    now = dt.datetime.now(dt.timezone.utc)
+    return ServerModAssignment(
+        id=ServerModId.new(),
+        server_id=server_id,
+        mod_id=mod_id,
+        enabled=enabled,
+        assigned_by=uuid.uuid4(),
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def test_add_then_get_assignment_round_trips() -> None:
+    repo = FakeModRepository()
+    server_id = ServerId(uuid.uuid4())
+    mod_id = ModId.new()
+    assignment = _make_assignment(server_id, mod_id)
+    await repo.add_assignment(assignment)
+    assert await repo.get_assignment(server_id, mod_id) is assignment
+
+
+async def test_get_assignment_absent_returns_none() -> None:
+    repo = FakeModRepository()
+    assert await repo.get_assignment(ServerId(uuid.uuid4()), ModId.new()) is None
+
+
+async def test_list_assignments_for_server() -> None:
+    repo = FakeModRepository()
+    server_id = ServerId(uuid.uuid4())
+    other = ServerId(uuid.uuid4())
+    await repo.add_assignment(_make_assignment(server_id, ModId.new()))
+    await repo.add_assignment(_make_assignment(server_id, ModId.new()))
+    await repo.add_assignment(_make_assignment(other, ModId.new()))
+    rows = await repo.list_assignments_for_server(server_id)
+    assert len(rows) == 2
+    assert all(r.server_id == server_id for r in rows)
+
+
+async def test_list_assignments_for_mod() -> None:
+    repo = FakeModRepository()
+    mod_id = ModId.new()
+    await repo.add_assignment(_make_assignment(ServerId(uuid.uuid4()), mod_id))
+    await repo.add_assignment(_make_assignment(ServerId(uuid.uuid4()), mod_id))
+    await repo.add_assignment(_make_assignment(ServerId(uuid.uuid4()), ModId.new()))
+    rows = await repo.list_assignments_for_mod(mod_id)
+    assert len(rows) == 2
+    assert all(r.mod_id == mod_id for r in rows)
+
+
+async def test_set_assignment_enabled_persists_flag() -> None:
+    repo = FakeModRepository()
+    server_id = ServerId(uuid.uuid4())
+    mod_id = ModId.new()
+    assignment = _make_assignment(server_id, mod_id, enabled=True)
+    await repo.add_assignment(assignment)
+    assignment.enabled = False
+    await repo.set_assignment_enabled(assignment)
+    stored = await repo.get_assignment(server_id, mod_id)
+    assert stored is not None
+    assert stored.enabled is False
+
+
+async def test_delete_assignment_removes_row() -> None:
+    repo = FakeModRepository()
+    server_id = ServerId(uuid.uuid4())
+    mod_id = ModId.new()
+    await repo.add_assignment(_make_assignment(server_id, mod_id))
+    await repo.delete_assignment(server_id, mod_id)
+    assert await repo.get_assignment(server_id, mod_id) is None
