@@ -2137,6 +2137,7 @@ def get_resolve_server_mods(request: Request) -> ResolveServerMods:
 def get_apply_server_mod_resolution(
     request: Request,
     assign_mods: Annotated[AssignMods, Depends(get_assign_mods)],
+    unassign_mod: Annotated[UnassignMod, Depends(get_unassign_mod)],
 ) -> ApplyServerModResolution:
     """Assemble the :class:`ApplyServerModResolution` use case (issue #1294)."""
 
@@ -2144,6 +2145,7 @@ def get_apply_server_mod_resolution(
     return ApplyServerModResolution(
         uow=ServersUnitOfWork(session_factory),
         assign_mods=assign_mods,
+        unassign_mod=unassign_mod,
     )
 
 

@@ -2867,12 +2867,18 @@ export interface components {
          *
          *     ``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /
          *     ``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod
-         *     only for ``resolvable_from_library``; it is ``None`` otherwise.
+         *     only for ``resolvable_from_library``; it is ``None`` otherwise. ``replaces``
+         *     is non-empty only when that pick swaps out an already-assigned but
+         *     out-of-range version of the same id (a ``version_unsatisfied`` finding):
+         *     applying unassigns these stale mods and assigns ``mod`` so one in-range
+         *     version remains. An absent dep is a plain add with empty ``replaces``.
          */
         ResolutionEntryResponse: {
             /** Dep Identifier */
             dep_identifier: string;
             mod: components["schemas"]["ModResponse"] | null;
+            /** Replaces */
+            replaces: components["schemas"]["ModResponse"][];
             /** Required Range */
             required_range: string;
             /** Status */

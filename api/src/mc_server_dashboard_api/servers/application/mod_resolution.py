@@ -42,7 +42,10 @@ from mc_server_dashboard_api.servers.application.mod_validation import (
     ModValidation,
     validate_mod_set,
 )
-from mc_server_dashboard_api.servers.application.server_mods import AssignMods
+from mc_server_dashboard_api.servers.application.server_mods import (
+    AssignMods,
+    UnassignMod,
+)
 from mc_server_dashboard_api.servers.application.version_range import (
     compare_versions,
     version_satisfies,
@@ -72,6 +75,14 @@ class ResolutionEntry:
     """How the dependency classifies against the current set and the library."""
     mod: Mod | None = None
     """The chosen library mod for ``resolvable_from_library``; ``None`` otherwise."""
+    replaces: list[Mod] = field(default_factory=list)
+    """Assigned mods this ``resolvable_from_library`` pick replaces.
+
+    Non-empty only when the dep is present on the server at an out-of-range
+    version (a ``version_unsatisfied`` finding): apply unassigns these stale
+    same-``mod_identifier`` assignments before assigning ``mod``, so exactly one
+    in-range version of the id remains (#1294). Empty for an absent dep — that
+    is a plain add."""
 
 
 @dataclass(frozen=True)
@@ -133,6 +144,21 @@ def _provides(mod: Mod, identifier: str) -> bool:
     """Whether ``mod`` satisfies ``identifier`` (own id or a ``provides`` entry)."""
 
     return mod.mod_identifier == identifier or identifier in mod.provides
+
+
+def _stale_providers(assigned: list[Mod], identifier: str, chosen: Mod) -> list[Mod]:
+    """Assigned mods whose own id is ``identifier`` that a replacement supersedes.
+
+    Only own-``mod_identifier`` matches are stale (a ``provides`` alias is a
+    different host mod the replacement should not touch); the chosen library mod
+    is excluded so a re-plan after apply yields no spurious replacement.
+    """
+
+    return [
+        mod
+        for mod in assigned
+        if mod.mod_identifier == identifier and mod.id != chosen.id
+    ]
 
 
 def _server_compatible(mod: Mod, *, server_type: str, mc_version: str) -> bool:
@@ -209,12 +235,24 @@ def resolve_dependencies(
             dep, server_type=server_type, mc_version=mc_version, library=library
         )
         if candidate is not None:
+            # If the id is already assigned but out of range (a
+            # ``version_unsatisfied`` finding, not an absent dep), the pick is a
+            # replacement: apply unassigns the stale assignment(s) so exactly one
+            # in-range version of the id remains. Only own-id providers are stale;
+            # a ``provides`` alias is left alone (replacing it would drop the host
+            # mod). An absent dep has no ``replaces`` — it is a plain add.
+            replaces = (
+                _stale_providers(assigned, dep.identifier, candidate)
+                if present is not None
+                else []
+            )
             entries.append(
                 ResolutionEntry(
                     dep.identifier,
                     dep.version_range,
                     "resolvable_from_library",
                     mod=candidate,
+                    replaces=replaces,
                 )
             )
         elif any(_provides(mod, dep.identifier) for mod in library):
@@ -282,10 +320,17 @@ class ApplyServerModResolution:
     returns the re-planned result. Idempotent: with nothing newly resolvable the
     assign list is empty and the returned plan shows the picks as
     ``already_satisfied``. Does NOT import from Modrinth (that is C3).
+
+    A pick that carries ``replaces`` (the id is present but out of range — a
+    ``version_unsatisfied`` finding) is a swap, not an add: the stale
+    same-``mod_identifier`` assignment(s) are unassigned via :class:`UnassignMod`
+    before the in-range library mod is assigned, so exactly one in-range version
+    of the id remains and the re-plan converges to ``already_satisfied``.
     """
 
     uow: UnitOfWork
     assign_mods: AssignMods
+    unassign_mod: UnassignMod
 
     async def __call__(
         self,
@@ -304,12 +349,27 @@ class ApplyServerModResolution:
             library=library,
         )
 
-        # De-dup the picks: two deps can resolve to the same library mod.
+        # De-dup the picks: two deps can resolve to the same library mod. Collect
+        # the stale assignments each replacement supersedes so they are unassigned
+        # before the new version is added (never the chosen mod itself).
         picked: dict[ModId, None] = {}
+        replaced: dict[ModId, None] = {}
         for entry in plan.entries:
             if entry.status == "resolvable_from_library" and entry.mod is not None:
                 picked[entry.mod.id] = None
+                for stale in entry.replaces:
+                    replaced[stale.id] = None
+        for chosen_id in picked:
+            replaced.pop(chosen_id, None)
         applied = list(picked)
+
+        if replaced:
+            for stale_id in replaced:
+                await self.unassign_mod(
+                    community_id=community_id,
+                    server_id=server_id,
+                    mod_id=stale_id,
+                )
 
         if applied:
             await self.assign_mods(

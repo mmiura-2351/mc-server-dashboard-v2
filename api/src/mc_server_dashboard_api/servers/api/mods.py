@@ -944,13 +944,18 @@ class ResolutionEntryResponse(BaseModel):
 
     ``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /
     ``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod
-    only for ``resolvable_from_library``; it is ``None`` otherwise.
+    only for ``resolvable_from_library``; it is ``None`` otherwise. ``replaces``
+    is non-empty only when that pick swaps out an already-assigned but
+    out-of-range version of the same id (a ``version_unsatisfied`` finding):
+    applying unassigns these stale mods and assigns ``mod`` so one in-range
+    version remains. An absent dep is a plain add with empty ``replaces``.
     """
 
     dep_identifier: str
     required_range: str
     status: str
     mod: ModResponse | None
+    replaces: list[ModResponse]
 
 
 class ResolutionPlanResponse(BaseModel):
@@ -968,6 +973,7 @@ class ResolutionPlanResponse(BaseModel):
                     required_range=e.required_range,
                     status=e.status,
                     mod=ModResponse.from_mod(e.mod) if e.mod is not None else None,
+                    replaces=[ModResponse.from_mod(m) for m in e.replaces],
                 )
                 for e in plan.entries
             ],

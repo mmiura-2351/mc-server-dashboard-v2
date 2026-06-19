@@ -23,7 +23,10 @@ from mc_server_dashboard_api.servers.application.mod_resolution import (
     ResolveServerMods,
     resolve_dependencies,
 )
-from mc_server_dashboard_api.servers.application.server_mods import AssignMods
+from mc_server_dashboard_api.servers.application.server_mods import (
+    AssignMods,
+    UnassignMod,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ServerFilesUnsettledError,
@@ -262,6 +265,44 @@ class TestResolveDependencies:
         statuses = {e.dep_identifier: e.status for e in plan.entries}
         assert statuses["fabric-api"] == "already_satisfied"
 
+    def test_present_out_of_range_resolves_as_replacement(self) -> None:
+        # X is assigned at v1.0.0 (out of range), the dep needs >=2.0.0, and the
+        # library has X v2.0.0. The pick is resolvable_from_library but flags the
+        # stale assigned X in ``replaces`` so apply swaps rather than duplicates.
+        consumer = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", version_range=">=2.0.0")],
+        )
+        stale = _mod(mod_identifier="fabric-api", version_number="1.0.0")
+        in_range = _mod(mod_identifier="fabric-api", version_number="2.0.0")
+        plan = resolve_dependencies(
+            server_type="fabric",
+            mc_version="1.21",
+            assigned=[consumer, stale],
+            library=[in_range],
+        )
+        entry = next(e for e in plan.entries if e.dep_identifier == "fabric-api")
+        assert entry.status == "resolvable_from_library"
+        assert entry.mod is not None
+        assert entry.mod.id == in_range.id
+        assert [m.id for m in entry.replaces] == [stale.id]
+
+    def test_absent_dep_has_no_replaces(self) -> None:
+        # An absent dep is a plain add: ``replaces`` stays empty.
+        consumer = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", version_range=">=0.90.0")],
+        )
+        fabric_api = _mod(mod_identifier="fabric-api", version_number="0.92.0")
+        plan = resolve_dependencies(
+            server_type="fabric",
+            mc_version="1.21",
+            assigned=[consumer],
+            library=[fabric_api],
+        )
+        assert plan.entries[0].status == "resolvable_from_library"
+        assert plan.entries[0].replaces == []
+
     def test_optional_dep_is_not_resolved(self) -> None:
         consumer = _mod(
             mod_identifier="sodium",
@@ -352,14 +393,23 @@ class TestApplyServerModResolution:
     def _apply(
         self, uow: FakeUnitOfWork, file_store: FakeFileStore, store: FakeModStore
     ) -> ApplyServerModResolution:
+        lock = FakeLifecycleLock()
         assign = AssignMods(
             uow=uow,
             file_store=file_store,
             store=store,
             clock=FakeClock(_NOW),
-            lifecycle_lock=FakeLifecycleLock(),
+            lifecycle_lock=lock,
         )
-        return ApplyServerModResolution(uow=uow, assign_mods=assign)
+        unassign = UnassignMod(
+            uow=uow,
+            file_store=file_store,
+            store=store,
+            lifecycle_lock=lock,
+        )
+        return ApplyServerModResolution(
+            uow=uow, assign_mods=assign, unassign_mod=unassign
+        )
 
     async def test_apply_assigns_resolvable_and_validates_clean(self) -> None:
         server = _server()
@@ -382,6 +432,69 @@ class TestApplyServerModResolution:
         # The re-planned result shows the dep satisfied, with no missing finding.
         assert plan.entries[0].status == "already_satisfied"
         assert plan.validation.missing_deps == []
+
+    async def test_apply_replaces_out_of_range_version(self) -> None:
+        # Server has X v1.0.0 assigned (out of range); dep requires X >=2.0.0;
+        # library has X v2.0.0. Apply must unassign v1.0.0 and assign v2.0.0 so
+        # exactly one X remains (in range), the server validates clean, and the
+        # re-plan is idempotent (already_satisfied, no duplicate identifier).
+        server = _server()
+        uow, file_store, store = _ctx(server)
+        consumer = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", version_range=">=2.0.0")],
+        )
+        stale = _mod(mod_identifier="fabric-api", version_number="1.0.0")
+        _seed_assigned(uow, store, server, consumer)
+        _seed_assigned(uow, store, server, stale)
+        in_range = _mod(mod_identifier="fabric-api", version_number="2.0.0")
+        _seed_library(uow, store, in_range)
+
+        plan, applied = await self._apply(uow, file_store, store)(
+            community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
+        )
+
+        assert applied == [in_range.id]
+        # Exactly one fabric-api assignment remains, and it is the in-range one.
+        fabric_api_mod_ids = [
+            a.mod_id
+            for a in uow.mods.assignments.values()
+            if a.server_id == server.id
+            and uow.mods.mods[a.mod_id].mod_identifier == "fabric-api"
+        ]
+        assert fabric_api_mod_ids == [in_range.id]
+        assert stale.id not in {a.mod_id for a in uow.mods.assignments.values()}
+        # The dep converges: re-plan is already_satisfied and validation is clean.
+        entry = next(e for e in plan.entries if e.dep_identifier == "fabric-api")
+        assert entry.status == "already_satisfied"
+        assert plan.validation.version_unsatisfied == []
+        assert plan.validation.missing_deps == []
+
+    async def test_apply_replacement_is_idempotent(self) -> None:
+        # A second apply after a replacement re-finds the dep already_satisfied
+        # and changes nothing (no further swap).
+        server = _server()
+        uow, file_store, store = _ctx(server)
+        consumer = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", version_range=">=2.0.0")],
+        )
+        stale = _mod(mod_identifier="fabric-api", version_number="1.0.0")
+        _seed_assigned(uow, store, server, consumer)
+        _seed_assigned(uow, store, server, stale)
+        in_range = _mod(mod_identifier="fabric-api", version_number="2.0.0")
+        _seed_library(uow, store, in_range)
+
+        apply = self._apply(uow, file_store, store)
+        await apply(
+            community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
+        )
+        plan, applied = await apply(
+            community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
+        )
+        assert applied == []
+        entry = next(e for e in plan.entries if e.dep_identifier == "fabric-api")
+        assert entry.status == "already_satisfied"
 
     async def test_apply_is_idempotent(self) -> None:
         server = _server()

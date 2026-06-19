@@ -794,6 +794,29 @@ class TestResolvePlanEndpoint:
         assert body["entries"][1]["mod"] is None
         assert body["validation"]["missing_deps"] == []
 
+    def test_plan_surfaces_replaces_for_version_swap(self) -> None:
+        new = _mod(filename="fabric-api-2.jar")
+        old = _mod(filename="fabric-api-1.jar")
+        plan = _plan(
+            entries=[
+                ResolutionEntry(
+                    dep_identifier="fabric-api",
+                    required_range=">=2.0.0",
+                    status="resolvable_from_library",
+                    mod=new,
+                    replaces=[old],
+                )
+            ]
+        )
+        uc = _FakeUseCase(result=plan)
+        app = _assignment_app(resolve=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_RESOLVE_BASE)
+        assert resp.status_code == 200
+        entry = resp.json()["entries"][0]
+        assert entry["mod"]["id"] == str(new.id.value)
+        assert [r["id"] for r in entry["replaces"]] == [str(old.id.value)]
+
     def test_plan_server_not_found_404(self) -> None:
         uc = _FakeUseCase(error=ServerNotFoundError("nope"))
         app = _assignment_app(resolve=uc)
