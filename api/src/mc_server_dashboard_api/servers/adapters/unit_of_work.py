@@ -34,6 +34,9 @@ from mc_server_dashboard_api.servers.adapters.game_session_repository import (
 from mc_server_dashboard_api.servers.adapters.group_repository import (
     SqlAlchemyGroupRepository,
 )
+from mc_server_dashboard_api.servers.adapters.mod_repository import (
+    SqlAlchemyModRepository,
+)
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
@@ -90,6 +93,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.groups = SqlAlchemyGroupRepository(self._session)
         self.game_sessions = SqlAlchemyGameSessionRepository(self._session)
         self.resource_packs = SqlAlchemyResourcePackRepository(self._session)
+        self.mods = SqlAlchemyModRepository(self._session)
         return self
 
     async def __aexit__(

@@ -59,6 +59,14 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import (
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
+from mc_server_dashboard_api.servers.domain.mod import (
+    Mod,
+    ModId,
+    ModLoader,
+    ModSide,
+)
+from mc_server_dashboard_api.servers.domain.mod_repository import ModRepository
+from mc_server_dashboard_api.servers.domain.mod_store import ModStore
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
@@ -696,6 +704,42 @@ class FakeResourcePackRepository(ResourcePackRepository):
         return [a for a in self.assignments.values() if a.resource_pack_id == pack_id]
 
 
+class FakeModRepository(ModRepository):
+    def __init__(self) -> None:
+        self.mods: dict[ModId, Mod] = {}
+
+    async def add(self, mod: Mod) -> None:
+        self.mods[mod.id] = mod
+
+    async def get_by_id(self, mod_id: ModId) -> Mod | None:
+        return self.mods.get(mod_id)
+
+    async def get_by_sha256(self, sha256_hash: str) -> Mod | None:
+        for mod in self.mods.values():
+            if mod.sha256_hash == sha256_hash:
+                return mod
+        return None
+
+    async def list_all(
+        self,
+        *,
+        loader_type: ModLoader | None = None,
+        mc_version: str | None = None,
+        side: ModSide | None = None,
+    ) -> list[Mod]:
+        rows = [
+            mod
+            for mod in self.mods.values()
+            if (loader_type is None or mod.loader_type == loader_type)
+            and (side is None or mod.side == side)
+            and (mc_version is None or mc_version in mod.mc_versions)
+        ]
+        return sorted(rows, key=lambda m: (m.display_name, str(m.id.value)))
+
+    async def delete(self, mod_id: ModId) -> None:
+        self.mods.pop(mod_id, None)
+
+
 class FakeUnitOfWork(UnitOfWork):
     # Narrow the Port-declared attribute types to the concrete fakes so tests can
     # reach their inspection helpers without casts.
@@ -705,6 +749,7 @@ class FakeUnitOfWork(UnitOfWork):
     groups: FakeGroupRepository
     game_sessions: FakeGameSessionRepository
     resource_packs: FakeResourcePackRepository
+    mods: FakeModRepository
 
     def __init__(
         self,
@@ -714,6 +759,7 @@ class FakeUnitOfWork(UnitOfWork):
         groups: FakeGroupRepository | None = None,
         game_sessions: FakeGameSessionRepository | None = None,
         resource_packs: FakeResourcePackRepository | None = None,
+        mods: FakeModRepository | None = None,
     ) -> None:
         self.servers = servers or FakeServerRepository()
         self.resource_grants = resource_grants or FakeResourceGrantSweeper()
@@ -721,6 +767,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.groups = groups or FakeGroupRepository()
         self.game_sessions = game_sessions or FakeGameSessionRepository()
         self.resource_packs = resource_packs or FakeResourcePackRepository()
+        self.mods = mods or FakeModRepository()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":
@@ -1097,3 +1144,33 @@ class FakeResourcePackStore(ResourcePackStore):
 
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
         return len(self.blobs[pack_id])
+
+
+class FakeModStore(ModStore):
+    """In-memory mod jar blob store for use-case tests (issue #1259)."""
+
+    def __init__(self) -> None:
+        self.blobs: dict[ModId, bytes] = {}
+
+    async def put(
+        self,
+        mod_id: ModId,
+        filename: str,
+        stream: AsyncIterator[bytes],
+    ) -> None:
+        data = b"".join([chunk async for chunk in stream])
+        self.blobs[mod_id] = data
+
+    def open(self, mod_id: ModId, filename: str) -> AsyncIterator[bytes]:
+        data = self.blobs[mod_id]
+
+        async def _gen() -> AsyncIterator[bytes]:
+            yield data
+
+        return _gen()
+
+    async def delete(self, mod_id: ModId) -> None:
+        self.blobs.pop(mod_id, None)
+
+    async def size(self, mod_id: ModId, filename: str) -> int:
+        return len(self.blobs[mod_id])

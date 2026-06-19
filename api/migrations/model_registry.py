@@ -21,6 +21,7 @@ from mc_server_dashboard_api.servers.adapters import (
     game_session_models as _game_session_models,
 )
 from mc_server_dashboard_api.servers.adapters import group_models as _group_models
+from mc_server_dashboard_api.servers.adapters import mod_models as _mod_models
 from mc_server_dashboard_api.servers.adapters import models as _servers_models
 from mc_server_dashboard_api.servers.adapters import (
     resource_pack_models as _resource_pack_models,
@@ -35,6 +36,7 @@ _ = (
     _game_session_models,
     _group_models,
     _resource_pack_models,
+    _mod_models,
     _audit_models,
 )
 
