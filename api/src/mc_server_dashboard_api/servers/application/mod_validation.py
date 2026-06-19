@@ -14,11 +14,10 @@ Four finding kinds:
   version-range satisfaction is phase C, #1268). This catches the canonical
   "Fabric API entirely absent" failure without a constraint solver.
 * ``conflicts`` -- a dependency entry explicitly marked as a break/conflict whose
-  target id is present in the set. The current manifest parser does **not** emit
-  break/conflict entries (it stores only ``required`` deps), so this list is
-  empty for today's data; the check reads an optional ``conflict`` flag on the
-  dependency dict so it works the moment the parser surfaces breaks, without
-  inventing new parser output here.
+  target id is present in the set. The manifest parser now emits these entries
+  (#1288): a declared ``breaks``/incompatible relation is stored as a dependency
+  dict carrying a ``conflict`` flag, so this list is populated from parsed data.
+  The check reads that optional ``conflict`` flag on the dependency dict.
 * ``loader_mismatch`` -- an assigned mod whose ``loader_type`` is incompatible
   with the server's loader (see :data:`_LOADER_COMPAT`). A phase-B *warning*, not
   a hard gate.
@@ -45,6 +44,10 @@ from mc_server_dashboard_api.servers.domain.mod import Mod
 # * paper   <-> paper plugins
 # * spigot  <-> paper plugins (Paper is a Spigot fork; Bukkit/Spigot plugins load)
 # * vanilla <-> nothing (a vanilla server runs no mod loader)
+#
+# This map is the canonical loader-compatibility policy (issue #1286). The webui
+# assign-dialog filter mirrors it as ``LOADER_COMPAT`` in
+# ``webui/src/pages/ServerModsSection.tsx``; keep the two in sync.
 _LOADER_COMPAT: dict[str, frozenset[str]] = {
     "fabric": frozenset({"fabric", "quilt"}),
     "forge": frozenset({"forge", "neoforge"}),
