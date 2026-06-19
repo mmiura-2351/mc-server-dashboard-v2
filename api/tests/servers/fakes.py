@@ -1193,10 +1193,16 @@ class FakeResourcePackStore(ResourcePackStore):
 
 
 class FakeModStore(ModStore):
-    """In-memory mod jar blob store for use-case tests (issue #1259)."""
+    """In-memory mod jar blob store for use-case tests (issue #1259).
 
-    def __init__(self) -> None:
+    ``chunk_size`` controls how :meth:`open` yields a blob: ``None`` (default)
+    yields the whole blob in a single chunk; a positive value yields it in
+    fixed-size chunks, exercising the streaming/drain path of consumers.
+    """
+
+    def __init__(self, chunk_size: int | None = None) -> None:
         self.blobs: dict[ModId, bytes] = {}
+        self.chunk_size = chunk_size
 
     async def put(
         self,
@@ -1209,9 +1215,14 @@ class FakeModStore(ModStore):
 
     def open(self, mod_id: ModId, filename: str) -> AsyncIterator[bytes]:
         data = self.blobs[mod_id]
+        chunk_size = self.chunk_size
 
         async def _gen() -> AsyncIterator[bytes]:
-            yield data
+            if chunk_size is None:
+                yield data
+                return
+            for start in range(0, len(data), chunk_size):
+                yield data[start : start + chunk_size]
 
         return _gen()
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import random
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
@@ -773,6 +774,46 @@ class TestDownloadClientModpack:
         entries = _read_zip(await _collect(stream))
 
         assert entries == {}
+
+    async def test_large_multi_chunk_jars_produce_valid_archive(self) -> None:
+        # Jars larger than the internal drain threshold, streamed from the store
+        # in many chunks, must still produce a structurally valid zip with each
+        # entry's bytes preserved exactly (issue #1265 corrupt-archive fix).
+        server = _at_rest_server()
+        servers = FakeServerRepository()
+        servers.seed(server)
+        uow = FakeUnitOfWork(servers=servers)
+        store = FakeModStore(chunk_size=64 * 1024)
+
+        # Deterministic but incompressible: deflate cannot shrink it below the
+        # drain threshold, so the streaming/drain path genuinely executes.
+        rng = random.Random(1265)
+        big_a = rng.randbytes(3 * 1024 * 1024)
+        big_b = rng.randbytes(5 * 1024 * 1024)
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="both", filename="big-a.jar"),
+            blob=big_a,
+        )
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="client", filename="big-b.jar", sha256="b" * 64),
+            blob=big_b,
+        )
+
+        uc = DownloadClientModpack(uow=uow, store=store)
+        stream, _ = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+        data = await _collect(stream)
+
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            assert zf.testzip() is None
+            assert set(zf.namelist()) == {"big-a.jar", "big-b.jar"}
+            assert zf.read("big-a.jar") == big_a
+            assert zf.read("big-b.jar") == big_b
 
     async def test_rejects_unknown_server(self) -> None:
         uow = FakeUnitOfWork()

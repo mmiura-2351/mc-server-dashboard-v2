@@ -376,13 +376,14 @@ def _needs_client(mod: Mod) -> bool:
 
 async def _select_client_mods(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
-) -> list[Mod]:
-    """Return the server's assigned, enabled, client-needed mods.
+) -> tuple[str, list[Mod]]:
+    """Return the server's name and its assigned, enabled, client-needed mods.
 
     Selection (epic #1258): assigned to the server, ``enabled``, side ∈
     {``client``, ``both``}. Server-only mods are excluded; a disabled assignment
     is excluded even when its side reaches the client. Ordered by the assignment
-    order (``list_assignments_for_server`` orders by ``created_at``).
+    order (``list_assignments_for_server`` orders by ``created_at``). The server
+    name is returned alongside so the download path need not re-load the server.
     """
 
     async with uow:
@@ -397,7 +398,7 @@ async def _select_client_mods(
             mod = await uow.mods.get_by_id(assignment.mod_id)
             if mod is not None and _needs_client(mod):
                 mods.append(mod)
-    return mods
+    return server.name.value, mods
 
 
 @dataclass(frozen=True)
@@ -416,7 +417,8 @@ class ListClientMods:
         community_id: CommunityId,
         server_id: ServerId,
     ) -> list[Mod]:
-        return await _select_client_mods(self.uow, community_id, server_id)
+        _, mods = await _select_client_mods(self.uow, community_id, server_id)
+        return mods
 
 
 @dataclass(frozen=True)
@@ -437,11 +439,5 @@ class DownloadClientModpack:
         community_id: CommunityId,
         server_id: ServerId,
     ) -> tuple[AsyncIterator[bytes], str]:
-        async with self.uow:
-            server = await self.uow.servers.get_by_id(server_id)
-            if server is None or server.community_id != community_id:
-                raise ServerNotFoundError(str(server_id.value))
-            server_name = server.name.value
-
-        mods = await _select_client_mods(self.uow, community_id, server_id)
+        server_name, mods = await _select_client_mods(self.uow, community_id, server_id)
         return stream_client_modpack(self.store, mods), server_name
