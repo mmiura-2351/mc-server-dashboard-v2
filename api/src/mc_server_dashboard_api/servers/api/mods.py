@@ -610,6 +610,15 @@ class MissingDependencyResponse(BaseModel):
     version_range: str
 
 
+class VersionUnsatisfiedResponse(BaseModel):
+    """A required dependency present at a version outside its required range."""
+
+    mod_id: str
+    depends_on: str
+    version_range: str
+    present_version: str
+
+
 class ConflictResponse(BaseModel):
     """An assigned mod that conflicts with another present mod."""
 
@@ -636,12 +645,15 @@ class McMismatchResponse(BaseModel):
 class ModValidationResponse(BaseModel):
     """The phase-B validation checklist for a server's mod set (issue #1263).
 
-    Display-only: empty lists mean the set is fully valid. ``conflicts`` is empty
-    for jars uploaded today (the manifest parser does not yet capture break
-    entries); the field is present so it populates once breaks are parsed.
+    Display-only: empty lists mean the set is fully valid. ``version_unsatisfied``
+    flags a required dependency that is present but at a version outside the
+    required range (issue #1293). ``conflicts`` is empty for jars uploaded today
+    (the manifest parser does not yet capture break entries); the field is present
+    so it populates once breaks are parsed.
     """
 
     missing_deps: list[MissingDependencyResponse]
+    version_unsatisfied: list[VersionUnsatisfiedResponse]
     conflicts: list[ConflictResponse]
     loader_mismatch: list[LoaderMismatchResponse]
     mc_mismatch: list[McMismatchResponse]
@@ -656,6 +668,15 @@ class ModValidationResponse(BaseModel):
                     version_range=f.version_range,
                 )
                 for f in validation.missing_deps
+            ],
+            version_unsatisfied=[
+                VersionUnsatisfiedResponse(
+                    mod_id=f.mod_id,
+                    depends_on=f.depends_on,
+                    version_range=f.version_range,
+                    present_version=f.present_version,
+                )
+                for f in validation.version_unsatisfied
             ],
             conflicts=[
                 ConflictResponse(mod_id=f.mod_id, conflicts_with=f.conflicts_with)

@@ -1956,7 +1956,7 @@
         "type": "object"
       },
       "ModValidationResponse": {
-        "description": "The phase-B validation checklist for a server's mod set (issue #1263).\n\nDisplay-only: empty lists mean the set is fully valid. ``conflicts`` is empty\nfor jars uploaded today (the manifest parser does not yet capture break\nentries); the field is present so it populates once breaks are parsed.",
+        "description": "The phase-B validation checklist for a server's mod set (issue #1263).\n\nDisplay-only: empty lists mean the set is fully valid. ``version_unsatisfied``\nflags a required dependency that is present but at a version outside the\nrequired range (issue #1293). ``conflicts`` is empty for jars uploaded today\n(the manifest parser does not yet capture break entries); the field is present\nso it populates once breaks are parsed.",
         "properties": {
           "conflicts": {
             "items": {
@@ -1985,10 +1985,18 @@
             },
             "title": "Missing Deps",
             "type": "array"
+          },
+          "version_unsatisfied": {
+            "items": {
+              "$ref": "#/components/schemas/VersionUnsatisfiedResponse"
+            },
+            "title": "Version Unsatisfied",
+            "type": "array"
           }
         },
         "required": [
           "missing_deps",
+          "version_unsatisfied",
           "conflicts",
           "loader_mismatch",
           "mc_mismatch"
@@ -2942,6 +2950,35 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VersionUnsatisfiedResponse": {
+        "description": "A required dependency present at a version outside its required range.",
+        "properties": {
+          "depends_on": {
+            "title": "Depends On",
+            "type": "string"
+          },
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "present_version": {
+            "title": "Present Version",
+            "type": "string"
+          },
+          "version_range": {
+            "title": "Version Range",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "depends_on",
+          "version_range",
+          "present_version"
+        ],
+        "title": "VersionUnsatisfiedResponse",
         "type": "object"
       },
       "VersionsResponse": {

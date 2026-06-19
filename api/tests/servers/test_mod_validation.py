@@ -41,6 +41,7 @@ def _mod(
     mc_versions: list[str] | None = None,
     dependencies: list[dict[str, object]] | None = None,
     side: ModSide = "both",
+    version_number: str = "1.0.0",
 ) -> Mod:
     return Mod(
         id=ModId.new(),
@@ -50,7 +51,7 @@ def _mod(
         loader_type=loader_type,
         mod_identifier=mod_identifier,
         provides=provides or [],
-        version_number="1.0.0",
+        version_number=version_number,
         mc_versions=mc_versions if mc_versions is not None else ["1.21"],
         side=side,
         dependencies=dependencies or [],
@@ -127,6 +128,103 @@ class TestMissingDeps:
         result = validate_mod_set(server_type="fabric", mc_version="1.21", mods=[mod])
 
         assert result.missing_deps == []
+
+
+class TestVersionUnsatisfied:
+    def test_present_but_out_of_range_is_flagged(self) -> None:
+        """A required dep is present but at a version outside the required range."""
+
+        sodium = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", required=True, version_range=">=0.90.0")],
+        )
+        fabric_api = _mod(mod_identifier="fabric-api", version_number="0.80.0")
+        result = validate_mod_set(
+            server_type="fabric", mc_version="1.21", mods=[sodium, fabric_api]
+        )
+
+        assert result.missing_deps == []
+        assert len(result.version_unsatisfied) == 1
+        finding = result.version_unsatisfied[0]
+        assert finding.mod_id == "sodium"
+        assert finding.depends_on == "fabric-api"
+        assert finding.version_range == ">=0.90.0"
+        assert finding.present_version == "0.80.0"
+
+    def test_present_and_in_range_is_not_flagged(self) -> None:
+        sodium = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", required=True, version_range=">=0.90.0")],
+        )
+        fabric_api = _mod(mod_identifier="fabric-api", version_number="0.95.0")
+        result = validate_mod_set(
+            server_type="fabric", mc_version="1.21", mods=[sodium, fabric_api]
+        )
+
+        assert result.missing_deps == []
+        assert result.version_unsatisfied == []
+
+    def test_absent_dep_stays_missing_not_version_unsatisfied(self) -> None:
+        sodium = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", required=True, version_range=">=0.90.0")],
+        )
+        result = validate_mod_set(
+            server_type="fabric", mc_version="1.21", mods=[sodium]
+        )
+
+        assert len(result.missing_deps) == 1
+        assert result.version_unsatisfied == []
+
+    def test_empty_range_present_is_not_flagged(self) -> None:
+        """A present dep with no declared range is satisfied (range == any)."""
+
+        sodium = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", required=True)],
+        )
+        fabric_api = _mod(mod_identifier="fabric-api", version_number="0.1.0")
+        result = validate_mod_set(
+            server_type="fabric", mc_version="1.21", mods=[sodium, fabric_api]
+        )
+
+        assert result.version_unsatisfied == []
+
+    def test_provides_version_is_used_for_range_check(self) -> None:
+        """A dep satisfied via ``provides`` is range-checked against that jar."""
+
+        sodium = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", required=True, version_range=">=0.90.0")],
+        )
+        bundle = _mod(
+            mod_identifier="qfapi", provides=["fabric-api"], version_number="0.50.0"
+        )
+        result = validate_mod_set(
+            server_type="fabric", mc_version="1.21", mods=[sodium, bundle]
+        )
+
+        assert result.missing_deps == []
+        assert len(result.version_unsatisfied) == 1
+        assert result.version_unsatisfied[0].present_version == "0.50.0"
+
+    def test_forge_maven_interval_out_of_range_is_flagged(self) -> None:
+        """A Forge dep uses Maven interval notation for its range."""
+
+        jei = _mod(
+            mod_identifier="jei",
+            loader_type="forge",
+            dependencies=[_dep("forge-lib", required=True, version_range="[2.0,)")],
+        )
+        lib = _mod(
+            mod_identifier="forge-lib", loader_type="forge", version_number="1.5"
+        )
+        result = validate_mod_set(
+            server_type="forge", mc_version="1.21", mods=[jei, lib]
+        )
+
+        assert len(result.version_unsatisfied) == 1
+        assert result.version_unsatisfied[0].version_range == "[2.0,)"
 
 
 class TestConflicts:

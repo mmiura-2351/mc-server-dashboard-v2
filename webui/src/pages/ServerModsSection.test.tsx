@@ -104,6 +104,7 @@ type ModValidation = components["schemas"]["ModValidationResponse"];
 
 const EMPTY_VALIDATION: ModValidation = {
   missing_deps: [],
+  version_unsatisfied: [],
   conflicts: [],
   loader_mismatch: [],
   mc_mismatch: [],
@@ -252,6 +253,30 @@ describe("ServerModsSection — validation checklist", () => {
     // The mod_id resolves to the assigned mod's display name.
     expect(
       await screen.findByText(/Fabric API.*cloth-config/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a version-unsatisfied finding", async () => {
+    routeGet({
+      mods: [serverMod()],
+      validation: {
+        ...EMPTY_VALIDATION,
+        version_unsatisfied: [
+          {
+            mod_id: "mod-1",
+            depends_on: "fabric-api",
+            version_range: ">=0.90.0",
+            present_version: "0.80.0",
+          },
+        ],
+      },
+    });
+    await openSettings();
+
+    // The mod_id resolves to the assigned mod's display name; the present
+    // version and required range both surface in the finding.
+    expect(
+      await screen.findByText(/Fabric API.*fabric-api.*0\.90\.0.*0\.80\.0/),
     ).toBeInTheDocument();
   });
 
