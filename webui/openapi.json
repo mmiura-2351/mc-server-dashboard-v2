@@ -927,6 +927,23 @@
         "title": "ChangePasswordRequest",
         "type": "object"
       },
+      "ClientModListResponse": {
+        "description": "The mods a player's client needs for a server (side \u2208 {client, both}).",
+        "properties": {
+          "mods": {
+            "items": {
+              "$ref": "#/components/schemas/ModResponse"
+            },
+            "title": "Mods",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mods"
+        ],
+        "title": "ClientModListResponse",
+        "type": "object"
+      },
       "CommunityResponse": {
         "description": "Public view of a community (DATABASE.md Section 5; quotas unused in M1).",
         "properties": {
@@ -6179,6 +6196,116 @@
           }
         ],
         "summary": "Restore Backup"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/client-mods": {
+      "get": {
+        "description": "List the mods a client needs for a server (server:read, issue #1265).",
+        "operationId": "list_client_mods_api_communities__community_id__servers__server_id__client_mods_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientModListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Client Mods"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
+      "get": {
+        "description": "Bulk download the client modpack as a zip (server:read, issue #1265).",
+        "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Client Modpack"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/command": {

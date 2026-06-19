@@ -817,6 +817,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/client-mods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Client Mods
+         * @description List the mods a client needs for a server (server:read, issue #1265).
+         */
+        get: operations["list_client_mods_api_communities__community_id__servers__server_id__client_mods_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Client Modpack
+         * @description Bulk download the client modpack as a zip (server:read, issue #1265).
+         */
+        get: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/command": {
         parameters: {
             query?: never;
@@ -2268,6 +2308,14 @@ export interface components {
             current_password: string;
             /** New Password */
             new_password: string;
+        };
+        /**
+         * ClientModListResponse
+         * @description The mods a player's client needs for a server (side ∈ {client, both}).
+         */
+        ClientModListResponse: {
+            /** Mods */
+            mods: components["schemas"]["ModResponse"][];
         };
         /**
          * CommunityResponse
@@ -4972,6 +5020,70 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_client_mods_api_communities__community_id__servers__server_id__client_mods_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientModListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
             };
             /** @description Validation Error */
             422: {

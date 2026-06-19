@@ -22,13 +22,22 @@ Deployment rules:
 
 ``ListServerMods`` lists the mod set and attaches a phase-B validation checklist
 (issue #1263) computed by the pure :func:`validate_mod_set`.
+
+``ListClientMods`` / ``DownloadClientModpack`` (issue #1265) serve the *client*
+side of the set: the assigned, enabled mods whose side ∈ {``client``, ``both``}.
+These are read-only (no working-set mutation, no at-rest gate); the download
+streams the jars into a single zip with bounded memory.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.client_modpack_zip import (
+    stream_client_modpack,
+)
 from mc_server_dashboard_api.servers.application.mod_validation import (
     ModValidation,
     validate_mod_set,
@@ -357,3 +366,82 @@ class ListServerMods:
             mods=[mod for _, mod in entries],
         )
         return ServerModSet(entries=entries, validation=validation)
+
+
+def _needs_client(mod: Mod) -> bool:
+    """A mod the client needs: its side reaches the client (client or both)."""
+
+    return mod.side in ("client", "both")
+
+
+async def _select_client_mods(
+    uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
+) -> list[Mod]:
+    """Return the server's assigned, enabled, client-needed mods.
+
+    Selection (epic #1258): assigned to the server, ``enabled``, side ∈
+    {``client``, ``both``}. Server-only mods are excluded; a disabled assignment
+    is excluded even when its side reaches the client. Ordered by the assignment
+    order (``list_assignments_for_server`` orders by ``created_at``).
+    """
+
+    async with uow:
+        server = await uow.servers.get_by_id(server_id)
+        if server is None or server.community_id != community_id:
+            raise ServerNotFoundError(str(server_id.value))
+
+        mods: list[Mod] = []
+        for assignment in await uow.mods.list_assignments_for_server(server_id):
+            if not assignment.enabled:
+                continue
+            mod = await uow.mods.get_by_id(assignment.mod_id)
+            if mod is not None and _needs_client(mod):
+                mods.append(mod)
+    return mods
+
+
+@dataclass(frozen=True)
+class ListClientMods:
+    """List the mods a player's client needs for a server (issue #1265).
+
+    Read-only: the assigned, enabled mods with side ∈ {client, both}. Does not
+    touch the working set, so no at-rest gate.
+    """
+
+    uow: UnitOfWork
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> list[Mod]:
+        return await _select_client_mods(self.uow, community_id, server_id)
+
+
+@dataclass(frozen=True)
+class DownloadClientModpack:
+    """Stream the client-needed jars of a server as a single zip (issue #1265).
+
+    Selects the same mods as :class:`ListClientMods`, then streams their jars
+    from the :class:`ModStore` into one zip with bounded memory. Returns the byte
+    stream paired with the server name so the HTTP layer can name the download.
+    """
+
+    uow: UnitOfWork
+    store: ModStore
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> tuple[AsyncIterator[bytes], str]:
+        async with self.uow:
+            server = await self.uow.servers.get_by_id(server_id)
+            if server is None or server.community_id != community_id:
+                raise ServerNotFoundError(str(server_id.value))
+            server_name = server.name.value
+
+        mods = await _select_client_mods(self.uow, community_id, server_id)
+        return stream_client_modpack(self.store, mods), server_name
