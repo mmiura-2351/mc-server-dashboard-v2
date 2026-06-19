@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.domain.errors import (
+    ModAlreadyExistsError,
     PortAlreadyTakenError,
     ServerNameAlreadyExistsError,
     SlugAlreadyTakenError,
@@ -82,6 +83,13 @@ async def test_commit_translates_game_port_violation() -> None:
 async def test_commit_translates_slug_violation() -> None:
     uow, session = _uow_with_commit_error("uq_server_slug")
     with pytest.raises(SlugAlreadyTakenError):
+        await uow.commit()
+    assert session.rolled_back is True
+
+
+async def test_commit_translates_mod_sha256_violation() -> None:
+    uow, session = _uow_with_commit_error("uq_mods_sha256_hash")
+    with pytest.raises(ModAlreadyExistsError):
         await uow.commit()
     assert session.rolled_back is True
 

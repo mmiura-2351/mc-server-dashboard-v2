@@ -30,6 +30,7 @@ from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidModJarError,
+    ModAlreadyExistsError,
     ModIntegrityError,
     ModInUseError,
     ModNotFoundError,
@@ -178,7 +179,16 @@ async def _persist_mod(
 
     async with uow:
         await uow.mods.add(mod)
-        await uow.commit()
+        try:
+            await uow.commit()
+        except ModAlreadyExistsError:
+            # Lost the SHA-256 unique race: a concurrent identical upload committed
+            # between this caller's dedup pre-read and this commit (issue #1276).
+            # Re-fetch by sha256 and return the winner's entry — the same
+            # return-existing result the happy-path dedup gives, not a 500.
+            existing = await uow.mods.get_by_sha256(sha256)
+            assert existing is not None
+            return existing
 
     return mod
 
