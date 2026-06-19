@@ -2864,25 +2864,40 @@ export interface components {
         };
         /**
          * ResolutionEntryResponse
-         * @description One direct required dependency and how it can be resolved (issues #1294, #1295).
+         * @description One required dependency in the transitive closure and how it resolves.
          *
          *     ``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /
-         *     ``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod
-         *     only for ``resolvable_from_library``; it is ``None`` otherwise. ``replaces``
-         *     is non-empty only when that pick swaps out an already-assigned but
-         *     out-of-range version of the same id (a ``version_unsatisfied`` finding):
-         *     applying unassigns these stale mods and assigns ``mod`` so one in-range
-         *     version remains. An absent dep is a plain add with empty ``replaces``.
-         *     ``will_import`` carries the Modrinth project@version a ``needs_import`` dep
-         *     resolves to (#1295); it is ``None`` for every other status and for a
-         *     ``needs_import`` Modrinth cannot satisfy (that becomes ``unresolvable``).
+         *     ``needs_import`` / ``unresolvable`` / ``depth_exceeded`` (issues #1294, #1295,
+         *     #1296). ``mod`` carries the chosen library mod only for
+         *     ``resolvable_from_library``; it is ``None`` otherwise. ``replaces`` is
+         *     non-empty only when that pick swaps out an already-assigned but out-of-range
+         *     version of the same id (a ``version_unsatisfied`` finding): applying unassigns
+         *     these stale mods and assigns ``mod`` so one in-range version remains. An absent
+         *     dep is a plain add with empty ``replaces``. ``will_import`` carries the
+         *     Modrinth project@version a ``needs_import`` dep resolves to (#1295); it is
+         *     ``None`` for every other status and for a ``needs_import`` Modrinth cannot
+         *     satisfy (that becomes ``unresolvable``).
+         *
+         *     Transitive-walk fields (#1296): ``depth`` is the distance from the assigned set
+         *     (``0`` for a direct dep of an assigned mod, ``1`` for a dep of a depth-0 pick,
+         *     …); ``required_by`` is the id whose resolution surfaced this dep (``None`` at
+         *     depth 0); ``depth_exceeded`` marks a dep cut off past the bounded walk depth.
+         *     ``blocked`` is ``True`` when auto-adding this resolved dep would introduce a
+         *     conflict with a mod present or being added — it is reported but apply never
+         *     auto-adds it.
          */
         ResolutionEntryResponse: {
+            /** Blocked */
+            blocked: boolean;
             /** Dep Identifier */
             dep_identifier: string;
+            /** Depth */
+            depth: number;
             mod: components["schemas"]["ModResponse"] | null;
             /** Replaces */
             replaces: components["schemas"]["ModResponse"][];
+            /** Required By */
+            required_by: string | null;
             /** Required Range */
             required_range: string;
             /** Status */

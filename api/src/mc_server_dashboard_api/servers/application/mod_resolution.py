@@ -40,13 +40,34 @@ CurseForge is deferred, #1269):
   assigns it via :class:`AssignMods`, then re-plans. A Modrinth lookup/import
   failure for one dep is isolated (recorded on that entry, the rest still apply).
 
-Scope (per #1294/#1295): only the DIRECT required deps of the currently-assigned
-set. Transitive closure (deps-of-deps) is C4 (#1296).
+C4 (#1296) extends resolution from the direct deps to the **full transitive
+closure** (:func:`resolve_closure`):
+
+* The walk is breadth-first from the assigned set. A resolved dep is added to the
+  closure and its OWN required deps are then walked at the next depth — a library
+  pick expands through the chosen jar's manifest ``dependencies``, a Modrinth
+  ``will_import`` through the selected version's catalog dependency edges — so the
+  plan covers transitively-required mods, not just first-level ones.
+* It is **cycle-safe and bounded**: each dep id is classified at most once
+  (a cycle A→B→A terminates), and the walk stops expanding past
+  :data:`MAX_RESOLUTION_DEPTH`; a dep past the bound is reported ``depth_exceeded``
+  rather than recursed. Each entry carries its ``depth`` and ``required_by`` so the
+  transitive chain is visible in the plan.
+* **Conflict detection spans the whole closure**: a resolved dep whose mod would
+  break — or be broken by — a mod present or being added is marked ``blocked``,
+  and the subtree that exists *only* because a blocked mod required it is pruned
+  (also ``blocked``), so a transitive conflict blocks its whole orphaned subtree.
+  Blocking and pruning iterate to a fixpoint — pruning a dep can change what
+  conflicts another mod. A blocked entry is reported (so the user decides) but
+  apply never auto-adds it.
+
+Scope (per #1296): presence + per-edge range satisfaction across the closure; no
+full SAT / optimal cross-graph version selection.
 
 Pure: :func:`resolve_dependencies` does no I/O.
-:func:`resolve_imports_from_catalog` does read-only catalog I/O. The use cases
-load the data and, for apply, delegate the mutation to :class:`ImportMod` /
-:class:`AssignMods`.
+:func:`resolve_imports_from_catalog` and :func:`resolve_closure` do read-only
+catalog I/O. The use cases load the data and, for apply, delegate the mutation to
+:class:`ImportMod` / :class:`AssignMods`.
 """
 
 from __future__ import annotations
@@ -94,7 +115,13 @@ ResolutionStatus = Literal[
     "resolvable_from_library",
     "needs_import",
     "unresolvable",
+    "depth_exceeded",
 ]
+
+#: How deep the transitive dependency walk recurses before it stops expanding
+#: the frontier (#1296). A deeper-than-this dep is reported ``depth_exceeded``
+#: rather than resolved, so a pathological graph can never loop or blow the stack.
+MAX_RESOLUTION_DEPTH = 10
 
 
 @dataclass(frozen=True)
@@ -138,6 +165,24 @@ class ResolutionEntry:
     Set by :func:`resolve_imports_from_catalog` for a ``needs_import`` entry when
     Modrinth has a compatible version; ``None`` otherwise. On apply this version is
     imported into the library and assigned."""
+    depth: int = 0
+    """How far from the assigned set this dep sits in the transitive walk (#1296).
+
+    ``0`` is a direct required dep of an assigned mod; ``1`` is a dep of a mod
+    resolved at depth 0; and so on. The walk stops expanding past
+    :data:`MAX_RESOLUTION_DEPTH`."""
+    required_by: str | None = None
+    """The id whose resolution surfaced this dep, or ``None`` for a depth-0 dep.
+
+    For a transitive dep it is the resolving mod's ``mod_identifier`` (or the
+    depended-on Modrinth slug) that pulled this one in, so the chain is visible."""
+    blocked: bool = False
+    """Whether auto-adding this resolved dep would introduce a conflict (#1296).
+
+    A resolved entry (``resolvable_from_library`` / ``needs_import``) is blocked
+    when the mod it would add breaks — or is broken by — a mod already present or
+    being added elsewhere in the closure. Apply skips a blocked entry: the user
+    must resolve the conflict by hand."""
 
 
 @dataclass(frozen=True)
@@ -517,6 +562,451 @@ async def _resolve_will_import(
     )
 
 
+# ---------------------------------------------------------------------------
+# Transitive closure walk + conflict detection (#1296)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _FrontierDep:
+    """One dependency edge queued for resolution at a given depth."""
+
+    identifier: str
+    version_range: str
+    loader: str
+    """The depending mod's loader, for range evaluation (C1 dialect)."""
+    project_id: str | None
+    """A Modrinth project id captured on the edge, if any (C3 direct lookup)."""
+    depth: int
+    required_by: str | None
+    """The id whose resolution surfaced this edge (``None`` at depth 0)."""
+
+
+def _frontier_from_mod(
+    mod: Mod, depth: int, required_by: str | None
+) -> list[_FrontierDep]:
+    """The required (non-conflict) dep edges of ``mod`` as frontier entries."""
+
+    frontier: list[_FrontierDep] = []
+    for dep in mod.dependencies:
+        if not dep.get("required") or dep.get("conflict"):
+            continue
+        target = dep.get("mod_identifier")
+        if not isinstance(target, str):
+            continue
+        raw_range = dep.get("version_range")
+        version_range = raw_range if isinstance(raw_range, str) else ""
+        project_id = dep.get("project_id")
+        frontier.append(
+            _FrontierDep(
+                identifier=target,
+                version_range=version_range,
+                loader=mod.loader_type,
+                project_id=project_id if isinstance(project_id, str) else None,
+                depth=depth,
+                required_by=required_by,
+            )
+        )
+    return frontier
+
+
+def _conflict_edges(mods: list[Mod]) -> list[tuple[str, str]]:
+    """``(declaring_id, target_id)`` pairs for every ``conflict`` dep edge."""
+
+    edges: list[tuple[str, str]] = []
+    for mod in mods:
+        for dep in mod.dependencies:
+            if not dep.get("conflict"):
+                continue
+            target = dep.get("mod_identifier")
+            if isinstance(target, str):
+                edges.append((mod.mod_identifier, target))
+    return edges
+
+
+async def resolve_closure(
+    *,
+    server_type: str,
+    mc_version: str,
+    assigned: list[Mod],
+    library: list[Mod],
+    catalog: CatalogProvider,
+) -> ResolutionPlan:
+    """Resolve the full transitive closure of a server's required deps (#1296).
+
+    Walks deps-of-deps breadth-first from the assigned set: at each level every
+    unvisited required dep is classified against the closure-so-far + library
+    (:func:`_best_candidate`), and a ``needs_import`` is enriched with a Modrinth
+    ``will_import`` (:func:`_resolve_will_import`). A resolved dep is added to the
+    closure and its OWN required deps are queued at the next depth, so the plan
+    covers transitively-required mods. A library pick expands through the chosen
+    jar's manifest ``dependencies``; a Modrinth ``will_import`` expands through the
+    selected version's catalog dependency edges.
+
+    Bounded and cycle-safe: a dep id is classified at most once (``visited``), so a
+    cycle (A→B→A) terminates; the walk stops expanding past
+    :data:`MAX_RESOLUTION_DEPTH`, beyond which a frontier dep is reported
+    ``depth_exceeded`` rather than recursed.
+
+    After the walk, :func:`_block_and_prune` runs conflict detection over the
+    closure: a resolved entry whose mod would break — or be broken by — another
+    mod present or added is marked ``blocked``, and the orphaned subtree that
+    exists only because a blocked mod required it is pruned (``blocked`` too), so
+    apply auto-adds neither. The validation block is recomputed over the surviving
+    set (the orphans excluded) so transitive findings (missing, version, conflict)
+    surface without an orphan skewing them.
+    """
+
+    closure: list[Mod] = list(assigned)
+    entries: list[ResolutionEntry] = []
+    visited: set[str] = set()
+    # Every requirer (by added-id, or ``None`` for the assigned root) that pulled in
+    # each dep id — a dep can have more than one requirer, but is classified once.
+    # Drives orphan-of-blocked pruning: a dep survives if any requirer survives.
+    requirers: dict[str, set[str | None]] = {}
+    frontier: list[_FrontierDep] = []
+    for mod in assigned:
+        frontier.extend(_frontier_from_mod(mod, depth=0, required_by=None))
+
+    while frontier:
+        next_frontier: list[_FrontierDep] = []
+        provided = _provided_versions(closure)
+        for dep in frontier:
+            requirers.setdefault(dep.identifier, set()).add(dep.required_by)
+            if dep.identifier in visited:
+                continue
+            visited.add(dep.identifier)
+
+            present = provided.get(dep.identifier)
+            if present is not None and version_satisfies(
+                present, dep.version_range, dep.loader
+            ):
+                entries.append(
+                    ResolutionEntry(
+                        dep.identifier,
+                        dep.version_range,
+                        "already_satisfied",
+                        depth=dep.depth,
+                        required_by=dep.required_by,
+                    )
+                )
+                continue
+
+            if dep.depth >= MAX_RESOLUTION_DEPTH:
+                entries.append(
+                    ResolutionEntry(
+                        dep.identifier,
+                        dep.version_range,
+                        "depth_exceeded",
+                        depth=dep.depth,
+                        required_by=dep.required_by,
+                    )
+                )
+                continue
+
+            entry, resolved_mod, resolved_will = await _classify_frontier_dep(
+                dep,
+                server_type=server_type,
+                mc_version=mc_version,
+                assigned=closure,
+                library=library,
+                catalog=catalog,
+            )
+            entries.append(entry)
+
+            # Expand the resolved dep: a library pick through its manifest deps, a
+            # Modrinth pick through its version's catalog deps. The closure grows
+            # so the next level sees the new id as provided (cycle termination).
+            if resolved_mod is not None:
+                closure.append(resolved_mod)
+                next_frontier.extend(
+                    _frontier_from_mod(
+                        resolved_mod,
+                        depth=dep.depth + 1,
+                        required_by=resolved_mod.mod_identifier,
+                    )
+                )
+            elif resolved_will is not None:
+                next_frontier.extend(
+                    await _frontier_from_will_import(
+                        resolved_will,
+                        catalog=catalog,
+                        depth=dep.depth + 1,
+                        loader=dep.loader,
+                    )
+                )
+        frontier = next_frontier
+
+    entries, validation_mods = _block_and_prune(
+        entries, assigned=assigned, requirers=requirers
+    )
+    validation = validate_mod_set(
+        server_type=server_type, mc_version=mc_version, mods=validation_mods
+    )
+    return ResolutionPlan(entries=entries, validation=validation)
+
+
+async def _classify_frontier_dep(
+    dep: _FrontierDep,
+    *,
+    server_type: str,
+    mc_version: str,
+    assigned: list[Mod],
+    library: list[Mod],
+    catalog: CatalogProvider,
+) -> tuple[ResolutionEntry, Mod | None, WillImport | None]:
+    """Classify one frontier dep; return its entry plus what it resolved to.
+
+    Mirrors the per-dep logic of :func:`resolve_dependencies` +
+    :func:`resolve_imports_from_catalog`, but for a single edge at a known depth.
+    Returns ``(entry, library_mod, will_import)``: at most one of the latter two
+    is set, and identifies what to expand next.
+    """
+
+    required = _RequiredDep(dep.identifier, dep.version_range, dep.loader)
+    candidate = _best_candidate(
+        required, server_type=server_type, mc_version=mc_version, library=library
+    )
+    if candidate is not None:
+        present = _provided_versions(assigned).get(dep.identifier)
+        replaces = (
+            _stale_providers(assigned, dep.identifier, candidate)
+            if present is not None
+            else []
+        )
+        entry = ResolutionEntry(
+            dep.identifier,
+            dep.version_range,
+            "resolvable_from_library",
+            mod=candidate,
+            replaces=replaces,
+            depth=dep.depth,
+            required_by=dep.required_by,
+        )
+        return entry, candidate, None
+
+    will_import = await _resolve_will_import(
+        catalog,
+        dep_identifier=dep.identifier,
+        version_range=dep.version_range,
+        range_loader=dep.loader,
+        project_id=dep.project_id,
+        server_type=server_type,
+        mc_version=mc_version,
+    )
+    status: ResolutionStatus = "needs_import" if will_import else "unresolvable"
+    entry = ResolutionEntry(
+        dep.identifier,
+        dep.version_range,
+        status,
+        will_import=will_import,
+        depth=dep.depth,
+        required_by=dep.required_by,
+    )
+    return entry, None, will_import
+
+
+async def _frontier_from_will_import(
+    will: WillImport,
+    *,
+    catalog: CatalogProvider,
+    depth: int,
+    loader: str,
+) -> list[_FrontierDep]:
+    """The required deps of a Modrinth ``will_import`` version as frontier entries.
+
+    A catalog dependency edge carries only a ``project_id`` (no manifest id or
+    range), so each required edge is queued keyed by that ``project_id``: the next
+    level resolves it through the same Modrinth path (direct project lookup). A
+    catalog failure yields no expansion — the rest of the closure still resolves.
+    """
+
+    try:
+        version = await catalog.get_version(will.version_id)
+    except CatalogError:
+        return []
+    frontier: list[_FrontierDep] = []
+    for cdep in version.dependencies:
+        if cdep.dependency_type != "required" or cdep.project_id is None:
+            continue
+        frontier.append(
+            _FrontierDep(
+                identifier=cdep.project_id,
+                version_range="",
+                loader=loader,
+                project_id=cdep.project_id,
+                depth=depth,
+                required_by=will.slug,
+            )
+        )
+    return frontier
+
+
+def _block_and_prune(
+    entries: list[ResolutionEntry],
+    *,
+    assigned: list[Mod],
+    requirers: dict[str, set[str | None]],
+) -> tuple[list[ResolutionEntry], list[Mod]]:
+    """Block conflicting adds and prune the orphans they leave behind (#1296).
+
+    Two reasons an added entry must not be auto-added:
+
+    * **Conflict** — the mod it would add either declares a ``conflict`` edge
+      against an id present/added, or is itself the target of such an edge from
+      another present/added mod.
+    * **Orphan-of-blocked** — it exists in the closure *only* because a blocked
+      mod required it: none of its requirers (``requirers`` maps each dep id to
+      every requirer that pulled it in) is the assigned root or a surviving
+      (non-blocked) added entry. A dep required by both a blocked and a surviving
+      mod keeps a valid requirer and is not pruned.
+
+    Blocking one mod and pruning its subtree changes which ids are present, which
+    can change conflict detection for other mods (a pruned dep may have been
+    someone's conflict target). So this iterates to a fixpoint: detect conflicts
+    over the surviving set, mark them blocked, prune the orphans-of-blocked,
+    recompute the present set, and repeat until the blocked set stops growing. The
+    blocked set only grows and the closure is finite, so the loop terminates.
+
+    Returns the entries (with ``blocked`` set on every conflicting/orphaned one)
+    and the mod set for the validation block. Conflict detection excludes *all*
+    blocked entries (an orphan must not pollute ``present_ids``), but the
+    validation set keeps the conflict-blocked picks — so the conflict that caused
+    the block still surfaces to the user — while dropping the silent orphans.
+    """
+
+    assigned_ids: set[str] = set()
+    for mod in assigned:
+        assigned_ids.add(mod.mod_identifier)
+        assigned_ids.update(mod.provides)
+
+    conflict_blocked: set[int] = set()
+    orphan_blocked: set[int] = set()
+    while True:
+        blocked = conflict_blocked | orphan_blocked
+        present_ids = _present_ids(entries, assigned_ids, blocked)
+        edges = _conflict_edges(_surviving_mods(entries, assigned, blocked))
+        broken_ids = {target for _d, target in edges if target in present_ids}
+        breaking_ids = {decl for decl, target in edges if target in present_ids}
+        conflict_ids = broken_ids | breaking_ids
+
+        added_ids = {
+            added_id
+            for idx, entry in enumerate(entries)
+            if idx not in blocked and (added_id := _entry_added_id(entry)) is not None
+        }
+
+        new_conflict: set[int] = set()
+        new_orphan: set[int] = set()
+        for idx, entry in enumerate(entries):
+            if idx in blocked:
+                continue
+            added_id = _entry_added_id(entry)
+            if added_id is None:
+                continue
+            # A direct conflict participant is blocked outright.
+            if added_id in conflict_ids:
+                new_conflict.add(idx)
+                continue
+            # Otherwise it survives only if some requirer survives: the assigned
+            # root (``None``), an assigned id, or a still-added entry's id. A dep
+            # shared by a blocked and a surviving requirer keeps a valid requirer.
+            edge_requirers = requirers.get(entry.dep_identifier, {entry.required_by})
+            if any(
+                req is None or req in assigned_ids or req in added_ids
+                for req in edge_requirers
+            ):
+                continue
+            new_orphan.add(idx)
+
+        if not new_conflict and not new_orphan:
+            break
+        conflict_blocked |= new_conflict
+        orphan_blocked |= new_orphan
+
+    blocked = conflict_blocked | orphan_blocked
+    # Validation keeps the conflict-blocked picks (so the conflict reports) but
+    # not the orphans (their requirer is gone — reporting them would be noise).
+    validation_mods = _surviving_mods(entries, assigned, orphan_blocked)
+    return _mark_blocked(entries, blocked), validation_mods
+
+
+def _present_ids(
+    entries: list[ResolutionEntry],
+    assigned_ids: set[str],
+    blocked: set[int],
+) -> set[str]:
+    """Every id present if the plan applies, excluding the blocked entries.
+
+    A blocked entry adds nothing, so its id is left out — neither a conflict-blocked
+    pick nor an orphan pollutes the conflict-detection present set.
+    """
+
+    present_ids: set[str] = set(assigned_ids)
+    for idx, entry in enumerate(entries):
+        if idx in blocked:
+            continue
+        if entry.status == "resolvable_from_library" and entry.mod is not None:
+            present_ids.add(entry.mod.mod_identifier)
+            present_ids.update(entry.mod.provides)
+        elif entry.status == "needs_import" and entry.will_import is not None:
+            present_ids.add(entry.will_import.slug)
+    return present_ids
+
+
+def _surviving_mods(
+    entries: list[ResolutionEntry],
+    assigned: list[Mod],
+    excluded: set[int],
+) -> list[Mod]:
+    """The assigned mods plus every library pick whose entry is not ``excluded``."""
+
+    mods: list[Mod] = list(assigned)
+    for idx, entry in enumerate(entries):
+        if idx in excluded:
+            continue
+        if entry.status == "resolvable_from_library" and entry.mod is not None:
+            mods.append(entry.mod)
+    return mods
+
+
+def _mark_blocked(
+    entries: list[ResolutionEntry], blocked: set[int]
+) -> list[ResolutionEntry]:
+    """A copy of ``entries`` with ``blocked`` set on every index in ``blocked``."""
+
+    return [
+        _replace_entry_blocked(entry) if idx in blocked else entry
+        for idx, entry in enumerate(entries)
+    ]
+
+
+def _entry_added_id(entry: ResolutionEntry) -> str | None:
+    """The id a resolved entry would add, or ``None`` if it adds nothing."""
+
+    if entry.status == "resolvable_from_library" and entry.mod is not None:
+        return entry.mod.mod_identifier
+    if entry.status == "needs_import" and entry.will_import is not None:
+        return entry.will_import.slug
+    return None
+
+
+def _replace_entry_blocked(entry: ResolutionEntry) -> ResolutionEntry:
+    """A copy of ``entry`` with ``blocked`` set (frozen dataclasses are immutable)."""
+
+    return ResolutionEntry(
+        entry.dep_identifier,
+        entry.required_range,
+        entry.status,
+        mod=entry.mod,
+        replaces=entry.replaces,
+        will_import=entry.will_import,
+        depth=entry.depth,
+        required_by=entry.required_by,
+        blocked=True,
+    )
+
+
 async def _load_resolution_inputs(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
 ) -> tuple[str, str, list[Mod], list[Mod]]:
@@ -541,9 +1031,12 @@ async def _load_resolution_inputs(
 class ResolveServerMods:
     """Plan a server's dependency resolution against the library + Modrinth.
 
-    Classifies the direct required deps against the library (#1294), then enriches
-    each import-needing entry with a concrete Modrinth ``will_import`` candidate
-    (#1295). Read-only end to end: it only queries the catalog — no import.
+    Walks the full transitive closure of the assigned set's required deps (#1296):
+    each dep is classified against the library (#1294) and, when import-needing,
+    enriched with a concrete Modrinth ``will_import`` candidate (#1295); a resolved
+    dep's own deps are then walked too (bounded, cycle-safe). A resolution that
+    would introduce a conflict is marked ``blocked``. Read-only end to end: it only
+    queries the catalog — no import.
     """
 
     uow: UnitOfWork
@@ -555,18 +1048,12 @@ class ResolveServerMods:
         server_type, mc_version, assigned, library = await _load_resolution_inputs(
             self.uow, community_id, server_id
         )
-        plan = resolve_dependencies(
+        return await resolve_closure(
             server_type=server_type,
             mc_version=mc_version,
             assigned=assigned,
             library=library,
-        )
-        return await resolve_imports_from_catalog(
-            plan,
             catalog=self.catalog,
-            server_type=server_type,
-            mc_version=mc_version,
-            assigned=assigned,
         )
 
 
@@ -615,26 +1102,24 @@ class ApplyServerModResolution:
         server_type, mc_version, assigned, library = await _load_resolution_inputs(
             self.uow, community_id, server_id
         )
-        plan = resolve_dependencies(
+        plan = await resolve_closure(
             server_type=server_type,
             mc_version=mc_version,
             assigned=assigned,
             library=library,
-        )
-        plan = await resolve_imports_from_catalog(
-            plan,
             catalog=self.catalog,
-            server_type=server_type,
-            mc_version=mc_version,
-            assigned=assigned,
         )
 
         # De-dup the picks: two deps can resolve to the same library mod. Collect
         # the stale assignments each replacement supersedes so they are unassigned
-        # before the new version is added (never the chosen mod itself).
+        # before the new version is added (never the chosen mod itself). A
+        # ``blocked`` entry would introduce a conflict — it is reported but never
+        # auto-added (#1296).
         picked: dict[ModId, None] = {}
         replaced: dict[ModId, None] = {}
         for entry in plan.entries:
+            if entry.blocked:
+                continue
             if entry.status == "resolvable_from_library" and entry.mod is not None:
                 picked[entry.mod.id] = None
                 for stale in entry.replaces:
@@ -669,7 +1154,7 @@ class ApplyServerModResolution:
         failed: list[str] = []
         for entry in plan.entries:
             wi = entry.will_import
-            if wi is None:
+            if wi is None or entry.blocked:
                 continue
             if wi.version_id in imported:
                 continue
