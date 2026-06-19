@@ -126,6 +126,13 @@ def _make_mod(
     )
 
 
+def _deployed(mod: Mod) -> str:
+    """The mod-id-namespaced working-set path a mod's jar deploys to (#1279)."""
+
+    target_dir = "plugins" if mod.loader_type == "paper" else "mods"
+    return f"{target_dir}/{mod.id.value.hex}-{mod.filename}"
+
+
 def _seed_mod(uow: FakeUnitOfWork, store: FakeModStore, mod: Mod) -> Mod:
     uow.mods.mods[mod.id] = mod
     store.blobs[mod.id] = b"JAR!"
@@ -164,8 +171,8 @@ class TestAssignMods:
         assert result[0].mod_id == mod.id
         assert result[0].enabled is True
         assert result[0].assigned_by == user_id
-        # Jar physically placed into mods/.
-        assert file_store.files["mods/sodium.jar"] == b"JAR!"
+        # Jar physically placed into mods/ under its mod-id-namespaced path.
+        assert file_store.files[_deployed(mod)] == b"JAR!"
         # Row committed and lock held.
         assert uow.commits == 1
         assert lock.events == [(server.id, "acquire"), (server.id, "release")]
@@ -187,8 +194,8 @@ class TestAssignMods:
             assigned_by=uuid.uuid4(),
         )
 
-        assert file_store.files["plugins/essentials.jar"] == b"JAR!"
-        assert "mods/essentials.jar" not in file_store.files
+        assert file_store.files[_deployed(mod)] == b"JAR!"
+        assert _deployed(mod).startswith("plugins/")
 
     @pytest.mark.parametrize("loader", ["forge", "neoforge", "quilt"])
     async def test_assign_deploys_other_loaders_into_mods_dir(
@@ -208,7 +215,8 @@ class TestAssignMods:
             assigned_by=uuid.uuid4(),
         )
 
-        assert file_store.files["mods/sodium.jar"] == b"JAR!"
+        assert file_store.files[_deployed(mod)] == b"JAR!"
+        assert _deployed(mod).startswith("mods/")
 
     async def test_assign_multiple_mods(self) -> None:
         server = _at_rest_server()
@@ -227,8 +235,8 @@ class TestAssignMods:
         )
 
         assert {a.mod_id for a in result} == {m1.id, m2.id}
-        assert "mods/a.jar" in file_store.files
-        assert "mods/b.jar" in file_store.files
+        assert _deployed(m1) in file_store.files
+        assert _deployed(m2) in file_store.files
         assert len(uow.mods.assignments) == 2
 
     async def test_assign_client_only_mod_not_deployed_server_side(self) -> None:
@@ -265,7 +273,32 @@ class TestAssignMods:
             assigned_by=uuid.uuid4(),
         )
 
-        assert file_store.files["mods/sodium.jar"] == b"JAR!"
+        assert file_store.files[_deployed(mod)] == b"JAR!"
+
+    async def test_assign_same_filename_mods_deploy_to_distinct_files(self) -> None:
+        # Two distinct library mods that happen to share a filename, both
+        # assigned to one server, must deploy to distinct on-disk files: the
+        # second must not overwrite the first (issue #1279).
+        server = _at_rest_server()
+        uow, file_store, store = _ctx(server)
+        m1 = _seed_mod(uow, store, _make_mod(filename="dup.jar", sha256="1" * 64))
+        m2 = _seed_mod(uow, store, _make_mod(filename="dup.jar", sha256="2" * 64))
+        store.blobs[m1.id] = b"FIRST"
+        store.blobs[m2.id] = b"SECOND"
+
+        uc = AssignMods(
+            uow=uow, file_store=file_store, store=store, clock=FakeClock(_NOW)
+        )
+        await uc(
+            community_id=_COMMUNITY_ID,
+            server_id=server.id,
+            mod_ids=[m1.id, m2.id],
+            assigned_by=uuid.uuid4(),
+        )
+
+        # Both jars are on disk under distinct paths; neither overwrote the other.
+        assert len(file_store.files) == 2
+        assert set(file_store.files.values()) == {b"FIRST", b"SECOND"}
 
     async def test_assign_idempotent_for_already_assigned(self) -> None:
         server = _at_rest_server()
@@ -355,7 +388,7 @@ class TestUnassignMod:
             mod_ids=[mod.id],
             assigned_by=uuid.uuid4(),
         )
-        assert "mods/sodium.jar" in file_store.files
+        assert _deployed(mod) in file_store.files
 
         uc = UnassignMod(
             uow=uow, file_store=file_store, store=store, lifecycle_lock=lock
@@ -363,7 +396,7 @@ class TestUnassignMod:
         await uc(community_id=_COMMUNITY_ID, server_id=server.id, mod_id=mod.id)
 
         assert len(uow.mods.assignments) == 0
-        assert "mods/sodium.jar" not in file_store.files
+        assert _deployed(mod) not in file_store.files
         assert lock.events == [(server.id, "acquire"), (server.id, "release")]
 
     async def test_unassign_removes_disabled_variant(self) -> None:
@@ -389,12 +422,12 @@ class TestUnassignMod:
             mod_id=mod.id,
             enabled=False,
         )
-        assert "mods/sodium.jar.disabled" in file_store.files
+        assert f"{_deployed(mod)}.disabled" in file_store.files
 
         uc = UnassignMod(uow=uow, file_store=file_store, store=store)
         await uc(community_id=_COMMUNITY_ID, server_id=server.id, mod_id=mod.id)
 
-        assert "mods/sodium.jar.disabled" not in file_store.files
+        assert f"{_deployed(mod)}.disabled" not in file_store.files
 
     async def test_unassign_rejects_unassigned(self) -> None:
         server = _at_rest_server()
@@ -442,8 +475,8 @@ class TestSetModEnabled:
         )
 
         assert assignment.enabled is False
-        assert "mods/sodium.jar" not in file_store.files
-        assert file_store.files["mods/sodium.jar.disabled"] == b"JAR!"
+        assert _deployed(mod) not in file_store.files
+        assert file_store.files[f"{_deployed(mod)}.disabled"] == b"JAR!"
 
     async def test_reenable_redeploys(self) -> None:
         server = _at_rest_server()
@@ -477,8 +510,8 @@ class TestSetModEnabled:
         )
 
         assert assignment.enabled is True
-        assert file_store.files["mods/sodium.jar"] == b"JAR!"
-        assert "mods/sodium.jar.disabled" not in file_store.files
+        assert file_store.files[_deployed(mod)] == b"JAR!"
+        assert f"{_deployed(mod)}.disabled" not in file_store.files
 
     async def test_toggle_client_only_updates_row_without_deploying(self) -> None:
         server = _at_rest_server()
@@ -539,6 +572,93 @@ class TestSetModEnabled:
                 mod_id=mod.id,
                 enabled=True,
             )
+
+
+class TestSameFilenameCollision:
+    """Two distinct mods sharing a filename, both on one server (issue #1279).
+
+    The deployed path is namespaced per-mod, so the two never collide. Each of
+    disable / unassign / re-enable operates only on the targeted mod's jar and
+    never touches the other's.
+    """
+
+    def _assign_pair(
+        self,
+    ) -> tuple[Server, FakeUnitOfWork, FakeFileStore, FakeModStore, Mod, Mod]:
+        server = _at_rest_server()
+        uow, file_store, store = _ctx(server)
+        m1 = _seed_mod(uow, store, _make_mod(filename="dup.jar", sha256="1" * 64))
+        m2 = _seed_mod(uow, store, _make_mod(filename="dup.jar", sha256="2" * 64))
+        store.blobs[m1.id] = b"FIRST"
+        store.blobs[m2.id] = b"SECOND"
+        return server, uow, file_store, store, m1, m2
+
+    async def _seed_both(
+        self,
+    ) -> tuple[Server, FakeUnitOfWork, FakeFileStore, FakeModStore, Mod, Mod]:
+        server, uow, file_store, store, m1, m2 = self._assign_pair()
+        assign = AssignMods(
+            uow=uow, file_store=file_store, store=store, clock=FakeClock(_NOW)
+        )
+        await assign(
+            community_id=_COMMUNITY_ID,
+            server_id=server.id,
+            mod_ids=[m1.id, m2.id],
+            assigned_by=uuid.uuid4(),
+        )
+        return server, uow, file_store, store, m1, m2
+
+    async def test_disabling_one_keeps_the_other_deployed(self) -> None:
+        server, uow, file_store, store, m1, m2 = await self._seed_both()
+
+        disable = SetModEnabled(
+            uow=uow, file_store=file_store, store=store, clock=FakeClock(_NOW)
+        )
+        await disable(
+            community_id=_COMMUNITY_ID,
+            server_id=server.id,
+            mod_id=m1.id,
+            enabled=False,
+        )
+
+        # m2's enabled jar survives; m1's content is kept under a .disabled path.
+        deployed = [p for p, c in file_store.files.items() if c == b"SECOND"]
+        assert len(deployed) == 1 and not deployed[0].endswith(".disabled")
+        disabled = [p for p, c in file_store.files.items() if c == b"FIRST"]
+        assert len(disabled) == 1 and disabled[0].endswith(".disabled")
+
+    async def test_unassigning_one_keeps_the_other_deployed(self) -> None:
+        server, uow, file_store, store, m1, m2 = await self._seed_both()
+
+        unassign = UnassignMod(uow=uow, file_store=file_store, store=store)
+        await unassign(community_id=_COMMUNITY_ID, server_id=server.id, mod_id=m1.id)
+
+        # m1's jar is gone; m2's jar is untouched.
+        assert list(file_store.files.values()) == [b"SECOND"]
+        assert len(uow.mods.assignments) == 1
+
+    async def test_reenabling_restores_the_right_jar(self) -> None:
+        server, uow, file_store, store, m1, m2 = await self._seed_both()
+
+        toggle = SetModEnabled(
+            uow=uow, file_store=file_store, store=store, clock=FakeClock(_NOW)
+        )
+        await toggle(
+            community_id=_COMMUNITY_ID,
+            server_id=server.id,
+            mod_id=m1.id,
+            enabled=False,
+        )
+        await toggle(
+            community_id=_COMMUNITY_ID,
+            server_id=server.id,
+            mod_id=m1.id,
+            enabled=True,
+        )
+
+        # Both back to two enabled jars with the right bytes; no .disabled left.
+        assert set(file_store.files.values()) == {b"FIRST", b"SECOND"}
+        assert not any(p.endswith(".disabled") for p in file_store.files)
 
 
 class TestListServerMods:

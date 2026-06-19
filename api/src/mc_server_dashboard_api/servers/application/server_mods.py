@@ -78,7 +78,17 @@ def _target_dir(loader_type: ModLoader) -> str:
 
 
 def _deployed_path(mod: Mod) -> str:
-    return f"{_target_dir(mod.loader_type)}/{mod.filename}"
+    """The deterministic, collision-free working-set path of a mod's jar.
+
+    Library filenames are not unique (only ``sha256_hash`` is deduped), so two
+    distinct mods can share a ``filename``. The path is namespaced by the mod id
+    so two distinct mods never resolve to the same on-disk file (issue #1279);
+    mod loaders (``mods/``) and Bukkit/Paper (``plugins/``) accept any jar name,
+    so the on-disk name is functionally irrelevant. This is the single source of
+    truth for the deployed path across deploy/disable/enable/unassign.
+    """
+
+    return f"{_target_dir(mod.loader_type)}/{mod.id.value.hex}-{mod.filename}"
 
 
 def _disabled_path(mod: Mod) -> str:
