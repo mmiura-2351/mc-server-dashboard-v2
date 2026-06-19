@@ -525,7 +525,7 @@ function BrowseDialog({
                       className="btn sm"
                       onClick={() => setSelected(hit)}
                     >
-                      {t("mods.browseDialog.import")}
+                      {t("mods.browseDialog.viewVersions")}
                     </button>
                   </li>
                 ))}

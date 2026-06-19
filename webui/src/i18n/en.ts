@@ -1360,7 +1360,7 @@ export const en = {
   "mods.browseDialog.search": "Search",
   "mods.browseDialog.searching": "Searching…",
   "mods.browseDialog.empty": "No results.",
-  "mods.browseDialog.prompt": "Enter a search term to find mods on Modrinth.",
+  "mods.browseDialog.viewVersions": "View versions",
   "mods.browseDialog.import": "Import",
   "mods.browseDialog.importing": "Importing…",
   "mods.browseDialog.imported": "Mod imported.",

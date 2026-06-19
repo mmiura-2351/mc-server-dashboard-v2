@@ -421,14 +421,16 @@ describe("mod library", () => {
       screen.getByRole("button", { name: t("mods.browseDialog.search") }),
     );
 
-    // Result hit shows; clicking Import drills into the project versions.
+    // Result hit shows; clicking View versions drills into the project versions.
     await screen.findByText("A rendering optimization mod.");
     expect(calls.some((c) => c.url.startsWith("/api/catalog/search"))).toBe(
       true,
     );
 
     fireEvent.click(
-      screen.getByRole("button", { name: t("mods.browseDialog.import") }),
+      screen.getByRole("button", {
+        name: t("mods.browseDialog.viewVersions"),
+      }),
     );
 
     // Project detail loads its versions; import the first version.

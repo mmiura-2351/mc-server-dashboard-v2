@@ -1369,7 +1369,7 @@ export const ja: Record<TranslationKey, string> = {
   "mods.browseDialog.search": "検索",
   "mods.browseDialog.searching": "検索しています…",
   "mods.browseDialog.empty": "結果がありません。",
-  "mods.browseDialog.prompt": "検索語を入力してModrinthでModを検索します。",
+  "mods.browseDialog.viewVersions": "バージョンを表示",
   "mods.browseDialog.import": "インポート",
   "mods.browseDialog.importing": "インポートしています…",
   "mods.browseDialog.imported": "Modをインポートしました。",
