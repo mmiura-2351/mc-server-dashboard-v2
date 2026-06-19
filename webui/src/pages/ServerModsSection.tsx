@@ -40,6 +40,19 @@ const SIDE_LABEL: Record<string, TranslationKey> = {
   both: "mods.side.both",
 };
 
+// Which library mod loaders a server loader can run (issue #1286). Mirrors the
+// canonical `_LOADER_COMPAT` map in
+// `api/.../servers/application/mod_validation.py`; the assign-dialog filter and
+// the backend validation must agree on which loaders are compatible. Keep the
+// two obviously in sync. A server loader absent from this map matches nothing.
+const LOADER_COMPAT: Record<string, readonly string[]> = {
+  fabric: ["fabric", "quilt"],
+  forge: ["forge", "neoforge"],
+  paper: ["paper"],
+  spigot: ["paper"],
+  vanilla: [],
+};
+
 function SideBadge({ side }: { side: string }) {
   const key = SIDE_LABEL[side];
   return <span className="badge">{key !== undefined ? t(key) : side}</span>;
@@ -449,9 +462,12 @@ function AssignDialog({
     });
   };
 
-  // Offer mods matching the server's loader that are not already assigned.
+  // Offer mods whose loader the server can run (LOADER_COMPAT, matching the
+  // backend validation policy) that are not already assigned.
+  const compatibleLoaders = LOADER_COMPAT[serverLoader] ?? [];
   const available: ModResponse[] = (libraryQuery.data?.mods ?? []).filter(
-    (mod) => mod.loader_type === serverLoader && !assignedIds.has(mod.id),
+    (mod) =>
+      compatibleLoaders.includes(mod.loader_type) && !assignedIds.has(mod.id),
   );
 
   return (

@@ -133,9 +133,9 @@ class TestConflicts:
     def test_marked_conflict_present_is_flagged(self) -> None:
         """A dependency entry marked as a conflict whose target is present."""
 
-        # The parser does not yet emit break/conflict entries; a hand-built dep
-        # with a ``conflict`` flag exercises the check the data will eventually
-        # supply (see mod_validation docstring).
+        # A hand-built dep with a ``conflict`` flag exercises the check in
+        # isolation; the end-to-end parsed-break case is covered separately
+        # (the parser emits these entries since #1288).
         mod_a = _mod(
             mod_identifier="optifabric",
             dependencies=[

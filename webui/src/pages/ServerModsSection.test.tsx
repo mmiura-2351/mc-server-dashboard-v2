@@ -271,6 +271,44 @@ describe("ServerModsSection — validation checklist", () => {
       await screen.findByText(/Fabric API.*forge.*fabric/),
     ).toBeInTheDocument();
   });
+
+  it("renders a conflict finding", async () => {
+    routeGet({
+      mods: [serverMod()],
+      validation: {
+        ...EMPTY_VALIDATION,
+        conflicts: [{ mod_id: "mod-1", conflicts_with: "optifine" }],
+      },
+    });
+    await openSettings();
+
+    // The mod_id resolves to the assigned mod's display name.
+    expect(await screen.findByText(/Fabric API.*optifine/)).toBeInTheDocument();
+  });
+
+  it("renders an mc-mismatch finding as a warning", async () => {
+    routeGet({
+      mods: [serverMod()],
+      validation: {
+        ...EMPTY_VALIDATION,
+        mc_mismatch: [
+          {
+            mod_id: "mod-1",
+            mod_mc_versions: ["1.20.4", "1.20.6"],
+            server_mc_version: "1.21.6",
+          },
+        ],
+      },
+    });
+    await openSettings();
+
+    const finding = await screen.findByText(
+      /Fabric API.*1\.21\.6.*1\.20\.4, 1\.20\.6/,
+    );
+    expect(finding).toBeInTheDocument();
+    // Warning severity (not the red `field-error`): rendered as `field-hint warn`.
+    expect(finding).toHaveClass("field-hint", "warn");
+  });
 });
 
 describe("ServerModsSection — assign flow", () => {
@@ -318,13 +356,20 @@ describe("ServerModsSection — assign flow", () => {
     );
   });
 
-  it("filters the library to the server's loader and excludes assigned mods", async () => {
+  it("filters the library to loader-compatible mods and excludes assigned mods", async () => {
+    // A fabric server runs fabric + quilt mods (LOADER_COMPAT mirrors the
+    // backend validation map): quilt is offered, forge is not.
     routeGet({
       mods: [serverMod({ mod: mod({ id: "mod-1" }) })],
       library: [
         mod({ id: "mod-1", display_name: "Fabric API" }), // already assigned
-        mod({ id: "mod-2", display_name: "Forge Mod", loader_type: "forge" }), // wrong loader
-        mod({ id: "mod-3", display_name: "Sodium" }), // assignable
+        mod({ id: "mod-2", display_name: "Forge Mod", loader_type: "forge" }), // incompatible loader
+        mod({ id: "mod-3", display_name: "Sodium" }), // assignable (fabric)
+        mod({
+          id: "mod-4",
+          display_name: "Quilt Mod",
+          loader_type: "quilt",
+        }), // assignable (quilt compatible with fabric)
       ],
     });
     await openSettings();
@@ -334,8 +379,10 @@ describe("ServerModsSection — assign flow", () => {
     );
 
     const checkboxes = await screen.findAllByRole("checkbox");
-    expect(checkboxes).toHaveLength(1);
+    expect(checkboxes).toHaveLength(2);
     expect(screen.getByText(/Sodium/)).toBeInTheDocument();
+    expect(screen.getByText(/Quilt Mod/)).toBeInTheDocument();
+    expect(screen.queryByText(/Forge Mod/)).not.toBeInTheDocument();
   });
 
   it("shows the empty message when no compatible mods remain", async () => {

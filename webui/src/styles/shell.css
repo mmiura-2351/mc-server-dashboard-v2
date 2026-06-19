@@ -938,9 +938,38 @@ body.col-resizing {
 .settings .field-hint.ok {
   color: var(--green);
 }
+/* Warning severity (#1286): the mod-validation MC-mismatch finding renders as a
+   `field-hint warn` — amber distinguishes it from a neutral hint and from the
+   red `field-error`. Mirrors `.field .hint.warn` / `.files .notice.warn`. */
+.settings .field-hint.warn {
+  color: var(--amber);
+}
 .settings .field-error {
   color: var(--red);
   font-size: 12px;
+}
+/* Mod management (#1267/#1286). The validation checklist wraps a heading and a
+   findings list; strip the default list bullets and give the findings a little
+   breathing room. */
+.server-mods-validation {
+  margin-top: 16px;
+}
+.server-mods-validation ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* Assign-dialog pick list — rendered inside the portaled Modal, so unscoped. */
+.mod-pick-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 /* ---------- Server create wizard (WEBUI_SPEC.md 6.3) ---------- */
 .wizard-steps {
