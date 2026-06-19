@@ -74,12 +74,17 @@ def version_satisfies(version: str, range_spec: str, loader: str) -> bool:
 
 # --- version comparison ----------------------------------------------------
 
-_PART_SPLIT = re.compile(r"[.\-+]")
+_PART_SPLIT = re.compile(r"[.\-]")
 
 
 def _components(version: str) -> list[object]:
-    """Split a version into comparable components (ints where numeric)."""
+    """Split a version into comparable components (ints where numeric).
 
+    Semver ``+build`` metadata is dropped first: per semver it MUST NOT affect
+    precedence, and real Fabric mod versions carry it (e.g. ``0.92.2+1.20.1``).
+    """
+
+    version = version.split("+", 1)[0]
     parts: list[object] = []
     for raw in _PART_SPLIT.split(version):
         if raw == "":

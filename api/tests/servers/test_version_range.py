@@ -125,6 +125,32 @@ class TestSemverCombinations:
         assert version_satisfies("0.9.0", ">=1.0", "quilt") is False
 
 
+class TestSemverBuildMetadata:
+    """Semver ``+build`` metadata must be ignored for precedence (issue #1293).
+
+    Real Fabric mod versions carry build metadata (e.g. ``0.92.2+1.20.1``,
+    ``0.11.2+build.123``); per semver it MUST NOT affect comparison.
+    """
+
+    @pytest.mark.parametrize(
+        ("version", "spec", "expected"),
+        [
+            ("1.0.0+build", ">=1.0.0", True),
+            ("0.92.2+1.20.1", "=0.92.2", True),
+            ("0.92.2+1.20.1", "0.92.2", True),
+            # A realistic Fabric-API-style version against a typical range.
+            ("0.92.2+1.20.1", ">=0.92.0", True),
+            ("0.11.2+build.123", ">=0.11.0", True),
+            # Build metadata on a genuinely out-of-range version stays False.
+            ("0.91.0+x", ">=0.92.0", False),
+        ],
+    )
+    def test_build_metadata_ignored(
+        self, version: str, spec: str, expected: bool
+    ) -> None:
+        assert version_satisfies(version, spec, "fabric") is expected
+
+
 class TestMavenIntervals:
     @pytest.mark.parametrize(
         ("version", "spec", "expected"),
