@@ -71,6 +71,13 @@ dependencies = [
     # protocol the servers-by-state gauge uses. 0.25.0 (2026-04-09) is well outside
     # the 7-day cooldown (Section 3); cap the next minor (0.x, Section 1).
     "prometheus-client>=0.25.0,<0.26",  # 2026-04-09
+    # YAML parsing for Paper/Bukkit plugin descriptors (plugin.yml /
+    # paper-plugin.yml) in the mod manifest parser (issue #1260). Forge/NeoForge
+    # TOML uses stdlib ``tomllib`` (Py3.11+) and Fabric/Quilt JSON uses ``json``,
+    # so YAML is the only manifest format needing a third-party parser. Confined
+    # to servers/application/mod_manifest.py. 6.0.2 (2024-08-06) is well outside
+    # the 7-day cooldown (Section 3); cap the next major (Section 1).
+    "pyyaml>=6.0.2,<7",                 # 2024-08-06
 ]
 
 [dependency-groups]
@@ -113,6 +120,11 @@ dev = [
     # outside the 7-day cooldown (Section 3); cap the next major (dev tooling,
     # Section 1).
     "pytest-xdist>=3.6.1,<4",
+    # Type stubs for PyYAML (no inline types) so the mod manifest parser type-
+    # checks under mypy strict (issue #1260). 6.0.12.20260510 (2026-05-10) is
+    # outside the 7-day cooldown (Section 3); cap the next major (dev tooling,
+    # Section 1).
+    "types-PyYAML>=6.0.12.20260510,<7",
 ]
 
 [build-system]

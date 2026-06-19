@@ -450,6 +450,17 @@ class InvalidResourcePackError(ServerError):
     """
 
 
+class InvalidModJarError(ServerError):
+    """An uploaded mod file could not be opened as a jar (zip) at all.
+
+    Raised by the manifest parser when the bytes are not a readable zip, carry
+    too many entries, or decompress past the size cap (a decompression bomb).
+    Distinct from a readable jar with no recognized loader manifest, which the
+    parser returns as a ``loader_type="unknown"`` result rather than raising.
+    The edge maps this to 422.
+    """
+
+
 class ResourcePackNotFoundError(ServerError):
     """A resource pack operation targeted a pack that does not exist.
 
