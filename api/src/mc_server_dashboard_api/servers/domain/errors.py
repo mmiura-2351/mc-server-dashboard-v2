@@ -461,6 +461,14 @@ class InvalidModJarError(ServerError):
     """
 
 
+class ModNotFoundError(ServerError):
+    """A mod-library operation targeted a mod that does not exist.
+
+    Raised by get/delete/download when the mod id is unknown. The edge maps this
+    to 404.
+    """
+
+
 class ResourcePackNotFoundError(ServerError):
     """A resource pack operation targeted a pack that does not exist.
 

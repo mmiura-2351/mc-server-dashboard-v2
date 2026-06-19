@@ -259,6 +259,12 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.application.mods import (
+    DeleteMod,
+    DownloadMod,
+    ListMods,
+    UploadMod,
+)
 from mc_server_dashboard_api.servers.application.port_availability import (
     CheckPort,
     ListAvailablePorts,
@@ -284,6 +290,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.file_store import (
     FileStore as ServersFileStore,
 )
+from mc_server_dashboard_api.servers.domain.mod_store import ModStore
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
@@ -1957,6 +1964,69 @@ def get_get_resource_pack_assignment(request: Request) -> GetResourcePackAssignm
 
     session_factory = create_session_factory(get_engine(request))
     return GetResourcePackAssignment(uow=ServersUnitOfWork(session_factory))
+
+
+def get_mod_store(request: Request) -> ModStore:
+    """Return the :class:`ModStore` adapter from app state (issue #1261).
+
+    Built by the app factory from the storage config; ``None`` when the storage
+    backend is ``fs`` (no fs adapter exists yet). A missing store is a 503.
+    """
+
+    store: ModStore | None = getattr(request.app.state, "mod_store", None)
+    if store is None:
+        raise problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "mod_store_unavailable",
+        )
+    return store
+
+
+def get_upload_mod(
+    request: Request,
+    store: Annotated[ModStore, Depends(get_mod_store)],
+) -> UploadMod:
+    """Assemble the :class:`UploadMod` use case (issue #1261)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UploadMod(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+        clock=ServersSystemClock(),
+    )
+
+
+def get_list_mods(request: Request) -> ListMods:
+    """Assemble the :class:`ListMods` use case (issue #1261)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListMods(uow=ServersUnitOfWork(session_factory))
+
+
+def get_delete_mod(
+    request: Request,
+    store: Annotated[ModStore, Depends(get_mod_store)],
+) -> DeleteMod:
+    """Assemble the :class:`DeleteMod` use case (issue #1261)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteMod(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+    )
+
+
+def get_download_mod(
+    request: Request,
+    store: Annotated[ModStore, Depends(get_mod_store)],
+) -> DownloadMod:
+    """Assemble the :class:`DownloadMod` use case (issue #1261)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DownloadMod(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+    )
 
 
 async def require_server_update_in_any_community(
