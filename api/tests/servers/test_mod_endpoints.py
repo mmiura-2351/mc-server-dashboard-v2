@@ -42,6 +42,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.servers.application.mod_resolution import (
     ResolutionEntry,
     ResolutionPlan,
+    WillImport,
 )
 from mc_server_dashboard_api.servers.application.mod_validation import (
     LoaderMismatch,
@@ -777,6 +778,12 @@ class TestResolvePlanEndpoint:
                     dep_identifier="some-lib",
                     required_range="",
                     status="needs_import",
+                    will_import=WillImport(
+                        project_id="P1",
+                        version_id="V1",
+                        slug="some-lib",
+                        version_number="1.2.3",
+                    ),
                 ),
             ]
         )
@@ -790,8 +797,11 @@ class TestResolvePlanEndpoint:
         assert body["entries"][0]["dep_identifier"] == "fabric-api"
         assert body["entries"][0]["status"] == "resolvable_from_library"
         assert body["entries"][0]["mod"]["id"] == str(m.id.value)
+        assert body["entries"][0]["will_import"] is None
         assert body["entries"][1]["status"] == "needs_import"
         assert body["entries"][1]["mod"] is None
+        assert body["entries"][1]["will_import"]["project_id"] == "P1"
+        assert body["entries"][1]["will_import"]["version_number"] == "1.2.3"
         assert body["validation"]["missing_deps"] == []
 
     def test_plan_surfaces_replaces_for_version_swap(self) -> None:
@@ -844,7 +854,7 @@ class TestApplyResolutionEndpoint:
                 )
             ]
         )
-        uc = _FakeUseCase(result=(plan, [m.id]))
+        uc = _FakeUseCase(result=(plan, [m.id], []))
         recorder = RecordingAuditRecorder()
         app = _assignment_app(apply_resolution=uc, recorder=recorder)
         with TestClient(app) as client:  # type: ignore[arg-type]
@@ -852,8 +862,27 @@ class TestApplyResolutionEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert body["entries"][0]["status"] == "already_satisfied"
+        assert body["failed_imports"] == []
         assert len(recorder.events) == 1
         assert recorder.events[0].operation == ops.MOD_RESOLVE
+
+    def test_apply_surfaces_failed_imports(self) -> None:
+        # A per-dep Modrinth import failure is reported in failed_imports (#1295).
+        plan = _plan(
+            entries=[
+                ResolutionEntry(
+                    dep_identifier="broken-dep",
+                    required_range="",
+                    status="unresolvable",
+                )
+            ]
+        )
+        uc = _FakeUseCase(result=(plan, [], ["broken-dep"]))
+        app = _assignment_app(apply_resolution=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(_RESOLVE_BASE)
+        assert resp.status_code == 200
+        assert resp.json()["failed_imports"] == ["broken-dep"]
 
     def test_apply_unsettled_409(self) -> None:
         uc = _FakeUseCase(error=ServerFilesUnsettledError("nope"))

@@ -1167,11 +1167,12 @@ export interface paths {
         put?: never;
         /**
          * Apply Server Mod Resolution
-         * @description Apply a server's library-resolvable deps (server:update, at-rest, #1294).
+         * @description Apply a server's resolvable deps from library + Modrinth (server:update, #1295).
          *
          *     Assigns every ``resolvable_from_library`` pick via the assign spine (at-rest
-         *     gated: 409 ``server_unsettled`` while running) and returns the re-planned
-         *     result. Does NOT import from Modrinth (that is C3).
+         *     gated: 409 ``server_unsettled`` while running), then imports each ``needs_import``
+         *     ``will_import`` version from Modrinth and assigns it. A per-dep Modrinth failure
+         *     is isolated (returned in ``failed_imports``) and does not abort the rest.
          */
         post: operations["apply_server_mod_resolution_api_communities__community_id__servers__server_id__mods_resolve_post"];
         delete?: never;
@@ -2863,7 +2864,7 @@ export interface components {
         };
         /**
          * ResolutionEntryResponse
-         * @description One direct required dependency and how it can be resolved (issue #1294).
+         * @description One direct required dependency and how it can be resolved (issues #1294, #1295).
          *
          *     ``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /
          *     ``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod
@@ -2872,6 +2873,9 @@ export interface components {
          *     out-of-range version of the same id (a ``version_unsatisfied`` finding):
          *     applying unassigns these stale mods and assigns ``mod`` so one in-range
          *     version remains. An absent dep is a plain add with empty ``replaces``.
+         *     ``will_import`` carries the Modrinth project@version a ``needs_import`` dep
+         *     resolves to (#1295); it is ``None`` for every other status and for a
+         *     ``needs_import`` Modrinth cannot satisfy (that becomes ``unresolvable``).
          */
         ResolutionEntryResponse: {
             /** Dep Identifier */
@@ -2883,14 +2887,24 @@ export interface components {
             required_range: string;
             /** Status */
             status: string;
+            will_import: components["schemas"]["WillImportResponse"] | null;
         };
         /**
          * ResolutionPlanResponse
          * @description A server's dependency-resolution plan plus its validation findings.
+         *
+         *     ``failed_imports`` lists dep ids whose Modrinth import failed during apply (a
+         *     per-dep failure isolated from the rest, issue #1295); it is empty on the
+         *     read-only ``GET`` plan.
          */
         ResolutionPlanResponse: {
             /** Entries */
             entries: components["schemas"]["ResolutionEntryResponse"][];
+            /**
+             * Failed Imports
+             * @default []
+             */
+            failed_imports: string[];
             validation: components["schemas"]["ModValidationResponse"];
         };
         /** ResourcePackAssignmentResponse */
@@ -3213,6 +3227,24 @@ export interface components {
         VersionsResponse: {
             /** Versions */
             versions: string[];
+        };
+        /**
+         * WillImportResponse
+         * @description The Modrinth project@version a ``needs_import`` dep resolves to (issue #1295).
+         *
+         *     A preview only on ``GET .../mods/resolve`` (nothing is downloaded); ``POST``
+         *     imports and assigns it. ``project_id`` / ``version_id`` are the Modrinth ids;
+         *     ``slug`` / ``version_number`` are for display.
+         */
+        WillImportResponse: {
+            /** Project Id */
+            project_id: string;
+            /** Slug */
+            slug: string;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: string;
         };
         /** WorkerResponse */
         WorkerResponse: {

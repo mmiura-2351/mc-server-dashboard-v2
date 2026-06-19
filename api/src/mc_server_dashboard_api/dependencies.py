@@ -2127,25 +2127,32 @@ def get_list_server_mods(request: Request) -> ListServerMods:
     return ListServerMods(uow=ServersUnitOfWork(session_factory))
 
 
-def get_resolve_server_mods(request: Request) -> ResolveServerMods:
-    """Assemble the :class:`ResolveServerMods` plan use case (issue #1294)."""
+def get_resolve_server_mods(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> ResolveServerMods:
+    """Assemble the :class:`ResolveServerMods` plan use case (issues #1294, #1295)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return ResolveServerMods(uow=ServersUnitOfWork(session_factory))
+    return ResolveServerMods(uow=ServersUnitOfWork(session_factory), catalog=catalog)
 
 
 def get_apply_server_mod_resolution(
     request: Request,
     assign_mods: Annotated[AssignMods, Depends(get_assign_mods)],
     unassign_mod: Annotated[UnassignMod, Depends(get_unassign_mod)],
+    import_mod: Annotated[ImportMod, Depends(get_import_mod)],
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
 ) -> ApplyServerModResolution:
-    """Assemble the :class:`ApplyServerModResolution` use case (issue #1294)."""
+    """Assemble the :class:`ApplyServerModResolution` use case (issues #1294, #1295)."""
 
     session_factory = create_session_factory(get_engine(request))
     return ApplyServerModResolution(
         uow=ServersUnitOfWork(session_factory),
         assign_mods=assign_mods,
         unassign_mod=unassign_mod,
+        import_mod=import_mod,
+        catalog=catalog,
     )
 
 

@@ -14,18 +14,31 @@ Two layers, both against fakes (no DB, TESTING.md Section 4):
 from __future__ import annotations
 
 import datetime as dt
+import io
+import json
 import uuid
+import zipfile
 
 import pytest
 
 from mc_server_dashboard_api.servers.application.mod_resolution import (
     ApplyServerModResolution,
     ResolveServerMods,
+    _select_import_version,
     resolve_dependencies,
+    resolve_imports_from_catalog,
 )
+from mc_server_dashboard_api.servers.application.mods import ImportMod
 from mc_server_dashboard_api.servers.application.server_mods import (
     AssignMods,
     UnassignMod,
+)
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogProject,
+    CatalogSearchHit,
+    CatalogSearchResult,
+    CatalogUnavailableError,
+    CatalogVersion,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -44,6 +57,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 from tests.servers.fakes import (
+    FakeCatalogProvider,
     FakeClock,
     FakeFileStore,
     FakeLifecycleLock,
@@ -375,7 +389,7 @@ class TestResolveServerMods:
         _seed_assigned(uow, store, server, consumer)
         _seed_library(uow, store, _mod(mod_identifier="fabric-api"))
 
-        plan = await ResolveServerMods(uow)(
+        plan = await ResolveServerMods(uow, FakeCatalogProvider())(
             community_id=_COMMUNITY_ID, server_id=server.id
         )
         assert len(plan.entries) == 1
@@ -384,16 +398,21 @@ class TestResolveServerMods:
     async def test_plan_server_not_found(self) -> None:
         uow, _file_store, _store = _ctx(_server())
         with pytest.raises(ServerNotFoundError):
-            await ResolveServerMods(uow)(
+            await ResolveServerMods(uow, FakeCatalogProvider())(
                 community_id=_COMMUNITY_ID, server_id=ServerId(uuid.uuid4())
             )
 
 
 class TestApplyServerModResolution:
     def _apply(
-        self, uow: FakeUnitOfWork, file_store: FakeFileStore, store: FakeModStore
+        self,
+        uow: FakeUnitOfWork,
+        file_store: FakeFileStore,
+        store: FakeModStore,
+        provider: FakeCatalogProvider | None = None,
     ) -> ApplyServerModResolution:
         lock = FakeLifecycleLock()
+        catalog = provider or FakeCatalogProvider()
         assign = AssignMods(
             uow=uow,
             file_store=file_store,
@@ -407,8 +426,18 @@ class TestApplyServerModResolution:
             store=store,
             lifecycle_lock=lock,
         )
+        import_mod = ImportMod(
+            uow=uow,
+            store=store,
+            clock=FakeClock(_NOW),
+            catalog=catalog,
+        )
         return ApplyServerModResolution(
-            uow=uow, assign_mods=assign, unassign_mod=unassign
+            uow=uow,
+            assign_mods=assign,
+            unassign_mod=unassign,
+            import_mod=import_mod,
+            catalog=catalog,
         )
 
     async def test_apply_assigns_resolvable_and_validates_clean(self) -> None:
@@ -422,7 +451,7 @@ class TestApplyServerModResolution:
         fabric_api = _mod(mod_identifier="fabric-api", version_number="0.92.0")
         _seed_library(uow, store, fabric_api)
 
-        plan, applied = await self._apply(uow, file_store, store)(
+        plan, applied, _failed = await self._apply(uow, file_store, store)(
             community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
         )
 
@@ -450,7 +479,7 @@ class TestApplyServerModResolution:
         in_range = _mod(mod_identifier="fabric-api", version_number="2.0.0")
         _seed_library(uow, store, in_range)
 
-        plan, applied = await self._apply(uow, file_store, store)(
+        plan, applied, _failed = await self._apply(uow, file_store, store)(
             community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
         )
 
@@ -489,7 +518,7 @@ class TestApplyServerModResolution:
         await apply(
             community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
         )
-        plan, applied = await apply(
+        plan, applied, _failed = await apply(
             community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
         )
         assert applied == []
@@ -507,7 +536,7 @@ class TestApplyServerModResolution:
         await apply(
             community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
         )
-        plan, applied = await apply(
+        plan, applied, _failed = await apply(
             community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
         )
         assert applied == []
@@ -533,8 +562,511 @@ class TestApplyServerModResolution:
         # Library has nothing that provides the dep.
         _seed_library(uow, store, _mod(mod_identifier="lithium"))
 
-        plan, applied = await self._apply(uow, file_store, store)(
+        plan, applied, _failed = await self._apply(uow, file_store, store)(
             community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
         )
         assert applied == []
         assert plan.entries[0].status == "unresolvable"
+
+
+# ---------------------------------------------------------------------------
+# Modrinth catalog enrichment + auto-import (#1295)
+# ---------------------------------------------------------------------------
+
+
+def _catalog_version(
+    *,
+    version_id: str = "VER1",
+    project_id: str = "FABRICAPI",
+    version_number: str = "0.92.0",
+    download_url: str,
+    loaders: list[str] | None = None,
+    game_versions: list[str] | None = None,
+    filename: str = "fabric-api.jar",
+) -> CatalogVersion:
+    return CatalogVersion(
+        version_id=version_id,
+        project_id=project_id,
+        name=f"Fabric API {version_number}",
+        version_number=version_number,
+        filename=filename,
+        download_url=download_url,
+        sha512=None,
+        loaders=loaders if loaders is not None else ["fabric"],
+        game_versions=game_versions if game_versions is not None else ["1.21"],
+        dependencies=[],
+    )
+
+
+def _catalog_project(
+    *,
+    project_id: str = "FABRICAPI",
+    slug: str = "fabric-api",
+    versions: list[CatalogVersion],
+) -> CatalogProject:
+    return CatalogProject(
+        project_id=project_id,
+        slug=slug,
+        title="Fabric API",
+        description="Core library",
+        project_type="mod",
+        side="both",
+        loaders=["fabric"],
+        game_versions=["1.21"],
+        versions=versions,
+    )
+
+
+def _search_hit(
+    *, project_id: str = "FABRICAPI", slug: str = "fabric-api"
+) -> CatalogSearchHit:
+    return CatalogSearchHit(
+        project_id=project_id,
+        slug=slug,
+        title="Fabric API",
+        description="Core library",
+        project_type="mod",
+        side="both",
+        loaders=["fabric"],
+        game_versions=["1.21"],
+        downloads=100,
+    )
+
+
+def _make_jar(entries: dict[str, str]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _fabric_api_jar(*, version: str = "0.92.0") -> bytes:
+    return _make_jar(
+        {
+            "fabric.mod.json": json.dumps(
+                {"id": "fabric-api", "version": version, "depends": {"minecraft": "*"}}
+            )
+        }
+    )
+
+
+class TestSelectImportVersion:
+    """Version selection against MC / loader / required-range (#1295)."""
+
+    def test_picks_newest_compatible_version(self) -> None:
+
+        project = _catalog_project(
+            versions=[
+                _catalog_version(
+                    version_id="OLD", version_number="0.91.0", download_url="u1"
+                ),
+                _catalog_version(
+                    version_id="NEW", version_number="0.95.0", download_url="u2"
+                ),
+            ]
+        )
+        chosen = _select_import_version(
+            project,
+            server_type="fabric",
+            mc_version="1.21",
+            version_range=">=0.90.0",
+            range_loader="fabric",
+        )
+        assert chosen is not None
+        assert chosen.version_id == "NEW"
+
+    def test_skips_mc_incompatible_version(self) -> None:
+
+        project = _catalog_project(
+            versions=[
+                _catalog_version(
+                    version_number="0.95.0",
+                    game_versions=["1.20.4"],
+                    download_url="u",
+                ),
+            ]
+        )
+        assert (
+            _select_import_version(
+                project,
+                server_type="fabric",
+                mc_version="1.21",
+                version_range="",
+                range_loader="fabric",
+            )
+            is None
+        )
+
+    def test_skips_loader_incompatible_version(self) -> None:
+
+        project = _catalog_project(
+            versions=[
+                _catalog_version(
+                    version_number="0.95.0", loaders=["forge"], download_url="u"
+                ),
+            ]
+        )
+        assert (
+            _select_import_version(
+                project,
+                server_type="fabric",
+                mc_version="1.21",
+                version_range="",
+                range_loader="fabric",
+            )
+            is None
+        )
+
+    def test_skips_out_of_range_version(self) -> None:
+
+        project = _catalog_project(
+            versions=[
+                _catalog_version(version_number="0.80.0", download_url="u"),
+            ]
+        )
+        assert (
+            _select_import_version(
+                project,
+                server_type="fabric",
+                mc_version="1.21",
+                version_range=">=0.90.0",
+                range_loader="fabric",
+            )
+            is None
+        )
+
+
+class TestResolveImportsFromCatalog:
+    """The read-only plan enrichment that sets ``will_import`` (#1295)."""
+
+    async def test_resolves_needs_import_via_search_fallback(self) -> None:
+        # Library has fabric-api only at an out-of-range version -> needs_import.
+        # No project_id is captured on the dep, so the resolver searches by id.
+
+        consumer = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("fabric-api", version_range=">=0.90.0")],
+        )
+        too_old = _mod(mod_identifier="fabric-api", version_number="0.80.0")
+        plan = resolve_dependencies(
+            server_type="fabric",
+            mc_version="1.21",
+            assigned=[consumer],
+            library=[too_old],
+        )
+        assert plan.entries[0].status == "needs_import"
+
+        project = _catalog_project(
+            versions=[_catalog_version(version_number="0.95.0", download_url="u")]
+        )
+        provider = FakeCatalogProvider(
+            projects={"FABRICAPI": project},
+            results={"fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1)},
+        )
+        enriched = await resolve_imports_from_catalog(
+            plan,
+            catalog=provider,
+            server_type="fabric",
+            mc_version="1.21",
+            assigned=[consumer],
+        )
+        entry = enriched.entries[0]
+        assert entry.status == "needs_import"
+        assert entry.will_import is not None
+        assert entry.will_import.project_id == "FABRICAPI"
+        assert entry.will_import.version_id == "VER1"
+        assert entry.will_import.version_number == "0.95.0"
+
+    async def test_resolves_absent_dep_via_captured_project_id(self) -> None:
+        # The dep is entirely absent from the library (pure layer -> unresolvable),
+        # but the dep edge carries a Modrinth project_id, so the resolver fetches
+        # the project directly (no search) and resolves a will_import.
+
+        consumer = _mod(
+            mod_identifier="sodium",
+            dependencies=[
+                {
+                    "mod_identifier": "fabric-api",
+                    "version_range": "",
+                    "required": True,
+                    "project_id": "FABRICAPI",
+                }
+            ],
+        )
+        plan = resolve_dependencies(
+            server_type="fabric", mc_version="1.21", assigned=[consumer], library=[]
+        )
+        assert plan.entries[0].status == "unresolvable"
+
+        project = _catalog_project(
+            versions=[_catalog_version(version_number="0.95.0", download_url="u")]
+        )
+        # No search results seeded: resolution must use the captured project_id.
+        provider = FakeCatalogProvider(projects={"FABRICAPI": project})
+        enriched = await resolve_imports_from_catalog(
+            plan,
+            catalog=provider,
+            server_type="fabric",
+            mc_version="1.21",
+            assigned=[consumer],
+        )
+        entry = enriched.entries[0]
+        assert entry.status == "needs_import"
+        assert entry.will_import is not None
+        assert entry.will_import.version_id == "VER1"
+
+    async def test_stays_unresolvable_when_only_incompatible_versions(self) -> None:
+
+        consumer = _mod(mod_identifier="sodium", dependencies=[_dep("fabric-api")])
+        plan = resolve_dependencies(
+            server_type="fabric", mc_version="1.21", assigned=[consumer], library=[]
+        )
+        # Project exists but every version is for the wrong MC version.
+        project = _catalog_project(
+            versions=[
+                _catalog_version(
+                    version_number="0.95.0",
+                    game_versions=["1.20.4"],
+                    download_url="u",
+                )
+            ]
+        )
+        provider = FakeCatalogProvider(
+            projects={"FABRICAPI": project},
+            results={"fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1)},
+        )
+        enriched = await resolve_imports_from_catalog(
+            plan,
+            catalog=provider,
+            server_type="fabric",
+            mc_version="1.21",
+            assigned=[consumer],
+        )
+        assert enriched.entries[0].status == "unresolvable"
+        assert enriched.entries[0].will_import is None
+
+    async def test_per_dep_catalog_failure_is_isolated(self) -> None:
+        # Two needs_import deps: the first's search raises, the second resolves.
+
+        consumer = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("broken-dep"), _dep("fabric-api")],
+        )
+        plan = resolve_dependencies(
+            server_type="fabric", mc_version="1.21", assigned=[consumer], library=[]
+        )
+
+        project = _catalog_project(
+            versions=[_catalog_version(version_number="0.95.0", download_url="u")]
+        )
+
+        class _FlakyProvider(FakeCatalogProvider):
+            async def search(
+                self,
+                *,
+                query: str,
+                loader: str | None = None,
+                game_version: str | None = None,
+                limit: int = 20,
+                offset: int = 0,
+            ) -> CatalogSearchResult:
+                if query == "broken-dep":
+                    raise CatalogUnavailableError("down")
+                return await super().search(
+                    query=query, loader=loader, game_version=game_version
+                )
+
+        provider = _FlakyProvider(
+            projects={"FABRICAPI": project},
+            results={"fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1)},
+        )
+        enriched = await resolve_imports_from_catalog(
+            plan,
+            catalog=provider,
+            server_type="fabric",
+            mc_version="1.21",
+            assigned=[consumer],
+        )
+        by_id = {e.dep_identifier: e for e in enriched.entries}
+        # The broken dep's lookup failed -> it stays unresolvable, no crash.
+        assert by_id["broken-dep"].status == "unresolvable"
+        assert by_id["broken-dep"].will_import is None
+        # The healthy dep still resolved.
+        assert by_id["fabric-api"].status == "needs_import"
+        assert by_id["fabric-api"].will_import is not None
+
+
+class TestApplyImportsFromModrinth:
+    """Apply imports the will_import deps into the library and assigns them."""
+
+    def _apply(
+        self,
+        uow: FakeUnitOfWork,
+        file_store: FakeFileStore,
+        store: FakeModStore,
+        provider: FakeCatalogProvider,
+    ) -> ApplyServerModResolution:
+        lock = FakeLifecycleLock()
+        assign = AssignMods(
+            uow=uow,
+            file_store=file_store,
+            store=store,
+            clock=FakeClock(_NOW),
+            lifecycle_lock=lock,
+        )
+        unassign = UnassignMod(
+            uow=uow, file_store=file_store, store=store, lifecycle_lock=lock
+        )
+        import_mod = ImportMod(
+            uow=uow, store=store, clock=FakeClock(_NOW), catalog=provider
+        )
+        return ApplyServerModResolution(
+            uow=uow,
+            assign_mods=assign,
+            unassign_mod=unassign,
+            import_mod=import_mod,
+            catalog=provider,
+        )
+
+    async def test_apply_imports_assigns_and_validates_clean(self) -> None:
+
+        server = _server()
+        uow, file_store, store = _ctx(server)
+        consumer = _mod(mod_identifier="sodium", dependencies=[_dep("fabric-api")])
+        _seed_assigned(uow, store, server, consumer)
+
+        jar = _fabric_api_jar()
+        version = _catalog_version(download_url="https://cdn.modrinth.com/fa.jar")
+        project = _catalog_project(versions=[version])
+        provider = FakeCatalogProvider(
+            projects={"FABRICAPI": project},
+            results={"fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1)},
+            versions={"VER1": version},
+            blobs={"https://cdn.modrinth.com/fa.jar": jar},
+        )
+
+        plan, applied, failed = await self._apply(uow, file_store, store, provider)(
+            community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
+        )
+
+        assert failed == []
+        # The fabric-api jar was imported into the library and assigned.
+        imported = [
+            m for m in uow.mods.mods.values() if m.mod_identifier == "fabric-api"
+        ]
+        assert len(imported) == 1
+        assert imported[0].source == "modrinth"
+        assert imported[0].id in applied
+        assert any(a.mod_id == imported[0].id for a in uow.mods.assignments.values())
+        # The dep is now satisfied and the server validates clean.
+        entry = next(e for e in plan.entries if e.dep_identifier == "fabric-api")
+        assert entry.status == "already_satisfied"
+        assert plan.validation.missing_deps == []
+
+    async def test_apply_per_dep_import_failure_isolated(self) -> None:
+
+        server = _server()
+        uow, file_store, store = _ctx(server)
+        consumer = _mod(
+            mod_identifier="sodium",
+            dependencies=[_dep("broken-dep"), _dep("fabric-api")],
+        )
+        _seed_assigned(uow, store, server, consumer)
+
+        jar = _fabric_api_jar()
+        fabric_version = _catalog_version(
+            download_url="https://cdn.modrinth.com/fa.jar"
+        )
+        fabric_project = _catalog_project(versions=[fabric_version])
+        broken_version = _catalog_version(
+            version_id="BROKENVER",
+            project_id="BROKEN",
+            download_url="https://cdn.modrinth.com/broken.jar",
+            filename="broken.jar",
+        )
+        broken_project = _catalog_project(
+            project_id="BROKEN", slug="broken-dep", versions=[broken_version]
+        )
+
+        class _FlakyDownload(FakeCatalogProvider):
+            async def download(self, url: str) -> bytes:
+                if "broken" in url:
+                    raise CatalogUnavailableError("cdn down")
+                return await super().download(url)
+
+        provider = _FlakyDownload(
+            projects={"FABRICAPI": fabric_project, "BROKEN": broken_project},
+            results={
+                "fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1),
+                "broken-dep": CatalogSearchResult(
+                    hits=[_search_hit(project_id="BROKEN", slug="broken-dep")], total=1
+                ),
+            },
+            versions={"VER1": fabric_version, "BROKENVER": broken_version},
+            blobs={"https://cdn.modrinth.com/fa.jar": jar},
+        )
+
+        plan, applied, failed = await self._apply(uow, file_store, store, provider)(
+            community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
+        )
+
+        # The broken dep's import failed in isolation; fabric-api still applied.
+        assert failed == ["broken-dep"]
+        imported = [
+            m for m in uow.mods.mods.values() if m.mod_identifier == "fabric-api"
+        ]
+        assert len(imported) == 1
+        assert imported[0].id in applied
+
+    async def test_get_plan_does_not_import(self) -> None:
+        # GET (ResolveServerMods) enriches with will_import but never downloads.
+
+        server = _server()
+        uow, _file_store, store = _ctx(server)
+        consumer = _mod(mod_identifier="sodium", dependencies=[_dep("fabric-api")])
+        _seed_assigned(uow, store, server, consumer)
+
+        jar = _fabric_api_jar()
+        version = _catalog_version(download_url="https://cdn.modrinth.com/fa.jar")
+        project = _catalog_project(versions=[version])
+        provider = FakeCatalogProvider(
+            projects={"FABRICAPI": project},
+            results={"fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1)},
+            versions={"VER1": version},
+            blobs={"https://cdn.modrinth.com/fa.jar": jar},
+        )
+
+        plan = await ResolveServerMods(uow, provider)(
+            community_id=_COMMUNITY_ID, server_id=server.id
+        )
+        entry = plan.entries[0]
+        assert entry.status == "needs_import"
+        assert entry.will_import is not None
+        # No download happened and nothing was persisted to the library.
+        assert provider.downloads == []
+        assert all(m.mod_identifier != "fabric-api" for m in uow.mods.mods.values())
+
+    async def test_apply_at_rest_gate_aborts_running_server(self) -> None:
+        # The at-rest gate (a ServerError subclass) on the import-loop assign must
+        # NOT be swallowed as a per-dep failure — it aborts the whole apply so the
+        # edge returns 409.
+        server = _server(running=True)
+        uow, file_store, store = _ctx(server)
+        consumer = _mod(mod_identifier="sodium", dependencies=[_dep("fabric-api")])
+        _seed_assigned(uow, store, server, consumer)
+
+        jar = _fabric_api_jar()
+        version = _catalog_version(download_url="https://cdn.modrinth.com/fa.jar")
+        project = _catalog_project(versions=[version])
+        provider = FakeCatalogProvider(
+            projects={"FABRICAPI": project},
+            results={"fabric-api": CatalogSearchResult(hits=[_search_hit()], total=1)},
+            versions={"VER1": version},
+            blobs={"https://cdn.modrinth.com/fa.jar": jar},
+        )
+
+        with pytest.raises(ServerFilesUnsettledError):
+            await self._apply(uow, file_store, store, provider)(
+                community_id=_COMMUNITY_ID, server_id=server.id, applied_by=uuid.uuid4()
+            )

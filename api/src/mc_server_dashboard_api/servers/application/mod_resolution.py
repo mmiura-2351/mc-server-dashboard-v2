@@ -17,21 +17,41 @@ Classification of each direct required dependency:
   in the *depending* mod's loader dialect (C1 :func:`version_satisfies`), and (c)
   is loader/MC-compatible with the server. The chosen mod is the best candidate
   (highest satisfying ``version_number``; ties broken by mod id for determinism).
-* ``needs_import`` — the id exists in the library but no candidate is both
-  range- and server-compatible (e.g. only an out-of-range version is present, or
-  every provider mismatches the loader/MC). C3 (#1295) would import a fit from
-  Modrinth; here it is just classified.
-* ``unresolvable`` — nothing in the library provides the id at all.
+* ``needs_import`` — the id is missing from (or unsatisfiable by) the library, so
+  it must be imported from Modrinth (#1295). The pure classifier marks it
+  ``needs_import`` whenever no library candidate fits; the catalog enrichment then
+  resolves a concrete ``will_import`` (project@version) for it, or — if Modrinth
+  has nothing compatible — downgrades it to ``unresolvable``.
+* ``unresolvable`` — neither the library nor Modrinth can satisfy the id.
 
-Scope (per #1294): only the DIRECT required deps of the currently-assigned set.
-Transitive closure (deps-of-deps) is C4 (#1296); Modrinth auto-import is C3.
+C3 (#1295) folds Modrinth auto-import into the plan/apply (Modrinth-only;
+CurseForge is deferred, #1269):
 
-Pure: :func:`resolve_dependencies` does no I/O. The use cases load the data and,
-for apply, delegate the mutation to :class:`AssignMods`.
+* :func:`resolve_imports_from_catalog` enriches each ``needs_import`` entry with a
+  concrete ``will_import`` candidate. It locates the dependency's Modrinth project
+  (a ``project_id`` carried on the dep edge if present, else a search by the dep's
+  ``mod_identifier``) and selects the newest version compatible with the server's
+  MC version, the server loader, and the required range (C1). Read-only: it only
+  queries the catalog, never imports.
+* ``GET .../mods/resolve`` returns the enriched plan (the ``will_import`` is a
+  preview; nothing is downloaded).
+* ``POST .../mods/resolve`` imports each ``will_import`` version into the library
+  (reusing :class:`ImportMod` — sha256-dedup, so a jar already present is reused),
+  assigns it via :class:`AssignMods`, then re-plans. A Modrinth lookup/import
+  failure for one dep is isolated (recorded on that entry, the rest still apply).
+
+Scope (per #1294/#1295): only the DIRECT required deps of the currently-assigned
+set. Transitive closure (deps-of-deps) is C4 (#1296).
+
+Pure: :func:`resolve_dependencies` does no I/O.
+:func:`resolve_imports_from_catalog` does read-only catalog I/O. The use cases
+load the data and, for apply, delegate the mutation to :class:`ImportMod` /
+:class:`AssignMods`.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from functools import cmp_to_key
@@ -42,6 +62,7 @@ from mc_server_dashboard_api.servers.application.mod_validation import (
     ModValidation,
     validate_mod_set,
 )
+from mc_server_dashboard_api.servers.application.mods import ImportMod
 from mc_server_dashboard_api.servers.application.server_mods import (
     AssignMods,
     UnassignMod,
@@ -50,10 +71,23 @@ from mc_server_dashboard_api.servers.application.version_range import (
     compare_versions,
     version_satisfies,
 )
-from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogError,
+    CatalogProject,
+    CatalogProvider,
+    CatalogVersion,
+)
+from mc_server_dashboard_api.servers.domain.errors import (
+    FileTooLargeError,
+    InvalidModJarError,
+    ModIntegrityError,
+    ServerNotFoundError,
+)
 from mc_server_dashboard_api.servers.domain.mod import Mod, ModId
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
+
+_LOGGER = logging.getLogger(__name__)
 
 ResolutionStatus = Literal[
     "already_satisfied",
@@ -61,6 +95,21 @@ ResolutionStatus = Literal[
     "needs_import",
     "unresolvable",
 ]
+
+
+@dataclass(frozen=True)
+class WillImport:
+    """The concrete Modrinth project@version a ``needs_import`` dep resolves to.
+
+    Carried on a ``needs_import`` :class:`ResolutionEntry` by the catalog
+    enrichment (#1295). ``project_id`` / ``version_id`` drive the import on apply;
+    ``slug`` / ``version_number`` are for the human-readable preview.
+    """
+
+    project_id: str
+    version_id: str
+    slug: str
+    version_number: str
 
 
 @dataclass(frozen=True)
@@ -83,6 +132,12 @@ class ResolutionEntry:
     same-``mod_identifier`` assignments before assigning ``mod``, so exactly one
     in-range version of the id remains (#1294). Empty for an absent dep — that
     is a plain add."""
+    will_import: WillImport | None = None
+    """The Modrinth project@version a ``needs_import`` dep resolves to (#1295).
+
+    Set by :func:`resolve_imports_from_catalog` for a ``needs_import`` entry when
+    Modrinth has a compatible version; ``None`` otherwise. On apply this version is
+    imported into the library and assigned."""
 
 
 @dataclass(frozen=True)
@@ -270,6 +325,199 @@ def resolve_dependencies(
     return ResolutionPlan(entries=entries, validation=validation)
 
 
+# ---------------------------------------------------------------------------
+# Modrinth catalog enrichment (#1295)
+# ---------------------------------------------------------------------------
+
+
+def _select_import_version(
+    project: CatalogProject,
+    *,
+    server_type: str,
+    mc_version: str,
+    version_range: str,
+    range_loader: str,
+) -> CatalogVersion | None:
+    """The newest project version compatible with the server and the range.
+
+    A version qualifies when it (a) lists the server's MC version in
+    ``game_versions``, (b) declares a loader the server can run (the same
+    loader-compat map the library resolver uses), and (c) satisfies the required
+    ``version_range`` in the depending mod's loader dialect (C1). The newest
+    ``version_number`` wins; the ``version_id`` breaks ties for determinism.
+    ``None`` when no version qualifies.
+    """
+
+    compatible_loaders = _LOADER_COMPAT.get(server_type, frozenset())
+    candidates = [
+        version
+        for version in project.versions
+        if mc_version in version.game_versions
+        and compatible_loaders.intersection(version.loaders)
+        and version_satisfies(version.version_number, version_range, range_loader)
+    ]
+    if not candidates:
+        return None
+    version_key = cmp_to_key(compare_versions)
+    return max(
+        candidates,
+        key=lambda v: (version_key(v.version_number), v.version_id),
+    )
+
+
+def _dep_project_id(assigned: list[Mod], dep_identifier: str) -> str | None:
+    """A Modrinth ``project_id`` captured on the dep edge of an assigned mod.
+
+    The preferred project lookup: when the depending mod was Modrinth-sourced its
+    captured catalog ``dependencies`` may carry the depended-on project's id. Read
+    a ``project_id`` key off the matching dep dict if present; ``None`` falls the
+    resolver back to a search by ``dep_identifier``.
+    """
+
+    for mod in assigned:
+        for dep in mod.dependencies:
+            if dep.get("mod_identifier") != dep_identifier:
+                continue
+            project_id = dep.get("project_id")
+            if isinstance(project_id, str) and project_id:
+                return project_id
+    return None
+
+
+async def _locate_project(
+    catalog: CatalogProvider,
+    *,
+    dep_identifier: str,
+    project_id: str | None,
+    server_type: str,
+    mc_version: str,
+) -> CatalogProject | None:
+    """Locate the Modrinth project for a dep, by captured id else by search.
+
+    With a captured ``project_id`` the project is fetched directly. Otherwise a
+    search by ``dep_identifier`` (faceted by loader/MC) picks the hit whose slug
+    equals the dep id (slugs usually match the manifest id, e.g. ``fabric-api``),
+    falling back to the first hit. ``None`` when nothing is found.
+    """
+
+    if project_id is not None:
+        return await catalog.get_project(project_id)
+
+    loaders = _LOADER_COMPAT.get(server_type, frozenset())
+    loader = next(iter(sorted(loaders)), None)
+    result = await catalog.search(
+        query=dep_identifier, loader=loader, game_version=mc_version
+    )
+    if not result.hits:
+        return None
+    chosen = next(
+        (hit for hit in result.hits if hit.slug == dep_identifier), result.hits[0]
+    )
+    return await catalog.get_project(chosen.project_id)
+
+
+async def resolve_imports_from_catalog(
+    plan: ResolutionPlan,
+    *,
+    catalog: CatalogProvider,
+    server_type: str,
+    mc_version: str,
+    assigned: list[Mod],
+) -> ResolutionPlan:
+    """Enrich a plan's import-needing entries with a Modrinth ``will_import``.
+
+    Read-only: for every ``needs_import`` or ``unresolvable`` entry it locates the
+    Modrinth project (captured id else search) and selects a compatible version
+    (:func:`_select_import_version`). A resolved entry becomes ``needs_import`` with
+    ``will_import`` set; one Modrinth cannot satisfy becomes ``unresolvable``. The
+    range dialect is the depending mod's loader (looked up per dep). A catalog
+    failure for one dep leaves that entry ``unresolvable`` and does not abort the
+    rest. Never imports — that is :class:`ApplyServerModResolution`.
+    """
+
+    dep_loaders = _dep_loaders(assigned)
+    enriched: list[ResolutionEntry] = []
+    for entry in plan.entries:
+        if entry.status not in ("needs_import", "unresolvable"):
+            enriched.append(entry)
+            continue
+        will_import = await _resolve_will_import(
+            catalog,
+            dep_identifier=entry.dep_identifier,
+            version_range=entry.required_range,
+            range_loader=dep_loaders.get(entry.dep_identifier, server_type),
+            project_id=_dep_project_id(assigned, entry.dep_identifier),
+            server_type=server_type,
+            mc_version=mc_version,
+        )
+        status: ResolutionStatus = "needs_import" if will_import else "unresolvable"
+        enriched.append(
+            ResolutionEntry(
+                entry.dep_identifier,
+                entry.required_range,
+                status,
+                will_import=will_import,
+            )
+        )
+    return ResolutionPlan(entries=enriched, validation=plan.validation)
+
+
+def _dep_loaders(assigned: list[Mod]) -> dict[str, str]:
+    """Map each required dep id to the depending mod's loader (range dialect)."""
+
+    loaders: dict[str, str] = {}
+    for mod in assigned:
+        for dep in mod.dependencies:
+            target = dep.get("mod_identifier")
+            if isinstance(target, str) and target not in loaders:
+                loaders[target] = mod.loader_type
+    return loaders
+
+
+async def _resolve_will_import(
+    catalog: CatalogProvider,
+    *,
+    dep_identifier: str,
+    version_range: str,
+    range_loader: str,
+    project_id: str | None,
+    server_type: str,
+    mc_version: str,
+) -> WillImport | None:
+    """Resolve one dep to a ``WillImport``, swallowing catalog failures as ``None``.
+
+    Isolates a per-dep Modrinth lookup failure so it never aborts the whole plan.
+    """
+
+    try:
+        project = await _locate_project(
+            catalog,
+            dep_identifier=dep_identifier,
+            project_id=project_id,
+            server_type=server_type,
+            mc_version=mc_version,
+        )
+    except CatalogError:
+        return None
+    if project is None:
+        return None
+    version = _select_import_version(
+        project,
+        server_type=server_type,
+        mc_version=mc_version,
+        version_range=version_range,
+        range_loader=range_loader,
+    )
+    if version is None:
+        return None
+    return WillImport(
+        project_id=project.project_id,
+        version_id=version.version_id,
+        slug=project.slug,
+        version_number=version.version_number,
+    )
+
+
 async def _load_resolution_inputs(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
 ) -> tuple[str, str, list[Mod], list[Mod]]:
@@ -292,53 +540,19 @@ async def _load_resolution_inputs(
 
 @dataclass(frozen=True)
 class ResolveServerMods:
-    """Plan a server's dependency resolution against the library (read-only)."""
+    """Plan a server's dependency resolution against the library + Modrinth.
+
+    Classifies the direct required deps against the library (#1294), then enriches
+    each import-needing entry with a concrete Modrinth ``will_import`` candidate
+    (#1295). Read-only end to end: it only queries the catalog — no import.
+    """
 
     uow: UnitOfWork
+    catalog: CatalogProvider
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> ResolutionPlan:
-        server_type, mc_version, assigned, library = await _load_resolution_inputs(
-            self.uow, community_id, server_id
-        )
-        return resolve_dependencies(
-            server_type=server_type,
-            mc_version=mc_version,
-            assigned=assigned,
-            library=library,
-        )
-
-
-@dataclass(frozen=True)
-class ApplyServerModResolution:
-    """Assign a server's ``resolvable_from_library`` deps, then re-plan (#1294).
-
-    Plans against the current library, assigns every ``resolvable_from_library``
-    pick through :class:`AssignMods` (which holds the lifecycle lock and is
-    at-rest gated — a running server raises ``ServerFilesUnsettledError``), and
-    returns the re-planned result. Idempotent: with nothing newly resolvable the
-    assign list is empty and the returned plan shows the picks as
-    ``already_satisfied``. Does NOT import from Modrinth (that is C3).
-
-    A pick that carries ``replaces`` (the id is present but out of range — a
-    ``version_unsatisfied`` finding) is a swap, not an add: the stale
-    same-``mod_identifier`` assignment(s) are unassigned via :class:`UnassignMod`
-    before the in-range library mod is assigned, so exactly one in-range version
-    of the id remains and the re-plan converges to ``already_satisfied``.
-    """
-
-    uow: UnitOfWork
-    assign_mods: AssignMods
-    unassign_mod: UnassignMod
-
-    async def __call__(
-        self,
-        *,
-        community_id: CommunityId,
-        server_id: ServerId,
-        applied_by: uuid.UUID,
-    ) -> tuple[ResolutionPlan, list[ModId]]:
         server_type, mc_version, assigned, library = await _load_resolution_inputs(
             self.uow, community_id, server_id
         )
@@ -347,6 +561,73 @@ class ApplyServerModResolution:
             mc_version=mc_version,
             assigned=assigned,
             library=library,
+        )
+        return await resolve_imports_from_catalog(
+            plan,
+            catalog=self.catalog,
+            server_type=server_type,
+            mc_version=mc_version,
+            assigned=assigned,
+        )
+
+
+@dataclass(frozen=True)
+class ApplyServerModResolution:
+    """Apply a server's resolvable deps from the library + Modrinth, then re-plan.
+
+    Plans against the current library and Modrinth, then, behind one explicit call:
+
+    * assigns every ``resolvable_from_library`` pick through :class:`AssignMods`
+      (which holds the lifecycle lock and is at-rest gated — a running server
+      raises ``ServerFilesUnsettledError``);
+    * imports each ``needs_import`` ``will_import`` version into the library via
+      :class:`ImportMod` (sha256-dedup, so a jar already present is reused) and
+      assigns it (#1295).
+
+    Idempotent: with nothing newly resolvable both lists are empty and the returned
+    plan shows the picks ``already_satisfied``.
+
+    A pick that carries ``replaces`` (the id is present but out of range — a
+    ``version_unsatisfied`` finding) is a swap, not an add: the stale
+    same-``mod_identifier`` assignment(s) are unassigned via :class:`UnassignMod`
+    before the in-range library mod is assigned, so exactly one in-range version
+    of the id remains and the re-plan converges to ``already_satisfied``.
+
+    A per-dep Modrinth lookup/import failure is isolated: that dep's id is added to
+    the returned ``failed`` list and the remaining deps still apply. The
+    lifecycle/at-rest gate is NOT swallowed — a running server aborts the whole
+    apply (it raises ``ServerFilesUnsettledError`` from the gated assign, which the
+    edge maps to 409).
+    """
+
+    uow: UnitOfWork
+    assign_mods: AssignMods
+    unassign_mod: UnassignMod
+    import_mod: ImportMod
+    catalog: CatalogProvider
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        applied_by: uuid.UUID,
+    ) -> tuple[ResolutionPlan, list[ModId], list[str]]:
+        server_type, mc_version, assigned, library = await _load_resolution_inputs(
+            self.uow, community_id, server_id
+        )
+        plan = resolve_dependencies(
+            server_type=server_type,
+            mc_version=mc_version,
+            assigned=assigned,
+            library=library,
+        )
+        plan = await resolve_imports_from_catalog(
+            plan,
+            catalog=self.catalog,
+            server_type=server_type,
+            mc_version=mc_version,
+            assigned=assigned,
         )
 
         # De-dup the picks: two deps can resolve to the same library mod. Collect
@@ -379,7 +660,56 @@ class ApplyServerModResolution:
                 assigned_by=applied_by,
             )
 
-        new_plan = await ResolveServerMods(self.uow)(
+        # Import + assign each Modrinth ``will_import`` dep. Per-dep failures are
+        # isolated: a Modrinth lookup/import error for one dep is recorded and the
+        # rest still apply. De-dup so two deps resolving to the same version import
+        # once. The assign holds the same at-rest gate as the library picks, so a
+        # running server still aborts the apply (after the first download) rather
+        # than mutating the working set.
+        imported: dict[str, ModId] = {}
+        failed: list[str] = []
+        for entry in plan.entries:
+            wi = entry.will_import
+            if wi is None:
+                continue
+            if wi.version_id in imported:
+                continue
+            # Per-dep isolation covers the *import* failures (catalog unreachable,
+            # bad/oversized/tampered jar). The lifecycle gate errors
+            # (``ServerFilesUnsettledError`` / ``ServerBusyError``) from the assign
+            # are NOT swallowed — they must abort the whole apply with a 409.
+            try:
+                mod = await self.import_mod(
+                    project_id=wi.project_id,
+                    version_id=wi.version_id,
+                    imported_by=applied_by,
+                )
+            except (
+                CatalogError,
+                InvalidModJarError,
+                FileTooLargeError,
+                ModIntegrityError,
+                ValueError,
+            ) as exc:
+                failed.append(entry.dep_identifier)
+                _LOGGER.warning(
+                    "modrinth import failed for dep %s (%s@%s): %s",
+                    entry.dep_identifier,
+                    wi.project_id,
+                    wi.version_id,
+                    exc,
+                )
+                continue
+            await self.assign_mods(
+                community_id=community_id,
+                server_id=server_id,
+                mod_ids=[mod.id],
+                assigned_by=applied_by,
+            )
+            imported[wi.version_id] = mod.id
+            applied.append(mod.id)
+
+        new_plan = await ResolveServerMods(self.uow, self.catalog)(
             community_id=community_id, server_id=server_id
         )
-        return new_plan, applied
+        return new_plan, applied, failed
