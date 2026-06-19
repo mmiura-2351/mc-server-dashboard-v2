@@ -554,8 +554,8 @@ class TestListServerMods:
         uc = ListServerMods(uow=uow)
         result = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
 
-        assert len(result) == 1
-        assignment, returned_mod = result[0]
+        assert len(result.entries) == 1
+        assignment, returned_mod = result.entries[0]
         assert assignment.mod_id == mod.id
         assert returned_mod.id == mod.id
 
@@ -563,7 +563,8 @@ class TestListServerMods:
         server = _at_rest_server()
         uow, _, _ = _ctx(server)
         uc = ListServerMods(uow=uow)
-        assert await uc(community_id=_COMMUNITY_ID, server_id=server.id) == []
+        result = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+        assert result.entries == []
 
     async def test_list_rejects_unknown_server(self) -> None:
         uow = FakeUnitOfWork()

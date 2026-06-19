@@ -37,7 +37,14 @@ from mc_server_dashboard_api.dependencies import (
     get_upload_mod,
     require_server_update_in_any_community,
 )
+from mc_server_dashboard_api.servers.application.mod_validation import (
+    LoaderMismatch,
+    McMismatch,
+    MissingDependency,
+    ModValidation,
+)
 from mc_server_dashboard_api.servers.application.mods import UploadMod
+from mc_server_dashboard_api.servers.application.server_mods import ServerModSet
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     ModAssignmentNotFoundError,
@@ -400,6 +407,13 @@ def _assignment(mod: Mod) -> ServerModAssignment:
     )
 
 
+def _mod_set(
+    entries: list[tuple[ServerModAssignment, Mod]],
+    validation: ModValidation | None = None,
+) -> ServerModSet:
+    return ServerModSet(entries=entries, validation=validation or ModValidation())
+
+
 def _assignment_app(
     *,
     assign: _FakeUseCase | None = None,
@@ -452,7 +466,7 @@ class TestAssignEndpoint:
     def test_assign_201(self) -> None:
         m = _mod()
         assign = _FakeUseCase(result=[_assignment(m)])
-        list_ = _FakeUseCase(result=[(_assignment(m), m)])
+        list_ = _FakeUseCase(result=_mod_set([(_assignment(m), m)]))
         recorder = RecordingAuditRecorder()
         app = _assignment_app(assign=assign, list_=list_, recorder=recorder)
         with TestClient(app) as client:  # type: ignore[arg-type]
@@ -462,6 +476,12 @@ class TestAssignEndpoint:
         assert len(body["mods"]) == 1
         assert body["mods"][0]["mod"]["id"] == str(m.id.value)
         assert body["mods"][0]["enabled"] is True
+        assert body["validation"] == {
+            "missing_deps": [],
+            "conflicts": [],
+            "loader_mismatch": [],
+            "mc_mismatch": [],
+        }
         assert len(recorder.events) == 1
         assert recorder.events[0].operation == ops.MOD_ASSIGN
 
@@ -556,7 +576,7 @@ class TestToggleEndpoint:
 class TestListServerModsEndpoint:
     def test_list_200(self) -> None:
         m = _mod()
-        uc = _FakeUseCase(result=[(_assignment(m), m)])
+        uc = _FakeUseCase(result=_mod_set([(_assignment(m), m)]))
         app = _assignment_app(list_=uc)
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(_ASSIGN_BASE)
@@ -566,12 +586,68 @@ class TestListServerModsEndpoint:
         assert body["mods"][0]["mod"]["id"] == str(m.id.value)
 
     def test_list_empty_200(self) -> None:
-        uc = _FakeUseCase(result=[])
+        uc = _FakeUseCase(result=_mod_set([]))
         app = _assignment_app(list_=uc)
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(_ASSIGN_BASE)
         assert resp.status_code == 200
         assert resp.json()["mods"] == []
+
+    def test_list_includes_validation_block(self) -> None:
+        """The mod-set response carries the phase-B validation checklist (#1263)."""
+
+        m = _mod()
+        validation = ModValidation(
+            missing_deps=[
+                MissingDependency(
+                    mod_id="examplemod",
+                    depends_on="fabric-api",
+                    version_range=">=0.90.0",
+                )
+            ],
+            loader_mismatch=[
+                LoaderMismatch(
+                    mod_id="examplemod",
+                    mod_loader="forge",
+                    server_loader="fabric",
+                )
+            ],
+            mc_mismatch=[
+                McMismatch(
+                    mod_id="examplemod",
+                    mod_mc_versions=["1.20.4"],
+                    server_mc_version="1.21",
+                )
+            ],
+        )
+        uc = _FakeUseCase(result=_mod_set([(_assignment(m), m)], validation))
+        app = _assignment_app(list_=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_ASSIGN_BASE)
+        assert resp.status_code == 200
+        block = resp.json()["validation"]
+        assert block["missing_deps"] == [
+            {
+                "mod_id": "examplemod",
+                "depends_on": "fabric-api",
+                "version_range": ">=0.90.0",
+            }
+        ]
+        assert block["loader_mismatch"] == [
+            {
+                "mod_id": "examplemod",
+                "mod_loader": "forge",
+                "server_loader": "fabric",
+            }
+        ]
+        assert block["mc_mismatch"] == [
+            {
+                "mod_id": "examplemod",
+                "mod_mc_versions": ["1.20.4"],
+                "server_mc_version": "1.21",
+            }
+        ]
+        assert block["conflicts"] == []
 
     def test_list_server_not_found_404(self) -> None:
         uc = _FakeUseCase(error=ServerNotFoundError("nope"))

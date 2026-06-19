@@ -20,8 +20,8 @@ Deployment rules:
   deleted); re-enable redeploys it.
 * Unassign = the deployed file (and any ``.disabled`` variant) is removed.
 
-Dependency validation is the next sub-issue (#1263); ``ListServerMods`` here just
-lists the mod set.
+``ListServerMods`` lists the mod set and attaches a phase-B validation checklist
+(issue #1263) computed by the pure :func:`validate_mod_set`.
 """
 
 from __future__ import annotations
@@ -29,6 +29,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.mod_validation import (
+    ModValidation,
+    validate_mod_set,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
     ModAssignmentNotFoundError,
@@ -311,8 +315,21 @@ class SetModEnabled:
 
 
 @dataclass(frozen=True)
+class ServerModSet:
+    """A server's mod set plus its phase-B validation checklist (issue #1263)."""
+
+    entries: list[tuple[ServerModAssignment, Mod]]
+    validation: ModValidation
+
+
+@dataclass(frozen=True)
 class ListServerMods:
-    """Return a server's mod set: each assignment with its library mod."""
+    """Return a server's mod set with its validation checklist.
+
+    Each assignment is paired with its library mod, and the whole set is run
+    through the pure :func:`validate_mod_set` against the server's loader and MC
+    version. Validation is display-only (#1263): it never mutates the set.
+    """
 
     uow: UnitOfWork
 
@@ -321,16 +338,22 @@ class ListServerMods:
         *,
         community_id: CommunityId,
         server_id: ServerId,
-    ) -> list[tuple[ServerModAssignment, Mod]]:
+    ) -> ServerModSet:
         async with self.uow:
             server = await self.uow.servers.get_by_id(server_id)
             if server is None or server.community_id != community_id:
                 raise ServerNotFoundError(str(server_id.value))
 
             assignments = await self.uow.mods.list_assignments_for_server(server_id)
-            result: list[tuple[ServerModAssignment, Mod]] = []
+            entries: list[tuple[ServerModAssignment, Mod]] = []
             for assignment in assignments:
                 mod = await self.uow.mods.get_by_id(assignment.mod_id)
                 if mod is not None:
-                    result.append((assignment, mod))
-            return result
+                    entries.append((assignment, mod))
+
+        validation = validate_mod_set(
+            server_type=server.server_type.value,
+            mc_version=server.mc_version,
+            mods=[mod for _, mod in entries],
+        )
+        return ServerModSet(entries=entries, validation=validation)

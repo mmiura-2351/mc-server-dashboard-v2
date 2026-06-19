@@ -49,6 +49,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.servers.application.mod_validation import ModValidation
 from mc_server_dashboard_api.servers.application.mods import (
     MAX_MOD_BYTES,
     DeleteMod,
@@ -59,6 +60,7 @@ from mc_server_dashboard_api.servers.application.mods import (
 from mc_server_dashboard_api.servers.application.server_mods import (
     AssignMods,
     ListServerMods,
+    ServerModSet,
     SetModEnabled,
     UnassignMod,
 )
@@ -342,8 +344,94 @@ class ServerModResponse(BaseModel):
         )
 
 
+class MissingDependencyResponse(BaseModel):
+    """A required dependency that nothing in the mod set provides."""
+
+    mod_id: str
+    depends_on: str
+    version_range: str
+
+
+class ConflictResponse(BaseModel):
+    """An assigned mod that conflicts with another present mod."""
+
+    mod_id: str
+    conflicts_with: str
+
+
+class LoaderMismatchResponse(BaseModel):
+    """An assigned mod whose loader the server cannot run."""
+
+    mod_id: str
+    mod_loader: str
+    server_loader: str
+
+
+class McMismatchResponse(BaseModel):
+    """An assigned mod that does not list the server's MC version."""
+
+    mod_id: str
+    mod_mc_versions: list[str]
+    server_mc_version: str
+
+
+class ModValidationResponse(BaseModel):
+    """The phase-B validation checklist for a server's mod set (issue #1263).
+
+    Display-only: empty lists mean the set is fully valid. ``conflicts`` is empty
+    for jars uploaded today (the manifest parser does not yet capture break
+    entries); the field is present so it populates once breaks are parsed.
+    """
+
+    missing_deps: list[MissingDependencyResponse]
+    conflicts: list[ConflictResponse]
+    loader_mismatch: list[LoaderMismatchResponse]
+    mc_mismatch: list[McMismatchResponse]
+
+    @classmethod
+    def from_validation(cls, validation: ModValidation) -> "ModValidationResponse":
+        return cls(
+            missing_deps=[
+                MissingDependencyResponse(
+                    mod_id=f.mod_id,
+                    depends_on=f.depends_on,
+                    version_range=f.version_range,
+                )
+                for f in validation.missing_deps
+            ],
+            conflicts=[
+                ConflictResponse(mod_id=f.mod_id, conflicts_with=f.conflicts_with)
+                for f in validation.conflicts
+            ],
+            loader_mismatch=[
+                LoaderMismatchResponse(
+                    mod_id=f.mod_id,
+                    mod_loader=f.mod_loader,
+                    server_loader=f.server_loader,
+                )
+                for f in validation.loader_mismatch
+            ],
+            mc_mismatch=[
+                McMismatchResponse(
+                    mod_id=f.mod_id,
+                    mod_mc_versions=f.mod_mc_versions,
+                    server_mc_version=f.server_mc_version,
+                )
+                for f in validation.mc_mismatch
+            ],
+        )
+
+
 class ServerModListResponse(BaseModel):
     mods: list[ServerModResponse]
+    validation: ModValidationResponse
+
+    @classmethod
+    def from_mod_set(cls, mod_set: ServerModSet) -> "ServerModListResponse":
+        return cls(
+            mods=[ServerModResponse.from_assignment(a, m) for a, m in mod_set.entries],
+            validation=ModValidationResponse.from_validation(mod_set.validation),
+        )
 
 
 def _server_update_guard() -> object:
@@ -404,9 +492,7 @@ async def assign_mods(
         community_id=CommunityId(community_id),
         server_id=ServerId(server_id),
     )
-    return ServerModListResponse(
-        mods=[ServerModResponse.from_assignment(a, m) for a, m in mod_set]
-    )
+    return ServerModListResponse.from_mod_set(mod_set)
 
 
 @assignment_router.delete(
@@ -557,6 +643,4 @@ async def list_server_mods(
     except ServerNotFoundError as exc:
         raise _not_found() from exc
 
-    return ServerModListResponse(
-        mods=[ServerModResponse.from_assignment(a, m) for a, m in mod_set]
-    )
+    return ServerModListResponse.from_mod_set(mod_set)
