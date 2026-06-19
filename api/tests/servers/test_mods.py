@@ -24,10 +24,16 @@ from mc_server_dashboard_api.servers.application.mods import (
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidModJarError,
+    ModInUseError,
     ModNotFoundError,
     PermissionDeniedError,
 )
 from mc_server_dashboard_api.servers.domain.mod import ModId
+from mc_server_dashboard_api.servers.domain.server_mod import (
+    ServerModAssignment,
+    ServerModId,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.servers.fakes import FakeClock, FakeModStore, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 16, 12, 0, 0, tzinfo=dt.timezone.utc)
@@ -354,6 +360,43 @@ class TestDeleteMod:
                 caller_id=uuid.uuid4(),
                 is_platform_admin=False,
             )
+
+    async def test_delete_blocked_while_assigned(self) -> None:
+        """A library mod assigned to any server cannot be deleted (issue #1262)."""
+        uow = FakeUnitOfWork()
+        store = FakeModStore()
+        upload_uc = _make_upload(uow=uow, store=store)
+        user_id = uuid.uuid4()
+
+        mod = await upload_uc(
+            filename="assigned.jar",
+            display_name="Assigned",
+            content=_JAR_CONTENT,
+            uploaded_by=user_id,
+        )
+
+        # Assign the mod to a server.
+        await uow.mods.add_assignment(
+            ServerModAssignment(
+                id=ServerModId.new(),
+                server_id=ServerId(uuid.uuid4()),
+                mod_id=mod.id,
+                enabled=True,
+                assigned_by=user_id,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+
+        with pytest.raises(ModInUseError):
+            await DeleteMod(uow=uow, store=store)(
+                mod_id=mod.id,
+                caller_id=user_id,
+                is_platform_admin=False,
+            )
+        # Blob and row survive the refused delete.
+        assert mod.id in uow.mods.mods
+        assert mod.id in store.blobs
 
 
 class TestDownloadMod:

@@ -1,10 +1,14 @@
-"""Persistence Port for mod library metadata.
+"""Persistence Port for mod library metadata and server assignments.
 
 The ``ModRepository`` the mod-library use cases depend on; a concrete
 async-SQLAlchemy adapter implements it on the unit-of-work's session. Lookups
 return ``None`` when absent rather than raising, so callers decide policy
 (mirroring :class:`ResourcePackRepository`). ``get_by_sha256`` backs the
 content-address dedup (reject/return existing on identical upload).
+
+The assignment methods (issue #1262) manage the ``server_mods`` many-to-many link:
+listing a server's mod set, listing a mod's assignments (for the delete guard),
+and add/get/delete/toggle of a single assignment.
 """
 
 from __future__ import annotations
@@ -17,6 +21,8 @@ from mc_server_dashboard_api.servers.domain.mod import (
     ModLoader,
     ModSide,
 )
+from mc_server_dashboard_api.servers.domain.server_mod import ServerModAssignment
+from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 
 class ModRepository(abc.ABC):
@@ -55,3 +61,37 @@ class ModRepository(abc.ABC):
     @abc.abstractmethod
     async def delete(self, mod_id: ModId) -> None:
         """Delete the mod row."""
+
+    @abc.abstractmethod
+    async def add_assignment(self, assignment: ServerModAssignment) -> None:
+        """Stage a new server↔mod assignment row for persistence."""
+
+    @abc.abstractmethod
+    async def get_assignment(
+        self, server_id: ServerId, mod_id: ModId
+    ) -> ServerModAssignment | None:
+        """Return the assignment for ``(server_id, mod_id)``, or ``None``."""
+
+    @abc.abstractmethod
+    async def list_assignments_for_server(
+        self, server_id: ServerId
+    ) -> list[ServerModAssignment]:
+        """Return the server's mod set (its assignments), ordered by created_at."""
+
+    @abc.abstractmethod
+    async def list_assignments_for_mod(
+        self, mod_id: ModId
+    ) -> list[ServerModAssignment]:
+        """Return all assignments referencing ``mod_id``.
+
+        Backs the delete guard: a library mod assigned to any server cannot be
+        deleted.
+        """
+
+    @abc.abstractmethod
+    async def set_assignment_enabled(self, assignment: ServerModAssignment) -> None:
+        """Persist the ``enabled`` flag (and ``updated_at``) of an assignment."""
+
+    @abc.abstractmethod
+    async def delete_assignment(self, server_id: ServerId, mod_id: ModId) -> None:
+        """Delete the assignment for ``(server_id, mod_id)``."""

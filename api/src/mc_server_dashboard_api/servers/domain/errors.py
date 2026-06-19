@@ -451,13 +451,14 @@ class InvalidResourcePackError(ServerError):
 
 
 class InvalidModJarError(ServerError):
-    """An uploaded mod file could not be opened as a jar (zip) at all.
+    """An uploaded mod file could not be turned into a deployable library entry.
 
     Raised by the manifest parser when the bytes are not a readable zip, carry
-    too many entries, or decompress past the size cap (a decompression bomb).
-    Distinct from a readable jar with no recognized loader manifest, which the
-    parser returns as a ``loader_type="unknown"`` result rather than raising.
-    The edge maps this to 422.
+    too many entries, or decompress past the size cap (a decompression bomb). The
+    parser returns a ``loader_type="unknown"`` result for a readable jar with no
+    recognized loader manifest, and ``UploadMod`` re-raises this error for that
+    case too (issue #1261): an unknown loader has no deploy target, so it cannot
+    join the library. The edge maps this to 422.
     """
 
 
@@ -466,6 +467,22 @@ class ModNotFoundError(ServerError):
 
     Raised by get/delete/download when the mod id is unknown. The edge maps this
     to 404.
+    """
+
+
+class ModInUseError(ServerError):
+    """A library mod cannot be deleted because it is assigned to servers.
+
+    Raised by delete when one or more servers still reference the mod. The caller
+    must unassign it from every server first. The edge maps this to 409.
+    """
+
+
+class ModAssignmentNotFoundError(ServerError):
+    """A server-mod operation targeted an assignment that does not exist.
+
+    Raised by unassign/enable/disable when the (server, mod) pair is not assigned.
+    The edge maps this to 404.
     """
 
 
