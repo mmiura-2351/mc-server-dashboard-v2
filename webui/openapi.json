@@ -541,6 +541,41 @@
         "title": "Body_upload_file_api_communities__community_id__servers__server_id__files_upload_post",
         "type": "object"
       },
+      "Body_upload_mod_api_mods_post": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "side": {
+            "anyOf": [
+              {
+                "enum": [
+                  "server",
+                  "client",
+                  "both"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Side"
+          }
+        },
+        "required": [
+          "file",
+          "display_name"
+        ],
+        "title": "Body_upload_mod_api_mods_post",
+        "type": "object"
+      },
       "Body_upload_resource_pack_api_resource_packs_post": {
         "properties": {
           "display_name": {
@@ -1343,6 +1378,149 @@
           "max_memory_limit_mb"
         ],
         "title": "MetaResponse",
+        "type": "object"
+      },
+      "ModListResponse": {
+        "properties": {
+          "mods": {
+            "items": {
+              "$ref": "#/components/schemas/ModResponse"
+            },
+            "title": "Mods",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mods"
+        ],
+        "title": "ModListResponse",
+        "type": "object"
+      },
+      "ModResponse": {
+        "description": "One mod's library metadata.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "dependencies": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "loader_type": {
+            "title": "Loader Type",
+            "type": "string"
+          },
+          "mc_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mc Versions",
+            "type": "array"
+          },
+          "mod_identifier": {
+            "title": "Mod Identifier",
+            "type": "string"
+          },
+          "provides": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Provides",
+            "type": "array"
+          },
+          "sha256_hash": {
+            "title": "Sha256 Hash",
+            "type": "string"
+          },
+          "sha512_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha512 Hash"
+          },
+          "side": {
+            "title": "Side",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "uploaded_by": {
+            "format": "uuid",
+            "title": "Uploaded By",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "display_name",
+          "description",
+          "loader_type",
+          "mod_identifier",
+          "provides",
+          "version_number",
+          "mc_versions",
+          "side",
+          "dependencies",
+          "sha256_hash",
+          "sha512_hash",
+          "size_bytes",
+          "source",
+          "uploaded_by",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ModResponse",
         "type": "object"
       },
       "PlatformAdminRequest": {
@@ -6856,6 +7034,215 @@
           }
         },
         "summary": "Metrics"
+      }
+    },
+    "/api/mods": {
+      "get": {
+        "description": "List library mods, optionally filtered (authenticated, issue #1261).",
+        "operationId": "list_mods_api_mods_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "loader",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Loader"
+            }
+          },
+          {
+            "in": "query",
+            "name": "mc",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Mc"
+            }
+          },
+          {
+            "in": "query",
+            "name": "side",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Side"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Mods"
+      },
+      "post": {
+        "description": "Upload a mod jar (server:update in any community, issue #1261).\n\nParses the manifest on ingest and dedups on SHA-256: an identical upload\nresolves to the existing library entry (returned 201, no duplicate stored).",
+        "operationId": "upload_mod_api_mods_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_mod_api_mods_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Upload Mod"
+      }
+    },
+    "/api/mods/{mod_id}": {
+      "delete": {
+        "description": "Delete a mod from the library (uploader or platform admin, issue #1261).",
+        "operationId": "delete_mod_api_mods__mod_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "mod_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Mod Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Mod"
+      }
+    },
+    "/api/mods/{mod_id}/download": {
+      "get": {
+        "description": "Download a mod jar (authenticated, issue #1261).",
+        "operationId": "download_mod_api_mods__mod_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "mod_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Mod Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Mod"
       }
     },
     "/api/ports/available": {

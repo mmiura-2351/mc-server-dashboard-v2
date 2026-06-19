@@ -1310,6 +1310,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/mods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Mods
+         * @description List library mods, optionally filtered (authenticated, issue #1261).
+         */
+        get: operations["list_mods_api_mods_get"];
+        put?: never;
+        /**
+         * Upload Mod
+         * @description Upload a mod jar (server:update in any community, issue #1261).
+         *
+         *     Parses the manifest on ingest and dedups on SHA-256: an identical upload
+         *     resolves to the existing library entry (returned 201, no duplicate stored).
+         */
+        post: operations["upload_mod_api_mods_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods/{mod_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Mod
+         * @description Delete a mod from the library (uploader or platform admin, issue #1261).
+         */
+        delete: operations["delete_mod_api_mods__mod_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mods/{mod_id}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Mod
+         * @description Download a mod jar (authenticated, issue #1261).
+         */
+        get: operations["download_mod_api_mods__mod_id__download_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/ports/available": {
         parameters: {
             query?: never;
@@ -1923,6 +1990,15 @@ export interface components {
             /** File */
             file: string;
         };
+        /** Body_upload_mod_api_mods_post */
+        Body_upload_mod_api_mods_post: {
+            /** Display Name */
+            display_name: string;
+            /** File */
+            file: string;
+            /** Side */
+            side?: ("server" | "client" | "both") | null;
+        };
         /** Body_upload_resource_pack_api_resource_packs_post */
         Body_upload_resource_pack_api_resource_packs_post: {
             /** Display Name */
@@ -2234,6 +2310,67 @@ export interface components {
             max_memory_limit_mb: number | null;
             /** Relay Enabled */
             relay_enabled: boolean;
+        };
+        /** ModListResponse */
+        ModListResponse: {
+            /** Mods */
+            mods: components["schemas"]["ModResponse"][];
+        };
+        /**
+         * ModResponse
+         * @description One mod's library metadata.
+         */
+        ModResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Dependencies */
+            dependencies: {
+                [key: string]: unknown;
+            }[];
+            /** Description */
+            description: string | null;
+            /** Display Name */
+            display_name: string;
+            /** Filename */
+            filename: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Loader Type */
+            loader_type: string;
+            /** Mc Versions */
+            mc_versions: string[];
+            /** Mod Identifier */
+            mod_identifier: string;
+            /** Provides */
+            provides: string[];
+            /** Sha256 Hash */
+            sha256_hash: string;
+            /** Sha512 Hash */
+            sha512_hash: string | null;
+            /** Side */
+            side: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Source */
+            source: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /**
+             * Uploaded By
+             * Format: uuid
+             */
+            uploaded_by: string;
+            /** Version Number */
+            version_number: string;
         };
         /** PlatformAdminRequest */
         PlatformAdminRequest: {
@@ -5233,6 +5370,132 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_mods_api_mods_get: {
+        parameters: {
+            query?: {
+                loader?: string | null;
+                mc?: string | null;
+                side?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_mod_api_mods_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_mod_api_mods_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_mod_api_mods__mod_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                mod_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_mod_api_mods__mod_id__download_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                mod_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

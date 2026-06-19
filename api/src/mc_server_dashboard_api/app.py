@@ -100,6 +100,7 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
     ServersLateSnapshotResultSink,
 )
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
+from mc_server_dashboard_api.servers.adapters.mod_store import ObjectModStore
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
     run_reconciler_loop,
 )
@@ -123,6 +124,7 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
 from mc_server_dashboard_api.servers.api import backups as server_backups
 from mc_server_dashboard_api.servers.api import files as server_files
 from mc_server_dashboard_api.servers.api import groups as server_groups
+from mc_server_dashboard_api.servers.api import mods as server_mods
 from mc_server_dashboard_api.servers.api import ports as server_ports
 from mc_server_dashboard_api.servers.api import resource_packs as server_resource_packs
 from mc_server_dashboard_api.servers.api import servers
@@ -260,6 +262,31 @@ def _build_resource_pack_store(
     assert obj.access_key is not None
     assert obj.secret_key is not None
     return ObjectResourcePackStore(
+        make_s3_client_factory(
+            endpoint=obj.endpoint,
+            bucket=obj.bucket,
+            access_key=obj.access_key,
+            secret_key=obj.secret_key,
+        )
+    )
+
+
+def _build_mod_store(settings: Settings) -> ObjectModStore | None:
+    """Build the :class:`ModStore` adapter (issue #1261).
+
+    Only available for the ``object`` storage backend; returns ``None`` for
+    ``fs``/``remote-fs`` (the fs adapter is not implemented yet). The dependency
+    layer raises 503 when the store is ``None``.
+    """
+
+    if settings.storage.backend in ("fs", "remote-fs"):
+        return None
+    obj = settings.storage.object
+    assert obj.endpoint is not None
+    assert obj.bucket is not None
+    assert obj.access_key is not None
+    assert obj.secret_key is not None
+    return ObjectModStore(
         make_s3_client_factory(
             endpoint=obj.endpoint,
             bucket=obj.bucket,
@@ -492,6 +519,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # backend; None for fs/remote-fs.
     resource_pack_store = _build_resource_pack_store(settings)
 
+    # Build the mod store (issue #1261): same object-backend-only constraint.
+    mod_store = _build_mod_store(settings)
+
     # Build the process-wide version catalog now so its in-process manifest cache
     # is shared across requests (FR-VER-2). No external secret is required, so it
     # cannot fail at boot; it is stored on app state below.
@@ -525,6 +555,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.storage = storage
         app.state.resource_pack_store = resource_pack_store
+        app.state.mod_store = mod_store
         app.state.version_catalog = version_catalog
         # The catalog's manifest-cache invalidator + per-type source prefixes, for
         # the platform-admin manual refresh (issue #286).
@@ -941,6 +972,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(server_resource_packs.router)
     api_router.include_router(server_resource_packs.public_router)
     api_router.include_router(server_resource_packs.assignment_router)
+    api_router.include_router(server_mods.router)
     api_router.include_router(workers.router)
     api_router.include_router(server_events.router)
     api_router.include_router(transfers.router)
