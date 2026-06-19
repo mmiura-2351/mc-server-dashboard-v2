@@ -83,6 +83,11 @@ const ResourcePacksPage = lazyRetry(() =>
     default: m.ResourcePacksPage,
   })),
 );
+const ModsPage = lazyRetry(() =>
+  import("./pages/ModsPage.tsx").then((m) => ({
+    default: m.ModsPage,
+  })),
+);
 const ServerDetailPage = lazyRetry(() =>
   import("./pages/ServerDetailPage.tsx").then((m) => ({
     default: m.ServerDetailPage,
@@ -220,6 +225,7 @@ export function App() {
             />
             <Route path="/account" element={<AccountPage />} />
             <Route path="/resource-packs" element={<ResourcePacksPage />} />
+            <Route path="/mods" element={<ModsPage />} />
 
             <Route element={<RequireAdmin />}>
               <Route path="/admin" element={<AdminOverviewPage />} />
