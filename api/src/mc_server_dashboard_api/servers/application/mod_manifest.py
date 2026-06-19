@@ -74,7 +74,11 @@ class ParsedModMetadata:
 
     ``loader_type`` is the detected loader, or ``"unknown"`` when no manifest was
     recognized. ``dependencies`` use the library's persisted shape:
-    ``[{"mod_identifier": str, "version_range": str, "required": bool}]``.
+    ``[{"mod_identifier": str, "version_range": str, "required": bool,
+    "conflict": bool}]``. ``conflict`` flags an entry as an incompatibility
+    (Fabric/Quilt ``breaks``, Forge/NeoForge ``incompatible``/``discouraged``)
+    rather than a dependency; it defaults ``False`` for ordinary deps. The
+    phase-B validator (#1263) reads it to populate ``conflicts``.
     ``side`` defaults to ``"both"`` whenever undetectable.
     """
 
@@ -178,6 +182,7 @@ def _parse_fabric(names: dict[str, str]) -> ParsedModMetadata | None:
 
     depends = _as_dict(data.get("depends"))
     recommends = _as_dict(data.get("recommends"))
+    breaks = _as_dict(data.get("breaks"))
 
     dependencies: list[dict[str, object]] = []
     for dep_id, rng in depends.items():
@@ -188,6 +193,12 @@ def _parse_fabric(names: dict[str, str]) -> ParsedModMetadata | None:
         if dep_id in _FABRIC_RUNTIME_IDS:
             continue
         dependencies.append(_dep(dep_id, _fabric_range(rng), required=False))
+    for dep_id, rng in breaks.items():
+        if dep_id in _FABRIC_RUNTIME_IDS:
+            continue
+        dependencies.append(
+            _dep(dep_id, _fabric_range(rng), required=False, conflict=True)
+        )
 
     return ParsedModMetadata(
         loader_type="fabric",
@@ -232,6 +243,18 @@ def _parse_quilt(names: dict[str, str]) -> ParsedModMetadata | None:
             if dep_id in _FABRIC_RUNTIME_IDS:
                 continue
             dependencies.append(_dep(dep_id, rng, required=not entry.get("optional")))
+    raw_breaks = loader.get("breaks")
+    if isinstance(raw_breaks, list):
+        for entry in raw_breaks:
+            if not isinstance(entry, dict):
+                continue
+            dep_id = entry.get("id")
+            if not isinstance(dep_id, str) or not dep_id:
+                continue
+            if dep_id in _FABRIC_RUNTIME_IDS:
+                continue
+            rng = _fabric_range(entry.get("versions"))
+            dependencies.append(_dep(dep_id, rng, required=False, conflict=True))
 
     return ParsedModMetadata(
         loader_type="quilt",
@@ -283,6 +306,9 @@ def _parse_forge_like(raw: str | None, loader: ModLoader) -> ParsedModMetadata |
                 mc_versions = [rng] if rng else []
                 continue
             if dep_id in _FORGE_RUNTIME_IDS:
+                continue
+            if _forge_conflict(entry):
+                dependencies.append(_dep(dep_id, rng, required=False, conflict=True))
                 continue
             dependencies.append(_dep(dep_id, rng, required=_forge_required(entry)))
 
@@ -350,12 +376,17 @@ _LOADER_ORDER = (
 
 
 def _dep(
-    mod_identifier: str, version_range: str, *, required: bool
+    mod_identifier: str,
+    version_range: str,
+    *,
+    required: bool,
+    conflict: bool = False,
 ) -> dict[str, object]:
     return {
         "mod_identifier": mod_identifier,
         "version_range": version_range,
         "required": required,
+        "conflict": conflict,
     }
 
 
@@ -400,6 +431,15 @@ def _quilt_provides(provides: object) -> list[str]:
     return out
 
 
+# Forge/NeoForge dependency ``type`` values that mark an incompatibility rather
+# than a (possibly optional) requirement. NeoForge defines ``incompatible`` (a
+# hard break) and ``discouraged`` (a soft break) alongside ``required`` /
+# ``optional``; we map both to a conflict so the validator surfaces them. We do
+# NOT treat ``mandatory = false`` as a conflict — that is merely an optional
+# dependency (the canonical Forge "soft dep"), not an incompatibility.
+_FORGE_CONFLICT_TYPES = frozenset({"incompatible", "discouraged"})
+
+
 def _forge_required(entry: dict[str, object]) -> bool:
     """Whether a Forge/NeoForge dependency is required.
 
@@ -412,6 +452,11 @@ def _forge_required(entry: dict[str, object]) -> bool:
     if "type" in entry:
         return entry.get("type") != "optional"
     return True
+
+
+def _forge_conflict(entry: dict[str, object]) -> bool:
+    """Whether a Forge/NeoForge dependency entry declares an incompatibility."""
+    return entry.get("type") in _FORGE_CONFLICT_TYPES
 
 
 def _str_list(value: object) -> list[str]:
