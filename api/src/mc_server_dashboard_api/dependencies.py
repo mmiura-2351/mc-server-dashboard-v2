@@ -262,6 +262,7 @@ from mc_server_dashboard_api.servers.application.manage_server import (
 from mc_server_dashboard_api.servers.application.mods import (
     DeleteMod,
     DownloadMod,
+    ImportMod,
     ListMods,
     UploadMod,
 )
@@ -290,6 +291,7 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
 )
+from mc_server_dashboard_api.servers.domain.catalog_provider import CatalogProvider
 from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane as ServersControlPlane,
 )
@@ -2032,6 +2034,33 @@ def get_download_mod(
     return DownloadMod(
         uow=ServersUnitOfWork(session_factory),
         store=store,
+    )
+
+
+def get_catalog_provider(request: Request) -> CatalogProvider:
+    """Return the process-wide :class:`CatalogProvider` from app state (issue #1264).
+
+    The keyless Modrinth adapter, built once by the app factory over a single
+    httpx client. Source-agnostic so a future CurseForge adapter can replace it.
+    """
+
+    provider: CatalogProvider = request.app.state.catalog_provider
+    return provider
+
+
+def get_import_mod(
+    request: Request,
+    store: Annotated[ModStore, Depends(get_mod_store)],
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> ImportMod:
+    """Assemble the :class:`ImportMod` use case (issue #1264)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ImportMod(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+        clock=ServersSystemClock(),
+        catalog=catalog,
     )
 
 

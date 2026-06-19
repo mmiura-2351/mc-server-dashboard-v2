@@ -26,6 +26,13 @@ from mc_server_dashboard_api.servers.domain.backup_repository import (
     BackupRepository,
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogProject,
+    CatalogProjectNotFoundError,
+    CatalogProvider,
+    CatalogSearchResult,
+    CatalogVersion,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.committed_resources import (
     CommittedResources,
@@ -1213,3 +1220,53 @@ class FakeModStore(ModStore):
 
     async def size(self, mod_id: ModId, filename: str) -> int:
         return len(self.blobs[mod_id])
+
+
+class FakeCatalogProvider(CatalogProvider):
+    """In-memory :class:`CatalogProvider` for import tests (issue #1264).
+
+    Serves recorded :class:`CatalogVersion` / :class:`CatalogProject` by id and
+    jar bytes keyed by download URL; no network. A missing version raises the
+    same not-found error the real adapter raises on a 404.
+    """
+
+    def __init__(
+        self,
+        *,
+        versions: dict[str, CatalogVersion] | None = None,
+        projects: dict[str, CatalogProject] | None = None,
+        results: dict[str, CatalogSearchResult] | None = None,
+        blobs: dict[str, bytes] | None = None,
+    ) -> None:
+        self.versions = versions or {}
+        self.projects = projects or {}
+        self.results = results or {}
+        self.blobs = blobs or {}
+        self.downloads: list[str] = []
+
+    async def search(
+        self,
+        *,
+        query: str,
+        loader: str | None = None,
+        game_version: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> CatalogSearchResult:
+        return self.results.get(query, CatalogSearchResult(hits=[], total=0))
+
+    async def get_project(self, project_id: str) -> CatalogProject:
+        project = self.projects.get(project_id)
+        if project is None:
+            raise CatalogProjectNotFoundError(project_id)
+        return project
+
+    async def get_version(self, version_id: str) -> CatalogVersion:
+        version = self.versions.get(version_id)
+        if version is None:
+            raise CatalogProjectNotFoundError(version_id)
+        return version
+
+    async def download(self, url: str) -> bytes:
+        self.downloads.append(url)
+        return self.blobs[url]
