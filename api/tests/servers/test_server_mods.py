@@ -10,12 +10,18 @@ rename, the at-rest gate, and the lifecycle lock.
 from __future__ import annotations
 
 import datetime as dt
+import io
+import random
 import uuid
+import zipfile
+from collections.abc import AsyncIterator
 
 import pytest
 
 from mc_server_dashboard_api.servers.application.server_mods import (
     AssignMods,
+    DownloadClientModpack,
+    ListClientMods,
     ListServerMods,
     SetModEnabled,
     UnassignMod,
@@ -569,5 +575,248 @@ class TestListServerMods:
     async def test_list_rejects_unknown_server(self) -> None:
         uow = FakeUnitOfWork()
         uc = ListServerMods(uow=uow)
+        with pytest.raises(ServerNotFoundError):
+            await uc(community_id=_COMMUNITY_ID, server_id=ServerId(uuid.uuid4()))
+
+
+def _seed_assigned_mod(
+    uow: FakeUnitOfWork,
+    store: FakeModStore,
+    server_id: ServerId,
+    mod: Mod,
+    *,
+    enabled: bool = True,
+    blob: bytes = b"JAR!",
+) -> Mod:
+    """Seed a library mod, its jar bytes, and an assignment row to a server."""
+
+    from mc_server_dashboard_api.servers.domain.server_mod import (
+        ServerModAssignment,
+        ServerModId,
+    )
+
+    uow.mods.mods[mod.id] = mod
+    store.blobs[mod.id] = blob
+    assignment = ServerModAssignment(
+        id=ServerModId.new(),
+        server_id=server_id,
+        mod_id=mod.id,
+        enabled=enabled,
+        assigned_by=uuid.uuid4(),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    uow.mods.assignments[assignment.id] = assignment
+    return mod
+
+
+class TestListClientMods:
+    async def test_includes_client_and_both_excludes_server(self) -> None:
+        server = _at_rest_server()
+        uow, _, store = _ctx(server)
+        client = _seed_assigned_mod(
+            uow, store, server.id, _make_mod(side="client", filename="minimap.jar")
+        )
+        both = _seed_assigned_mod(
+            uow, store, server.id, _make_mod(side="both", filename="fabric-api.jar")
+        )
+        _seed_assigned_mod(
+            uow, store, server.id, _make_mod(side="server", filename="lithium.jar")
+        )
+
+        uc = ListClientMods(uow=uow)
+        result = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+
+        assert {m.id for m in result} == {client.id, both.id}
+
+    async def test_excludes_disabled(self) -> None:
+        server = _at_rest_server()
+        uow, _, store = _ctx(server)
+        enabled = _seed_assigned_mod(
+            uow, store, server.id, _make_mod(side="both", filename="enabled.jar")
+        )
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="client", filename="disabled.jar"),
+            enabled=False,
+        )
+
+        uc = ListClientMods(uow=uow)
+        result = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+
+        assert [m.id for m in result] == [enabled.id]
+
+    async def test_empty_when_no_client_mods(self) -> None:
+        server = _at_rest_server()
+        uow, _, store = _ctx(server)
+        _seed_assigned_mod(uow, store, server.id, _make_mod(side="server"))
+
+        uc = ListClientMods(uow=uow)
+        result = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+
+        assert result == []
+
+    async def test_rejects_unknown_server(self) -> None:
+        uow = FakeUnitOfWork()
+        uc = ListClientMods(uow=uow)
+        with pytest.raises(ServerNotFoundError):
+            await uc(community_id=_COMMUNITY_ID, server_id=ServerId(uuid.uuid4()))
+
+
+def _read_zip(data: bytes) -> dict[str, bytes]:
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        return {name: zf.read(name) for name in zf.namelist()}
+
+
+async def _collect(stream: AsyncIterator[bytes]) -> bytes:
+    return b"".join([chunk async for chunk in stream])
+
+
+class TestDownloadClientModpack:
+    async def test_zip_contains_exactly_client_jars_with_bytes(self) -> None:
+        server = _at_rest_server()
+        uow, _, store = _ctx(server)
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="both", filename="fabric-api.jar"),
+            blob=b"FABRIC-API-BYTES",
+        )
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="client", filename="minimap.jar"),
+            blob=b"MINIMAP-BYTES",
+        )
+        # Server-only mod is excluded from the client modpack.
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="server", filename="lithium.jar"),
+            blob=b"LITHIUM",
+        )
+
+        uc = DownloadClientModpack(uow=uow, store=store)
+        stream, name = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+        entries = _read_zip(await _collect(stream))
+
+        assert name == "test-server"
+        assert entries == {
+            "fabric-api.jar": b"FABRIC-API-BYTES",
+            "minimap.jar": b"MINIMAP-BYTES",
+        }
+
+    async def test_excludes_disabled_from_zip(self) -> None:
+        server = _at_rest_server()
+        uow, _, store = _ctx(server)
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="both", filename="enabled.jar"),
+            blob=b"ENABLED",
+        )
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="client", filename="disabled.jar"),
+            enabled=False,
+            blob=b"DISABLED",
+        )
+
+        uc = DownloadClientModpack(uow=uow, store=store)
+        stream, _ = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+        entries = _read_zip(await _collect(stream))
+
+        assert entries == {"enabled.jar": b"ENABLED"}
+
+    async def test_duplicate_filenames_do_not_corrupt_zip(self) -> None:
+        server = _at_rest_server()
+        uow, _, store = _ctx(server)
+        # Two distinct library mods that happen to share a filename.
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="both", filename="dup.jar", sha256="1" * 64),
+            blob=b"FIRST",
+        )
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="both", filename="dup.jar", sha256="2" * 64),
+            blob=b"SECOND",
+        )
+
+        uc = DownloadClientModpack(uow=uow, store=store)
+        stream, _ = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+        entries = _read_zip(await _collect(stream))
+
+        # Both jars are present under distinct, non-colliding entry names.
+        assert len(entries) == 2
+        assert "dup.jar" in entries
+        assert set(entries.values()) == {b"FIRST", b"SECOND"}
+
+    async def test_empty_zip_when_no_client_mods(self) -> None:
+        server = _at_rest_server()
+        uow, _, store = _ctx(server)
+        _seed_assigned_mod(uow, store, server.id, _make_mod(side="server"))
+
+        uc = DownloadClientModpack(uow=uow, store=store)
+        stream, _ = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+        entries = _read_zip(await _collect(stream))
+
+        assert entries == {}
+
+    async def test_large_multi_chunk_jars_produce_valid_archive(self) -> None:
+        # Jars larger than the internal drain threshold, streamed from the store
+        # in many chunks, must still produce a structurally valid zip with each
+        # entry's bytes preserved exactly (issue #1265 corrupt-archive fix).
+        server = _at_rest_server()
+        servers = FakeServerRepository()
+        servers.seed(server)
+        uow = FakeUnitOfWork(servers=servers)
+        store = FakeModStore(chunk_size=64 * 1024)
+
+        # Deterministic but incompressible: deflate cannot shrink it below the
+        # drain threshold, so the streaming/drain path genuinely executes.
+        rng = random.Random(1265)
+        big_a = rng.randbytes(3 * 1024 * 1024)
+        big_b = rng.randbytes(5 * 1024 * 1024)
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="both", filename="big-a.jar"),
+            blob=big_a,
+        )
+        _seed_assigned_mod(
+            uow,
+            store,
+            server.id,
+            _make_mod(side="client", filename="big-b.jar", sha256="b" * 64),
+            blob=big_b,
+        )
+
+        uc = DownloadClientModpack(uow=uow, store=store)
+        stream, _ = await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+        data = await _collect(stream)
+
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            assert zf.testzip() is None
+            assert set(zf.namelist()) == {"big-a.jar", "big-b.jar"}
+            assert zf.read("big-a.jar") == big_a
+            assert zf.read("big-b.jar") == big_b
+
+    async def test_rejects_unknown_server(self) -> None:
+        uow = FakeUnitOfWork()
+        uc = DownloadClientModpack(uow=uow, store=FakeModStore())
         with pytest.raises(ServerNotFoundError):
             await uc(community_id=_COMMUNITY_ID, server_id=ServerId(uuid.uuid4()))

@@ -28,7 +28,9 @@ from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
     get_current_user,
     get_delete_mod,
+    get_download_client_modpack,
     get_download_mod,
+    get_list_client_mods,
     get_list_mods,
     get_list_server_mods,
     get_mod_store,
@@ -420,7 +422,10 @@ def _assignment_app(
     unassign: _FakeUseCase | None = None,
     toggle: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
+    client_list: _FakeUseCase | None = None,
+    modpack: object | None = None,
     recorder: RecordingAuditRecorder | None = None,
+    permit: bool = True,
 ) -> object:
     from mc_server_dashboard_api.community.domain.permission_checker import (
         MembershipVisibility,
@@ -443,6 +448,10 @@ def _assignment_app(
         app.dependency_overrides[get_set_mod_enabled] = lambda: toggle
     if list_ is not None:
         app.dependency_overrides[get_list_server_mods] = lambda: list_
+    if client_list is not None:
+        app.dependency_overrides[get_list_client_mods] = lambda: client_list
+    if modpack is not None:
+        app.dependency_overrides[get_download_client_modpack] = lambda: modpack
     if recorder is not None:
         app.dependency_overrides[get_audit_recorder] = lambda: recorder
 
@@ -450,14 +459,14 @@ def _assignment_app(
         async def is_member(self, *, user_id: object, community_id: object) -> bool:
             return True
 
-    class _AlwaysAllow(PermissionChecker):
+    class _Checker(PermissionChecker):
         async def can(
             self, *, user: object, operation: object, resource: object
         ) -> bool:
-            return True
+            return permit
 
     app.dependency_overrides[get_membership_visibility] = _AlwaysMember
-    app.dependency_overrides[get_permission_checker] = _AlwaysAllow
+    app.dependency_overrides[get_permission_checker] = _Checker
 
     return app
 
@@ -655,3 +664,98 @@ class TestListServerModsEndpoint:
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(_ASSIGN_BASE)
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Client modpack endpoint tests (issue #1265)
+# ---------------------------------------------------------------------------
+
+_CLIENT_BASE = f"/api/communities/{_COMMUNITY_ID}/servers/{_SERVER_ID}/client-mods"
+
+
+class _FakeModpackUseCase:
+    """Fake that returns a (stream, server_name) tuple like DownloadClientModpack."""
+
+    def __init__(
+        self,
+        *,
+        data: bytes = b"PK-zip-bytes",
+        server_name: str = "my-server",
+        error: Exception | None = None,
+    ):
+        self._data = data
+        self._server_name = server_name
+        self._error = error
+
+    async def __call__(self, **kwargs: object) -> tuple[AsyncIterator[bytes], str]:
+        if self._error is not None:
+            raise self._error
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield self._data
+
+        return _stream(), self._server_name
+
+
+class TestListClientModsEndpoint:
+    def test_list_200(self) -> None:
+        client_mod = _mod(side="both", filename="fabric-api.jar")
+        uc = _FakeUseCase(result=[client_mod])
+        app = _assignment_app(client_list=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_CLIENT_BASE)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["mods"]) == 1
+        assert body["mods"][0]["filename"] == "fabric-api.jar"
+        assert body["mods"][0]["side"] == "both"
+
+    def test_list_empty_200(self) -> None:
+        uc = _FakeUseCase(result=[])
+        app = _assignment_app(client_list=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_CLIENT_BASE)
+        assert resp.status_code == 200
+        assert resp.json()["mods"] == []
+
+    def test_list_server_not_found_404(self) -> None:
+        uc = _FakeUseCase(error=ServerNotFoundError("nope"))
+        app = _assignment_app(client_list=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_CLIENT_BASE)
+        assert resp.status_code == 404
+
+    def test_list_requires_server_read_403(self) -> None:
+        uc = _FakeUseCase(result=[])
+        app = _assignment_app(client_list=uc, permit=False)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_CLIENT_BASE)
+        assert resp.status_code == 403
+
+
+class TestDownloadClientModpackEndpoint:
+    def test_download_200_streams_zip(self) -> None:
+        uc = _FakeModpackUseCase(data=b"ZIPDATA", server_name="alpha")
+        app = _assignment_app(modpack=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"{_CLIENT_BASE}/download")
+        assert resp.status_code == 200
+        assert resp.content == b"ZIPDATA"
+        assert resp.headers["content-type"] == "application/zip"
+        disposition = resp.headers["content-disposition"]
+        assert "attachment" in disposition
+        assert "alpha-client-mods.zip" in disposition
+
+    def test_download_server_not_found_404(self) -> None:
+        uc = _FakeModpackUseCase(error=ServerNotFoundError("nope"))
+        app = _assignment_app(modpack=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"{_CLIENT_BASE}/download")
+        assert resp.status_code == 404
+
+    def test_download_requires_server_read_403(self) -> None:
+        uc = _FakeModpackUseCase()
+        app = _assignment_app(modpack=uc, permit=False)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"{_CLIENT_BASE}/download")
+        assert resp.status_code == 403

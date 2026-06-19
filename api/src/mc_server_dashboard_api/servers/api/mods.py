@@ -16,7 +16,10 @@ Modrinth search and project detail (authenticated). ``POST /mods/import`` import
 a chosen project/version into the global library (gated like upload:
 ``server:update`` in any community).
 
-The client modpack is a later sub-issue of epic #1258 and is not served here.
+The client modpack routes (issue #1265) live under
+``/communities/{community_id}/servers/{server_id}/client-mods`` (``server:read``):
+list the mods a client needs (side ∈ {client, both}, enabled) and bulk-download
+them as a single zip. Read-only, so no at-rest gate and no audit mutation code.
 """
 
 from __future__ import annotations
@@ -42,8 +45,10 @@ from mc_server_dashboard_api.dependencies import (
     get_catalog_provider,
     get_current_user,
     get_delete_mod,
+    get_download_client_modpack,
     get_download_mod,
     get_import_mod,
+    get_list_client_mods,
     get_list_mods,
     get_list_server_mods,
     get_set_mod_enabled,
@@ -66,6 +71,8 @@ from mc_server_dashboard_api.servers.application.mods import (
 )
 from mc_server_dashboard_api.servers.application.server_mods import (
     AssignMods,
+    DownloadClientModpack,
+    ListClientMods,
     ListServerMods,
     ServerModSet,
     SetModEnabled,
@@ -880,3 +887,65 @@ async def list_server_mods(
         raise _not_found() from exc
 
     return ServerModListResponse.from_mod_set(mod_set)
+
+
+# ---------------------------------------------------------------------------
+# Client modpack routes (issue #1265)
+# ---------------------------------------------------------------------------
+
+_CLIENT_MODS_BASE = "/communities/{community_id}/servers/{server_id}/client-mods"
+_MODPACK_MEDIA_TYPE = "application/zip"
+
+
+class ClientModListResponse(BaseModel):
+    """The mods a player's client needs for a server (side ∈ {client, both})."""
+
+    mods: list[ModResponse]
+
+
+@assignment_router.get(_CLIENT_MODS_BASE)
+async def list_client_mods(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _auth_user: Annotated[AuthUser, Depends(_server_read_guard())],
+    use_case: Annotated[ListClientMods, Depends(get_list_client_mods)],
+) -> ClientModListResponse:
+    """List the mods a client needs for a server (server:read, issue #1265)."""
+
+    try:
+        mods = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+
+    return ClientModListResponse(mods=[ModResponse.from_mod(m) for m in mods])
+
+
+@assignment_router.get(_CLIENT_MODS_BASE + "/download")
+async def download_client_modpack(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _auth_user: Annotated[AuthUser, Depends(_server_read_guard())],
+    use_case: Annotated[DownloadClientModpack, Depends(get_download_client_modpack)],
+) -> StreamingResponse:
+    """Bulk download the client modpack as a zip (server:read, issue #1265)."""
+
+    try:
+        stream, server_name = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+
+    return StreamingResponse(
+        stream,
+        media_type=_MODPACK_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": _content_disposition(
+                f"{server_name}-client-mods.zip"
+            )
+        },
+    )

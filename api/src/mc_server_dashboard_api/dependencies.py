@@ -281,6 +281,8 @@ from mc_server_dashboard_api.servers.application.resource_packs import (
 )
 from mc_server_dashboard_api.servers.application.server_mods import (
     AssignMods,
+    DownloadClientModpack,
+    ListClientMods,
     ListServerMods,
     SetModEnabled,
     UnassignMod,
@@ -2119,6 +2121,26 @@ def get_list_server_mods(request: Request) -> ListServerMods:
 
     session_factory = create_session_factory(get_engine(request))
     return ListServerMods(uow=ServersUnitOfWork(session_factory))
+
+
+def get_list_client_mods(request: Request) -> ListClientMods:
+    """Assemble the :class:`ListClientMods` use case (issue #1265)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListClientMods(uow=ServersUnitOfWork(session_factory))
+
+
+def get_download_client_modpack(
+    request: Request,
+    store: Annotated[ModStore, Depends(get_mod_store)],
+) -> DownloadClientModpack:
+    """Assemble the :class:`DownloadClientModpack` use case (issue #1265)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DownloadClientModpack(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+    )
 
 
 async def require_server_update_in_any_community(
