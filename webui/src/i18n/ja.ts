@@ -1422,6 +1422,44 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーからリソースパックの割り当てを解除しますか？",
   "serverDetail.resourcePack.removeDialog.confirm": "解除",
 
+  // Server mod management (issue #1267).
+  "serverMods.heading": "Mod",
+  "serverMods.none": "Modが割り当てられていません。",
+  "serverMods.loadError": "サーバーのModを読み込めませんでした。",
+  "serverMods.col.name": "名前",
+  "serverMods.col.version": "バージョン",
+  "serverMods.col.loader": "ローダー",
+  "serverMods.col.side": "対象",
+  "serverMods.col.state": "状態",
+  "serverMods.enabled": "有効",
+  "serverMods.disabled": "無効",
+  "serverMods.enable": "有効化",
+  "serverMods.disable": "無効化",
+  "serverMods.unassign": "解除",
+  "serverMods.assign": "Modを割り当て",
+  "serverMods.downloadClient": "クライアントModパックをダウンロード",
+  "serverMods.notAtRest": "Modを変更するにはサーバーを停止してください。",
+  "serverMods.assigned": "Modを割り当てました。",
+  "serverMods.unassigned": "Modを解除しました。",
+  "serverMods.assignError": "Modを割り当てできませんでした。",
+  "serverMods.unassignError": "Modを解除できませんでした。",
+  "serverMods.toggleError": "Modの状態を変更できませんでした。",
+  "serverMods.downloadError":
+    "クライアントModパックをダウンロードできませんでした。",
+  "serverMods.validation.heading": "依存関係と互換性",
+  "serverMods.validation.ok": "問題は見つかりませんでした。",
+  "serverMods.validation.missingDep":
+    "{mod} は {dependency}（{range}）を必要としますが、割り当てられていません。",
+  "serverMods.validation.conflict": "{mod} は {other} と競合します。",
+  "serverMods.validation.loaderMismatch":
+    "{mod} は {modLoader} 用のModですが、サーバーは {serverLoader} で動作しています。",
+  "serverMods.validation.mcMismatch":
+    "{mod} は MC {serverVersion} に対応していません（対応: {modVersions}）。",
+  "serverMods.assignDialog.title": "Modを割り当て",
+  "serverMods.assignDialog.loading": "Modを読み込んでいます…",
+  "serverMods.assignDialog.empty": "割り当て可能なModがありません。",
+  "serverMods.assignDialog.submit": "割り当て",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "この操作を行う権限がありません。",
   // Composed with the missing permission code, e.g. "You lack: server:start".

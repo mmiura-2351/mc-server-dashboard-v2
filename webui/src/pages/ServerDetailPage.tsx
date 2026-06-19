@@ -24,6 +24,7 @@ import { dashboardPath } from "../routes.ts";
 import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
+import { ServerModsSection } from "./ServerModsSection.tsx";
 import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
 import { ServerResourcePackSection } from "./ServerResourcePackSection.tsx";
 import { serverKey } from "./serverKey.ts";
@@ -1623,6 +1624,8 @@ function Settings({
         communityId={communityId}
         can={can}
       />
+
+      <ServerModsSection server={server} communityId={communityId} can={can} />
 
       <div className="card danger-zone">
         <h2>{t("serverDetail.danger.heading")}</h2>

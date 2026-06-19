@@ -1411,6 +1411,44 @@ export const en = {
     "Remove the resource pack assignment from this server?",
   "serverDetail.resourcePack.removeDialog.confirm": "Remove",
 
+  // Server mod management (issue #1267). Displayed as a card in the server
+  // detail Settings tab.
+  "serverMods.heading": "Mods",
+  "serverMods.none": "No mods assigned.",
+  "serverMods.loadError": "Could not load the server's mods.",
+  "serverMods.col.name": "Name",
+  "serverMods.col.version": "Version",
+  "serverMods.col.loader": "Loader",
+  "serverMods.col.side": "Side",
+  "serverMods.col.state": "State",
+  "serverMods.enabled": "Enabled",
+  "serverMods.disabled": "Disabled",
+  "serverMods.enable": "Enable",
+  "serverMods.disable": "Disable",
+  "serverMods.unassign": "Remove",
+  "serverMods.assign": "Assign mods",
+  "serverMods.downloadClient": "Download client modpack",
+  "serverMods.notAtRest": "Stop the server to change its mods.",
+  "serverMods.assigned": "Mods assigned.",
+  "serverMods.unassigned": "Mod removed.",
+  "serverMods.assignError": "Could not assign the mods.",
+  "serverMods.unassignError": "Could not remove the mod.",
+  "serverMods.toggleError": "Could not change the mod's state.",
+  "serverMods.downloadError": "Could not download the client modpack.",
+  "serverMods.validation.heading": "Dependencies & compatibility",
+  "serverMods.validation.ok": "No issues found.",
+  "serverMods.validation.missingDep":
+    "{mod} requires {dependency} ({range}), which is not assigned.",
+  "serverMods.validation.conflict": "{mod} conflicts with {other}.",
+  "serverMods.validation.loaderMismatch":
+    "{mod} is a {modLoader} mod, but the server runs {serverLoader}.",
+  "serverMods.validation.mcMismatch":
+    "{mod} does not list MC {serverVersion} (supports {modVersions}).",
+  "serverMods.assignDialog.title": "Assign mods",
+  "serverMods.assignDialog.loading": "Loading mods…",
+  "serverMods.assignDialog.empty": "No compatible mods available.",
+  "serverMods.assignDialog.submit": "Assign",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
