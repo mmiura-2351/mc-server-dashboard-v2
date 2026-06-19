@@ -41,6 +41,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     Permission,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_apply_server_mod_resolution,
     get_assign_mods,
     get_audit_recorder,
     get_catalog_provider,
@@ -52,6 +53,7 @@ from mc_server_dashboard_api.dependencies import (
     get_list_client_mods,
     get_list_mods,
     get_list_server_mods,
+    get_resolve_server_mods,
     get_set_mod_enabled,
     get_unassign_mod,
     get_upload_mod,
@@ -61,6 +63,11 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.servers.application.mod_resolution import (
+    ApplyServerModResolution,
+    ResolutionPlan,
+    ResolveServerMods,
+)
 from mc_server_dashboard_api.servers.application.mod_validation import ModValidation
 from mc_server_dashboard_api.servers.application.mods import (
     MAX_MOD_BYTES,
@@ -923,6 +930,118 @@ async def list_server_mods(
         raise _not_found() from exc
 
     return ServerModListResponse.from_mod_set(mod_set)
+
+
+# ---------------------------------------------------------------------------
+# Dependency resolution routes (issue #1294)
+# ---------------------------------------------------------------------------
+
+_RESOLVE_BASE = _ASSIGNMENT_BASE + "/resolve"
+
+
+class ResolutionEntryResponse(BaseModel):
+    """One direct required dependency and how it can be resolved (issue #1294).
+
+    ``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /
+    ``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod
+    only for ``resolvable_from_library``; it is ``None`` otherwise. ``replaces``
+    is non-empty only when that pick swaps out an already-assigned but
+    out-of-range version of the same id (a ``version_unsatisfied`` finding):
+    applying unassigns these stale mods and assigns ``mod`` so one in-range
+    version remains. An absent dep is a plain add with empty ``replaces``.
+    """
+
+    dep_identifier: str
+    required_range: str
+    status: str
+    mod: ModResponse | None
+    replaces: list[ModResponse]
+
+
+class ResolutionPlanResponse(BaseModel):
+    """A server's dependency-resolution plan plus its validation findings."""
+
+    entries: list[ResolutionEntryResponse]
+    validation: ModValidationResponse
+
+    @classmethod
+    def from_plan(cls, plan: ResolutionPlan) -> "ResolutionPlanResponse":
+        return cls(
+            entries=[
+                ResolutionEntryResponse(
+                    dep_identifier=e.dep_identifier,
+                    required_range=e.required_range,
+                    status=e.status,
+                    mod=ModResponse.from_mod(e.mod) if e.mod is not None else None,
+                    replaces=[ModResponse.from_mod(m) for m in e.replaces],
+                )
+                for e in plan.entries
+            ],
+            validation=ModValidationResponse.from_validation(plan.validation),
+        )
+
+
+@assignment_router.get(_RESOLVE_BASE)
+async def resolve_server_mods(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _auth_user: Annotated[AuthUser, Depends(_server_read_guard())],
+    use_case: Annotated[ResolveServerMods, Depends(get_resolve_server_mods)],
+) -> ResolutionPlanResponse:
+    """Plan a server's dependency resolution (server:read, no mutation, #1294)."""
+
+    try:
+        plan = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+
+    return ResolutionPlanResponse.from_plan(plan)
+
+
+@assignment_router.post(_RESOLVE_BASE)
+async def apply_server_mod_resolution(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    auth_user: Annotated[AuthUser, Depends(_server_update_guard())],
+    use_case: Annotated[
+        ApplyServerModResolution, Depends(get_apply_server_mod_resolution)
+    ],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> ResolutionPlanResponse:
+    """Apply a server's library-resolvable deps (server:update, at-rest, #1294).
+
+    Assigns every ``resolvable_from_library`` pick via the assign spine (at-rest
+    gated: 409 ``server_unsettled`` while running) and returns the re-planned
+    result. Does NOT import from Modrinth (that is C3).
+    """
+
+    try:
+        plan, _applied = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            applied_by=auth_user.user_id.value,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFilesUnsettledError as exc:
+        raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        raise _conflict("server_busy") from exc
+
+    await recorder.record(
+        AuditEvent(
+            operation=ops.MOD_RESOLVE,
+            outcome=Outcome.SUCCESS,
+            actor_id=auth_user.user_id.value,
+            target_type=ops.TARGET_SERVER,
+            target_id=server_id,
+        )
+    )
+
+    return ResolutionPlanResponse.from_plan(plan)
 
 
 # ---------------------------------------------------------------------------
