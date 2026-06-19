@@ -1152,6 +1152,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/mods/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resolve Server Mods
+         * @description Plan a server's dependency resolution (server:read, no mutation, #1294).
+         */
+        get: operations["resolve_server_mods_api_communities__community_id__servers__server_id__mods_resolve_get"];
+        put?: never;
+        /**
+         * Apply Server Mod Resolution
+         * @description Apply a server's library-resolvable deps (server:update, at-rest, #1294).
+         *
+         *     Assigns every ``resolvable_from_library`` pick via the assign spine (at-rest
+         *     gated: 409 ``server_unsettled`` while running) and returns the re-planned
+         *     result. Does NOT import from Modrinth (that is C3).
+         */
+        post: operations["apply_server_mod_resolution_api_communities__community_id__servers__server_id__mods_resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/mods/{mod_id}": {
         parameters: {
             query?: never;
@@ -2832,6 +2860,32 @@ export interface components {
             from: string;
             /** To */
             to: string;
+        };
+        /**
+         * ResolutionEntryResponse
+         * @description One direct required dependency and how it can be resolved (issue #1294).
+         *
+         *     ``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /
+         *     ``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod
+         *     only for ``resolvable_from_library``; it is ``None`` otherwise.
+         */
+        ResolutionEntryResponse: {
+            /** Dep Identifier */
+            dep_identifier: string;
+            mod: components["schemas"]["ModResponse"] | null;
+            /** Required Range */
+            required_range: string;
+            /** Status */
+            status: string;
+        };
+        /**
+         * ResolutionPlanResponse
+         * @description A server's dependency-resolution plan plus its validation findings.
+         */
+        ResolutionPlanResponse: {
+            /** Entries */
+            entries: components["schemas"]["ResolutionEntryResponse"][];
+            validation: components["schemas"]["ModValidationResponse"];
         };
         /** ResourcePackAssignmentResponse */
         ResourcePackAssignmentResponse: {
@@ -5615,6 +5669,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ServerModListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_server_mods_api_communities__community_id__servers__server_id__mods_resolve_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_server_mod_resolution_api_communities__community_id__servers__server_id__mods_resolve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolutionPlanResponse"];
                 };
             };
             /** @description Validation Error */

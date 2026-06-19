@@ -181,6 +181,12 @@ MOD_ASSIGN: Final = "mod:assign"
 MOD_UNASSIGN: Final = "mod:unassign"
 MOD_ENABLE: Final = "mod:enable"
 MOD_DISABLE: Final = "mod:disable"
+# Auto-resolving a server's missing required deps from the library (issue #1294).
+# A distinct code from mod:assign so the deliberate dependency-resolution apply is
+# queryable apart from a manual assign, even though both are gated by server:update
+# and both place jars. Names the operation, not a permission code; free-text column
+# (see module docstring). The actor is the caller; the target is the server.
+MOD_RESOLVE: Final = "mod:resolve"
 
 # Target-type names (the ``target_type`` column).
 TARGET_COMMUNITY: Final = "community"

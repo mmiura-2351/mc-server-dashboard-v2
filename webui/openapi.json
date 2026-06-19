@@ -2211,6 +2211,62 @@
         "title": "RenameRequest",
         "type": "object"
       },
+      "ResolutionEntryResponse": {
+        "description": "One direct required dependency and how it can be resolved (issue #1294).\n\n``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /\n``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod\nonly for ``resolvable_from_library``; it is ``None`` otherwise.",
+        "properties": {
+          "dep_identifier": {
+            "title": "Dep Identifier",
+            "type": "string"
+          },
+          "mod": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "required_range": {
+            "title": "Required Range",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dep_identifier",
+          "required_range",
+          "status",
+          "mod"
+        ],
+        "title": "ResolutionEntryResponse",
+        "type": "object"
+      },
+      "ResolutionPlanResponse": {
+        "description": "A server's dependency-resolution plan plus its validation findings.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ResolutionEntryResponse"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/ModValidationResponse"
+          }
+        },
+        "required": [
+          "entries",
+          "validation"
+        ],
+        "title": "ResolutionPlanResponse",
+        "type": "object"
+      },
       "ResourcePackAssignmentResponse": {
         "properties": {
           "assigned_at": {
@@ -7307,6 +7363,116 @@
           }
         ],
         "summary": "Assign Mods"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/mods/resolve": {
+      "get": {
+        "description": "Plan a server's dependency resolution (server:read, no mutation, #1294).",
+        "operationId": "resolve_server_mods_api_communities__community_id__servers__server_id__mods_resolve_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolutionPlanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Resolve Server Mods"
+      },
+      "post": {
+        "description": "Apply a server's library-resolvable deps (server:update, at-rest, #1294).\n\nAssigns every ``resolvable_from_library`` pick via the assign spine (at-rest\ngated: 409 ``server_unsettled`` while running) and returns the re-planned\nresult. Does NOT import from Modrinth (that is C3).",
+        "operationId": "apply_server_mod_resolution_api_communities__community_id__servers__server_id__mods_resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolutionPlanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Apply Server Mod Resolution"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/mods/{mod_id}": {

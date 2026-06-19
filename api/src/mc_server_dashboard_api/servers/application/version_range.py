@@ -74,6 +74,19 @@ def version_satisfies(version: str, range_spec: str, loader: str) -> bool:
 
 # --- version comparison ----------------------------------------------------
 
+
+def compare_versions(a: str, b: str) -> int:
+    """Three-way compare two version strings (-1/0/1); public façade for #1294.
+
+    The dependency resolver (#1294) needs to *order* satisfying candidates, not
+    just test a range, so it reuses the same component-wise comparison the range
+    predicates use. Thin wrapper over :func:`_compare` to keep that the single
+    comparison rule.
+    """
+
+    return _compare(a, b)
+
+
 _PART_SPLIT = re.compile(r"[.\-]")
 
 

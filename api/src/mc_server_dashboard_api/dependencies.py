@@ -259,6 +259,10 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.application.mod_resolution import (
+    ApplyServerModResolution,
+    ResolveServerMods,
+)
 from mc_server_dashboard_api.servers.application.mods import (
     DeleteMod,
     DownloadMod,
@@ -2121,6 +2125,26 @@ def get_list_server_mods(request: Request) -> ListServerMods:
 
     session_factory = create_session_factory(get_engine(request))
     return ListServerMods(uow=ServersUnitOfWork(session_factory))
+
+
+def get_resolve_server_mods(request: Request) -> ResolveServerMods:
+    """Assemble the :class:`ResolveServerMods` plan use case (issue #1294)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ResolveServerMods(uow=ServersUnitOfWork(session_factory))
+
+
+def get_apply_server_mod_resolution(
+    request: Request,
+    assign_mods: Annotated[AssignMods, Depends(get_assign_mods)],
+) -> ApplyServerModResolution:
+    """Assemble the :class:`ApplyServerModResolution` use case (issue #1294)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ApplyServerModResolution(
+        uow=ServersUnitOfWork(session_factory),
+        assign_mods=assign_mods,
+    )
 
 
 def get_list_client_mods(request: Request) -> ListClientMods:

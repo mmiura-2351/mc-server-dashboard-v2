@@ -39,6 +39,10 @@ from mc_server_dashboard_api.dependencies import (
     get_upload_mod,
     require_server_update_in_any_community,
 )
+from mc_server_dashboard_api.servers.application.mod_resolution import (
+    ResolutionEntry,
+    ResolutionPlan,
+)
 from mc_server_dashboard_api.servers.application.mod_validation import (
     LoaderMismatch,
     McMismatch,
@@ -471,6 +475,8 @@ def _assignment_app(
     unassign: _FakeUseCase | None = None,
     toggle: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
+    resolve: _FakeUseCase | None = None,
+    apply_resolution: _FakeUseCase | None = None,
     client_list: _FakeUseCase | None = None,
     modpack: object | None = None,
     recorder: RecordingAuditRecorder | None = None,
@@ -481,8 +487,10 @@ def _assignment_app(
         PermissionChecker,
     )
     from mc_server_dashboard_api.dependencies import (
+        get_apply_server_mod_resolution,
         get_membership_visibility,
         get_permission_checker,
+        get_resolve_server_mods,
     )
 
     app = create_app()
@@ -497,6 +505,12 @@ def _assignment_app(
         app.dependency_overrides[get_set_mod_enabled] = lambda: toggle
     if list_ is not None:
         app.dependency_overrides[get_list_server_mods] = lambda: list_
+    if resolve is not None:
+        app.dependency_overrides[get_resolve_server_mods] = lambda: resolve
+    if apply_resolution is not None:
+        app.dependency_overrides[get_apply_server_mod_resolution] = lambda: (
+            apply_resolution
+        )
     if client_list is not None:
         app.dependency_overrides[get_list_client_mods] = lambda: client_list
     if modpack is not None:
@@ -730,6 +744,115 @@ class TestListServerModsEndpoint:
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(_ASSIGN_BASE)
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Dependency resolution endpoint tests (issue #1294)
+# ---------------------------------------------------------------------------
+
+_RESOLVE_BASE = f"{_ASSIGN_BASE}/resolve"
+
+
+def _plan(
+    entries: list[ResolutionEntry] | None = None,
+    validation: ModValidation | None = None,
+) -> ResolutionPlan:
+    return ResolutionPlan(
+        entries=entries or [], validation=validation or ModValidation()
+    )
+
+
+class TestResolvePlanEndpoint:
+    def test_plan_200_classifies_entries(self) -> None:
+        m = _mod(filename="fabric-api.jar")
+        plan = _plan(
+            entries=[
+                ResolutionEntry(
+                    dep_identifier="fabric-api",
+                    required_range=">=0.90.0",
+                    status="resolvable_from_library",
+                    mod=m,
+                ),
+                ResolutionEntry(
+                    dep_identifier="some-lib",
+                    required_range="",
+                    status="needs_import",
+                ),
+            ]
+        )
+        uc = _FakeUseCase(result=plan)
+        app = _assignment_app(resolve=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_RESOLVE_BASE)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["entries"]) == 2
+        assert body["entries"][0]["dep_identifier"] == "fabric-api"
+        assert body["entries"][0]["status"] == "resolvable_from_library"
+        assert body["entries"][0]["mod"]["id"] == str(m.id.value)
+        assert body["entries"][1]["status"] == "needs_import"
+        assert body["entries"][1]["mod"] is None
+        assert body["validation"]["missing_deps"] == []
+
+    def test_plan_server_not_found_404(self) -> None:
+        uc = _FakeUseCase(error=ServerNotFoundError("nope"))
+        app = _assignment_app(resolve=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_RESOLVE_BASE)
+        assert resp.status_code == 404
+
+    def test_plan_requires_server_read_403(self) -> None:
+        uc = _FakeUseCase(result=_plan())
+        app = _assignment_app(resolve=uc, permit=False)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(_RESOLVE_BASE)
+        assert resp.status_code == 403
+
+
+class TestApplyResolutionEndpoint:
+    def test_apply_200_assigns_and_audits(self) -> None:
+        m = _mod(filename="fabric-api.jar")
+        plan = _plan(
+            entries=[
+                ResolutionEntry(
+                    dep_identifier="fabric-api",
+                    required_range="",
+                    status="already_satisfied",
+                )
+            ]
+        )
+        uc = _FakeUseCase(result=(plan, [m.id]))
+        recorder = RecordingAuditRecorder()
+        app = _assignment_app(apply_resolution=uc, recorder=recorder)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(_RESOLVE_BASE)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["entries"][0]["status"] == "already_satisfied"
+        assert len(recorder.events) == 1
+        assert recorder.events[0].operation == ops.MOD_RESOLVE
+
+    def test_apply_unsettled_409(self) -> None:
+        uc = _FakeUseCase(error=ServerFilesUnsettledError("nope"))
+        app = _assignment_app(apply_resolution=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(_RESOLVE_BASE)
+        assert resp.status_code == 409
+        assert resp.json()["reason"] == "server_unsettled"
+
+    def test_apply_server_not_found_404(self) -> None:
+        uc = _FakeUseCase(error=ServerNotFoundError("nope"))
+        app = _assignment_app(apply_resolution=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(_RESOLVE_BASE)
+        assert resp.status_code == 404
+
+    def test_apply_requires_server_update_403(self) -> None:
+        uc = _FakeUseCase(result=(_plan(), []))
+        app = _assignment_app(apply_resolution=uc, permit=False)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(_RESOLVE_BASE)
+        assert resp.status_code == 403
 
 
 # ---------------------------------------------------------------------------
