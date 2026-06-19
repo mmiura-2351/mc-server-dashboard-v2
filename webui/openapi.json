@@ -2212,7 +2212,7 @@
         "type": "object"
       },
       "ResolutionEntryResponse": {
-        "description": "One direct required dependency and how it can be resolved (issue #1294).\n\n``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /\n``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod\nonly for ``resolvable_from_library``; it is ``None`` otherwise. ``replaces``\nis non-empty only when that pick swaps out an already-assigned but\nout-of-range version of the same id (a ``version_unsatisfied`` finding):\napplying unassigns these stale mods and assigns ``mod`` so one in-range\nversion remains. An absent dep is a plain add with empty ``replaces``.",
+        "description": "One direct required dependency and how it can be resolved (issues #1294, #1295).\n\n``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /\n``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod\nonly for ``resolvable_from_library``; it is ``None`` otherwise. ``replaces``\nis non-empty only when that pick swaps out an already-assigned but\nout-of-range version of the same id (a ``version_unsatisfied`` finding):\napplying unassigns these stale mods and assigns ``mod`` so one in-range\nversion remains. An absent dep is a plain add with empty ``replaces``.\n``will_import`` carries the Modrinth project@version a ``needs_import`` dep\nresolves to (#1295); it is ``None`` for every other status and for a\n``needs_import`` Modrinth cannot satisfy (that becomes ``unresolvable``).",
         "properties": {
           "dep_identifier": {
             "title": "Dep Identifier",
@@ -2242,6 +2242,16 @@
           "status": {
             "title": "Status",
             "type": "string"
+          },
+          "will_import": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WillImportResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -2249,19 +2259,28 @@
           "required_range",
           "status",
           "mod",
-          "replaces"
+          "replaces",
+          "will_import"
         ],
         "title": "ResolutionEntryResponse",
         "type": "object"
       },
       "ResolutionPlanResponse": {
-        "description": "A server's dependency-resolution plan plus its validation findings.",
+        "description": "A server's dependency-resolution plan plus its validation findings.\n\n``failed_imports`` lists dep ids whose Modrinth import failed during apply (a\nper-dep failure isolated from the rest, issue #1295); it is empty on the\nread-only ``GET`` plan.",
         "properties": {
           "entries": {
             "items": {
               "$ref": "#/components/schemas/ResolutionEntryResponse"
             },
             "title": "Entries",
+            "type": "array"
+          },
+          "failed_imports": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Failed Imports",
             "type": "array"
           },
           "validation": {
@@ -3060,6 +3079,35 @@
           "versions"
         ],
         "title": "VersionsResponse",
+        "type": "object"
+      },
+      "WillImportResponse": {
+        "description": "The Modrinth project@version a ``needs_import`` dep resolves to (issue #1295).\n\nA preview only on ``GET .../mods/resolve`` (nothing is downloaded); ``POST``\nimports and assigns it. ``project_id`` / ``version_id`` are the Modrinth ids;\n``slug`` / ``version_number`` are for display.",
+        "properties": {
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "version_id",
+          "slug",
+          "version_number"
+        ],
+        "title": "WillImportResponse",
         "type": "object"
       },
       "WorkerResponse": {
@@ -7429,7 +7477,7 @@
         "summary": "Resolve Server Mods"
       },
       "post": {
-        "description": "Apply a server's library-resolvable deps (server:update, at-rest, #1294).\n\nAssigns every ``resolvable_from_library`` pick via the assign spine (at-rest\ngated: 409 ``server_unsettled`` while running) and returns the re-planned\nresult. Does NOT import from Modrinth (that is C3).",
+        "description": "Apply a server's resolvable deps from library + Modrinth (server:update, #1295).\n\nAssigns every ``resolvable_from_library`` pick via the assign spine (at-rest\ngated: 409 ``server_unsettled`` while running), then imports each ``needs_import``\n``will_import`` version from Modrinth and assigns it. A per-dep Modrinth failure\nis isolated (returned in ``failed_imports``) and does not abort the rest.",
         "operationId": "apply_server_mod_resolution_api_communities__community_id__servers__server_id__mods_resolve_post",
         "parameters": [
           {

@@ -939,8 +939,22 @@ async def list_server_mods(
 _RESOLVE_BASE = _ASSIGNMENT_BASE + "/resolve"
 
 
+class WillImportResponse(BaseModel):
+    """The Modrinth project@version a ``needs_import`` dep resolves to (issue #1295).
+
+    A preview only on ``GET .../mods/resolve`` (nothing is downloaded); ``POST``
+    imports and assigns it. ``project_id`` / ``version_id`` are the Modrinth ids;
+    ``slug`` / ``version_number`` are for display.
+    """
+
+    project_id: str
+    version_id: str
+    slug: str
+    version_number: str
+
+
 class ResolutionEntryResponse(BaseModel):
-    """One direct required dependency and how it can be resolved (issue #1294).
+    """One direct required dependency and how it can be resolved (issues #1294, #1295).
 
     ``status`` is one of ``already_satisfied`` / ``resolvable_from_library`` /
     ``needs_import`` / ``unresolvable``. ``mod`` carries the chosen library mod
@@ -949,6 +963,9 @@ class ResolutionEntryResponse(BaseModel):
     out-of-range version of the same id (a ``version_unsatisfied`` finding):
     applying unassigns these stale mods and assigns ``mod`` so one in-range
     version remains. An absent dep is a plain add with empty ``replaces``.
+    ``will_import`` carries the Modrinth project@version a ``needs_import`` dep
+    resolves to (#1295); it is ``None`` for every other status and for a
+    ``needs_import`` Modrinth cannot satisfy (that becomes ``unresolvable``).
     """
 
     dep_identifier: str
@@ -956,16 +973,25 @@ class ResolutionEntryResponse(BaseModel):
     status: str
     mod: ModResponse | None
     replaces: list[ModResponse]
+    will_import: WillImportResponse | None
 
 
 class ResolutionPlanResponse(BaseModel):
-    """A server's dependency-resolution plan plus its validation findings."""
+    """A server's dependency-resolution plan plus its validation findings.
+
+    ``failed_imports`` lists dep ids whose Modrinth import failed during apply (a
+    per-dep failure isolated from the rest, issue #1295); it is empty on the
+    read-only ``GET`` plan.
+    """
 
     entries: list[ResolutionEntryResponse]
     validation: ModValidationResponse
+    failed_imports: list[str] = []
 
     @classmethod
-    def from_plan(cls, plan: ResolutionPlan) -> "ResolutionPlanResponse":
+    def from_plan(
+        cls, plan: ResolutionPlan, *, failed_imports: list[str] | None = None
+    ) -> "ResolutionPlanResponse":
         return cls(
             entries=[
                 ResolutionEntryResponse(
@@ -974,10 +1000,21 @@ class ResolutionPlanResponse(BaseModel):
                     status=e.status,
                     mod=ModResponse.from_mod(e.mod) if e.mod is not None else None,
                     replaces=[ModResponse.from_mod(m) for m in e.replaces],
+                    will_import=(
+                        WillImportResponse(
+                            project_id=e.will_import.project_id,
+                            version_id=e.will_import.version_id,
+                            slug=e.will_import.slug,
+                            version_number=e.will_import.version_number,
+                        )
+                        if e.will_import is not None
+                        else None
+                    ),
                 )
                 for e in plan.entries
             ],
             validation=ModValidationResponse.from_validation(plan.validation),
+            failed_imports=failed_imports or [],
         )
 
 
@@ -1011,15 +1048,16 @@ async def apply_server_mod_resolution(
     ],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ResolutionPlanResponse:
-    """Apply a server's library-resolvable deps (server:update, at-rest, #1294).
+    """Apply a server's resolvable deps from library + Modrinth (server:update, #1295).
 
     Assigns every ``resolvable_from_library`` pick via the assign spine (at-rest
-    gated: 409 ``server_unsettled`` while running) and returns the re-planned
-    result. Does NOT import from Modrinth (that is C3).
+    gated: 409 ``server_unsettled`` while running), then imports each ``needs_import``
+    ``will_import`` version from Modrinth and assigns it. A per-dep Modrinth failure
+    is isolated (returned in ``failed_imports``) and does not abort the rest.
     """
 
     try:
-        plan, _applied = await use_case(
+        plan, _applied, failed = await use_case(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
             applied_by=auth_user.user_id.value,
@@ -1041,7 +1079,7 @@ async def apply_server_mod_resolution(
         )
     )
 
-    return ResolutionPlanResponse.from_plan(plan)
+    return ResolutionPlanResponse.from_plan(plan, failed_imports=failed)
 
 
 # ---------------------------------------------------------------------------
