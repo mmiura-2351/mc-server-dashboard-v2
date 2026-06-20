@@ -355,7 +355,8 @@ def _parse_plugin_yaml(raw: str) -> dict[str, object]:
 
     Handles ``key: value`` scalars, ``key: [a, b]`` inline lists, and
     ``key:`` followed by ``  - item`` block lists -- the shapes Bukkit/Paper
-    descriptors use for the fields we read. Nested mappings and other YAML
+    descriptors use for the fields we read. Unquoted trailing ``# ...`` comments
+    are stripped from scalar and list values. Nested mappings and other YAML
     features are ignored.
     """
 
@@ -375,7 +376,7 @@ def _parse_plugin_yaml(raw: str) -> dict[str, object]:
             continue
         key, _, rest = line.partition(":")
         key = key.strip()
-        rest = rest.strip()
+        rest = _strip_inline_comment(rest.strip())
         if rest:
             if rest.startswith("[") and rest.endswith("]"):
                 result[key] = _parse_inline_list(rest)
@@ -388,7 +389,7 @@ def _parse_plugin_yaml(raw: str) -> dict[str, object]:
             nxt = lines[i]
             nxt_stripped = nxt.strip()
             if nxt_stripped.startswith("- "):
-                items.append(_unquote(nxt_stripped[2:].strip()))
+                items.append(_unquote(_strip_inline_comment(nxt_stripped[2:].strip())))
                 i += 1
             elif nxt_stripped == "" or nxt_stripped.startswith("#"):
                 i += 1
@@ -407,6 +408,30 @@ def _parse_inline_list(rest: str) -> list[str]:
     if not inner:
         return []
     return [_unquote(part.strip()) for part in inner.split(",") if part.strip()]
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Drop an unquoted trailing ``# ...`` comment from a scalar/inline-list value.
+
+    Per YAML a ``#`` only begins a comment when it is at the start or preceded by
+    whitespace, and only outside a quoted scalar. So ``Foo # note`` -> ``Foo`` and
+    ``[Vault] # note`` -> ``[Vault]``, while ``Foo#Bar`` (no leading space) and a
+    ``#`` inside ``'...'``/``"..."`` are preserved. Returns the value with the
+    comment and any whitespace before it removed.
+    """
+
+    quote = ""
+    prev_space = True  # start-of-value counts as preceded by whitespace
+    for i, ch in enumerate(value):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and prev_space:
+            return value[:i].rstrip()
+        prev_space = ch.isspace()
+    return value
 
 
 def _unquote(value: str) -> str:

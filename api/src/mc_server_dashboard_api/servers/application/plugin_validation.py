@@ -41,11 +41,22 @@ from dataclasses import dataclass, field
 from mc_server_dashboard_api.servers.application.version_range import version_satisfies
 from mc_server_dashboard_api.servers.domain.plugin import ServerPlugin
 
-# The version-range dialect used for each server loader. Forge/NeoForge ranges
-# are Maven intervals; everything else uses semver predicates (see
-# :mod:`version_range`). A server runs a single loader family, so the dialect is
-# the same for every plugin on it.
+# The version-range dialect used for each server loader (see :mod:`version_range`).
+# Forge/NeoForge ranges are Maven intervals; Paper/Spigot MC compat is a Bukkit
+# ``api-version`` floor; everything else uses semver predicates. A server runs a
+# single loader family, so the dialect is the same for every plugin on it.
 _MAVEN_SERVER_TYPES = frozenset({"forge"})
+_PAPER_SERVER_TYPES = frozenset({"paper", "spigot"})
+
+
+def _loader_dialect(server_type: str) -> str:
+    """The :mod:`version_range` dialect key for a server's loader family."""
+
+    if server_type in _MAVEN_SERVER_TYPES:
+        return "forge"
+    if server_type in _PAPER_SERVER_TYPES:
+        return "paper"
+    return "fabric"
 
 
 @dataclass(frozen=True)
@@ -99,7 +110,7 @@ def validate_plugin_set(
 ) -> PluginValidation:
     """Run the phase-B validation pass over a server's installed plugin set."""
 
-    loader = "forge" if server_type in _MAVEN_SERVER_TYPES else "fabric"
+    loader = _loader_dialect(server_type)
     provided = _provided_versions(plugins)
     missing_deps, version_unsatisfied = _required_dep_findings(
         plugins, provided, loader
@@ -195,10 +206,11 @@ def _mc_mismatch(
     """Flag plugins that do not cover the server's MC version.
 
     Each declared ``mc_versions`` entry is matched against the server version in
-    the loader's range dialect, so a Forge interval (``[1.20.4,1.21)``) and a
-    Fabric exact/predicate (``1.20.4``, ``~1.20``) both work; a plain version
-    list still matches by membership. A plugin declaring no versions is
-    unconstrained and never flagged.
+    the loader's range dialect, so a Forge interval (``[1.20.4,1.21)``), a Fabric
+    exact/predicate (``1.20.4``, ``~1.20``), and a Bukkit ``api-version`` floor
+    (``1.21`` covers any ``1.21.x`` or newer) all work; a plain version list still
+    matches by membership. A plugin declaring no versions is unconstrained and
+    never flagged.
     """
 
     return [

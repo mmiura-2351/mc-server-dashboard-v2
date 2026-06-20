@@ -326,6 +326,45 @@ class TestMcMismatch:
         assert len(result.mc_mismatch) == 1
 
 
+class TestPaperMcMismatch:
+    # A Bukkit/Paper ``api-version`` is a major.minor *minimum floor*, not an
+    # exact version: a server at any ``1.21.x`` (or newer) satisfies
+    # ``api-version: 1.21``; an older minor does not. (Bug 1.)
+
+    def test_patch_level_server_satisfies_api_version(self) -> None:
+        plugin = _plugin(mod_identifier="EssentialsX", mc_versions=["1.21"])
+        result = validate_plugin_set(
+            server_type="paper", mc_version="1.21.1", plugins=[plugin]
+        )
+
+        assert result.mc_mismatch == []
+
+    def test_exact_minor_server_satisfies_api_version(self) -> None:
+        plugin = _plugin(mod_identifier="EssentialsX", mc_versions=["1.21"])
+        result = validate_plugin_set(
+            server_type="paper", mc_version="1.21.0", plugins=[plugin]
+        )
+
+        assert result.mc_mismatch == []
+
+    def test_older_minor_server_is_flagged(self) -> None:
+        plugin = _plugin(mod_identifier="EssentialsX", mc_versions=["1.21"])
+        result = validate_plugin_set(
+            server_type="paper", mc_version="1.20.4", plugins=[plugin]
+        )
+
+        assert len(result.mc_mismatch) == 1
+        assert result.mc_mismatch[0].mod_id == "EssentialsX"
+
+    def test_newer_minor_server_satisfies_api_version(self) -> None:
+        plugin = _plugin(mod_identifier="EssentialsX", mc_versions=["1.21"])
+        result = validate_plugin_set(
+            server_type="paper", mc_version="1.22", plugins=[plugin]
+        )
+
+        assert result.mc_mismatch == []
+
+
 class TestFullyValidSet:
     def test_no_findings(self) -> None:
         sodium = _plugin(

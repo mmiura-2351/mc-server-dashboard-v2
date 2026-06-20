@@ -4,7 +4,7 @@ A pure, stdlib-only predicate the validator uses to turn a *present-but-wrong-
 version* dependency into a distinct finding, rather than treating any present id
 as satisfied. No I/O, no DB, no network.
 
-Two range dialects, selected by the depending plugin's **loader**:
+Three range dialects, selected by the depending plugin's **loader**:
 
 * **Fabric / Quilt** -- semver-style predicates. A range is one or more
   comma- or space-separated predicates ANDed together; ``||`` separates OR
@@ -26,6 +26,13 @@ Two range dialects, selected by the depending plugin's **loader**:
   with no brackets is treated as exact. Comma-separated intervals are ORed
   (Maven's union semantics).
 
+* **Paper / Spigot** -- a Bukkit ``api-version`` minimum floor compared at
+  major.minor granularity: ``1.21`` is satisfied by any ``1.21.x`` or newer
+  major.minor, not by ``1.20.4``. (Bukkit ``api-version`` is the oldest server a
+  plugin runs on, not an exact version.) Paper plugins carry no dependency range
+  (the parser emits ``""``), so this dialect is only ever exercised by the MC
+  compatibility check.
+
 Tolerance is the contract: an empty range, ``*``, or anything that does not
 parse in the loader's dialect is treated as **any** (returns ``True``). The
 validator must never crash on a malformed manifest, and "I can't evaluate this"
@@ -43,10 +50,14 @@ from __future__ import annotations
 import re
 
 # Loaders whose ranges use Maven interval notation; everything else (fabric,
-# quilt, paper, unknown) uses the semver-predicate dialect. Paper plugins never
-# carry a real range (the parser emits ``""``), so they fall straight through to
-# the any-fallback regardless of which branch handles them.
+# quilt, unknown) uses the semver-predicate dialect. Paper plugins never carry a
+# real dependency range (the parser emits ``""``), so for dependencies they fall
+# straight through to the any-fallback regardless of which branch handles them.
 _MAVEN_LOADERS = frozenset({"forge", "neoforge"})
+
+# Loaders whose MC-version constraint is a Bukkit ``api-version`` floor; see
+# :func:`_paper_satisfies`.
+_PAPER_LOADERS = frozenset({"paper", "spigot"})
 
 _COMPARATORS = ("<=", ">=", "<", ">")
 
@@ -64,6 +75,8 @@ def version_satisfies(version: str, range_spec: str, loader: str) -> bool:
     if not spec or spec == "*":
         return True
     try:
+        if loader in _PAPER_LOADERS:
+            return _paper_satisfies(version.strip(), spec)
         if loader in _MAVEN_LOADERS:
             return _maven_satisfies(version.strip(), spec)
         return _semver_satisfies(version.strip(), spec)
@@ -206,6 +219,32 @@ def _caret(version: str, target: str) -> bool:
             break
     upper = ".".join(str(p) for p in upper_parts)
     return _compare(version, target) >= 0 and _compare(version, upper) < 0
+
+
+# --- Paper / Spigot api-version floor ---------------------------------------
+
+
+def _paper_satisfies(version: str, spec: str) -> bool:
+    """Evaluate a Bukkit ``api-version`` as a major.minor minimum floor.
+
+    A plugin's ``api-version: 1.21`` is the *oldest* server it runs on, compared
+    at major.minor granularity: a server at any ``1.21.x`` (or any newer
+    major.minor) satisfies it; ``1.20.4`` does not. This is distinct from the
+    fabric/forge range dialects, where the MC constraint is an exact version or
+    an interval. ``spec`` and ``version`` are truncated to (major, minor) and the
+    server's pair must be ``>=`` the floor's.
+    """
+
+    return _major_minor(version) >= _major_minor(spec)
+
+
+def _major_minor(version: str) -> tuple[int, int]:
+    """The (major, minor) of a version as ints; a missing minor is ``0``."""
+
+    parts = _components(version)
+    major = parts[0] if parts and isinstance(parts[0], int) else 0
+    minor = parts[1] if len(parts) > 1 and isinstance(parts[1], int) else 0
+    return (major, minor)
 
 
 # --- Forge / NeoForge Maven intervals --------------------------------------

@@ -186,3 +186,26 @@ class TestMavenIntervals:
     def test_neoforge_uses_maven_dialect(self) -> None:
         assert version_satisfies("20.4.100", "[20.4,)", "neoforge") is True
         assert version_satisfies("20.3.0", "[20.4,)", "neoforge") is False
+
+
+class TestPaperApiVersionFloor:
+    # A Bukkit ``api-version`` is a major.minor minimum floor, not an exact
+    # version: any patch of the declared minor (or any newer minor) satisfies it.
+    @pytest.mark.parametrize(
+        ("version", "spec", "expected"),
+        [
+            ("1.21.1", "1.21", True),
+            ("1.21.0", "1.21", True),
+            ("1.21", "1.21", True),
+            ("1.20.4", "1.21", False),
+            ("1.22", "1.21", True),
+            ("1.22.3", "1.21", True),
+            ("2.0", "1.21", True),
+        ],
+    )
+    def test_floor(self, version: str, spec: str, expected: bool) -> None:
+        assert version_satisfies(version, spec, "paper") is expected
+
+    def test_spigot_uses_paper_dialect(self) -> None:
+        assert version_satisfies("1.21.1", "1.21", "spigot") is True
+        assert version_satisfies("1.20.4", "1.21", "spigot") is False

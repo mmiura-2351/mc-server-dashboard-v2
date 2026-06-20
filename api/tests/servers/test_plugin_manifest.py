@@ -347,6 +347,58 @@ softdepend:
         assert deps["Vault"]["required"] is True
         assert deps["PlaceholderAPI"]["required"] is False
 
+    def test_plugin_yml_trailing_comments_stripped(self) -> None:
+        # Trailing inline comments are common in real descriptors; they must not
+        # pollute the scalar value (Bug 2).
+        yml = """
+name: ExamplePlugin # the plugin name
+version: 4.2.0   # release
+api-version: '1.20' # min server
+"""
+        meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
+        assert meta.mod_identifier == "ExamplePlugin"
+        assert meta.mc_versions == ["1.20"]
+
+    def test_plugin_yml_inline_list_dep_with_trailing_comment(self) -> None:
+        # `depend: [Vault] # comment` must keep the dependency: the unquoted
+        # trailing comment is stripped before the `]`-terminated list is parsed
+        # (without the fix the value no longer ends in `]` and is silently
+        # dropped). (Bug 2.)
+        yml = """
+name: P
+version: 1.0.0
+depend: [Vault, WorldEdit] # needs these
+"""
+        meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
+        deps = {d["mod_identifier"]: d for d in meta.dependencies}
+        assert deps["Vault"]["required"] is True
+        assert deps["WorldEdit"]["required"] is True
+
+    def test_plugin_yml_block_list_dep_with_trailing_comment(self) -> None:
+        yml = """
+name: P
+version: 1.0.0
+depend:
+  - Vault # economy
+  - WorldEdit
+"""
+        meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
+        deps = {d["mod_identifier"]: d for d in meta.dependencies}
+        assert deps["Vault"]["required"] is True
+        assert deps["WorldEdit"]["required"] is True
+
+    def test_plugin_yml_hash_inside_quoted_scalar_kept(self) -> None:
+        # A `#` inside a quoted scalar is not a comment and must be preserved.
+        yml = 'name: "Foo # Bar"\nversion: 1.0.0\n'
+        meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
+        assert meta.mod_identifier == "Foo # Bar"
+
+    def test_plugin_yml_hash_without_leading_space_kept(self) -> None:
+        # A `#` not preceded by whitespace does not begin a comment (YAML rule).
+        yml = "name: Foo#Bar\nversion: 1.0.0\n"
+        meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
+        assert meta.mod_identifier == "Foo#Bar"
+
     def test_paper_plugin_yml_preferred(self) -> None:
         paper_yml = "name: NewStyle\nversion: 1.0.0\n"
         plugin_yml = "name: OldStyle\nversion: 0.0.1\n"
