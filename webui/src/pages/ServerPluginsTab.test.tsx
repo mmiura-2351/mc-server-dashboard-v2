@@ -239,6 +239,57 @@ describe("ServerPluginsTab validation checklist", () => {
     });
   });
 
+  it("omits parentheses when version_range is empty (#1339)", async () => {
+    mockGets({
+      plugins: [plugin()],
+      validation: {
+        ...EMPTY_VALIDATION,
+        missing_deps: [
+          {
+            mod_id: "sodium",
+            depends_on: "Vault",
+            version_range: "",
+          },
+        ],
+      },
+    });
+    renderTab();
+    await waitFor(() => {
+      const el = screen.getByText(/Sodium requires Vault/);
+      expect(el).toBeInTheDocument();
+      // Must NOT contain empty parentheses.
+      expect(el.textContent).not.toContain("()");
+      // Must render without any parenthesized range portion.
+      expect(el.textContent).toBe(
+        "Sodium requires Vault, which is not installed.",
+      );
+    });
+  });
+
+  it("still shows the range in parentheses when version_range is set (#1339)", async () => {
+    mockGets({
+      plugins: [plugin()],
+      validation: {
+        ...EMPTY_VALIDATION,
+        missing_deps: [
+          {
+            mod_id: "sodium",
+            depends_on: "fabric-api",
+            version_range: ">=0.90.0",
+          },
+        ],
+      },
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Sodium requires fabric-api (>=0.90.0), which is not installed.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("does not render the checklist when no plugins are installed", async () => {
     mockGets({ plugins: [], validation: EMPTY_VALIDATION });
     renderTab();
