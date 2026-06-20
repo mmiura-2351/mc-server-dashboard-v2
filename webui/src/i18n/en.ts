@@ -1282,6 +1282,7 @@ export const en = {
   "plugins.col.name": "Name",
   "plugins.col.version": "Version",
   "plugins.col.source": "Source",
+  "plugins.col.side": "Side",
   "plugins.col.status": "Status",
   "plugins.col.size": "Size",
   "plugins.col.actions": "Actions",
@@ -1290,6 +1291,11 @@ export const en = {
   "plugins.status.disabled": "Disabled",
   "plugins.source.local": "Local",
   "plugins.source.modrinth": "Modrinth",
+  // Side (server / client / both, issue #1308).
+  "plugins.side.label": "Side",
+  "plugins.side.server": "Server",
+  "plugins.side.client": "Client",
+  "plugins.side.both": "Both",
   // Actions.
   "plugins.enable": "Enable",
   "plugins.disable": "Disable",
@@ -1297,6 +1303,7 @@ export const en = {
   "plugins.update": "Update",
   "plugins.install": "Upload JAR",
   "plugins.browse": "Browse Modrinth",
+  "plugins.downloadClientModpack": "Download client modpack",
   // Update indicators.
   "plugins.updateAvailable": "Update available: ",
   // Remove dialog.
@@ -1330,6 +1337,7 @@ export const en = {
   "plugins.removed": "Plugin removed.",
   "plugins.updated": "Plugin updated.",
   "plugins.installed": "Plugin installed.",
+  "plugins.sideUpdated": "Plugin side updated.",
   "plugins.catalogInstalled": "Plugin installed from Modrinth.",
   "plugins.error.notStopped": "Stop the server before managing plugins.",
   "plugins.error.generic": "Something went wrong. Please try again.",

@@ -162,6 +162,8 @@ PLUGIN_REMOVE: Final = "plugin:remove"
 PLUGIN_ENABLE: Final = "plugin:enable"
 PLUGIN_DISABLE: Final = "plugin:disable"
 PLUGIN_UPDATE: Final = "plugin:update"
+# Manual side override on an installed plugin (issue #1308).
+PLUGIN_SET_SIDE: Final = "plugin:set_side"
 
 # Resource pack upload / delete / download (issue #1176). Names the operation,
 # not a permission code — upload is gated by server:update in any community,

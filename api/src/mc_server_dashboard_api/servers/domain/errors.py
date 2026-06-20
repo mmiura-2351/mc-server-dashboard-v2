@@ -475,6 +475,13 @@ class PluginAlreadyExistsError(ServerError):
     """
 
 
+class InvalidPluginSideError(ServerError):
+    """A side override requested a value outside server/client/both (issue #1308).
+
+    The edge maps this to 422 ``invalid_side``.
+    """
+
+
 class CatalogUnavailableError(ServerError):
     """External catalog API unreachable or errored.
 

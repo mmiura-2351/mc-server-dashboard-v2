@@ -1093,6 +1093,23 @@
         "title": "ChangePasswordRequest",
         "type": "object"
       },
+      "ClientModsResponse": {
+        "description": "A server's enabled client-relevant plugins (issue #1308).",
+        "properties": {
+          "plugins": {
+            "items": {
+              "$ref": "#/components/schemas/PluginResponse"
+            },
+            "title": "Plugins",
+            "type": "array"
+          }
+        },
+        "required": [
+          "plugins"
+        ],
+        "title": "ClientModsResponse",
+        "type": "object"
+      },
       "CommunityResponse": {
         "description": "Public view of a community (DATABASE.md Section 5; quotas unused in M1).",
         "properties": {
@@ -2104,6 +2121,10 @@
             "title": "Server Id",
             "type": "string"
           },
+          "side": {
+            "title": "Side",
+            "type": "string"
+          },
           "size_bytes": {
             "anyOf": [
               {
@@ -2176,7 +2197,8 @@
           "installed_by",
           "created_at",
           "updated_at",
-          "mod_identifier"
+          "mod_identifier",
+          "side"
         ],
         "title": "PluginResponse",
         "type": "object"
@@ -2885,6 +2907,20 @@
           "expires_at"
         ],
         "title": "SessionResponse",
+        "type": "object"
+      },
+      "SetPluginSideRequest": {
+        "description": "Manual side override for an installed plugin (issue #1308).",
+        "properties": {
+          "side": {
+            "title": "Side",
+            "type": "string"
+          }
+        },
+        "required": [
+          "side"
+        ],
+        "title": "SetPluginSideRequest",
         "type": "object"
       },
       "TokenResponse": {
@@ -6498,6 +6534,116 @@
         "summary": "Search Catalog"
       }
     },
+    "/api/communities/{community_id}/servers/{server_id}/client-mods": {
+      "get": {
+        "description": "List a server's enabled client-relevant plugins (plugin:read, issue #1308).",
+        "operationId": "list_client_mods_api_communities__community_id__servers__server_id__client_mods_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientModsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Client Mods"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
+      "get": {
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).",
+        "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Client Modpack"
+      }
+    },
     "/api/communities/{community_id}/servers/{server_id}/command": {
       "post": {
         "operationId": "send_server_command_api_communities__community_id__servers__server_id__command_post",
@@ -7893,6 +8039,82 @@
           }
         ],
         "summary": "Enable Plugin"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/side": {
+      "post": {
+        "description": "Override an installed plugin's side (plugin:manage, issue #1308).\n\nChanging the side re-materializes the working set: a client-only jar is\nremoved from the running server, and a server-relevant jar is materialized\nfrom the content-addressed cache. At-rest gated (409 ``server_unsettled``).",
+        "operationId": "set_plugin_side_api_communities__community_id__servers__server_id__plugins__plugin_id__side_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPluginSideRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Plugin Side"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/update": {

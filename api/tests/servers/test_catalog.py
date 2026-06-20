@@ -16,6 +16,7 @@ from mc_server_dashboard_api.servers.application.catalog import (
     ListPluginDependencies,
     SearchCatalog,
     UpdatePlugin,
+    side_from_modrinth,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
@@ -136,6 +137,32 @@ def _version(
         date_published="2024-01-15T12:00:00Z",
     )
     return version, file_content
+
+
+# -- Modrinth side mapping (issue #1308) --
+
+
+class TestSideFromModrinth:
+    """Map Modrinth ``client_side`` / ``server_side`` to a :data:`PluginSide`."""
+
+    def test_server_only_when_client_unsupported(self) -> None:
+        assert side_from_modrinth("unsupported", "required") == "server"
+
+    def test_client_only_when_server_unsupported(self) -> None:
+        assert side_from_modrinth("required", "unsupported") == "client"
+
+    def test_both_when_required_on_both(self) -> None:
+        assert side_from_modrinth("required", "required") == "both"
+
+    def test_both_when_optional_on_both(self) -> None:
+        assert side_from_modrinth("optional", "optional") == "both"
+
+    def test_both_when_unknown(self) -> None:
+        assert side_from_modrinth("unknown", "unknown") == "both"
+
+    def test_server_when_client_optional_but_server_required(self) -> None:
+        # Only an explicit ``unsupported`` on one side narrows the side.
+        assert side_from_modrinth("optional", "required") == "both"
 
 
 # -- SearchCatalog --
@@ -1024,6 +1051,59 @@ async def test_update_plugin_different_filename() -> None:
     assert result.filename == "fabric-api-0.93.0.jar"
     assert "mods/fabric-api-0.93.0.jar" in fs.files
     assert "mods/fabric-api-0.92.0.jar" not in fs.files
+
+
+async def test_update_disabled_plugin_keeps_disabled_path_no_orphan() -> None:
+    """Updating a DISABLED server/both plugin must keep the .disabled invariant:
+    the new bytes land at the new .disabled path, the old .disabled file is
+    removed, and rel_path stays suffixed (issue #1308 reconcile)."""
+
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    fs.files["mods/fabric-api-0.92.0.jar.disabled"] = b"old"
+
+    plugin = _plugin(
+        server_id=server.id,
+        source_version_id="ver-1",
+        rel_path="mods/fabric-api-0.92.0.jar.disabled",
+    )
+    plugin.enabled = False
+    uow.plugins.seed(plugin)
+
+    project = _project()
+    new_content = b"new-jar-bytes-v2"
+    ver_new, _ = _version(
+        version_id="ver-2",
+        version_number="0.93.0",
+        filename="fabric-api-0.93.0.jar",  # different filename
+        file_content=new_content,
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [ver_new])
+    catalog.seed_file(ver_new.files[0].url, new_content)
+
+    uc = UpdatePlugin(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    result = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        plugin_id=plugin.id,
+        version_id="ver-2",
+    )
+
+    assert result.enabled is False
+    assert result.rel_path == "mods/fabric-api-0.93.0.jar.disabled"
+    assert fs.files["mods/fabric-api-0.93.0.jar.disabled"] == new_content
+    # The old .disabled file is gone (no orphan) and no clean file was written.
+    assert "mods/fabric-api-0.92.0.jar.disabled" not in fs.files
+    assert "mods/fabric-api-0.93.0.jar" not in fs.files
 
 
 async def test_update_plugin_not_at_rest() -> None:

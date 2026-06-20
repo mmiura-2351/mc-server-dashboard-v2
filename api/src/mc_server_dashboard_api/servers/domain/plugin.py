@@ -17,11 +17,17 @@ import datetime as dt
 import enum
 import uuid
 from dataclasses import dataclass, field
+from typing import Literal
 
 from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedPluginServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, ServerType
+
+# Where a mod/plugin is needed: ``server`` only, ``client`` only, or ``both``
+# (issue #1308). ``both`` is the safe default -- a ``both`` jar is present
+# everywhere -- so it is used whenever the side cannot be detected.
+PluginSide = Literal["server", "client", "both"]
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,12 @@ class ServerPlugin:
     "version_range", "required", "conflict"}]``; ``mc_versions`` are the declared
     compatible Minecraft versions. The phase-B validator reads these to surface
     missing required deps, conflicts, and MC-version mismatch.
+
+    ``side`` (issue #1308) is where the content is needed -- ``server``,
+    ``client``, or ``both`` -- auto-detected at ingest and manually overridable.
+    It governs working-set presence: only a jar with side in {``server``,
+    ``both``} deploys to the running server (see :func:`working_set_present`); a
+    ``client``-only jar is tracked and cached but never placed in the working set.
     """
 
     id: PluginId
@@ -97,6 +109,40 @@ class ServerPlugin:
     provides: list[str] = field(default_factory=list)
     dependencies: list[dict[str, object]] = field(default_factory=list)
     mc_versions: list[str] = field(default_factory=list)
+    side: PluginSide = "both"
+
+
+def working_set_present(*, enabled: bool, side: PluginSide) -> bool:
+    """Whether a plugin's jar belongs in the running server's working set.
+
+    The observable deployment contract (issue #1308): the working set holds
+    exactly the **enabled** jars whose side is server-relevant (``server`` or
+    ``both``). A ``client``-only jar is tracked and cached but never deployed; a
+    disabled jar is not running either (its working-set file is removed / suffixed
+    ``.disabled``).
+    """
+
+    return enabled and side != "client"
+
+
+def working_set_path(*, clean_path: str, enabled: bool, side: PluginSide) -> str | None:
+    """The working-set path a plugin's jar should occupy (issue #1308).
+
+    The desired on-disk state derived from ``(enabled, side)``, given the
+    suffix-free ``clean_path`` (e.g. ``mods/<name>.jar``):
+
+    * ``side == "client"`` -> no working-set file (ever); ``None``.
+    * server/both + enabled  -> the clean path.
+    * server/both + disabled -> the ``.disabled`` path.
+
+    Use cases reconcile the on-disk file to this single source of truth so the
+    recorded ``rel_path`` and the actual file never drift (the ``.disabled``
+    state-machine invariant).
+    """
+
+    if not working_set_present(enabled=True, side=side):
+        return None
+    return clean_path if enabled else f"{clean_path}.disabled"
 
 
 def content_dir_for_server_type(server_type: ServerType) -> str:

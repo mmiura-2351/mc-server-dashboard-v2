@@ -146,6 +146,51 @@ class TestFabric:
         assert deps["fabric-api"]["conflict"] is False
 
 
+class TestSide:
+    """Side auto-detection from the Fabric ``environment`` field (issue #1308)."""
+
+    def test_environment_client_maps_to_client(self) -> None:
+        manifest = {"id": "m", "version": "1.0.0", "environment": "client"}
+        meta = parse_manifest(
+            _make_jar({"fabric.mod.json": json.dumps(manifest)}), server_type="fabric"
+        )
+        assert meta.side == "client"
+
+    def test_environment_server_maps_to_server(self) -> None:
+        manifest = {"id": "m", "version": "1.0.0", "environment": "server"}
+        meta = parse_manifest(
+            _make_jar({"fabric.mod.json": json.dumps(manifest)}), server_type="fabric"
+        )
+        assert meta.side == "server"
+
+    def test_environment_star_maps_to_both(self) -> None:
+        manifest = {"id": "m", "version": "1.0.0", "environment": "*"}
+        meta = parse_manifest(
+            _make_jar({"fabric.mod.json": json.dumps(manifest)}), server_type="fabric"
+        )
+        assert meta.side == "both"
+
+    def test_missing_environment_defaults_to_both(self) -> None:
+        manifest = {"id": "m", "version": "1.0.0"}
+        meta = parse_manifest(
+            _make_jar({"fabric.mod.json": json.dumps(manifest)}), server_type="fabric"
+        )
+        assert meta.side == "both"
+
+    def test_forge_side_defaults_to_both(self) -> None:
+        # Forge/NeoForge side hints are unreliable -> default both.
+        toml = '[[mods]]\nmodId = "m"\nversion = "1.0.0"\n'
+        meta = parse_manifest(
+            _make_jar({"META-INF/mods.toml": toml}), server_type="forge"
+        )
+        assert meta.side == "both"
+
+    def test_paper_side_defaults_to_both(self) -> None:
+        yml = "name: P\nversion: 1.0.0\n"
+        meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
+        assert meta.side == "both"
+
+
 class TestQuilt:
     def test_quilt_parsed_on_fabric_server(self) -> None:
         # A Fabric server can run Quilt mods; the parser tries quilt.mod.json too.

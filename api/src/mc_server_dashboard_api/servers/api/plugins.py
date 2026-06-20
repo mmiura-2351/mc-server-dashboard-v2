@@ -18,6 +18,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -28,11 +29,14 @@ from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
     get_check_plugin_update,
     get_check_updates,
+    get_download_client_modpack,
     get_get_plugin,
     get_install_plugin,
+    get_list_client_mods,
     get_list_plugin_dependencies,
     get_list_plugins,
     get_remove_plugin,
+    get_set_plugin_side,
     get_toggle_plugin,
     get_update_plugin,
     get_validate_plugin_set,
@@ -46,6 +50,10 @@ from mc_server_dashboard_api.servers.application.catalog import (
     ListPluginDependencies,
     UpdatePlugin,
 )
+from mc_server_dashboard_api.servers.application.client_modpack import (
+    DownloadClientModpack,
+    ListClientMods,
+)
 from mc_server_dashboard_api.servers.application.plugin_validation import (
     PluginValidation,
 )
@@ -55,6 +63,7 @@ from mc_server_dashboard_api.servers.application.plugins import (
     InstallPlugin,
     ListPlugins,
     RemovePlugin,
+    SetPluginSide,
     TogglePlugin,
     ValidatePluginSet,
 )
@@ -67,6 +76,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogUnavailableError,
     FileTooLargeError,
     InvalidFilePathError,
+    InvalidPluginSideError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
     ServerBusyError,
@@ -110,6 +120,10 @@ class PluginResponse(BaseModel):
     # no recognized manifest. Surfaced so the validation checklist can map a
     # finding's mod_id back to a human-friendly plugin name.
     mod_identifier: str | None
+    # Where the content is needed (issue #1308): server / client / both.
+    # Auto-detected at ingest and manually overridable; a client-only plugin is
+    # tracked but never deployed to the running server.
+    side: str
 
     @classmethod
     def from_plugin(cls, plugin: ServerPlugin) -> "PluginResponse":
@@ -132,6 +146,7 @@ class PluginResponse(BaseModel):
             created_at=plugin.created_at,
             updated_at=plugin.updated_at,
             mod_identifier=plugin.mod_identifier,
+            side=plugin.side,
         )
 
 
@@ -206,6 +221,18 @@ class PluginUpdatesResponse(BaseModel):
 
 class UpdatePluginRequest(BaseModel):
     version_id: str
+
+
+class SetPluginSideRequest(BaseModel):
+    """Manual side override for an installed plugin (issue #1308)."""
+
+    side: str
+
+
+class ClientModsResponse(BaseModel):
+    """A server's enabled client-relevant plugins (issue #1308)."""
+
+    plugins: list[PluginResponse]
 
 
 class PluginDependencyResponse(BaseModel):
@@ -796,6 +823,127 @@ async def disable_plugin(
         recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
     )
     return PluginResponse.from_plugin(plugin)
+
+
+@router.post(
+    "/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/side",
+)
+async def set_plugin_side(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    plugin_id: uuid.UUID,
+    body: SetPluginSideRequest,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("plugin:manage"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[SetPluginSide, Depends(get_set_plugin_side)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> PluginResponse:
+    """Override an installed plugin's side (plugin:manage, issue #1308).
+
+    Changing the side re-materializes the working set: a client-only jar is
+    removed from the running server, and a server-relevant jar is materialized
+    from the content-addressed cache. At-rest gated (409 ``server_unsettled``).
+    """
+
+    try:
+        plugin = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            plugin_id=PluginId(plugin_id),
+            side=body.side,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except PluginNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidPluginSideError as exc:
+        raise _unprocessable("invalid_side") from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
+        )
+        raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
+        )
+        raise _conflict("server_busy") from exc
+    await _record_plugin(
+        recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
+    )
+    return PluginResponse.from_plugin(plugin)
+
+
+@router.get("/communities/{community_id}/servers/{server_id}/client-mods")
+async def list_client_mods(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("plugin:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ListClientMods, Depends(get_list_client_mods)],
+) -> ClientModsResponse:
+    """List a server's enabled client-relevant plugins (plugin:read, issue #1308)."""
+
+    try:
+        plugins = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except UnsupportedPluginServerTypeError as exc:
+        raise _unprocessable("unsupported_server_type") from exc
+    return ClientModsResponse(plugins=[PluginResponse.from_plugin(p) for p in plugins])
+
+
+@router.get("/communities/{community_id}/servers/{server_id}/client-mods/download")
+async def download_client_modpack(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("plugin:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[DownloadClientModpack, Depends(get_download_client_modpack)],
+) -> StreamingResponse:
+    """Download a server's client mods as a zip (plugin:read, issue #1308)."""
+
+    try:
+        stream = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except UnsupportedPluginServerTypeError as exc:
+        raise _unprocessable("unsupported_server_type") from exc
+    return StreamingResponse(
+        stream,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="client-modpack.zip"'},
+    )
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:

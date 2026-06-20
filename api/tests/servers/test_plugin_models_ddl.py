@@ -73,3 +73,20 @@ def test_manifest_columns_present_and_nullable() -> None:
     for column in ("mod_identifier", "provides", "dependencies", "mc_versions"):
         assert column in _TABLE.c
         assert _TABLE.c[column].nullable is True
+
+
+def test_side_check_lists_documented_values() -> None:
+    # Side governs working-set presence (issue #1308); CHECK mirrors the literal.
+    checks = {
+        c.name: str(c.sqltext)
+        for c in _TABLE.constraints
+        if isinstance(c, CheckConstraint)
+    }
+    assert "ck_server_plugin_side" in checks
+    for value in ("server", "client", "both"):
+        assert value in checks["ck_server_plugin_side"]
+
+
+def test_side_not_null_with_default() -> None:
+    assert _TABLE.c.side.nullable is False
+    assert _TABLE.c.side.server_default is not None

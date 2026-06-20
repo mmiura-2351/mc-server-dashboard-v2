@@ -35,6 +35,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
+    ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
 )
@@ -45,11 +46,14 @@ from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
 )
 from mc_server_dashboard_api.servers.domain.plugin import (
     PluginId,
+    PluginSide,
     PluginSource,
     ServerPlugin,
     content_dir_for_server_type,
     loader_type_for_server_type,
     modrinth_loader_for_server_type,
+    working_set_path,
+    working_set_present,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -63,6 +67,24 @@ async def _load(
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
     return server
+
+
+def side_from_modrinth(client_side: str, server_side: str) -> PluginSide:
+    """Map Modrinth ``client_side`` / ``server_side`` to a :data:`PluginSide`.
+
+    Modrinth declares each environment as ``required`` / ``optional`` /
+    ``unsupported`` / ``unknown``. Only an explicit ``unsupported`` on one side
+    narrows the result: server-unsupported -> ``client``, client-unsupported ->
+    ``server``. Anything else (the catalog's most common case, and any
+    ``unknown``) is ``both`` -- the safe default that is present everywhere
+    (issue #1308).
+    """
+
+    if server_side == "unsupported" and client_side != "unsupported":
+        return "client"
+    if client_side == "unsupported" and server_side != "unsupported":
+        return "server"
+    return "both"
 
 
 async def _resolve_modrinth_content(
@@ -224,6 +246,10 @@ class InstallFromCatalog:
         # uniform source, same as a local upload. Tolerant of an unreadable jar.
         manifest = parse_manifest_at_ingest(content, loader=loader)
 
+        # Side (issue #1308): Modrinth's per-environment support is the most
+        # accurate source, so it wins over the jar manifest hint here.
+        side = side_from_modrinth(project.client_side, project.server_side)
+
         # Phase 4: At-rest gate + write (hold lock, short duration).
         rel_path = f"{content_dir}/{file.filename}"
         async with self.lifecycle_lock.hold(server_id):
@@ -238,12 +264,15 @@ class InstallFromCatalog:
                 if existing is not None:
                     raise PluginAlreadyExistsError(rel_path)
 
-                await self.file_store.write_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=rel_path,
-                    content=content,
-                )
+                # Side-aware deploy: a client-only mod is cached + recorded but
+                # never placed in the running working set (issue #1308).
+                if working_set_present(enabled=True, side=side):
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=rel_path,
+                        content=content,
+                    )
 
                 now = self.clock.now()
                 plugin = ServerPlugin(
@@ -269,6 +298,7 @@ class InstallFromCatalog:
                     provides=manifest.provides,
                     dependencies=manifest.dependencies,
                     mc_versions=manifest.mc_versions,
+                    side=side,
                 )
                 await self.uow.plugins.add(plugin)
                 await self.uow.commit()
@@ -457,43 +487,60 @@ class UpdatePlugin:
         # updated version (issue #1307). Tolerant of an unreadable jar.
         manifest = parse_manifest_at_ingest(content, loader=loader)
 
-        # Phase 4: At-rest gate + write (hold lock, short duration).
-        new_rel_path = f"{content_dir}/{file.filename}"
+        # Phase 4: At-rest gate + write (hold lock, short duration). The new jar's
+        # working-set path follows the (enabled, side) desired state (issue #1308):
+        # a disabled server/both jar lives at the .disabled path, a client jar has
+        # no file. Reconciling old -> new keeps rel_path and the on-disk file
+        # consistent and never orphans the prior .disabled file.
+        new_clean_path = f"{content_dir}/{file.filename}"
+        old_path = working_set_path(
+            clean_path=plugin.rel_path.removesuffix(".disabled"),
+            enabled=plugin.enabled,
+            side=plugin.side,
+        )
+        new_path = working_set_path(
+            clean_path=new_clean_path, enabled=plugin.enabled, side=plugin.side
+        )
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 if not server.is_at_rest():
                     raise ServerFilesUnsettledError(str(server_id.value))
 
-                self.file_store.validate_rel_path(new_rel_path)
+                self.file_store.validate_rel_path(new_clean_path)
 
-                old_rel_path = plugin.rel_path
-                if new_rel_path != old_rel_path:
+                if new_path is not None and new_path != old_path:
                     existing = await self.uow.plugins.get_by_rel_path(
-                        server_id, new_rel_path
+                        server_id, new_path
                     )
                     if existing is not None and existing.id != plugin_id:
-                        raise PluginAlreadyExistsError(new_rel_path)
+                        raise PluginAlreadyExistsError(new_path)
 
-                await self.file_store.write_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=new_rel_path,
-                    content=content,
-                )
-
-                if new_rel_path != old_rel_path:
-                    await self.file_store.delete_file(
+                # Write the fresh bytes at the desired path and remove the old file
+                # (also when only the side/enabled mapping leaves the new bytes at a
+                # different path). A client-only jar has no working-set file.
+                if new_path is not None:
+                    await self.file_store.write_file(
                         community_id=community_id,
                         server_id=server_id,
-                        rel_path=old_rel_path,
+                        rel_path=new_path,
+                        content=content,
                     )
+                if old_path is not None and old_path != new_path:
+                    try:
+                        await self.file_store.delete_file(
+                            community_id=community_id,
+                            server_id=server_id,
+                            rel_path=old_path,
+                        )
+                    except ServerFileNotFoundError:
+                        pass
 
                 now = self.clock.now()
                 updated_plugin = ServerPlugin(
                     id=plugin.id,
                     server_id=plugin.server_id,
-                    rel_path=new_rel_path,
+                    rel_path=new_path if new_path is not None else new_clean_path,
                     filename=file.filename,
                     display_name=plugin.display_name,
                     description=plugin.description,
@@ -513,6 +560,7 @@ class UpdatePlugin:
                     provides=manifest.provides,
                     dependencies=manifest.dependencies,
                     mc_versions=manifest.mc_versions,
+                    side=plugin.side,
                 )
                 await self.uow.plugins.update(updated_plugin)
                 await self.uow.commit()

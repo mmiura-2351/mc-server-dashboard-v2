@@ -7,6 +7,8 @@ Rows are translated to/from the framework-free domain entity here.
 
 from __future__ import annotations
 
+from typing import cast
+
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +16,7 @@ from mc_server_dashboard_api.servers.adapters.plugin_models import ServerPluginM
 from mc_server_dashboard_api.servers.domain.plugin import (
     LoaderType,
     PluginId,
+    PluginSide,
     PluginSource,
     ServerPlugin,
 )
@@ -45,6 +48,7 @@ def _to_plugin(row: ServerPluginModel) -> ServerPlugin:
         provides=row.provides or [],
         dependencies=row.dependencies or [],
         mc_versions=row.mc_versions or [],
+        side=cast(PluginSide, row.side),
     )
 
 
@@ -79,6 +83,7 @@ class SqlAlchemyPluginRepository(PluginRepository):
                 provides=plugin.provides,
                 dependencies=plugin.dependencies,
                 mc_versions=plugin.mc_versions,
+                side=plugin.side,
             )
         )
 
@@ -139,6 +144,7 @@ class SqlAlchemyPluginRepository(PluginRepository):
                 provides=plugin.provides,
                 dependencies=plugin.dependencies,
                 mc_versions=plugin.mc_versions,
+                side=plugin.side,
             )
         )
         await self._session.execute(stmt)

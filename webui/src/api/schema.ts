@@ -837,6 +837,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/client-mods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Client Mods
+         * @description List a server's enabled client-relevant plugins (plugin:read, issue #1308).
+         */
+        get: operations["list_client_mods_api_communities__community_id__servers__server_id__client_mods_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Client Modpack
+         * @description Download a server's client mods as a zip (plugin:read, issue #1308).
+         */
+        get: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/command": {
         parameters: {
             query?: never;
@@ -1254,6 +1294,30 @@ export interface paths {
          * @description Enable a disabled plugin (plugin:manage).
          */
         post: operations["enable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__enable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/side": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Plugin Side
+         * @description Override an installed plugin's side (plugin:manage, issue #1308).
+         *
+         *     Changing the side re-materializes the working set: a client-only jar is
+         *     removed from the running server, and a server-relevant jar is materialized
+         *     from the content-addressed cache. At-rest gated (409 ``server_unsettled``).
+         */
+        post: operations["set_plugin_side_api_communities__community_id__servers__server_id__plugins__plugin_id__side_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2360,6 +2424,14 @@ export interface components {
             new_password: string;
         };
         /**
+         * ClientModsResponse
+         * @description A server's enabled client-relevant plugins (issue #1308).
+         */
+        ClientModsResponse: {
+            /** Plugins */
+            plugins: components["schemas"]["PluginResponse"][];
+        };
+        /**
          * CommunityResponse
          * @description Public view of a community (DATABASE.md Section 5; quotas unused in M1).
          */
@@ -2749,6 +2821,8 @@ export interface components {
              * Format: uuid
              */
             server_id: string;
+            /** Side */
+            side: string;
             /** Size Bytes */
             size_bytes: number | null;
             /** Source */
@@ -3052,6 +3126,14 @@ export interface components {
             expires_at: string;
             /** Id */
             id: string;
+        };
+        /**
+         * SetPluginSideRequest
+         * @description Manual side override for an installed plugin (issue #1308).
+         */
+        SetPluginSideRequest: {
+            /** Side */
+            side: string;
         };
         /**
          * TokenResponse
@@ -5092,6 +5174,70 @@ export interface operations {
             };
         };
     };
+    list_client_mods_api_communities__community_id__servers__server_id__client_mods_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientModsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     send_server_command_api_communities__community_id__servers__server_id__command_post: {
         parameters: {
             query?: never;
@@ -5812,6 +5958,43 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_plugin_side_api_communities__community_id__servers__server_id__plugins__plugin_id__side_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetPluginSideRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
