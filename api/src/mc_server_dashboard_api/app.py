@@ -103,6 +103,9 @@ from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleL
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
     run_reconciler_loop,
 )
+from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
+    ObjectResourcePackStore,
+)
 from mc_server_dashboard_api.servers.adapters.server_route_resolver import (
     ServersServerRouteResolver,
 )
@@ -123,6 +126,7 @@ from mc_server_dashboard_api.servers.api import files as server_files
 from mc_server_dashboard_api.servers.api import groups as server_groups
 from mc_server_dashboard_api.servers.api import plugins as server_plugins
 from mc_server_dashboard_api.servers.api import ports as server_ports
+from mc_server_dashboard_api.servers.api import resource_packs as server_resource_packs
 from mc_server_dashboard_api.servers.api import servers
 from mc_server_dashboard_api.servers.application.backup_scheduler import (
     RunBackupScheduleTick,
@@ -237,6 +241,33 @@ def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
             secret_key=obj.secret_key,
         ),
         version_retention=settings.storage.version_retention,
+    )
+
+
+def _build_resource_pack_store(
+    settings: Settings,
+) -> ObjectResourcePackStore | None:
+    """Build the :class:`ResourcePackStore` adapter (issue #1176).
+
+    Only available for the ``object`` storage backend; returns ``None`` for
+    ``fs``/``remote-fs`` (the fs adapter is not implemented yet). The dependency
+    layer raises 503 when the store is ``None``.
+    """
+
+    if settings.storage.backend in ("fs", "remote-fs"):
+        return None
+    obj = settings.storage.object
+    assert obj.endpoint is not None
+    assert obj.bucket is not None
+    assert obj.access_key is not None
+    assert obj.secret_key is not None
+    return ObjectResourcePackStore(
+        make_s3_client_factory(
+            endpoint=obj.endpoint,
+            bucket=obj.bucket,
+            access_key=obj.access_key,
+            secret_key=obj.secret_key,
+        )
     )
 
 
@@ -459,6 +490,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # than on first use (CONFIGURATION.md Section 3; STORAGE.md Section 7).
     storage = _build_storage(settings)
 
+    # Build the resource pack store (issue #1176): only available for the object
+    # backend; None for fs/remote-fs.
+    resource_pack_store = _build_resource_pack_store(settings)
+
     # Build the process-wide version catalog now so its in-process manifest cache
     # is shared across requests (FR-VER-2). No external secret is required, so it
     # cannot fail at boot; it is stored on app state below.
@@ -491,6 +526,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = engine
         app.state.settings = settings
         app.state.storage = storage
+        app.state.resource_pack_store = resource_pack_store
         app.state.version_catalog = version_catalog
         # The catalog's manifest-cache invalidator + per-type source prefixes, for
         # the platform-admin manual refresh (issue #286).
@@ -499,6 +535,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Readiness flag for /readyz (issue #282): the control-plane gRPC server
         # has not started yet; flipped True once start() returns below.
         app.state.grpc_started = False
+        # Boot-time reachability probe for object storage (issue #945): a
+        # misconfigured or unreachable S3 endpoint must fail fast with a clear
+        # diagnostic rather than degrading silently at the first runtime op.
+        if isinstance(storage, ObjectStorage):
+            obj = settings.storage.object
+            assert obj.endpoint is not None
+            assert obj.bucket is not None
+            await storage.check_reachable(endpoint=obj.endpoint, bucket=obj.bucket)
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
         # note): reclaim any staging dir/prefix or superseded snapshot left by a
         # crash before this process serves. Idempotent and keyed off the live
@@ -898,6 +942,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(server_groups.router)
     api_router.include_router(server_plugins.router)
     api_router.include_router(server_catalog.router)
+    api_router.include_router(server_resource_packs.router)
+    api_router.include_router(server_resource_packs.public_router)
+    api_router.include_router(server_resource_packs.assignment_router)
     api_router.include_router(workers.router)
     api_router.include_router(server_events.router)
     api_router.include_router(transfers.router)

@@ -25,6 +25,7 @@ export const en = {
   "nav.adminWorkers": "Workers",
   "nav.adminVersions": "Versions & JARs",
   "nav.adminAudit": "Global audit",
+  "nav.sharedResources": "Shared resources",
 
   // Placeholder pages (Phase 1: routing skeleton only)
   "page.login": "Sign in",
@@ -483,6 +484,7 @@ export const en = {
     "No worker is available to take the backup right now.",
   "backups.error.invalidSchedule":
     "backup_interval_hours must be a whole number of hours of at least 1.",
+  "backups.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "backups.error.generic": "Something went wrong. Please try again.",
 
   // Files tab (WEBUI_SPEC.md 6.6). One contiguous block to keep merge
@@ -547,6 +549,7 @@ export const en = {
   "files.rolledBack": "Rolled back to the selected version.",
   "files.error.serverMustBeStopped":
     "Stop the server before uploading files or creating folders.",
+  "files.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "files.error.generic": "Something went wrong. Please try again.",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
@@ -1025,6 +1028,10 @@ export const en = {
   "communitySettings.groups.playersHeading": "Players",
   "communitySettings.groups.playersEmpty": "No players in this group yet.",
   "communitySettings.groups.removePlayer": "Remove",
+  "communitySettings.groups.removePlayerDialogTitle": "Remove player",
+  "communitySettings.groups.removePlayerDialogBody":
+    "Are you sure you want to remove this player from the group?",
+  "communitySettings.groups.removePlayerConfirm": "Remove player",
   "communitySettings.groups.playerRemoved": "Player removed.",
   "communitySettings.groups.addPlayer": "Add player",
   "communitySettings.groups.uuidLabel": "UUID",
@@ -1338,8 +1345,99 @@ export const en = {
   "communitySettings.audit.op.plugin:update": "Update plugin",
   "communitySettings.audit.targetType.plugin": "Plugin",
 
+  // Resource pack library (issue #1178). One contiguous block to keep merge
+  // conflicts with sibling i18n PRs minimal.
+  "nav.resourcePacks": "Resource packs",
+  "page.resourcePacks": "Resource packs",
+  "resourcePacks.subtitle":
+    "Upload and manage resource packs for use with Minecraft servers.",
+  "resourcePacks.loading": "Loading resource packs…",
+  "resourcePacks.loadError": "Could not load resource packs.",
+  "resourcePacks.empty": "No resource packs yet.",
+  "resourcePacks.upload": "Upload pack",
+  "resourcePacks.col.displayName": "Name",
+  "resourcePacks.col.filename": "Filename",
+  "resourcePacks.col.size": "Size",
+  "resourcePacks.col.sha1": "SHA-1",
+  "resourcePacks.col.uploaded": "Uploaded",
+  "resourcePacks.col.uploader": "Uploader",
+  "resourcePacks.download": "Download",
+  "resourcePacks.delete": "Delete",
+  "resourcePacks.uploadDialog.title": "Upload resource pack",
+  "resourcePacks.uploadDialog.displayName": "Display name",
+  "resourcePacks.uploadDialog.file": "File (.zip)",
+  "resourcePacks.uploadDialog.submit": "Upload",
+  "resourcePacks.uploadDialog.uploading": "Uploading…",
+  "resourcePacks.uploadDialog.nameRequired": "Enter a display name.",
+  "resourcePacks.uploadDialog.fileRequired": "Choose a .zip file.",
+  "resourcePacks.uploaded": "Resource pack uploaded.",
+  "resourcePacks.deleted": "Resource pack deleted.",
+  "resourcePacks.deleteDialog.title": "Delete resource pack",
+  "resourcePacks.deleteDialog.body":
+    "This permanently deletes the resource pack. Packs currently assigned to servers cannot be deleted.",
+  "resourcePacks.deleteDialog.confirm": "Delete pack",
+  "resourcePacks.deleteDialog.prompt":
+    "Type the display name to enable deletion",
+  "resourcePacks.error.tooLarge": "That file exceeds the 256 MiB upload limit.",
+  "resourcePacks.error.uploadFailed": "Could not upload the resource pack.",
+  "resourcePacks.error.deleteFailed": "Could not delete the resource pack.",
+  "resourcePacks.error.inUse":
+    "This resource pack is assigned to one or more servers and cannot be deleted.",
+  "resourcePacks.error.downloadFailed": "Could not download the resource pack.",
+
+  // Server resource pack assignment (issue #1179). Displayed as a card in the
+  // server detail Settings tab.
+  "serverDetail.resourcePack.heading": "Resource pack",
+  "serverDetail.resourcePack.none": "No resource pack assigned.",
+  "serverDetail.resourcePack.assign": "Assign",
+  "serverDetail.resourcePack.change": "Change",
+  "serverDetail.resourcePack.remove": "Remove",
+  "serverDetail.resourcePack.name": "Name",
+  "serverDetail.resourcePack.filename": "Filename",
+  "serverDetail.resourcePack.size": "Size",
+  "serverDetail.resourcePack.sha1": "SHA-1",
+  "serverDetail.resourcePack.url": "Public URL",
+  "serverDetail.resourcePack.urlCopied": "Copied!",
+  "serverDetail.resourcePack.required": "Required",
+  "serverDetail.resourcePack.notRequired": "Optional",
+  "serverDetail.resourcePack.prompt": "Prompt",
+  "serverDetail.resourcePack.promptNone": "None",
+  "serverDetail.resourcePack.notAtRest":
+    "Stop the server to change resource pack settings.",
+  "serverDetail.resourcePack.assigned": "Resource pack assigned.",
+  "serverDetail.resourcePack.unassigned": "Resource pack unassigned.",
+  "serverDetail.resourcePack.assignError":
+    "Could not assign the resource pack.",
+  "serverDetail.resourcePack.unassignError":
+    "Could not unassign the resource pack.",
+  "serverDetail.resourcePack.assignDialog.title": "Assign resource pack",
+  "serverDetail.resourcePack.assignDialog.select": "Resource pack",
+  "serverDetail.resourcePack.assignDialog.selectPlaceholder": "Select a pack…",
+  "serverDetail.resourcePack.assignDialog.require": "Require resource pack",
+  "serverDetail.resourcePack.assignDialog.prompt":
+    "Custom prompt (shown to players)",
+  "serverDetail.resourcePack.assignDialog.submit": "Assign",
+  "serverDetail.resourcePack.assignDialog.loading": "Loading packs…",
+  "serverDetail.resourcePack.assignDialog.empty": "No packs available.",
+  "serverDetail.resourcePack.removeDialog.title": "Remove resource pack",
+  "serverDetail.resourcePack.removeDialog.body":
+    "Remove the resource pack assignment from this server?",
+  "serverDetail.resourcePack.removeDialog.confirm": "Remove",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "You lack: ",
+
+  // Error boundary (#1211): shown when an unhandled rendering error crashes a
+  // component subtree instead of the default white-screen unmount.
+  "errorBoundary.title": "Something went wrong",
+  "errorBoundary.body":
+    "An unexpected error occurred. Reloading usually fixes it.",
+  "errorBoundary.reload": "Reload page",
+
+  // Shared format strings — heartbeat age (#1214)
+  "format.secondsAgo": "{value}s ago",
+  "format.minutesAgo": "{value}m ago",
+  "format.hoursAgo": "{value}h ago",
 } as const;

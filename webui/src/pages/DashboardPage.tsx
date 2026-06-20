@@ -11,6 +11,7 @@ import { Link, useParams } from "react-router";
 import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
+import { copyToClipboard } from "../clipboard.ts";
 import { Modal } from "../components/Modal.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -28,37 +29,11 @@ import {
   type ObservedState,
   statePill,
 } from "./serverState.ts";
-import { useAuditFilterParams } from "./urlState.ts";
+import { useFilterParams } from "./urlState.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type LifecycleAction = "start" | "stop" | "restart";
-
-// Copy text to clipboard with an execCommand fallback for insecure contexts.
-function copyToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  return new Promise((resolve, reject) => {
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
-      document.body.appendChild(ta);
-      ta.select();
-      const ok = document.execCommand("copy");
-      document.body.removeChild(ta);
-      if (ok) {
-        resolve();
-      } else {
-        reject();
-      }
-    } catch {
-      reject();
-    }
-  });
-}
 
 // Dashboard server-list layout. Cards remain the default (#541); the table view
 // is the compact alternative for many servers / narrow screens.
@@ -292,7 +267,7 @@ function Loaded({ communityId }: { communityId: string }) {
   const degraded = useCommunityEvents(communityId);
   const [view, setView] = useViewMode();
   const [sort, setSort] = useSortPref();
-  const [filters, setFilters] = useAuditFilterParams(FILTER_KEYS);
+  const [filters, setFilters] = useFilterParams(FILTER_KEYS);
 
   // The search input uses a local draft so each keystroke does not push a
   // history entry. Filtering applies the draft immediately for instant

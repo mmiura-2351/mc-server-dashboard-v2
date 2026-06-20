@@ -101,6 +101,7 @@ class FakeFileStore(FileStore):
         self.rollbacks: list[tuple[str, str]] = []
         self.deleted_files: list[str] = []
         self.deleted_dirs: list[str] = []
+        self.renamed_dirs: list[tuple[str, str]] = []
         self.made_dirs: list[str] = []
         self.read_paths: list[str] = []
         self.missing = False
@@ -214,6 +215,18 @@ class FakeFileStore(FileStore):
         if rel_path not in self.dirs:
             raise ServerFileNotFoundError(str(server_id.value))
         self.deleted_dirs.append(rel_path)
+
+    async def rename_dir(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: str,
+        to_path: str,
+    ) -> None:
+        if from_path not in self.dirs:
+            raise ServerFileNotFoundError(str(server_id.value))
+        self.renamed_dirs.append((from_path, to_path))
 
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -2189,6 +2202,74 @@ def test_rename_docstring_notes_crash_window() -> None:
     doc = RenameFile.__doc__ or ""
     assert "crash" in doc.lower()
     assert "both" in doc.lower()
+
+
+# --- directory rename (issue #1191) ----------------------------------------
+
+
+async def test_rename_dir_at_rest_moves_directory() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["old_world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
+    store.files["old_world/level.dat"] = b"data"
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="old_world",
+        to_path="world",
+    )
+    assert store.renamed_dirs == [("old_world", "world")]
+    # File path was not touched — directory rename delegates to rename_dir.
+    assert store.deleted_files == []
+
+
+async def test_rename_dir_missing_source_is_not_found() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="ghost",
+            to_path="world",
+        )
+
+
+async def test_rename_dir_existing_destination_is_conflict() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["old_world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
+    store.dirs["taken"] = [FileEntry(name="x.dat", is_dir=False, size=1)]
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(FileAlreadyExistsError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="old_world",
+            to_path="taken",
+        )
+    assert store.renamed_dirs == []
+
+
+async def test_rename_dir_self_is_noop() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="world",
+        to_path="world",
+    )
+    assert store.renamed_dirs == []
+    assert store.deleted_files == []
 
 
 # --- search (name / content, issue #259) -----------------------------------

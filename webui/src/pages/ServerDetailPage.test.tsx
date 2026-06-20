@@ -102,7 +102,7 @@ function renderPage(path = `/communities/${CID}/servers/${SID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
@@ -117,6 +117,7 @@ function renderPage(path = `/communities/${CID}/servers/${SID}`) {
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 beforeEach(() => {
@@ -252,6 +253,53 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
     await waitFor(() =>
       expect(activeTab()).toBe(t("serverDetail.tab.overview")),
     );
+  });
+
+  it("tab buttons carry aria-controls and the panel carries aria-labelledby (#1216)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+    await screen.findByText("survival");
+
+    const overviewTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.overview"),
+    });
+    expect(overviewTab).toHaveAttribute("aria-controls", "sd-panel-overview");
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toHaveAttribute("id", "sd-panel-overview");
+    expect(panel).toHaveAttribute("aria-labelledby", "sd-tab-overview");
+  });
+
+  it("ArrowRight moves focus to the next tab (#1216)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+    await screen.findByText("survival");
+
+    const overviewTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.overview"),
+    });
+    overviewTab.focus();
+    fireEvent.keyDown(overviewTab, { key: "ArrowRight" });
+
+    const consoleTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.console"),
+    });
+    expect(consoleTab).toHaveFocus();
+    expect(consoleTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("inactive tabs have tabIndex -1 (roving tabindex, #1216)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    renderPage();
+    await screen.findByText("survival");
+
+    const overviewTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.overview"),
+    });
+    const settingsTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.settings"),
+    });
+    expect(overviewTab).toHaveAttribute("tabindex", "0");
+    expect(settingsTab).toHaveAttribute("tabindex", "-1");
   });
 });
 
@@ -781,18 +829,28 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("checks port availability on blur and shows the taken hint", async () => {
-    mockApi.get.mockResolvedValueOnce(server({ observed_state: "stopped" }));
-    // The Settings tab fetches /api/meta for the memory-limit ceiling (#1069);
-    // supply a response so it does not consume the port-check mock below.
-    mockApi.get.mockResolvedValueOnce({
-      relay_enabled: false,
-      default_memory_limit_mb: null,
-      max_memory_limit_mb: null,
-    });
-    mockApi.get.mockResolvedValueOnce({
-      port: 25570,
-      in_range: true,
-      available: false,
+    // Route by path so that the resource-pack assignment query (#1179) and the
+    // meta query don't consume the port-check response.
+    const srv = server({ observed_state: "stopped" });
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/resource-pack")) {
+        return Promise.reject(new ApiError(404, { reason: "not_found" }));
+      }
+      if (path === "/api/meta") {
+        return Promise.resolve({
+          relay_enabled: false,
+          default_memory_limit_mb: null,
+          max_memory_limit_mb: null,
+        });
+      }
+      if (path.startsWith("/api/ports/check/")) {
+        return Promise.resolve({
+          port: 25570,
+          in_range: true,
+          available: false,
+        });
+      }
+      return Promise.resolve(srv);
     });
     renderPage();
 
@@ -1061,6 +1119,50 @@ describe("ServerDetailPage settings", () => {
     expect(
       screen.getByRole("button", { name: t("serverDetail.settings.save") }),
     ).toBeDisabled();
+  });
+
+  it("re-syncs form fields when the server prop changes (#1212)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        name: "old-name",
+        slug: "old-slug",
+        game_port: 25565,
+        memory_limit_mb: 1024,
+        cpu_millis: 1000,
+        config: { motd: "hello" },
+        observed_state: "stopped",
+      }),
+    );
+    const { queryClient } = renderPage();
+
+    await screen.findByText("old-name");
+    openSettings();
+    expect(screen.getByDisplayValue("old-name")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("25565")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("1024")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("1000")).toBeInTheDocument();
+
+    // Simulate a react-query refetch returning updated server data.
+    mockApi.get.mockResolvedValue(
+      server({
+        name: "new-name",
+        slug: "new-slug",
+        game_port: 25570,
+        memory_limit_mb: 2048,
+        cpu_millis: 1500,
+        config: { motd: "bye" },
+        observed_state: "stopped",
+      }),
+    );
+    await act(() => queryClient.invalidateQueries());
+
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("new-name")).toBeInTheDocument(),
+    );
+    expect(screen.getByDisplayValue("25570")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("2048")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("1500")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("bye")).toBeInTheDocument();
   });
 });
 

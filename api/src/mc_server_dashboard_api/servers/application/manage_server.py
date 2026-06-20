@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,7 @@ from mc_server_dashboard_api.servers.domain.backup_schedule import (
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.cpu_allocation import (
+    CPU_ALLOCATION_CONFIG_KEY,
     cpu_allocation_from_config,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -65,6 +67,8 @@ from mc_server_dashboard_api.servers.domain.ports import (
     validate_explicit_port,
 )
 from mc_server_dashboard_api.servers.domain.server_properties import (
+    apply_overrides,
+    remove_keys,
     set_rcon_properties,
     set_server_port,
 )
@@ -143,6 +147,33 @@ _SAFE_CONFIG_KEYS = frozenset(
 # stays under ``server:update``.
 _SCHEDULING_CONFIG_KEYS = frozenset({BACKUP_INTERVAL_CONFIG_KEY})
 
+# Config keys consumed by the platform (resource limits, scheduler cadences)
+# that are NOT server.properties overrides (issue #1209). Everything else in the
+# config dict is treated as a server.properties key-value pair and written into
+# the file on create and update.
+_RESERVED_CONFIG_KEYS = frozenset(
+    {
+        MEMORY_LIMIT_CONFIG_KEY,
+        CPU_ALLOCATION_CONFIG_KEY,
+        SNAPSHOT_INTERVAL_CONFIG_KEY,
+        BACKUP_INTERVAL_CONFIG_KEY,
+        # Platform-managed server.properties keys (issue #1243). These are set
+        # by _seed_initial_working_set (create) and _rewrite_server_port
+        # (update); user config must not override them via the properties
+        # override path.
+        "server-port",
+        "enable-rcon",
+        "rcon.port",
+        "rcon.password",
+        # Resource-pack keys managed by set_resource_pack_properties /
+        # clear_resource_pack_properties (issue #1253).
+        "resource-pack",
+        "resource-pack-sha1",
+        "require-resource-pack",
+        "resource-pack-prompt",
+    }
+)
+
 # The permission codes the update gate evaluates (issue #458). Kept as bare
 # strings so this application module stays free of community-context value
 # objects; the edge maps a denial to the 403 ``permission`` member.
@@ -158,6 +189,21 @@ def _changed_config_keys(current: dict[str, Any], incoming: dict[str, Any]) -> s
         for key in current.keys() | incoming.keys()
         if (key in current) != (key in incoming)
         or current.get(key) != incoming.get(key)
+    }
+
+
+def _properties_overrides(config: dict[str, Any]) -> dict[str, str]:
+    """Extract the server.properties key-value pairs from a config dict (#1209).
+
+    Everything in the config dict that is not a reserved platform key is treated
+    as a server.properties override. Values are stringified because
+    ``server.properties`` is a plain-text key=value file.
+    """
+
+    return {
+        key: str(value)
+        for key, value in config.items()
+        if key not in _RESERVED_CONFIG_KEYS
     }
 
 
@@ -326,6 +372,7 @@ class CreateServer:
             server_id=server.id,
             game_port=assigned_port,
             accept_eula=accept_eula,
+            config=config,
         )
         return server
 
@@ -336,6 +383,7 @@ class CreateServer:
         server_id: ServerId,
         game_port: int,
         accept_eula: bool,
+        config: dict[str, Any],
     ) -> None:
         """Write the create-time seed files into the server's first version.
 
@@ -346,8 +394,9 @@ class CreateServer:
         ``server.properties`` and ``eula.txt`` may both be seeded in one create.
         ``server.properties`` is always seeded with the assigned game port (#243)
         and the RCON keys (#335: ``enable-rcon=true``, ``rcon.port``, and a fresh
-        random ``rcon.password``); ``eula.txt`` only when the operator accepted at
-        create (issue #198).
+        random ``rcon.password``); user-supplied server.properties overrides from
+        ``config`` are merged on top (#1209); ``eula.txt`` only when the operator
+        accepted at create (issue #198).
 
         A storage failure is caught and re-raised as
         :class:`WorkingSetSeedFailedError` (mapped to 503): the row is already
@@ -358,6 +407,9 @@ class CreateServer:
         properties = set_rcon_properties(
             set_server_port(b"", game_port), password=self.token_generator()
         )
+        overrides = _properties_overrides(config)
+        if overrides:
+            properties = apply_overrides(properties, overrides)
         seeds: list[tuple[str, bytes]] = [
             (_PROPERTIES_REL_PATH, properties),
         ]
@@ -561,6 +613,21 @@ class UpdateServer:
                         raise ServerNameAlreadyExistsError(new_name.value)
                     server.name = new_name
                 if config is not None:
+                    # Sync changed server.properties overrides to the file
+                    # (#1209, #1242). Only non-reserved keys are properties
+                    # overrides; compare old vs new to avoid a needless file
+                    # rewrite. Keys in old but not new must be removed from
+                    # the file so stale overrides do not survive (#1242).
+                    old_overrides = _properties_overrides(server.config)
+                    new_overrides = _properties_overrides(config)
+                    if new_overrides != old_overrides:
+                        removed_keys = old_overrides.keys() - new_overrides.keys()
+                        await self._rewrite_properties_overrides(
+                            community_id=community_id,
+                            server_id=server_id,
+                            overrides=new_overrides,
+                            removed_keys=removed_keys,
+                        )
                     server.config = config
                 if game_port is not None and game_port != server.game_port:
                     # Uniqueness check excluding the server's own current port, then
@@ -670,6 +737,50 @@ class UpdateServer:
             _logger.warning(
                 "rewriting server.properties for a port change failed; "
                 "aborting the port update",
+                extra={"server_id": str(server_id.value)},
+            )
+            raise WorkingSetSeedFailedError(str(server_id.value)) from exc
+
+    async def _rewrite_properties_overrides(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        overrides: dict[str, str],
+        removed_keys: AbstractSet[str] = frozenset(),
+    ) -> None:
+        """Sync config-carried server.properties overrides into the file (#1209).
+
+        Reads the current ``server.properties``, applies the overrides via
+        :func:`apply_overrides`, removes lines for keys in *removed_keys*
+        (#1242), and writes it back. A legacy server with no properties file is
+        handled by treating the absent file as empty. A storage failure is
+        surfaced as :class:`WorkingSetSeedFailedError` (mapped to 503): it is
+        raised before the DB commit, so the config and the file do not drift.
+        """
+
+        try:
+            current = await self.file_store.read_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=_PROPERTIES_REL_PATH,
+            )
+        except ServerFileNotFoundError:
+            current = b""
+        try:
+            updated = apply_overrides(current, overrides)
+            if removed_keys:
+                updated = remove_keys(updated, removed_keys)
+            await self.file_store.write_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=_PROPERTIES_REL_PATH,
+                content=updated,
+            )
+        except Exception as exc:
+            _logger.warning(
+                "rewriting server.properties for config overrides failed; "
+                "aborting the config update",
                 extra={"server_id": str(server_id.value)},
             )
             raise WorkingSetSeedFailedError(str(server_id.value)) from exc

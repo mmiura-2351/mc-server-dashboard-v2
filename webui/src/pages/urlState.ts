@@ -14,7 +14,7 @@
  * is the prior art for keeping the URL authoritative).
  */
 
-import { useCallback } from "react";
+import { type KeyboardEvent, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router";
 
 /**
@@ -102,7 +102,7 @@ export function useOffsetParam(): [number, (offset: number) => void] {
  * conversion happens at request-build time, not here, so the inputs round-trip
  * exactly.
  */
-export function useAuditFilterParams<K extends string>(
+export function useFilterParams<K extends string>(
   keys: readonly K[],
 ): [Record<K, string>, (next: Record<K, string>) => void] {
   const location = useLocation();
@@ -140,4 +140,52 @@ export function useAuditFilterParams<K extends string>(
   );
 
   return [filters, setFilters];
+}
+
+// ── WAI-ARIA tab helpers (issue #1216) ────────────────────────────────────────
+
+/** Stable id for a tab button: `<prefix>-tab-<name>`. */
+export function tabId(prefix: string, name: string): string {
+  return `${prefix}-tab-${name}`;
+}
+
+/** Stable id for a tab panel: `<prefix>-panel-<name>`. */
+export function panelId(prefix: string, name: string): string {
+  return `${prefix}-panel-${name}`;
+}
+
+/**
+ * WAI-ARIA roving tabindex keyboard handler for a horizontal tab list. Arrow
+ * Left/Right move focus and activate the adjacent tab; Home/End jump to the
+ * first/last tab. The caller's `setTab` callback is invoked on each move so the
+ * URL hash stays in sync.
+ */
+export function handleTabKeyDown<T extends string>(
+  event: KeyboardEvent<HTMLButtonElement>,
+  tabs: readonly T[],
+  active: T,
+  setTab: (tab: T) => void,
+  prefix: string,
+): void {
+  const idx = (tabs as readonly string[]).indexOf(active);
+  let next: T | undefined;
+  switch (event.key) {
+    case "ArrowRight":
+      next = tabs[(idx + 1) % tabs.length];
+      break;
+    case "ArrowLeft":
+      next = tabs[(idx - 1 + tabs.length) % tabs.length];
+      break;
+    case "Home":
+      next = tabs[0];
+      break;
+    case "End":
+      next = tabs[tabs.length - 1];
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  setTab(next);
+  document.getElementById(tabId(prefix, next))?.focus();
 }

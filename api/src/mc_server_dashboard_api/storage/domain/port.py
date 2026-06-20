@@ -536,6 +536,21 @@ class FileStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def rename_dir(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: RelPath,
+        to_path: RelPath,
+    ) -> None:
+        """Rename/move a directory atomically within ``current/`` (issue #1191).
+
+        Like :meth:`delete_dir`, no per-file version capture: whole-subtree
+        recovery is the backups' job (Section 3.3). Raises
+        :class:`~.errors.NotFoundError` for a missing source directory.
+        """
+
+    @abc.abstractmethod
     async def make_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:

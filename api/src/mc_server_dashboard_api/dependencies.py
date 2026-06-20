@@ -279,6 +279,15 @@ from mc_server_dashboard_api.servers.application.port_availability import (
     CheckPort,
     ListAvailablePorts,
 )
+from mc_server_dashboard_api.servers.application.resource_packs import (
+    AssignResourcePack,
+    DeleteResourcePack,
+    DownloadResourcePack,
+    GetResourcePackAssignment,
+    ListResourcePacks,
+    UnassignResourcePack,
+    UploadResourcePack,
+)
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
 )
@@ -295,6 +304,9 @@ from mc_server_dashboard_api.servers.domain.file_store import (
     FileStore as ServersFileStore,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
+from mc_server_dashboard_api.servers.domain.resource_pack_store import (
+    ResourcePackStore,
+)
 from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.versions.adapters.clock import (
     SystemClock as VersionsSystemClock,
@@ -1310,7 +1322,11 @@ def get_delete_group(
     """
 
     session_factory = create_session_factory(get_engine(request))
-    return DeleteGroup(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return DeleteGroup(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_add_player(
@@ -1320,7 +1336,11 @@ def get_add_player(
     """Assemble the :class:`AddPlayer` use case (group:manage)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return AddPlayer(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return AddPlayer(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_remove_player(
@@ -1330,7 +1350,11 @@ def get_remove_player(
     """Assemble the :class:`RemovePlayer` use case (group:manage)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return RemovePlayer(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return RemovePlayer(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_attach_group(
@@ -1340,7 +1364,11 @@ def get_attach_group(
     """Assemble the :class:`AttachGroup` use case (group:manage)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return AttachGroup(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return AttachGroup(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_detach_group(
@@ -1350,7 +1378,11 @@ def get_detach_group(
     """Assemble the :class:`DetachGroup` use case (group:manage)."""
 
     session_factory = create_session_factory(get_engine(request))
-    return DetachGroup(uow=ServersUnitOfWork(session_factory), file_store=file_store)
+    return DetachGroup(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
 
 
 def get_list_group_servers(request: Request) -> ListGroupServers:
@@ -1961,6 +1993,86 @@ def get_install_from_catalog(
     )
 
 
+def get_resource_pack_store(request: Request) -> ResourcePackStore:
+    """Return the :class:`ResourcePackStore` adapter from app state (issue #1176).
+
+    Built by the app factory from the storage config; ``None`` when the storage
+    backend is ``fs`` (no fs adapter exists yet). A missing store is a 503.
+    """
+
+    store: ResourcePackStore | None = getattr(
+        request.app.state, "resource_pack_store", None
+    )
+    if store is None:
+        raise problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "resource_pack_store_unavailable",
+        )
+    return store
+
+
+def get_upload_resource_pack(
+    request: Request,
+    store: Annotated[ResourcePackStore, Depends(get_resource_pack_store)],
+) -> UploadResourcePack:
+    """Assemble the :class:`UploadResourcePack` use case (issue #1176)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UploadResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+        clock=ServersSystemClock(),
+    )
+
+
+def get_list_resource_packs(request: Request) -> ListResourcePacks:
+    """Assemble the :class:`ListResourcePacks` use case (issue #1176)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListResourcePacks(uow=ServersUnitOfWork(session_factory))
+
+
+def get_delete_resource_pack(
+    request: Request,
+    store: Annotated[ResourcePackStore, Depends(get_resource_pack_store)],
+) -> DeleteResourcePack:
+    """Assemble the :class:`DeleteResourcePack` use case (issue #1176)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+    )
+
+
+def get_download_resource_pack(
+    request: Request,
+    store: Annotated[ResourcePackStore, Depends(get_resource_pack_store)],
+) -> DownloadResourcePack:
+    """Assemble the :class:`DownloadResourcePack` use case (issue #1176)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DownloadResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        store=store,
+    )
+
+
+def get_assign_resource_pack(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> AssignResourcePack:
+    """Assemble the :class:`AssignResourcePack` use case (issue #1177)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return AssignResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
 def get_check_updates(
     request: Request,
     catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
@@ -2004,6 +2116,20 @@ def get_update_plugin(
     )
 
 
+def get_unassign_resource_pack(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> UnassignResourcePack:
+    """Assemble the :class:`UnassignResourcePack` use case (issue #1177)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UnassignResourcePack(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
 def get_list_plugin_dependencies(
     request: Request,
     catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
@@ -2015,6 +2141,45 @@ def get_list_plugin_dependencies(
         uow=ServersUnitOfWork(session_factory),
         catalog=catalog,
     )
+
+
+def get_get_resource_pack_assignment(request: Request) -> GetResourcePackAssignment:
+    """Assemble the :class:`GetResourcePackAssignment` use case (issue #1177)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return GetResourcePackAssignment(uow=ServersUnitOfWork(session_factory))
+
+
+async def require_server_update_in_any_community(
+    user: Annotated[User, Depends(get_current_user)],
+    request: Request,
+) -> User:
+    """Dependency: the caller must hold ``server:update`` in at least one community.
+
+    This is the non-standard upload gate for resource packs (issue #1176): not
+    community-scoped (resource packs are global) and not per-resource, but
+    "exists any community where user has server:update". Platform admins pass
+    unconditionally.
+    """
+
+    if user.is_platform_admin:
+        return user
+
+    session_factory = create_session_factory(get_engine(request))
+    community_uow = CommunityUnitOfWork(session_factory)
+
+    auth_user = _to_auth_user(user)
+    target_permission = Permission("server:update")
+
+    async with community_uow as uow:
+        memberships = await uow.memberships.list_for_user(auth_user.user_id)
+        for membership in memberships:
+            role_ids = await uow.memberships.list_role_ids(membership.id)
+            for role in await uow.roles.get_by_ids(role_ids):
+                if target_permission in role.permissions:
+                    return user
+
+    raise _forbidden(target_permission)
 
 
 def _to_auth_user(user: User) -> AuthUser:

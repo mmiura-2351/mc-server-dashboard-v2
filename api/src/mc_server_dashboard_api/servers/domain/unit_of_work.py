@@ -25,6 +25,9 @@ from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
 )
+from mc_server_dashboard_api.servers.domain.resource_pack_repository import (
+    ResourcePackRepository,
+)
 
 
 class UnitOfWork(abc.ABC):
@@ -36,6 +39,7 @@ class UnitOfWork(abc.ABC):
     groups: GroupRepository
     game_sessions: GameSessionRepository
     plugins: PluginRepository
+    resource_packs: ResourcePackRepository
 
     @abc.abstractmethod
     async def __aenter__(self) -> UnitOfWork:

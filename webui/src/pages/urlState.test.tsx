@@ -8,7 +8,10 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { describe, expect, it } from "vitest";
 import {
-  useAuditFilterParams,
+  handleTabKeyDown,
+  panelId,
+  tabId,
+  useFilterParams,
   useOffsetParam,
   useTabHash,
 } from "./urlState.ts";
@@ -61,7 +64,7 @@ function OffsetProbe() {
 const FILTER_KEYS = ["operation", "actor", "since", "until"] as const;
 
 function FilterProbe() {
-  const [filters, applyFilters] = useAuditFilterParams(FILTER_KEYS);
+  const [filters, applyFilters] = useFilterParams(FILTER_KEYS);
   const loc = useLocation();
   const navigate = useNavigate();
   return (
@@ -272,7 +275,7 @@ describe("useOffsetParam", () => {
   });
 });
 
-describe("useAuditFilterParams", () => {
+describe("useFilterParams", () => {
   it("defaults to empty filters with a clean (param-less) URL", () => {
     render(
       <MemoryRouter initialEntries={["/x"]}>
@@ -379,5 +382,131 @@ describe("useAuditFilterParams", () => {
     fireEvent.click(screen.getByText("back"));
     expect(screen.getByTestId("operation").textContent).toBe("");
     expect(screen.getByTestId("actor").textContent).toBe("");
+  });
+});
+
+// ── WAI-ARIA tab helpers (issue #1216) ────────────────────────────────────────
+
+describe("tabId / panelId", () => {
+  it("produces deterministic ids for tabs and panels", () => {
+    expect(tabId("sd", "overview")).toBe("sd-tab-overview");
+    expect(panelId("sd", "overview")).toBe("sd-panel-overview");
+  });
+});
+
+// A probe that renders a real WAI-ARIA tab list with keyboard handling, so the
+// handleTabKeyDown helper can be tested end-to-end in a DOM environment.
+function AriaTabProbe() {
+  const [tab, setTab] = useTabHash(TABS);
+  return (
+    <div>
+      <div role="tablist">
+        {TABS.map((name) => (
+          <button
+            key={name}
+            id={tabId("t", name)}
+            type="button"
+            role="tab"
+            aria-selected={tab === name}
+            aria-controls={panelId("t", name)}
+            tabIndex={tab === name ? 0 : -1}
+            onClick={() => setTab(name)}
+            onKeyDown={(e) => handleTabKeyDown(e, TABS, tab, setTab, "t")}
+          >
+            {name}
+          </button>
+        ))}
+      </div>
+      <div
+        role="tabpanel"
+        id={panelId("t", tab)}
+        aria-labelledby={tabId("t", tab)}
+      >
+        {tab} content
+      </div>
+    </div>
+  );
+}
+
+describe("handleTabKeyDown (WAI-ARIA keyboard navigation, #1216)", () => {
+  function renderAriaProbe(hash = "") {
+    render(
+      <MemoryRouter initialEntries={[`/x${hash}`]}>
+        <AriaTabProbe />
+      </MemoryRouter>,
+    );
+  }
+
+  it("ArrowRight moves focus and activates the next tab", () => {
+    renderAriaProbe();
+    const overview = screen.getByRole("tab", { name: "overview" });
+    overview.focus();
+    fireEvent.keyDown(overview, { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "console" })).toHaveFocus();
+    expect(screen.getByRole("tab", { name: "console" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("ArrowLeft moves focus and activates the previous tab", () => {
+    renderAriaProbe("#console");
+    const console = screen.getByRole("tab", { name: "console" });
+    console.focus();
+    fireEvent.keyDown(console, { key: "ArrowLeft" });
+    expect(screen.getByRole("tab", { name: "overview" })).toHaveFocus();
+    expect(screen.getByRole("tab", { name: "overview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("ArrowRight wraps from the last tab to the first", () => {
+    renderAriaProbe("#settings");
+    const settings = screen.getByRole("tab", { name: "settings" });
+    settings.focus();
+    fireEvent.keyDown(settings, { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "overview" })).toHaveFocus();
+  });
+
+  it("ArrowLeft wraps from the first tab to the last", () => {
+    renderAriaProbe();
+    const overview = screen.getByRole("tab", { name: "overview" });
+    overview.focus();
+    fireEvent.keyDown(overview, { key: "ArrowLeft" });
+    expect(screen.getByRole("tab", { name: "settings" })).toHaveFocus();
+  });
+
+  it("Home focuses the first tab", () => {
+    renderAriaProbe("#settings");
+    const settings = screen.getByRole("tab", { name: "settings" });
+    settings.focus();
+    fireEvent.keyDown(settings, { key: "Home" });
+    expect(screen.getByRole("tab", { name: "overview" })).toHaveFocus();
+  });
+
+  it("End focuses the last tab", () => {
+    renderAriaProbe();
+    const overview = screen.getByRole("tab", { name: "overview" });
+    overview.focus();
+    fireEvent.keyDown(overview, { key: "End" });
+    expect(screen.getByRole("tab", { name: "settings" })).toHaveFocus();
+  });
+
+  it("tab buttons carry aria-controls linking to the panel", () => {
+    renderAriaProbe();
+    const overview = screen.getByRole("tab", { name: "overview" });
+    expect(overview).toHaveAttribute("aria-controls", "t-panel-overview");
+    const panel = screen.getByRole("tabpanel");
+    expect(panel).toHaveAttribute("id", "t-panel-overview");
+    expect(panel).toHaveAttribute("aria-labelledby", "t-tab-overview");
+  });
+
+  it("inactive tabs have tabIndex -1 (roving tabindex)", () => {
+    renderAriaProbe();
+    const overview = screen.getByRole("tab", { name: "overview" });
+    const console = screen.getByRole("tab", { name: "console" });
+    expect(overview).toHaveAttribute("tabindex", "0");
+    expect(console).toHaveAttribute("tabindex", "-1");
   });
 });

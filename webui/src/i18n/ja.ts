@@ -30,6 +30,7 @@ export const ja: Record<TranslationKey, string> = {
   "nav.adminWorkers": "Worker",
   "nav.adminVersions": "バージョンとJAR",
   "nav.adminAudit": "全体監査ログ",
+  "nav.sharedResources": "共有リソース",
 
   // Placeholder pages (Phase 1: routing skeleton only)
   "page.login": "サインイン",
@@ -490,6 +491,8 @@ export const ja: Record<TranslationKey, string> = {
     "現在、バックアップを取得できるWorkerがありません。",
   "backups.error.invalidSchedule":
     "backup_interval_hours は1以上の整数の時間数である必要があります。",
+  "backups.error.tooLarge":
+    "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "backups.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Files tab (WEBUI_SPEC.md 6.6).
@@ -555,6 +558,8 @@ export const ja: Record<TranslationKey, string> = {
   "files.rolledBack": "選択したバージョンにロールバックしました。",
   "files.error.serverMustBeStopped":
     "ファイルのアップロードやフォルダの作成を行う前にサーバーを停止してください。",
+  "files.error.tooLarge":
+    "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
@@ -1033,6 +1038,10 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.groups.playersEmpty":
     "このグループにはまだプレイヤーがいません。",
   "communitySettings.groups.removePlayer": "削除",
+  "communitySettings.groups.removePlayerDialogTitle": "プレイヤーを削除",
+  "communitySettings.groups.removePlayerDialogBody":
+    "このプレイヤーをグループから削除してもよろしいですか？",
+  "communitySettings.groups.removePlayerConfirm": "プレイヤーを削除",
   "communitySettings.groups.playerRemoved": "プレイヤーを削除しました。",
   "communitySettings.groups.addPlayer": "プレイヤーを追加",
   "communitySettings.groups.uuidLabel": "UUID",
@@ -1336,8 +1345,101 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.audit.op.plugin:update": "プラグインを更新",
   "communitySettings.audit.targetType.plugin": "プラグイン",
 
+  // Resource pack library (issue #1178).
+  "nav.resourcePacks": "リソースパック",
+  "page.resourcePacks": "リソースパック",
+  "resourcePacks.subtitle":
+    "Minecraftサーバーで使用するリソースパックのアップロードと管理。",
+  "resourcePacks.loading": "リソースパックを読み込んでいます…",
+  "resourcePacks.loadError": "リソースパックを読み込めませんでした。",
+  "resourcePacks.empty": "まだリソースパックがありません。",
+  "resourcePacks.upload": "パックをアップロード",
+  "resourcePacks.col.displayName": "名前",
+  "resourcePacks.col.filename": "ファイル名",
+  "resourcePacks.col.size": "サイズ",
+  "resourcePacks.col.sha1": "SHA-1",
+  "resourcePacks.col.uploaded": "アップロード日時",
+  "resourcePacks.col.uploader": "アップロード者",
+  "resourcePacks.download": "ダウンロード",
+  "resourcePacks.delete": "削除",
+  "resourcePacks.uploadDialog.title": "リソースパックをアップロード",
+  "resourcePacks.uploadDialog.displayName": "表示名",
+  "resourcePacks.uploadDialog.file": "ファイル（.zip）",
+  "resourcePacks.uploadDialog.submit": "アップロード",
+  "resourcePacks.uploadDialog.uploading": "アップロードしています…",
+  "resourcePacks.uploadDialog.nameRequired": "表示名を入力してください。",
+  "resourcePacks.uploadDialog.fileRequired": ".zipファイルを選択してください。",
+  "resourcePacks.uploaded": "リソースパックをアップロードしました。",
+  "resourcePacks.deleted": "リソースパックを削除しました。",
+  "resourcePacks.deleteDialog.title": "リソースパックを削除",
+  "resourcePacks.deleteDialog.body":
+    "リソースパックを完全に削除します。サーバーに割り当て済みのパックは削除できません。",
+  "resourcePacks.deleteDialog.confirm": "パックを削除",
+  "resourcePacks.deleteDialog.prompt": "削除を有効にするには表示名を入力",
+  "resourcePacks.error.tooLarge":
+    "ファイルサイズが256 MiBのアップロード上限を超えています。",
+  "resourcePacks.error.uploadFailed":
+    "リソースパックをアップロードできませんでした。",
+  "resourcePacks.error.deleteFailed": "リソースパックを削除できませんでした。",
+  "resourcePacks.error.inUse":
+    "このリソースパックは1つ以上のサーバーに割り当てられているため、削除できません。",
+  "resourcePacks.error.downloadFailed":
+    "リソースパックをダウンロードできませんでした。",
+
+  // Server resource pack assignment (issue #1179).
+  "serverDetail.resourcePack.heading": "リソースパック",
+  "serverDetail.resourcePack.none": "リソースパックが割り当てられていません。",
+  "serverDetail.resourcePack.assign": "割り当て",
+  "serverDetail.resourcePack.change": "変更",
+  "serverDetail.resourcePack.remove": "解除",
+  "serverDetail.resourcePack.name": "名前",
+  "serverDetail.resourcePack.filename": "ファイル名",
+  "serverDetail.resourcePack.size": "サイズ",
+  "serverDetail.resourcePack.sha1": "SHA-1",
+  "serverDetail.resourcePack.url": "公開URL",
+  "serverDetail.resourcePack.urlCopied": "コピーしました！",
+  "serverDetail.resourcePack.required": "必須",
+  "serverDetail.resourcePack.notRequired": "任意",
+  "serverDetail.resourcePack.prompt": "プロンプト",
+  "serverDetail.resourcePack.promptNone": "なし",
+  "serverDetail.resourcePack.notAtRest":
+    "リソースパックの設定を変更するにはサーバーを停止してください。",
+  "serverDetail.resourcePack.assigned": "リソースパックを割り当てました。",
+  "serverDetail.resourcePack.unassigned":
+    "リソースパックの割り当てを解除しました。",
+  "serverDetail.resourcePack.assignError":
+    "リソースパックを割り当てできませんでした。",
+  "serverDetail.resourcePack.unassignError":
+    "リソースパックの割り当てを解除できませんでした。",
+  "serverDetail.resourcePack.assignDialog.title": "リソースパックを割り当て",
+  "serverDetail.resourcePack.assignDialog.select": "リソースパック",
+  "serverDetail.resourcePack.assignDialog.selectPlaceholder": "パックを選択…",
+  "serverDetail.resourcePack.assignDialog.require":
+    "リソースパックを必須にする",
+  "serverDetail.resourcePack.assignDialog.prompt":
+    "カスタムプロンプト（プレイヤーに表示）",
+  "serverDetail.resourcePack.assignDialog.submit": "割り当て",
+  "serverDetail.resourcePack.assignDialog.loading": "パックを読み込んでいます…",
+  "serverDetail.resourcePack.assignDialog.empty":
+    "利用可能なパックがありません。",
+  "serverDetail.resourcePack.removeDialog.title": "リソースパックを解除",
+  "serverDetail.resourcePack.removeDialog.body":
+    "このサーバーからリソースパックの割り当てを解除しますか？",
+  "serverDetail.resourcePack.removeDialog.confirm": "解除",
+
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "この操作を行う権限がありません。",
   // Composed with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "不足している権限: ",
+
+  // Error boundary (#1211)
+  "errorBoundary.title": "問題が発生しました",
+  "errorBoundary.body":
+    "予期しないエラーが発生しました。ページを再読み込みすると復旧することがあります。",
+  "errorBoundary.reload": "ページを再読み込み",
+
+  // Shared format strings — heartbeat age (#1214)
+  "format.secondsAgo": "{value}秒前",
+  "format.minutesAgo": "{value}分前",
+  "format.hoursAgo": "{value}時間前",
 } as const;

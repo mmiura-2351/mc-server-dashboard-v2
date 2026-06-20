@@ -54,6 +54,30 @@ async def test_resolves_newest_build_with_sha256() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_url_encodes_version_path_segment() -> None:
+    """Version strings with path-traversal or query chars must be percent-encoded."""
+    malicious = "1.21.1/../admin?x=1"
+    encoded = "1.21.1%2F..%2Fadmin%3Fx%3D1"
+    build_detail = {
+        "downloads": {"application": {"name": "paper.jar", "sha256": "c" * 64}}
+    }
+    fetcher = FakeJsonFetcher(
+        {
+            f"{_BASE}/versions/{encoded}": {"builds": [1]},
+            f"{_BASE}/versions/{encoded}/builds/1": build_detail,
+        }
+    )
+    catalog = PaperCatalog(fetcher=fetcher)
+    source = await catalog.resolve(ServerType.PAPER, malicious)
+    # The fetcher must have received percent-encoded URLs, not raw path segments.
+    assert fetcher.calls == [
+        f"{_BASE}/versions/{encoded}",
+        f"{_BASE}/versions/{encoded}/builds/1",
+    ]
+    assert source.url == f"{_BASE}/versions/{encoded}/builds/1/downloads/paper.jar"
+
+
+@pytest.mark.asyncio
 async def test_vanilla_request_rejected() -> None:
     catalog, _ = _catalog()
     with pytest.raises(UnknownVersionError):

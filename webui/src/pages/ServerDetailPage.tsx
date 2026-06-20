@@ -12,6 +12,7 @@ import { ApiError, api } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
+import { copyToClipboard } from "../clipboard.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -25,6 +26,7 @@ import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
 import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
 import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
+import { ServerResourcePackSection } from "./ServerResourcePackSection.tsx";
 import { serverKey } from "./serverKey.ts";
 import {
   actionApplies,
@@ -32,7 +34,7 @@ import {
   normalizeState,
   statePill,
 } from "./serverState.ts";
-import { useTabHash } from "./urlState.ts";
+import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
 import {
   type LogEntry,
@@ -127,81 +129,99 @@ function Loaded({
         {visibleTabs.map((name) => (
           <button
             key={name}
+            id={tabId("sd", name)}
             type="button"
             role="tab"
             aria-selected={tab === name}
+            aria-controls={panelId("sd", name)}
+            tabIndex={tab === name ? 0 : -1}
             className={`tab${tab === name ? " active" : ""}`}
             onClick={() => setTab(name)}
+            onKeyDown={(e) => handleTabKeyDown(e, TABS, tab, setTab, "sd")}
           >
             {t(TAB_LABEL[name])}
           </button>
         ))}
       </div>
       {tab === "overview" && (
-        <Overview
-          server={server}
-          events={events}
-          onOpenConsole={() => setTab("console")}
-        />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "overview")}
+          aria-labelledby={tabId("sd", "overview")}
+        >
+          <Overview
+            server={server}
+            events={events}
+            onOpenConsole={() => setTab("console")}
+          />
+        </div>
       )}
       {tab === "console" && (
-        <Console
-          server={server}
-          communityId={communityId}
-          can={can}
-          events={events}
-        />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "console")}
+          aria-labelledby={tabId("sd", "console")}
+        >
+          <Console
+            server={server}
+            communityId={communityId}
+            can={can}
+            events={events}
+          />
+        </div>
       )}
       {tab === "files" && (
-        <ServerFilesTab server={server} communityId={communityId} can={can} />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "files")}
+          aria-labelledby={tabId("sd", "files")}
+        >
+          <ServerFilesTab server={server} communityId={communityId} can={can} />
+        </div>
       )}
       {tab === "backups" && (
-        <ServerBackupsTab server={server} communityId={communityId} can={can} />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "backups")}
+          aria-labelledby={tabId("sd", "backups")}
+        >
+          <ServerBackupsTab
+            server={server}
+            communityId={communityId}
+            can={can}
+          />
+        </div>
       )}
       {tab === "plugins" && (
         <ServerPluginsTab server={server} communityId={communityId} can={can} />
       )}
       {tab === "players" && (
-        <ServerPlayersTab
-          communityId={communityId}
-          serverId={server.id}
-          can={can}
-        />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "players")}
+          aria-labelledby={tabId("sd", "players")}
+        >
+          <ServerPlayersTab
+            communityId={communityId}
+            serverId={server.id}
+            can={can}
+          />
+        </div>
       )}
       {tab === "settings" && (
-        <Settings server={server} communityId={communityId} can={can} />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "settings")}
+          aria-labelledby={tabId("sd", "settings")}
+        >
+          <Settings server={server} communityId={communityId} can={can} />
+        </div>
       )}
     </>
   );
 }
 
 // ── Overview header + lifecycle controls ────────────────────────────────────
-
-// Copy text to clipboard with an execCommand fallback for insecure contexts.
-function copyToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  return new Promise((resolve, reject) => {
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      const ok = document.execCommand("copy");
-      document.body.removeChild(ta);
-      if (ok) {
-        resolve();
-      } else {
-        reject();
-      }
-    } catch {
-      reject();
-    }
-  });
-}
 
 function Header({
   server,
@@ -1301,6 +1321,33 @@ function Settings({
   const [portHint, setPortHint] = useState<TranslationKey | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
+  // Re-sync form state when the server prop changes (e.g. after a save +
+  // cache invalidation or an external edit) so the form never submits stale
+  // values that silently overwrite concurrent changes (#1212).
+  useEffect(() => {
+    setName(server.name);
+    setSlug(server.slug);
+    setSlugError(null);
+    setPortHint(null);
+    setPort(server.game_port !== null ? String(server.game_port) : "");
+    setRows(toRows(server.config as Record<string, unknown>));
+    setMemoryLimit(
+      typeof server.memory_limit_mb === "number"
+        ? String(server.memory_limit_mb)
+        : "",
+    );
+    setCpuAllocation(
+      typeof server.cpu_millis === "number" ? String(server.cpu_millis) : "",
+    );
+  }, [
+    server.name,
+    server.slug,
+    server.game_port,
+    server.config,
+    server.memory_limit_mb,
+    server.cpu_millis,
+  ]);
+
   // Operator-configurable memory-limit ceiling from /meta (issue #1069). The
   // meta query is shared with the create page via react-query's cache.
   const metaQuery = useQuery({
@@ -1583,6 +1630,12 @@ function Settings({
           {t("serverDetail.settings.save")}
         </button>
       </div>
+
+      <ServerResourcePackSection
+        server={server}
+        communityId={communityId}
+        can={can}
+      />
 
       <div className="card danger-zone">
         <h2>{t("serverDetail.danger.heading")}</h2>

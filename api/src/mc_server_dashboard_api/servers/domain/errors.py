@@ -483,3 +483,28 @@ class CatalogChecksumMismatchError(ServerError):
 
     The edge maps this to 502 ``checksum_mismatch``.
     """
+
+
+class InvalidResourcePackError(ServerError):
+    """The uploaded zip is not a valid Minecraft resource pack.
+
+    Raised when the zip cannot be normalized into a valid resource pack: not a
+    zip, no ``pack.mcmeta``, invalid ``pack.mcmeta`` content, ambiguous
+    structure, zip bomb, or path traversal. The edge maps this to 422
+    ``invalid_resource_pack``.
+    """
+
+
+class ResourcePackNotFoundError(ServerError):
+    """A resource pack operation targeted a pack that does not exist.
+
+    Raised by get/delete when the pack id is unknown. The edge maps this to 404.
+    """
+
+
+class ResourcePackInUseError(ServerError):
+    """A resource pack cannot be deleted because it is assigned to servers.
+
+    Raised by delete when one or more servers still reference the pack. The
+    caller must remove the assignments first. The edge maps this to 409.
+    """

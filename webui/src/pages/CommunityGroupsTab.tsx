@@ -5,8 +5,8 @@ import { api } from "../api/client.ts";
 import { attachmentsKeys, groupsKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
@@ -203,13 +203,11 @@ export function CommunityGroupsTab({
         />
       )}
 
-      <ConfirmDialog
+      <SimpleConfirmDialog
         open={deleting !== null}
         title={t("communitySettings.groups.deleteDialogTitle")}
         body={t("communitySettings.groups.deleteDialogBody")}
-        confirmPhrase={deleting?.name ?? ""}
         confirmLabel={t("communitySettings.groups.deleteConfirm")}
-        promptLabel={t("communitySettings.groups.deletePrompt")}
         onConfirm={() => {
           if (deleting !== null) {
             remove.mutate(deleting);
@@ -235,6 +233,9 @@ function GroupDetail({
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
+  const [removingPlayer, setRemovingPlayer] = useState<PlayerResponse | null>(
+    null,
+  );
 
   const onError = (error: unknown) => {
     if (onForbidden(error)) {
@@ -277,13 +278,18 @@ function GroupDetail({
           },
         ),
       ),
-    onSuccess: () =>
-      showToast(t("communitySettings.groups.playerRemoved"), "success"),
+    onSuccess: () => {
+      showToast(t("communitySettings.groups.playerRemoved"), "success");
+      setRemovingPlayer(null);
+    },
     onSettled: () => {
       invalidateGroups();
       invalidateAttachments();
     },
-    onError,
+    onError: (error) => {
+      setRemovingPlayer(null);
+      onError(error);
+    },
   });
 
   const attach = useMutation({
@@ -347,7 +353,7 @@ function GroupDetail({
                       type="button"
                       className="btn sm danger"
                       disabled={removePlayer.isPending}
-                      onClick={() => removePlayer.mutate(player.uuid)}
+                      onClick={() => setRemovingPlayer(player)}
                     >
                       {t("communitySettings.groups.removePlayer")}
                     </button>
@@ -420,6 +426,19 @@ function GroupDetail({
           </div>
         )}
       </div>
+
+      <SimpleConfirmDialog
+        open={removingPlayer !== null}
+        title={t("communitySettings.groups.removePlayerDialogTitle")}
+        body={t("communitySettings.groups.removePlayerDialogBody")}
+        confirmLabel={t("communitySettings.groups.removePlayerConfirm")}
+        onConfirm={() => {
+          if (removingPlayer !== null) {
+            removePlayer.mutate(removingPlayer.uuid);
+          }
+        }}
+        onClose={() => setRemovingPlayer(null)}
+      />
     </div>
   );
 }

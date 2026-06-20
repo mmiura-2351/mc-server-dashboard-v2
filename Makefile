@@ -287,7 +287,10 @@ bootstrap: $(GOLANGCI)
 # Point git at the checked-in hooks. One command, no external dependency.
 hooks-install:
 	git config core.hooksPath .githooks
-	@echo "git hooks installed (core.hooksPath -> .githooks)"
+	@for h in post-checkout pre-commit pre-push; do \
+		ln -sf "../../.githooks/$$h" ".git/hooks/$$h"; \
+	done
+	@echo "git hooks installed (core.hooksPath -> .githooks, symlinks in .git/hooks/)"
 
 # Preflight for `make check`: assert core.hooksPath and git identity on the
 # PRIMARY checkout; skip silently on CI runners and on agent worktrees (which
@@ -306,14 +309,22 @@ hooks-check:
 	case "$$_toplevel" in */.claude/worktrees/*) exit 0 ;; esac; \
 	_fail=0; \
 	if [ "$$(git config core.hooksPath)" != ".githooks" ]; then \
-		echo "============================================================"; \
-		echo "FAIL: git core.hooksPath is not '.githooks'"; \
-		echo "  current: $$(git config core.hooksPath || echo '<unset>')"; \
-		echo "  The pre-commit / pre-push / post-checkout hooks are DISABLED"; \
-		echo "  for every checkout sharing this .git/config (see #551/#867)."; \
-		echo "  Restore them with: make hooks-install"; \
-		echo "============================================================"; \
-		_fail=1; \
+		_gitdir="$$(git rev-parse --git-dir 2>/dev/null)"; \
+		if [ -x "$$_gitdir/hooks/post-checkout" ] && \
+		   [ -x "$$_gitdir/hooks/pre-commit" ] && \
+		   [ -x "$$_gitdir/hooks/pre-push" ]; then \
+			echo "WARN: core.hooksPath is not '.githooks' but symlinks exist in .git/hooks/ -- hooks will fire."; \
+			echo "  Run 'make hooks-install' to also fix the config value."; \
+		else \
+			echo "============================================================"; \
+			echo "FAIL: git core.hooksPath is not '.githooks'"; \
+			echo "  current: $$(git config core.hooksPath || echo '<unset>')"; \
+			echo "  The pre-commit / pre-push / post-checkout hooks are DISABLED"; \
+			echo "  for every checkout sharing this .git/config (see #551/#867)."; \
+			echo "  Restore them with: make hooks-install"; \
+			echo "============================================================"; \
+			_fail=1; \
+		fi; \
 	fi; \
 	_name="$$(git config user.name 2>/dev/null || true)"; \
 	_email="$$(git config user.email 2>/dev/null || true)"; \

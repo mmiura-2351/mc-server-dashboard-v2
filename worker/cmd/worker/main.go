@@ -27,6 +27,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/datatransfer"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/hostresources"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/tunnel"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
@@ -105,12 +106,19 @@ func run(ctx context.Context) error {
 	// operator should inspect them (STORAGE.md Section 4.6) and remove or recover
 	// the world manually.
 	instancemanager.WarnOrphanDisplacedTrees(cfg.Worker.ScratchDir, heldServers, logger)
+	cpuCores := hostresources.CPUCores()
+	memoryBytes := hostresources.MemoryBytes()
+	logger.Info("detected host resources", "cpu_cores", cpuCores, "memory_bytes", memoryBytes)
 	caps := session.Capabilities{
 		WorkerID:      cfg.Worker.ID,
 		WorkerVersion: version,
 		Drivers:       cfg.Worker.Drivers,
 		MaxServers:    cfg.Worker.MaxServers,
 		HeldServers:   heldServers,
+		Resources: session.HostResources{
+			CPUCores:    cpuCores,
+			MemoryBytes: memoryBytes,
+		},
 	}
 	manager.WithMetrics(sysClock, time.Duration(cfg.Worker.MetricsIntervalSeconds)*time.Second)
 	transferClient, err := buildTransferClient(cfg.API)
@@ -305,7 +313,7 @@ func buildTLSConfig(tlsCfg config.TLSConfig) (*tls.Config, error) {
 		return nil, fmt.Errorf("CA file %q contained no usable certificates", tlsCfg.CAFile)
 	}
 
-	out := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	out := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}
 
 	if tlsCfg.ClientCertFile != "" && tlsCfg.ClientKeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(tlsCfg.ClientCertFile, tlsCfg.ClientKeyFile)

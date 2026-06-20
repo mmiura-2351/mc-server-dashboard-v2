@@ -641,6 +641,164 @@ async def test_create_seeds_rcon_with_random_password_by_default() -> None:
     assert props["rcon.password"] != ""
 
 
+# --- create: config overrides written to server.properties (#1209) ---------
+
+
+async def test_create_merges_config_overrides_into_seeded_properties() -> None:
+    # User-supplied server.properties overrides from config are merged into the
+    # seeded server.properties at create time (issue #1209).
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={"motd": "Hello World", "pvp": "false"},
+    )
+    expected = (
+        b"server-port=25565\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+        b"motd=Hello World\npvp=false\n"
+    )
+    assert file_store.files["server.properties"] == expected
+
+
+async def test_create_skips_reserved_keys_in_properties_overrides() -> None:
+    # Reserved keys (memory_limit_mb, cpu_millis, etc.) are NOT written to
+    # server.properties — only user-supplied properties overrides are (#1209).
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={MEMORY_LIMIT_CONFIG_KEY: 2048, "motd": "hi"},
+    )
+    props_text = file_store.files["server.properties"].decode()
+    assert "memory_limit_mb" not in props_text
+    assert "motd=hi" in props_text
+
+
+async def test_create_skips_platform_managed_properties_keys() -> None:
+    # Platform-managed server.properties keys (server-port, enable-rcon,
+    # rcon.port, rcon.password) must NOT be overridable via the config dict
+    # (#1243). They are set by _seed_initial_working_set and must not be
+    # clobbered by user-supplied config values.
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={
+            "server-port": "99999",
+            "enable-rcon": "false",
+            "rcon.port": "11111",
+            "rcon.password": "hacked",
+            "motd": "hello",
+        },
+    )
+    props_text = file_store.files["server.properties"].decode()
+    # The platform-assigned values must survive, not the user overrides.
+    assert "server-port=25565" in props_text
+    assert "enable-rcon=true" in props_text
+    assert "rcon.port=25575" in props_text
+    assert "rcon.password=tok" in props_text
+    # Legitimate user overrides still apply.
+    assert "motd=hello" in props_text
+
+
+async def test_create_skips_resource_pack_properties_keys() -> None:
+    # Resource-pack keys (resource-pack, resource-pack-sha1,
+    # require-resource-pack, resource-pack-prompt) are platform-managed via
+    # set_resource_pack_properties and must NOT be overridable via the config
+    # dict (#1253).
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={
+            "resource-pack": "http://evil.example.com/pack.zip",
+            "resource-pack-sha1": "deadbeef",
+            "require-resource-pack": "true",
+            "resource-pack-prompt": "Install now!",
+            "motd": "hello",
+        },
+    )
+    props_text = file_store.files["server.properties"].decode()
+    # None of the resource-pack keys should appear in server.properties.
+    assert "resource-pack=" not in props_text
+    assert "resource-pack-sha1=" not in props_text
+    assert "require-resource-pack=" not in props_text
+    assert "resource-pack-prompt=" not in props_text
+    # Legitimate user overrides still apply.
+    assert "motd=hello" in props_text
+
+
+async def test_create_with_empty_config_seeds_no_overrides() -> None:
+    # An empty config dict produces the standard seeded properties, no extras.
+    uow = FakeUnitOfWork()
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        execution_backend="container",
+        config={},
+    )
+    assert file_store.files["server.properties"] == _SEEDED_PROPERTIES
+
+
 # --- create: game port assignment (#243) -----------------------------------
 
 
@@ -1518,6 +1676,194 @@ async def test_update_other_communitys_server_is_not_found() -> None:
             server_id=server.id,
             name="x",
         )
+
+
+# --- update: config overrides synced to server.properties (#1209) ----------
+
+
+async def test_update_config_overrides_syncs_to_properties_file() -> None:
+    # When config overrides change, the new overrides are written into
+    # server.properties (issue #1209).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "old"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"server-port=25565\nmotd=old\n"
+    updated = await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "new"},
+    )
+    assert updated.config == {"motd": "new"}
+    assert file_store.files["server.properties"] == b"server-port=25565\nmotd=new\n"
+    assert uow.commits == 1
+
+
+async def test_update_config_overrides_skips_reserved_keys_in_file() -> None:
+    # Reserved keys (memory_limit_mb, etc.) are NOT written to server.properties.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"server-port=25565\nmotd=hi\n"
+    updated = await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048},
+    )
+    assert updated.config[MEMORY_LIMIT_CONFIG_KEY] == 2048
+    props_text = file_store.files["server.properties"].decode()
+    assert "memory_limit_mb" not in props_text
+    assert uow.commits == 1
+
+
+async def test_update_config_overrides_skips_platform_managed_keys() -> None:
+    # Platform-managed server.properties keys (server-port, enable-rcon,
+    # rcon.port, rcon.password) must NOT be written into server.properties via
+    # config overrides (#1243). They are managed by platform seeding and the
+    # port-rewrite path; a user config must not clobber them.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = (
+        b"server-port=25565\nenable-rcon=true\nrcon.port=25575\n"
+        b"rcon.password=secret\nmotd=hi\n"
+    )
+    await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "bye",
+            "server-port": "99999",
+            "enable-rcon": "false",
+            "rcon.port": "11111",
+            "rcon.password": "hacked",
+        },
+    )
+    # The config dict stores all keys (the DB row is the source of truth for
+    # non-properties keys), but the file must not contain the overridden values.
+    props_text = file_store.files["server.properties"].decode()
+    assert "server-port=25565" in props_text
+    assert "enable-rcon=true" in props_text
+    assert "rcon.port=25575" in props_text
+    assert "rcon.password=secret" in props_text
+    assert "motd=bye" in props_text
+    assert uow.commits == 1
+
+
+async def test_update_config_overrides_skips_resource_pack_keys() -> None:
+    # Resource-pack keys are platform-managed via set_resource_pack_properties
+    # and must NOT be written into server.properties via config overrides
+    # (#1253).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"server-port=25565\nmotd=hi\n"
+    await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "bye",
+            "resource-pack": "http://evil.example.com/pack.zip",
+            "resource-pack-sha1": "deadbeef",
+            "require-resource-pack": "true",
+            "resource-pack-prompt": "Install now!",
+        },
+    )
+    props_text = file_store.files["server.properties"].decode()
+    # None of the resource-pack keys should appear in server.properties.
+    assert "resource-pack=" not in props_text
+    assert "resource-pack-sha1=" not in props_text
+    assert "require-resource-pack=" not in props_text
+    assert "resource-pack-prompt=" not in props_text
+    # Legitimate user overrides still apply.
+    assert "motd=bye" in props_text
+    assert uow.commits == 1
+
+
+async def test_update_no_override_change_skips_file_rewrite() -> None:
+    # When the properties overrides are unchanged, the file is not rewritten.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    updated = await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hi"},
+    )
+    assert updated.config == {"motd": "hi"}
+    # No file writes at all (the overrides did not change).
+    assert file_store.writes == []
+    assert uow.commits == 1
+
+
+async def test_update_config_overrides_creates_properties_when_absent() -> None:
+    # A legacy server with no server.properties gets one created from the overrides.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    updated = await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hello"},
+    )
+    assert updated.config == {"motd": "hello"}
+    assert file_store.files["server.properties"] == b"motd=hello\n"
+
+
+async def test_update_config_overrides_file_failure_aborts_without_commit() -> None:
+    # A storage failure rewriting server.properties surfaces as a seed failure and
+    # leaves the config row uncommitted, so the DB and file do not drift (#1209).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "old"}
+    uow.servers.seed(server)
+    with pytest.raises(WorkingSetSeedFailedError):
+        await _updater(uow, file_store=FakeFileStore(fail_write=True))(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "new"},
+        )
+    assert uow.commits == 0
+
+
+async def test_update_config_removing_override_clears_key_from_file() -> None:
+    # When a user removes a key from config overrides, the corresponding line
+    # must be removed from server.properties (issue #1242).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi", "pvp": "true"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"server-port=25565\nmotd=hi\npvp=true\n"
+    updated = await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hi"},
+    )
+    assert updated.config == {"motd": "hi"}
+    props_text = file_store.files["server.properties"].decode()
+    assert "motd=hi" in props_text
+    assert "pvp" not in props_text
+    assert "server-port=25565" in props_text
 
 
 # --- update: game port (#311) ----------------------------------------------

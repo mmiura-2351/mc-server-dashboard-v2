@@ -1,4 +1,4 @@
-import { lazy, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   Navigate,
   Outlet,
@@ -9,8 +9,10 @@ import {
 } from "react-router";
 import { useSession } from "./auth/SessionProvider.tsx";
 import { useCurrentUser } from "./auth/useCurrentUser.ts";
+import { ErrorBoundary } from "./components/ErrorBoundary.tsx";
 import { ToastProvider } from "./components/Toast.tsx";
 import { t } from "./i18n/index.ts";
+import { lazyRetry } from "./lazyRetry.ts";
 import { LoginPage } from "./pages/LoginPage.tsx";
 import { NoCommunityPage } from "./pages/NoCommunityPage.tsx";
 import { NotFoundPage } from "./pages/NotFoundPage.tsx";
@@ -28,55 +30,60 @@ import { AppShell } from "./shell/AppShell.tsx";
 // are first paint / fallback chrome, and NoCommunityPage renders inline from the
 // Landing redirect — splitting them would only add a Suspense flash before the
 // very first screen.
-const AccountPage = lazy(() =>
+const AccountPage = lazyRetry(() =>
   import("./pages/AccountPage.tsx").then((m) => ({ default: m.AccountPage })),
 );
-const AdminAuditPage = lazy(() =>
+const AdminAuditPage = lazyRetry(() =>
   import("./pages/AdminAuditPage.tsx").then((m) => ({
     default: m.AdminAuditPage,
   })),
 );
-const AdminCommunitiesPage = lazy(() =>
+const AdminCommunitiesPage = lazyRetry(() =>
   import("./pages/AdminCommunitiesPage.tsx").then((m) => ({
     default: m.AdminCommunitiesPage,
   })),
 );
-const AdminOverviewPage = lazy(() =>
+const AdminOverviewPage = lazyRetry(() =>
   import("./pages/AdminOverviewPage.tsx").then((m) => ({
     default: m.AdminOverviewPage,
   })),
 );
-const AdminUsersPage = lazy(() =>
+const AdminUsersPage = lazyRetry(() =>
   import("./pages/AdminUsersPage.tsx").then((m) => ({
     default: m.AdminUsersPage,
   })),
 );
-const AdminVersionsPage = lazy(() =>
+const AdminVersionsPage = lazyRetry(() =>
   import("./pages/AdminVersionsPage.tsx").then((m) => ({
     default: m.AdminVersionsPage,
   })),
 );
-const AdminWorkersPage = lazy(() =>
+const AdminWorkersPage = lazyRetry(() =>
   import("./pages/AdminWorkersPage.tsx").then((m) => ({
     default: m.AdminWorkersPage,
   })),
 );
-const CommunitySettingsPage = lazy(() =>
+const CommunitySettingsPage = lazyRetry(() =>
   import("./pages/CommunitySettingsPage.tsx").then((m) => ({
     default: m.CommunitySettingsPage,
   })),
 );
-const DashboardPage = lazy(() =>
+const DashboardPage = lazyRetry(() =>
   import("./pages/DashboardPage.tsx").then((m) => ({
     default: m.DashboardPage,
   })),
 );
-const ServerCreatePage = lazy(() =>
+const ServerCreatePage = lazyRetry(() =>
   import("./pages/ServerCreatePage.tsx").then((m) => ({
     default: m.ServerCreatePage,
   })),
 );
-const ServerDetailPage = lazy(() =>
+const ResourcePacksPage = lazyRetry(() =>
+  import("./pages/ResourcePacksPage.tsx").then((m) => ({
+    default: m.ResourcePacksPage,
+  })),
+);
+const ServerDetailPage = lazyRetry(() =>
   import("./pages/ServerDetailPage.tsx").then((m) => ({
     default: m.ServerDetailPage,
   })),
@@ -170,63 +177,66 @@ function Landing() {
 // session guard (#410).
 export function App() {
   return (
-    <ToastProvider>
-      <Routes>
-        <Route
-          path="/login"
-          element={
-            <RequireAnon>
-              <LoginPage />
-            </RequireAnon>
-          }
-        />
-        <Route
-          path="/register"
-          element={
-            <RequireAnon>
-              <RegisterPage />
-            </RequireAnon>
-          }
-        />
+    <ErrorBoundary>
+      <ToastProvider>
+        <Routes>
+          <Route
+            path="/login"
+            element={
+              <RequireAnon>
+                <LoginPage />
+              </RequireAnon>
+            }
+          />
+          <Route
+            path="/register"
+            element={
+              <RequireAnon>
+                <RegisterPage />
+              </RequireAnon>
+            }
+          />
 
-        <Route
-          element={
-            <RequireAuth>
-              <AppShell />
-            </RequireAuth>
-          }
-        >
-          <Route index element={<Landing />} />
-          <Route path="/communities/:cid" element={<DashboardPage />} />
           <Route
-            path="/communities/:cid/servers/new"
-            element={<ServerCreatePage />}
-          />
-          <Route
-            path="/communities/:cid/servers/:sid"
-            element={<ServerDetailPage />}
-          />
-          <Route
-            path="/communities/:cid/settings"
-            element={<CommunitySettingsPage />}
-          />
-          <Route path="/account" element={<AccountPage />} />
-
-          <Route element={<RequireAdmin />}>
-            <Route path="/admin" element={<AdminOverviewPage />} />
-            <Route path="/admin/users" element={<AdminUsersPage />} />
+            element={
+              <RequireAuth>
+                <AppShell />
+              </RequireAuth>
+            }
+          >
+            <Route index element={<Landing />} />
+            <Route path="/communities/:cid" element={<DashboardPage />} />
             <Route
-              path="/admin/communities"
-              element={<AdminCommunitiesPage />}
+              path="/communities/:cid/servers/new"
+              element={<ServerCreatePage />}
             />
-            <Route path="/admin/workers" element={<AdminWorkersPage />} />
-            <Route path="/admin/versions" element={<AdminVersionsPage />} />
-            <Route path="/admin/audit" element={<AdminAuditPage />} />
-          </Route>
-        </Route>
+            <Route
+              path="/communities/:cid/servers/:sid"
+              element={<ServerDetailPage />}
+            />
+            <Route
+              path="/communities/:cid/settings"
+              element={<CommunitySettingsPage />}
+            />
+            <Route path="/account" element={<AccountPage />} />
+            <Route path="/resource-packs" element={<ResourcePacksPage />} />
 
-        <Route path="*" element={<NotFoundPage />} />
-      </Routes>
-    </ToastProvider>
+            <Route element={<RequireAdmin />}>
+              <Route path="/admin" element={<AdminOverviewPage />} />
+              <Route path="/admin/users" element={<AdminUsersPage />} />
+              <Route
+                path="/admin/communities"
+                element={<AdminCommunitiesPage />}
+              />
+              <Route path="/admin/workers" element={<AdminWorkersPage />} />
+              <Route path="/admin/versions" element={<AdminVersionsPage />} />
+              <Route path="/admin/audit" element={<AdminAuditPage />} />
+            </Route>
+          </Route>
+
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </ToastProvider>
+    </ErrorBoundary>
   );
 }

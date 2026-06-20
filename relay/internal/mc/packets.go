@@ -63,7 +63,7 @@ func ReadStatusResponse(r *bufio.Reader) (string, error) {
 		return "", err
 	}
 	br := newByteSliceReader(body)
-	id, _, err := readVarInt(br)
+	id, _, _, err := readVarInt(br)
 	if err != nil {
 		return "", err
 	}
@@ -82,7 +82,7 @@ func ReadStatusRequest(r *bufio.Reader) (int32, []byte, error) {
 		return 0, nil, err
 	}
 	br := newByteSliceReader(body)
-	id, _, err := readVarInt(br)
+	id, _, _, err := readVarInt(br)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -97,7 +97,7 @@ func ReadPing(r *bufio.Reader) (int64, error) {
 		return 0, err
 	}
 	br := newByteSliceReader(body)
-	id, _, err := readVarInt(br)
+	id, _, _, err := readVarInt(br)
 	if err != nil {
 		return 0, err
 	}

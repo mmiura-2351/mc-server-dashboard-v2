@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from mc_server_dashboard_api.servers.domain.server_properties import (
     RCON_PORT,
+    apply_overrides,
+    clear_resource_pack_properties,
+    remove_keys,
     set_rcon_properties,
+    set_resource_pack_properties,
     set_server_port,
 )
 
@@ -96,3 +100,161 @@ def test_set_rcon_preserves_other_lines_and_order() -> None:
         b"#comment\nlevel-name=world\nserver-port=25565\n"
         + f"enable-rcon=true\nrcon.port={RCON_PORT}\nrcon.password=s3cret\n".encode()
     )
+
+
+# --- resource pack properties (issue #1177) ----------------------------------
+
+_RP_URL = "https://example.com/api/public/resource-packs/abc/pack.zip"
+_RP_SHA1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+
+
+def test_set_resource_pack_appends_all_keys_to_empty_content() -> None:
+    out = set_resource_pack_properties(b"", url=_RP_URL, sha1=_RP_SHA1)
+    assert (
+        out
+        == (
+            f"resource-pack={_RP_URL}\n"
+            f"resource-pack-sha1={_RP_SHA1}\n"
+            f"require-resource-pack=false\n"
+        ).encode()
+    )
+
+
+def test_set_resource_pack_with_require_true() -> None:
+    out = set_resource_pack_properties(b"", url=_RP_URL, sha1=_RP_SHA1, require=True)
+    assert b"require-resource-pack=true\n" in out
+
+
+def test_set_resource_pack_with_prompt() -> None:
+    out = set_resource_pack_properties(
+        b"", url=_RP_URL, sha1=_RP_SHA1, prompt="Install this pack"
+    )
+    assert b"resource-pack-prompt=Install this pack\n" in out
+
+
+def test_set_resource_pack_without_prompt_preserves_existing() -> None:
+    content = b"resource-pack-prompt=Old prompt\nmotd=hi\n"
+    out = set_resource_pack_properties(content, url=_RP_URL, sha1=_RP_SHA1)
+    # prompt=None leaves the existing prompt line untouched
+    assert b"resource-pack-prompt=Old prompt\n" in out
+
+
+def test_set_resource_pack_replaces_existing_keys() -> None:
+    content = (
+        b"resource-pack=old-url\n"
+        b"resource-pack-sha1=old-sha\n"
+        b"require-resource-pack=true\n"
+        b"motd=hi\n"
+    )
+    out = set_resource_pack_properties(
+        content, url=_RP_URL, sha1=_RP_SHA1, require=False
+    )
+    assert (
+        out
+        == (
+            f"resource-pack={_RP_URL}\n"
+            f"resource-pack-sha1={_RP_SHA1}\n"
+            f"require-resource-pack=false\n"
+            f"motd=hi\n"
+        ).encode()
+    )
+
+
+def test_set_resource_pack_preserves_other_lines() -> None:
+    content = b"#comment\nserver-port=25565\nlevel-name=world\n"
+    out = set_resource_pack_properties(content, url=_RP_URL, sha1=_RP_SHA1)
+    assert out.startswith(b"#comment\nserver-port=25565\nlevel-name=world\n")
+
+
+def test_clear_resource_pack_removes_all_four_keys() -> None:
+    content = (
+        b"motd=hi\n"
+        b"resource-pack=some-url\n"
+        b"resource-pack-sha1=some-sha\n"
+        b"require-resource-pack=true\n"
+        b"resource-pack-prompt=Hi there\n"
+        b"max-players=20\n"
+    )
+    out = clear_resource_pack_properties(content)
+    assert out == b"motd=hi\nmax-players=20\n"
+
+
+def test_clear_resource_pack_on_empty_content() -> None:
+    out = clear_resource_pack_properties(b"")
+    assert out == b"\n"
+
+
+def test_clear_resource_pack_preserves_other_lines() -> None:
+    content = b"motd=hi\nserver-port=25565\n"
+    out = clear_resource_pack_properties(content)
+    assert out == b"motd=hi\nserver-port=25565\n"
+
+
+def test_clear_resource_pack_ignores_commented_keys() -> None:
+    content = b"#resource-pack=url\nresource-pack=real-url\nmotd=hi\n"
+    out = clear_resource_pack_properties(content)
+    assert out == b"#resource-pack=url\nmotd=hi\n"
+
+
+# --- apply_overrides (issue #1209) -------------------------------------------
+
+
+def test_apply_overrides_appends_new_keys_to_empty_content() -> None:
+    out = apply_overrides(b"", {"motd": "Hello World", "pvp": "true"})
+    assert out == b"motd=Hello World\npvp=true\n"
+
+
+def test_apply_overrides_rewrites_existing_keys_in_place() -> None:
+    content = b"motd=old\nmax-players=20\n"
+    out = apply_overrides(content, {"motd": "new"})
+    assert out == b"motd=new\nmax-players=20\n"
+
+
+def test_apply_overrides_mixes_rewrite_and_append() -> None:
+    content = b"motd=old\n"
+    out = apply_overrides(content, {"motd": "new", "pvp": "false"})
+    assert out == b"motd=new\npvp=false\n"
+
+
+def test_apply_overrides_preserves_other_lines() -> None:
+    content = b"#comment\nserver-port=25565\nmotd=hi\n"
+    out = apply_overrides(content, {"motd": "bye"})
+    assert out == b"#comment\nserver-port=25565\nmotd=bye\n"
+
+
+def test_apply_overrides_empty_dict_is_noop() -> None:
+    content = b"motd=hi\n"
+    assert apply_overrides(content, {}) == b"motd=hi\n"
+
+
+# --- remove_keys (issue #1242) ------------------------------------------------
+
+
+def test_remove_keys_deletes_matching_lines() -> None:
+    content = b"motd=hi\npvp=true\nmax-players=20\n"
+    out = remove_keys(content, {"pvp"})
+    assert out == b"motd=hi\nmax-players=20\n"
+
+
+def test_remove_keys_preserves_other_lines_and_comments() -> None:
+    content = b"#comment\nserver-port=25565\nmotd=hi\npvp=true\n"
+    out = remove_keys(content, {"motd"})
+    assert out == b"#comment\nserver-port=25565\npvp=true\n"
+
+
+def test_remove_keys_multiple_keys() -> None:
+    content = b"motd=hi\npvp=true\nmax-players=20\n"
+    out = remove_keys(content, {"motd", "max-players"})
+    assert out == b"pvp=true\n"
+
+
+def test_remove_keys_absent_key_is_noop() -> None:
+    content = b"motd=hi\n"
+    out = remove_keys(content, {"pvp"})
+    assert out == b"motd=hi\n"
+
+
+def test_remove_keys_empty_set_is_noop() -> None:
+    content = b"motd=hi\n"
+    out = remove_keys(content, set())
+    assert out == b"motd=hi\n"

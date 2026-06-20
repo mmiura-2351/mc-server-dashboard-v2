@@ -56,7 +56,7 @@ func TestLoginDisconnectPacket(t *testing.T) {
 		t.Fatal(err)
 	}
 	br := newByteSliceReader(body)
-	id, _, _ := readVarInt(br)
+	id, _, _, _ := readVarInt(br)
 	if id != 0x00 {
 		t.Fatalf("disconnect id = 0x%02x, want 0x00", id)
 	}

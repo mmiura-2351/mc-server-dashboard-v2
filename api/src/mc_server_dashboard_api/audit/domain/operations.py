@@ -163,6 +163,18 @@ PLUGIN_ENABLE: Final = "plugin:enable"
 PLUGIN_DISABLE: Final = "plugin:disable"
 PLUGIN_UPDATE: Final = "plugin:update"
 
+# Resource pack upload / delete / download (issue #1176). Names the operation,
+# not a permission code — upload is gated by server:update in any community,
+# delete by uploader-or-admin, download by authenticated. The ``operation``
+# column is free text (see module docstring).
+RESOURCE_PACK_UPLOAD: Final = "resource_pack:upload"
+RESOURCE_PACK_DELETE: Final = "resource_pack:delete"
+RESOURCE_PACK_DOWNLOAD: Final = "resource_pack:download"
+# Resource pack assignment / unassignment (issue #1177). Gated by server:update
+# on the target server; names the operation, not a permission code.
+RESOURCE_PACK_ASSIGN: Final = "resource_pack:assign"
+RESOURCE_PACK_UNASSIGN: Final = "resource_pack:unassign"
+
 # Target-type names (the ``target_type`` column).
 TARGET_PLUGIN: Final = "plugin"
 TARGET_COMMUNITY: Final = "community"
@@ -174,3 +186,4 @@ TARGET_BACKUP: Final = "backup"
 TARGET_WORKER: Final = "worker"
 TARGET_FILE: Final = "file"
 TARGET_GROUP: Final = "group"
+TARGET_RESOURCE_PACK: Final = "resource_pack"

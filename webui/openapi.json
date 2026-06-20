@@ -204,6 +204,36 @@
         "title": "AdminUserResponse",
         "type": "object"
       },
+      "AssignResourcePackRequest": {
+        "properties": {
+          "require_resource_pack": {
+            "default": false,
+            "title": "Require Resource Pack",
+            "type": "boolean"
+          },
+          "resource_pack_id": {
+            "format": "uuid",
+            "title": "Resource Pack Id",
+            "type": "string"
+          },
+          "resource_pack_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Pack Prompt"
+          }
+        },
+        "required": [
+          "resource_pack_id"
+        ],
+        "title": "AssignResourcePackRequest",
+        "type": "object"
+      },
       "AssignRoleRequest": {
         "properties": {
           "role_id": {
@@ -528,6 +558,25 @@
           "file"
         ],
         "title": "Body_upload_file_api_communities__community_id__servers__server_id__files_upload_post",
+        "type": "object"
+      },
+      "Body_upload_resource_pack_api_resource_packs_post": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "display_name"
+        ],
+        "title": "Body_upload_resource_pack_api_resource_packs_post",
         "type": "object"
       },
       "CapabilitiesResponse": {
@@ -2266,6 +2315,138 @@
           "to"
         ],
         "title": "RenameRequest",
+        "type": "object"
+      },
+      "ResourcePackAssignmentResponse": {
+        "properties": {
+          "assigned_at": {
+            "format": "date-time",
+            "title": "Assigned At",
+            "type": "string"
+          },
+          "assigned_by": {
+            "format": "uuid",
+            "title": "Assigned By",
+            "type": "string"
+          },
+          "require_resource_pack": {
+            "title": "Require Resource Pack",
+            "type": "boolean"
+          },
+          "resource_pack": {
+            "$ref": "#/components/schemas/ResourcePackResponse"
+          },
+          "resource_pack_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Pack Prompt"
+          }
+        },
+        "required": [
+          "resource_pack",
+          "require_resource_pack",
+          "resource_pack_prompt",
+          "assigned_by",
+          "assigned_at"
+        ],
+        "title": "ResourcePackAssignmentResponse",
+        "type": "object"
+      },
+      "ResourcePackListResponse": {
+        "properties": {
+          "resource_packs": {
+            "items": {
+              "$ref": "#/components/schemas/ResourcePackResponse"
+            },
+            "title": "Resource Packs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "resource_packs"
+        ],
+        "title": "ResourcePackListResponse",
+        "type": "object"
+      },
+      "ResourcePackResponse": {
+        "description": "One resource pack's metadata.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "sha1_hash": {
+            "title": "Sha1 Hash",
+            "type": "string"
+          },
+          "sha256_hash": {
+            "title": "Sha256 Hash",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "uploaded_by": {
+            "format": "uuid",
+            "title": "Uploaded By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "display_name",
+          "description",
+          "sha1_hash",
+          "sha256_hash",
+          "size_bytes",
+          "download_url",
+          "uploaded_by",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ResourcePackResponse",
         "type": "object"
       },
       "RevokeOtherSessionsRequest": {
@@ -7652,6 +7833,173 @@
         "summary": "Check Plugin Update"
       }
     },
+    "/api/communities/{community_id}/servers/{server_id}/resource-pack": {
+      "delete": {
+        "description": "Unassign the resource pack from a server (server:update, issue #1177).",
+        "operationId": "unassign_resource_pack_api_communities__community_id__servers__server_id__resource_pack_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Unassign Resource Pack"
+      },
+      "get": {
+        "description": "Get the resource pack assignment for a server (server:read, issue #1177).",
+        "operationId": "get_resource_pack_assignment_api_communities__community_id__servers__server_id__resource_pack_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourcePackAssignmentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Resource Pack Assignment"
+      },
+      "post": {
+        "description": "Assign a resource pack to a server (server:update, issue #1177).",
+        "operationId": "assign_resource_pack_api_communities__community_id__servers__server_id__resource_pack_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignResourcePackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourcePackAssignmentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Assign Resource Pack"
+      }
+    },
     "/api/communities/{community_id}/servers/{server_id}/restart": {
       "post": {
         "operationId": "restart_server_api_communities__community_id__servers__server_id__restart_post",
@@ -8240,6 +8588,54 @@
         "summary": "Check Port"
       }
     },
+    "/api/public/resource-packs/{resource_pack_id}/{filename}": {
+      "get": {
+        "description": "Public download endpoint for Minecraft clients (no auth, issue #1176).\n\nValidates that ``filename`` matches the stored filename (404 otherwise).",
+        "operationId": "public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Resource Pack Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Public Download Resource Pack"
+      }
+    },
     "/api/readyz": {
       "get": {
         "operationId": "readyz_api_readyz_get",
@@ -8256,6 +8652,155 @@
           }
         },
         "summary": "Readyz"
+      }
+    },
+    "/api/resource-packs": {
+      "get": {
+        "description": "List all resource packs (authenticated, issue #1176).",
+        "operationId": "list_resource_packs_api_resource_packs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourcePackListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Resource Packs"
+      },
+      "post": {
+        "description": "Upload a resource pack (server:update in any community, issue #1176).",
+        "operationId": "upload_resource_pack_api_resource_packs_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_resource_pack_api_resource_packs_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourcePackResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Upload Resource Pack"
+      }
+    },
+    "/api/resource-packs/{resource_pack_id}": {
+      "delete": {
+        "description": "Delete a resource pack (uploader or platform admin, issue #1176).",
+        "operationId": "delete_resource_pack_api_resource_packs__resource_pack_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Resource Pack Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Resource Pack"
+      }
+    },
+    "/api/resource-packs/{resource_pack_id}/download": {
+      "get": {
+        "description": "Download a resource pack (authenticated, issue #1176).",
+        "operationId": "download_resource_pack_api_resource_packs__resource_pack_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Resource Pack Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Resource Pack"
       }
     },
     "/api/users": {

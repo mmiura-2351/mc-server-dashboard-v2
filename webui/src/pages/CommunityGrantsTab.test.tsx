@@ -266,12 +266,6 @@ describe("CommunityGrantsTab", () => {
         name: t("communitySettings.grants.revoke"),
       }),
     );
-    fireEvent.change(
-      screen.getByPlaceholderText(
-        t("communitySettings.grants.revokeConfirmPhrase"),
-      ),
-      { target: { value: t("communitySettings.grants.revokeConfirmPhrase") } },
-    );
     fireEvent.click(
       screen.getByRole("button", {
         name: t("communitySettings.grants.revokeConfirm"),
@@ -483,12 +477,6 @@ describe("CommunityGrantsTab", () => {
       await screen.findByRole("button", {
         name: t("communitySettings.grants.revoke"),
       }),
-    );
-    fireEvent.change(
-      screen.getByPlaceholderText(
-        t("communitySettings.grants.revokeConfirmPhrase"),
-      ),
-      { target: { value: t("communitySettings.grants.revokeConfirmPhrase") } },
     );
     fireEvent.click(
       screen.getByRole("button", {

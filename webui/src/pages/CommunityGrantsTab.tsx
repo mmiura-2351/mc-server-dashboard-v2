@@ -5,8 +5,8 @@ import { membersKeys } from "../api/communityQueryKeys.ts";
 import { labelQueryFn } from "../api/labelQuery.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import {
@@ -230,13 +230,11 @@ export function CommunityGrantsTab({
         />
       )}
 
-      <ConfirmDialog
+      <SimpleConfirmDialog
         open={revoking !== null}
         title={t("communitySettings.grants.revokeDialogTitle")}
         body={t("communitySettings.grants.revokeDialogBody")}
-        confirmPhrase={t("communitySettings.grants.revokeConfirmPhrase")}
         confirmLabel={t("communitySettings.grants.revokeConfirm")}
-        promptLabel={t("communitySettings.grants.revokePrompt")}
         onConfirm={() => {
           if (revoking !== null) {
             revoke.mutate(revoking);

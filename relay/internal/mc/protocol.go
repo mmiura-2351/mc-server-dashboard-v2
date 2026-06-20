@@ -47,23 +47,26 @@ const (
 // fit a 32-bit value) — a malformed or hostile length prefix.
 var ErrVarIntTooLong = errors.New("mc: VarInt is too long")
 
-// readVarInt reads a Minecraft VarInt from r and returns its value and the
-// number of bytes consumed. It rejects encodings longer than five bytes.
-func readVarInt(r io.ByteReader) (int32, int, error) {
+// readVarInt reads a Minecraft VarInt from r and returns its decoded value, the
+// number of bytes consumed, the raw wire bytes, and any error. It rejects
+// encodings longer than five bytes.
+func readVarInt(r io.ByteReader) (int32, int, []byte, error) {
 	var value uint32
 	var n int
+	var raw [maxVarIntBytes]byte
 	for {
 		b, err := r.ReadByte()
 		if err != nil {
-			return 0, n, err
+			return 0, n, raw[:n], err
 		}
+		raw[n] = b
 		n++
 		value |= uint32(b&0x7F) << (7 * (n - 1))
 		if b&0x80 == 0 {
-			return int32(value), n, nil
+			return int32(value), n, raw[:n], nil
 		}
 		if n >= maxVarIntBytes {
-			return 0, n, ErrVarIntTooLong
+			return 0, n, raw[:n], ErrVarIntTooLong
 		}
 	}
 }
@@ -88,7 +91,7 @@ func appendVarInt(dst []byte, v int32) []byte {
 // length prefix above maxLen (the caller's contextual ceiling) before
 // allocating.
 func readString(r io.Reader, br io.ByteReader, maxLen int) (string, error) {
-	length, _, err := readVarInt(br)
+	length, _, _, err := readVarInt(br)
 	if err != nil {
 		return "", err
 	}
@@ -154,7 +157,7 @@ func ReadHandshake(r *bufio.Reader) (Handshake, error) {
 	}
 	br := newByteSliceReader(body)
 
-	id, _, err := readVarInt(br)
+	id, _, _, err := readVarInt(br)
 	if err != nil {
 		return Handshake{}, err
 	}
@@ -162,7 +165,7 @@ func ReadHandshake(r *bufio.Reader) (Handshake, error) {
 		return Handshake{}, fmt.Errorf("mc: handshake: unexpected packet id 0x%02x", id)
 	}
 
-	protocol, _, err := readVarInt(br)
+	protocol, _, _, err := readVarInt(br)
 	if err != nil {
 		return Handshake{}, err
 	}
@@ -174,7 +177,7 @@ func ReadHandshake(r *bufio.Reader) (Handshake, error) {
 	if err != nil {
 		return Handshake{}, err
 	}
-	next, _, err := readVarInt(br)
+	next, _, _, err := readVarInt(br)
 	if err != nil {
 		return Handshake{}, err
 	}
@@ -231,7 +234,7 @@ func ReadLoginStart(r *bufio.Reader, protocolVersion int32) (LoginStart, error) 
 	ls := LoginStart{Raw: raw}
 
 	br := newByteSliceReader(body)
-	id, _, err := readVarInt(br)
+	id, _, _, err := readVarInt(br)
 	if err != nil || id != 0x00 {
 		// Framing was valid but this is not a Login Start we understand; splice
 		// anyway with a null identity.
@@ -278,7 +281,7 @@ func readPacket(r *bufio.Reader) (raw, body []byte, err error) {
 // MaxStatusResponseBytes for trusted tunnel-side reads that may carry a
 // server icon.
 func readPacketWithLimit(r *bufio.Reader, maxLen int) (raw, body []byte, err error) {
-	length, lenBytes, err := readVarInt(r)
+	length, lenBytes, lenRaw, err := readVarInt(r)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -290,7 +293,7 @@ func readPacketWithLimit(r *bufio.Reader, maxLen int) (raw, body []byte, err err
 		return nil, nil, err
 	}
 	raw = make([]byte, 0, lenBytes+int(length))
-	raw = appendVarInt(raw, length)
+	raw = append(raw, lenRaw...)
 	raw = append(raw, body...)
 	return raw, body, nil
 }

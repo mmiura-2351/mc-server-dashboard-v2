@@ -25,6 +25,7 @@ hash-verification seam (SHA-1, like vanilla).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import quote
 from xml.etree import ElementTree
 
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
@@ -48,7 +49,8 @@ _PROMOTIONS_URL = (
 
 
 def _installer_url(full_version: str) -> str:
-    return f"{_MAVEN}/{full_version}/forge-{full_version}-installer.jar"
+    v = quote(full_version, safe="")
+    return f"{_MAVEN}/{v}/forge-{v}-installer.jar"
 
 
 def _installer_sha1_url(full_version: str) -> str:

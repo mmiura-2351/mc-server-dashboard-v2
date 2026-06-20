@@ -32,8 +32,8 @@ import { ApiError, api } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
@@ -402,6 +402,7 @@ function Listing({
       ),
     onSuccess: () => {
       showToast(t("files.deleted"), "success");
+      setDeleting(null);
       onChanged();
     },
     onError: (error) => {
@@ -495,13 +496,11 @@ function Listing({
           onError={onError}
         />
       )}
-      <ConfirmDialog
+      <SimpleConfirmDialog
         open={deleting !== null}
         title={t("files.delete.dialogTitle")}
         body={t("files.delete.dialogBody")}
-        confirmPhrase={deleting?.name ?? ""}
         confirmLabel={t("files.delete.confirm")}
-        promptLabel={t("files.delete.prompt")}
         onConfirm={() => deleting !== null && remove.mutate(deleting)}
         onClose={() => setDeleting(null)}
       />
@@ -785,6 +784,7 @@ function Toolbar({
   onChanged: () => void;
   onError: (error: unknown) => void;
 }) {
+  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
   const [mkdirOpen, setMkdirOpen] = useState(false);
   const [extract, setExtract] = useState(false);
@@ -845,7 +845,11 @@ function Toolbar({
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file !== undefined) {
-                upload.mutate(file);
+                if (file.size > MAX_UPLOAD_BYTES) {
+                  showToast(t("files.error.tooLarge"), "error");
+                } else {
+                  upload.mutate(file);
+                }
               }
               e.target.value = "";
             }}
