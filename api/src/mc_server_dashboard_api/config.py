@@ -372,6 +372,17 @@ class JarGcSettings(_Section):
     interval_seconds: int = Field(default=86400, gt=0)
 
 
+class PluginCacheGcSettings(_Section):
+    """Plugin-cache garbage collection cadence (issue #1332).
+
+    The GC reclaims cached plugin/mod blobs no ``server_plugin`` row references.
+    Gated on the control plane like the jar-pool GC. ``interval_seconds`` is how
+    often the loop wakes to sweep; a daily default matches the jar-pool GC.
+    """
+
+    interval_seconds: int = Field(default=86400, gt=0)
+
+
 class PortsSettings(_Section):
     """Game-port range for create-time auto-assignment (issue #243).
 
@@ -710,6 +721,9 @@ class Settings(BaseSettings):
     backup: BackupSettings = Field(default_factory=BackupSettings)
     reconciler: ReconcilerSettings = Field(default_factory=ReconcilerSettings)
     jar_gc: JarGcSettings = Field(default_factory=JarGcSettings)
+    plugin_cache_gc: PluginCacheGcSettings = Field(
+        default_factory=PluginCacheGcSettings
+    )
     ports: PortsSettings = Field(default_factory=PortsSettings)
     memory_limit: MemoryLimitSettings = Field(default_factory=MemoryLimitSettings)
     webui: WebuiSettings = Field(default_factory=WebuiSettings)

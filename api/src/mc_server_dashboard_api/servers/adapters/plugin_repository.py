@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, distinct, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.plugin_models import ServerPluginModel
@@ -183,6 +183,14 @@ class SqlAlchemyPluginRepository(PluginRepository):
         )
         row = (await self._session.execute(stmt)).scalars().first()
         return _to_plugin(row) if row is not None else None
+
+    async def all_sha256s(self) -> set[str]:
+        stmt = select(distinct(ServerPluginModel.sha256)).where(
+            ServerPluginModel.sha256.is_not(None)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        # The WHERE clause guarantees no None values; the cast satisfies mypy.
+        return {r for r in rows if r is not None}
 
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
         stmt = (

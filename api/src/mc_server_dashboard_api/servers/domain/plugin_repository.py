@@ -67,6 +67,15 @@ class PluginRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def all_sha256s(self) -> set[str]:
+        """Return every distinct non-null ``sha256`` across all servers.
+
+        The plugin-cache GC's reference set (issue #1332): a cached blob
+        whose sha256 is in this set is still referenced by at least one
+        installed plugin and must not be reclaimed.
+        """
+
+    @abc.abstractmethod
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
         """Return a cached SHA-256 content address for a known SHA-512, or ``None``.
 

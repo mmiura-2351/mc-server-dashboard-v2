@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
+    CacheEntry,
     PluginCacheStore,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import S3ClientFactory
@@ -51,3 +52,20 @@ class ObjectPluginCacheStore(PluginCacheStore):
             # redundant head_object first — mirrors ObjectResourcePackStore.open.
             async for chunk in await client.get_object(key):
                 yield chunk
+
+    async def list_entries(self) -> list[CacheEntry]:
+        prefix = "plugin-cache/"
+        async with self._client_factory() as client:
+            objs = await client.list_objects(prefix)
+        return [
+            CacheEntry(
+                sha256=obj.key.removeprefix(prefix),
+                size_bytes=obj.size,
+                modified_at=obj.last_modified,
+            )
+            for obj in objs
+        ]
+
+    async def delete(self, sha256: str) -> None:
+        async with self._client_factory() as client:
+            await client.delete_object(_key(sha256))

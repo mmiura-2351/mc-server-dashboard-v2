@@ -72,6 +72,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
+    CacheEntry,
     PluginCacheStore,
 )
 from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
@@ -746,6 +747,9 @@ class FakePluginRepository(PluginRepository):
                 return plugin
         return None
 
+    async def all_sha256s(self) -> set[str]:
+        return {p.sha256 for p in self.by_id.values() if p.sha256 is not None}
+
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
         for plugin in self.by_id.values():
             if plugin.checksum_sha512 == checksum_sha512 and plugin.sha256 is not None:
@@ -1339,3 +1343,16 @@ class FakePluginCacheStore(PluginCacheStore):
             yield data
 
         return _gen()
+
+    async def list_entries(self) -> list[CacheEntry]:
+        return [
+            CacheEntry(
+                sha256=sha,
+                size_bytes=len(data),
+                modified_at=dt.datetime.now(dt.UTC),
+            )
+            for sha, data in self.blobs.items()
+        ]
+
+    async def delete(self, sha256: str) -> None:
+        self.blobs.pop(sha256, None)
