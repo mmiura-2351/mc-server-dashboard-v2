@@ -100,6 +100,12 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
     ServersLateSnapshotResultSink,
 )
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
+from mc_server_dashboard_api.servers.adapters.plugin_cache_gc_loop import (
+    run_plugin_cache_gc_loop,
+)
+from mc_server_dashboard_api.servers.adapters.plugin_cache_references import (
+    PluginCacheReferences,
+)
 from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
     ObjectPluginCacheStore,
 )
@@ -139,6 +145,9 @@ from mc_server_dashboard_api.servers.application.game_sessions import PruneGameS
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
+)
+from mc_server_dashboard_api.servers.application.plugin_cache_gc import (
+    RunPluginCacheGc,
 )
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
@@ -636,6 +645,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         backup_task: asyncio.Task[None] | None = None
         reconciler_task: asyncio.Task[None] | None = None
         jar_gc_task: asyncio.Task[None] | None = None
+        plugin_cache_gc_task: asyncio.Task[None] | None = None
         session_prune_task: asyncio.Task[None] | None = None
         # Periodic login_attempt prune (SECURITY.md Section 3). Ungated on the
         # control plane: unlike the snapshot/backup loops it drives only the
@@ -893,6 +903,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             logging.getLogger(__name__).info("jar-pool GC started")
+            # Run the periodic plugin-cache GC as a lifespan task (issue #1332),
+            # alongside the jar-pool GC. Gated on the plugin cache store being
+            # available (object backend only). Reclaims cached plugin/mod blobs
+            # not referenced by any server_plugin row.
+            if plugin_cache_store is not None:
+                plugin_cache_gc = RunPluginCacheGc(
+                    cache=plugin_cache_store,
+                    references=PluginCacheReferences(
+                        uow=ServersUnitOfWork(create_session_factory(engine))
+                    ),
+                    clock=ServersSystemClock(),
+                )
+                plugin_cache_gc_task = asyncio.create_task(
+                    run_plugin_cache_gc_loop(
+                        plugin_cache_gc,
+                        tick_seconds=settings.plugin_cache_gc.interval_seconds,
+                    )
+                )
+                logging.getLogger(__name__).info("plugin-cache GC started")
         try:
             yield
         finally:
@@ -903,6 +932,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session_prune_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await session_prune_task
+            if plugin_cache_gc_task is not None:
+                plugin_cache_gc_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await plugin_cache_gc_task
             if jar_gc_task is not None:
                 jar_gc_task.cancel()
                 with suppress(asyncio.CancelledError):

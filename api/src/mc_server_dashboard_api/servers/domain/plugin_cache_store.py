@@ -13,9 +13,26 @@ copy and short-circuits redundant downloads.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 ByteStream = AsyncIterator[bytes]
+
+
+@dataclass(frozen=True)
+class CacheEntry:
+    """One cached blob's content key, size, and store time (the GC's unit).
+
+    Mirrors :class:`~...versions.domain.jar_pool.PoolEntry`: ``sha256`` is the
+    content key, ``size_bytes`` feeds the freed-bytes accounting, and
+    ``modified_at`` (UTC, timezone-aware) is what the GC's safety window
+    compares against ``now``.
+    """
+
+    sha256: str
+    size_bytes: int
+    modified_at: dt.datetime
 
 
 class PluginCacheStore(abc.ABC):
@@ -32,3 +49,11 @@ class PluginCacheStore(abc.ABC):
     @abc.abstractmethod
     def open(self, sha256: str) -> ByteStream:
         """Open a read stream over a cached jar. Raises if absent."""
+
+    @abc.abstractmethod
+    async def list_entries(self) -> list[CacheEntry]:
+        """Enumerate cached blobs with key, size, and store time (the GC)."""
+
+    @abc.abstractmethod
+    async def delete(self, sha256: str) -> None:
+        """Remove a cached blob by content key. Idempotent (no error if absent)."""
