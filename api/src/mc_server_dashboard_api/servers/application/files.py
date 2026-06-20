@@ -53,6 +53,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    ContentDirProtectedError,
     FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
@@ -60,18 +61,21 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFilesUnsettledError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    UnsupportedPluginServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     LifecycleLock,
     NullLifecycleLock,
 )
+from mc_server_dashboard_api.servers.domain.plugin import content_dir_for_server_type
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
     ObservedState,
     ServerId,
+    ServerType,
 )
 
 # The edit-size cap. File access rides the control plane for small, interactive
@@ -155,6 +159,26 @@ async def _load(
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
     return server
+
+
+def _guard_content_dir(server_type: ServerType, rel_path: str) -> None:
+    """Reject a Files API path that falls under the plugin content directory.
+
+    The content directory (``mods/`` or ``plugins/``) is managed exclusively by
+    the Plugin API. Server types that do not support plugins (vanilla, spigot)
+    are unguarded -- :func:`content_dir_for_server_type` raises
+    :class:`UnsupportedPluginServerTypeError` for those, which we catch and
+    skip.
+    """
+
+    try:
+        content_dir = content_dir_for_server_type(server_type)
+    except UnsupportedPluginServerTypeError:
+        return
+
+    normalized = rel_path.rstrip("/")
+    if normalized == content_dir or normalized.startswith(f"{content_dir}/"):
+        raise ContentDirProtectedError(rel_path)
 
 
 def _is_running(server: Server) -> bool:
@@ -323,6 +347,8 @@ class WriteFile:
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
+
+            _guard_content_dir(server.server_type, rel_path)
 
             if server.is_at_rest():
                 await self.file_store.write_file(
@@ -648,6 +674,8 @@ class UploadFile:
             if not server.is_at_rest():
                 raise ServerFilesUnsettledError(str(server_id.value))
 
+            _guard_content_dir(server.server_type, _join(dir_path, filename))
+
             if extract:
                 # Validate the whole archive (traversal / symlink / size / entry-count)
                 # in a dry-run pass BEFORE writing anything: a mid-archive rejection
@@ -876,6 +904,8 @@ class DeleteFile:
             if not server.is_at_rest():
                 raise ServerFilesUnsettledError(str(server_id.value))
 
+            _guard_content_dir(server.server_type, rel_path)
+
             is_dir = await _path_is_dir(
                 self.file_store, community_id, server_id, rel_path
             )
@@ -961,6 +991,9 @@ class RenameFile:
                 server = await _load(self.uow, community_id, server_id)
             if not server.is_at_rest():
                 raise ServerFilesUnsettledError(str(server_id.value))
+
+            _guard_content_dir(server.server_type, from_path)
+            _guard_content_dir(server.server_type, to_path)
 
             is_dir = await _path_is_dir(
                 self.file_store, community_id, server_id, from_path

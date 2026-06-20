@@ -122,18 +122,30 @@ async def _reconcile_working_set(
         return
 
     # Rename within the working set (read old -> write new -> delete old).
-    content = await file_store.read_file(
-        community_id=community_id, server_id=server_id, rel_path=current_path
-    )
+    # If the on-disk file is missing (e.g. external deletion via Files API or a
+    # backup restore), fall back to materializing from the content-addressed cache
+    # instead of 500-ing (issue #1331 defence-in-depth).
+    try:
+        content = await file_store.read_file(
+            community_id=community_id, server_id=server_id, rel_path=current_path
+        )
+    except ServerFileNotFoundError:
+        if sha256 is None:
+            return
+        content = b"".join([chunk async for chunk in cache.open(sha256)])
+
     await file_store.write_file(
         community_id=community_id,
         server_id=server_id,
         rel_path=desired_path,
         content=content,
     )
-    await file_store.delete_file(
-        community_id=community_id, server_id=server_id, rel_path=current_path
-    )
+    try:
+        await file_store.delete_file(
+            community_id=community_id, server_id=server_id, rel_path=current_path
+        )
+    except ServerFileNotFoundError:
+        pass
 
 
 @dataclass(frozen=True)

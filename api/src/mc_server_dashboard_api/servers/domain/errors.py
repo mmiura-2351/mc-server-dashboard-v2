@@ -300,6 +300,16 @@ class ServerFilesUnsettledError(ServerError):
     """
 
 
+class ContentDirProtectedError(ServerError):
+    """A Files API operation targeted a path under the plugin content directory.
+
+    The content directory (``mods/`` for Fabric/Forge, ``plugins/`` for Paper)
+    is managed exclusively by the Plugin API; writes, deletes, renames, and
+    uploads through the Files API are rejected to prevent DB/FS divergence
+    (issue #1331). The edge maps this to 409 ``content_dir_protected``.
+    """
+
+
 class BackupNotFoundError(ServerError):
     """A backup operation targeted a backup that does not exist for the server.
 
