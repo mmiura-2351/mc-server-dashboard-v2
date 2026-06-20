@@ -612,6 +612,11 @@ async def resolve_closure(
     # imports walked this run, threaded into conflict detection (issue #1318).
     import_incompatible_edges: list[tuple[str, str]] = []
     provided = _provided_versions(plugins)
+    # Installed plugins' Modrinth ``source_project_id``s. A transitive dep keyed by
+    # ``project_id`` (depth >= 1) is already satisfied when one of these matches --
+    # the same recognition #1321 applies to the depth-0 catalog-dep seeding (issue
+    # #1325). The manifest namespace (``provided``) cannot cover a project_id key.
+    installed_projects = installed_project_ids(plugins)
 
     frontier: list[_FrontierDep] = []
     for plugin in plugins:
@@ -627,9 +632,10 @@ async def resolve_closure(
             visited.add(dep.identifier)
 
             present = provided.get(dep.identifier)
-            if present is not None and version_satisfies(
-                present, dep.version_range, range_loader
-            ):
+            if (
+                present is not None
+                and version_satisfies(present, dep.version_range, range_loader)
+            ) or dep.identifier in installed_projects:
                 entries.append(
                     ResolutionEntry(
                         dep.identifier,

@@ -972,6 +972,121 @@ class TestResolveCatalogDeps:
         assert failed == []
         assert [p.source_project_id for p in installed] == ["ARCH"]
 
+    async def test_transitive_dep_satisfied_by_installed_project_id(self) -> None:
+        # REI -> Architectury (catalog dep), and Architectury -> Fabric API
+        # (P7dR8mSH) transitively. Fabric API is ALREADY installed (by
+        # source_project_id), so the depth-1 transitive dep must classify
+        # already_satisfied, not needs_import (#1325).
+        rei = _plugin(
+            server_id=ServerId.new(),
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            catalog_dependencies=[_catalog_dep("ARCH")],
+        )
+        fabric = _plugin(
+            server_id=rei.server_id,
+            mod_identifier="fabric-api",
+            source=PluginSource.MODRINTH,
+            source_project_id="P7dR8mSH",
+        )
+        server = _server()
+        rei.server_id = server.id
+        fabric.server_id = server.id
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei, fabric)
+        catalog = FakeCatalogProvider()
+        arch_version = _version(
+            version_id="ARCHVER",
+            dependencies=[
+                CatalogDependency(
+                    version_id=None,
+                    project_id="P7dR8mSH",
+                    dependency_type="required",
+                )
+            ],
+        )
+        catalog.seed_project(
+            _project(project_id="ARCH", slug="architectury", title="Architectury"),
+            versions=[arch_version],
+        )
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        assert by_id["ARCH"].status == "needs_import"
+        fabric_entry = by_id["P7dR8mSH"]
+        assert fabric_entry.status == "already_satisfied"
+        assert fabric_entry.depth == 1
+        assert fabric_entry.required_by == "architectury"
+
+    async def test_apply_skips_installed_transitive_dep(self) -> None:
+        # Apply counterpart: with Fabric API already installed, apply imports
+        # Architectury and Cloth Config (REI's catalog deps) but does NOT
+        # re-install Fabric API (#1325).
+        rei = _plugin(
+            server_id=ServerId.new(),
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            catalog_dependencies=[_catalog_dep("ARCH"), _catalog_dep("CLOTH")],
+        )
+        fabric = _plugin(
+            server_id=rei.server_id,
+            mod_identifier="fabric-api",
+            source=PluginSource.MODRINTH,
+            source_project_id="P7dR8mSH",
+        )
+        server = _server()
+        rei.server_id = server.id
+        fabric.server_id = server.id
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei, fabric)
+        catalog = FakeCatalogProvider()
+        arch_jar = _fabric_jar(mod_id="architectury")
+        arch_version = _version(
+            version_id="ARCHVER",
+            filename="architectury.jar",
+            file_content=arch_jar,
+            dependencies=[
+                CatalogDependency(
+                    version_id=None,
+                    project_id="P7dR8mSH",
+                    dependency_type="required",
+                )
+            ],
+        )
+        catalog.seed_project(
+            _project(project_id="ARCH", slug="architectury", title="Architectury"),
+            versions=[arch_version],
+        )
+        _seed_downloadable(catalog, arch_version, arch_jar)
+        cloth_jar = _fabric_jar(mod_id="cloth-config")
+        cloth_version = _version(
+            version_id="CLOTHVER",
+            filename="cloth-config.jar",
+            file_content=cloth_jar,
+        )
+        catalog.seed_project(
+            _project(project_id="CLOTH", slug="cloth-config", title="Cloth Config"),
+            versions=[cloth_version],
+        )
+        _seed_downloadable(catalog, cloth_version, cloth_jar)
+        file_store = FakeFileStore()
+        cache = FakePluginCacheStore()
+        install = _install_uc(uow, catalog, file_store, cache)
+
+        _new_plan, installed, failed = await ApplyPluginResolution(
+            uow, catalog, install
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            applied_by=uuid.uuid4(),
+        )
+        assert failed == []
+        assert {p.source_project_id for p in installed} == {"ARCH", "CLOTH"}
+
 
 class TestResolveIncompatibleCatalogEdges:
     # A Modrinth catalog ``incompatible`` edge (issue #1318), keyed by project_id,

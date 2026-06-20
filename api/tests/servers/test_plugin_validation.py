@@ -308,6 +308,91 @@ class TestConflicts:
         assert len(result.conflicts) == 1
         assert result.conflicts[0].conflicts_with == "sodium"
 
+    def test_break_range_out_of_range_is_not_flagged(self) -> None:
+        # REI breaks cloth-config2 only below 6.2; Cloth Config v15.0.140
+        # provides cloth-config2 -- well above the range, so no conflict (#1324).
+        rei = _plugin(
+            mod_identifier="roughlyenoughitems",
+            dependencies=parse_manifest(
+                _jar(
+                    {
+                        "fabric.mod.json": json.dumps(
+                            {
+                                "id": "roughlyenoughitems",
+                                "version": "1.0.0",
+                                "breaks": {"cloth-config2": "<6.2-"},
+                            }
+                        )
+                    }
+                ),
+                server_type="fabric",
+            ).dependencies,
+        )
+        cloth = _plugin(
+            mod_identifier="cloth-config",
+            provides=["cloth-config2"],
+            version_number="15.0.140",
+        )
+        result = validate_plugin_set(
+            server_type="fabric", mc_version="1.21", plugins=[rei, cloth]
+        )
+
+        assert result.conflicts == []
+
+    def test_break_range_in_range_is_flagged(self) -> None:
+        # The same break edge fires when the present cloth-config2 (v6.1) falls
+        # inside the declared ``<6.2`` break range (#1324).
+        rei = _plugin(
+            mod_identifier="roughlyenoughitems",
+            dependencies=parse_manifest(
+                _jar(
+                    {
+                        "fabric.mod.json": json.dumps(
+                            {
+                                "id": "roughlyenoughitems",
+                                "version": "1.0.0",
+                                "breaks": {"cloth-config2": "<6.2-"},
+                            }
+                        )
+                    }
+                ),
+                server_type="fabric",
+            ).dependencies,
+        )
+        cloth = _plugin(
+            mod_identifier="cloth-config",
+            provides=["cloth-config2"],
+            version_number="6.1",
+        )
+        result = validate_plugin_set(
+            server_type="fabric", mc_version="1.21", plugins=[rei, cloth]
+        )
+
+        assert len(result.conflicts) == 1
+        assert result.conflicts[0].mod_id == "roughlyenoughitems"
+        assert result.conflicts[0].conflicts_with == "cloth-config2"
+
+    def test_break_empty_range_is_flagged_regardless_of_version(self) -> None:
+        # An empty break range means "any version" -- still a conflict (#1324).
+        breaking = _plugin(
+            mod_identifier="optifabric",
+            dependencies=[
+                {
+                    "mod_identifier": "sodium",
+                    "version_range": "",
+                    "required": False,
+                    "conflict": True,
+                }
+            ],
+        )
+        sodium = _plugin(mod_identifier="sodium", version_number="0.5.99")
+        result = validate_plugin_set(
+            server_type="fabric", mc_version="1.21", plugins=[breaking, sodium]
+        )
+
+        assert len(result.conflicts) == 1
+        assert result.conflicts[0].conflicts_with == "sodium"
+
     def test_catalog_incompatible_against_installed_project_is_flagged(self) -> None:
         # A Modrinth catalog ``incompatible`` edge (issue #1318), keyed by
         # project_id, is flagged when an installed plugin has that
