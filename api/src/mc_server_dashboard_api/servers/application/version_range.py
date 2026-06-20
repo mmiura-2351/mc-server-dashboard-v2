@@ -107,6 +107,17 @@ def _components(version: str) -> list[object]:
     return parts
 
 
+def compare_versions(a: str, b: str) -> int:
+    """Three-way compare two version strings (-1/0/1), for newest-wins selection.
+
+    A public wrapper over the same component-wise comparison the range dialects
+    use internally (issue #1309): the auto-resolver picks the newest compatible
+    Modrinth version, so it needs a total order over version numbers.
+    """
+
+    return _compare(a, b)
+
+
 def _compare(a: str, b: str) -> int:
     """Three-way compare two versions component-wise (missing component == 0).
 

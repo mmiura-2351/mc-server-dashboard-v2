@@ -7,7 +7,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { components } from "../api/schema";
@@ -264,5 +264,110 @@ describe("ServerPluginsTab side + client modpack (issue #1308)", () => {
     expect(
       screen.queryByText("Download client modpack"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("ServerPluginsTab dependency resolution (issue #1309)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const RESOLVE_PLAN = {
+    entries: [
+      {
+        dep_identifier: "fabric-api",
+        required_range: ">=0.90.0",
+        status: "needs_import",
+        will_import: {
+          project_id: "P_FABRICAPI",
+          version_id: "V1",
+          slug: "fabric-api",
+          version_number: "0.92.0",
+        },
+        depth: 0,
+        required_by: null,
+        blocked: false,
+      },
+    ],
+    validation: EMPTY_VALIDATION,
+  };
+
+  it("shows the planned imports and applies on confirm", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    mockApi.post.mockImplementation((url: string) => {
+      if (url.endsWith("/plugins/resolve/apply")) {
+        return Promise.resolve({
+          plan: RESOLVE_PLAN,
+          installed: [],
+          failed: [],
+        });
+      }
+      if (url.endsWith("/plugins/resolve")) {
+        return Promise.resolve(RESOLVE_PLAN);
+      }
+      return Promise.resolve({});
+    });
+    renderTab();
+
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resolve dependencies"));
+
+    // The plan modal lists the dep that will be imported from Modrinth.
+    await waitFor(() => {
+      expect(
+        screen.getByText(/fabric-api → fabric-api 0.92.0/),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Install dependencies"));
+    await waitFor(() => {
+      expect(mockApi.post).toHaveBeenCalledWith(
+        expect.stringContaining("/plugins/resolve/apply"),
+      );
+    });
+  });
+
+  it("surfaces a blocked conflict and disables apply", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    mockApi.post.mockImplementation((url: string) => {
+      if (url.endsWith("/plugins/resolve")) {
+        return Promise.resolve({
+          entries: [
+            {
+              dep_identifier: "fabric-api",
+              required_range: "",
+              status: "needs_import",
+              will_import: {
+                project_id: "P",
+                version_id: "V1",
+                slug: "fabric-api",
+                version_number: "0.92.0",
+              },
+              depth: 0,
+              required_by: null,
+              blocked: true,
+            },
+          ],
+          validation: EMPTY_VALIDATION,
+        });
+      }
+      return Promise.resolve({});
+    });
+    renderTab();
+
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resolve dependencies"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Blocked by conflicts")).toBeInTheDocument();
+    });
+    // No importable deps -> the apply button is disabled.
+    expect(
+      screen.getByText("Install dependencies").closest("button"),
+    ).toBeDisabled();
   });
 });

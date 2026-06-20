@@ -272,6 +272,10 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.application.plugin_resolution import (
+    ApplyPluginResolution,
+    ResolvePluginDependencies,
+)
 from mc_server_dashboard_api.servers.application.plugins import (
     GetPlugin,
     InstallPlugin,
@@ -2067,6 +2071,36 @@ def get_install_from_catalog(
         cache=cache,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_resolve_plugin_dependencies(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> ResolvePluginDependencies:
+    """Assemble :class:`ResolvePluginDependencies` (plugin:read, issue #1309)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ResolvePluginDependencies(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_apply_plugin_resolution(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+    install_from_catalog: Annotated[
+        InstallFromCatalog, Depends(get_install_from_catalog)
+    ],
+) -> ApplyPluginResolution:
+    """Assemble :class:`ApplyPluginResolution` (plugin:manage, issue #1309)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ApplyPluginResolution(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+        install_from_catalog=install_from_catalog,
     )
 
 

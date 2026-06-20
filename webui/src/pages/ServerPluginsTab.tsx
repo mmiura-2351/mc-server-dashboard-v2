@@ -39,6 +39,8 @@ type CatalogSearchResultResponse =
 type CatalogVersionResponse = components["schemas"]["CatalogVersionResponse"];
 type PluginValidationResponse =
   components["schemas"]["PluginValidationResponse"];
+type ResolutionPlanResponse = components["schemas"]["ResolutionPlanResponse"];
+type ApplyResolutionResponse = components["schemas"]["ApplyResolutionResponse"];
 
 /** Server types that support plugins/mods. Vanilla and Spigot do not. */
 function supportsPlugins(serverType: string): boolean {
@@ -83,6 +85,7 @@ export function ServerPluginsTab({
   const fileInput = useRef<HTMLInputElement>(null);
   const [removeTarget, setRemoveTarget] = useState<PluginResponse | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
+  const [resolveOpen, setResolveOpen] = useState(false);
 
   const canRead = can("plugin:read", { serverId });
   const canManage = can("plugin:manage", { serverId });
@@ -353,6 +356,14 @@ export function ServerPluginsTab({
           >
             {t("plugins.browse")}
           </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={busy || !serverAtRest}
+            onClick={() => setResolveOpen(true)}
+          >
+            {t("plugins.resolve.action")}
+          </button>
         </div>
       )}
 
@@ -453,6 +464,21 @@ export function ServerPluginsTab({
             refresh();
           }}
           onClose={() => setBrowseOpen(false)}
+          onError={onError}
+        />
+      )}
+
+      {resolveOpen && (
+        <PluginResolveModal
+          communityId={communityId}
+          serverId={serverId}
+          serverAtRest={serverAtRest}
+          nameOf={(modId) => nameOfPlugin(plugins, modId)}
+          onApplied={() => {
+            setResolveOpen(false);
+            refresh();
+          }}
+          onClose={() => setResolveOpen(false)}
           onError={onError}
         />
       )}
@@ -720,6 +746,181 @@ function PluginValidationChecklist({
         </ul>
       )}
     </div>
+  );
+}
+
+// ── Dependency auto-resolution modal (issue #1309) ────────────────────────
+
+function PluginResolveModal({
+  communityId,
+  serverId,
+  serverAtRest,
+  nameOf,
+  onApplied,
+  onClose,
+  onError,
+}: {
+  communityId: string;
+  serverId: string;
+  serverAtRest: boolean;
+  nameOf: (modId: string) => string;
+  onApplied: () => void;
+  onClose: () => void;
+  onError: (error: unknown) => void;
+}) {
+  const { showToast } = useToast();
+
+  // The plan is a POST (it queries Modrinth), so it is a mutation triggered on
+  // open rather than a cached query. Read-only on the backend: nothing installs.
+  const planMutation = useMutation({
+    mutationFn: (): Promise<ResolutionPlanResponse> =>
+      api.post(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/plugins/resolve",
+          { community_id: communityId, server_id: serverId },
+        ),
+      ),
+    onError,
+  });
+
+  // Compute the plan once when the modal opens.
+  const runPlan = planMutation.mutate;
+  useEffect(() => {
+    runPlan();
+  }, [runPlan]);
+
+  const applyMutation = useMutation({
+    mutationFn: (): Promise<ApplyResolutionResponse> =>
+      api.post(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/plugins/resolve/apply",
+          { community_id: communityId, server_id: serverId },
+        ),
+      ),
+    onSuccess: (result) => {
+      if (result.failed.length > 0) {
+        showToast(t("plugins.resolve.appliedWithFailures"), "error");
+      } else {
+        showToast(t("plugins.resolve.applied"), "success");
+      }
+      onApplied();
+    },
+    onError,
+  });
+
+  const plan = planMutation.data;
+  const entries = plan?.entries ?? [];
+  const imports = entries.filter(
+    (e) => e.status === "needs_import" && !e.blocked && e.will_import !== null,
+  );
+  const satisfied = entries.filter((e) => e.status === "already_satisfied");
+  const conflicts = entries.filter((e) => e.blocked);
+  const unresolvable = entries.filter(
+    (e) => e.status === "unresolvable" && !e.blocked,
+  );
+  const busy = applyMutation.isPending;
+
+  return (
+    <Modal open={true} title={t("plugins.resolve.title")} onClose={onClose}>
+      {planMutation.isPending ? (
+        <p className="sub">{t("plugins.resolve.loading")}</p>
+      ) : (
+        <div className="plugins-resolve">
+          {imports.length === 0 &&
+            conflicts.length === 0 &&
+            unresolvable.length === 0 && (
+              <p className="field-hint">{t("plugins.resolve.nothing")}</p>
+            )}
+
+          {imports.length > 0 && (
+            <section>
+              <h4>{t("plugins.resolve.importsHeading")}</h4>
+              <ul>
+                {imports.map((e) => (
+                  <li key={`import-${e.dep_identifier}`}>
+                    {t("plugins.resolve.importItem")
+                      .replace("{dependency}", e.dep_identifier)
+                      .replace("{project}", e.will_import?.slug ?? "")
+                      .replace(
+                        "{version}",
+                        e.will_import?.version_number ?? "",
+                      )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {conflicts.length > 0 && (
+            <section>
+              <h4>{t("plugins.resolve.conflictsHeading")}</h4>
+              <ul>
+                {conflicts.map((e) => (
+                  <li
+                    key={`conflict-${e.dep_identifier}`}
+                    className="field-error"
+                  >
+                    {t("plugins.resolve.conflictItem").replace(
+                      "{dependency}",
+                      e.dep_identifier,
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {unresolvable.length > 0 && (
+            <section>
+              <h4>{t("plugins.resolve.unresolvableHeading")}</h4>
+              <ul>
+                {unresolvable.map((e) => (
+                  <li
+                    key={`unresolvable-${e.dep_identifier}`}
+                    className="field-hint warn"
+                  >
+                    {t("plugins.resolve.unresolvableItem").replace(
+                      "{dependency}",
+                      e.dep_identifier,
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {satisfied.length > 0 && (
+            <section>
+              <h4>{t("plugins.resolve.satisfiedHeading")}</h4>
+              <ul>
+                {satisfied.map((e) => (
+                  <li key={`satisfied-${e.dep_identifier}`} className="sub">
+                    {t("plugins.resolve.satisfiedItem").replace(
+                      "{dependency}",
+                      nameOf(e.dep_identifier),
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          <div className="plugins-resolve-actions">
+            <button type="button" className="btn" onClick={onClose}>
+              {t("plugins.resolve.cancel")}
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy || !serverAtRest || imports.length === 0}
+              onClick={() => applyMutation.mutate()}
+            >
+              {t("plugins.resolve.apply")}
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 

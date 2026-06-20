@@ -1172,6 +1172,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Plugin Dependencies
+         * @description Plan dependency auto-resolution (plugin:read, issue #1309).
+         *
+         *     Computes the transitive closure of the server's required deps: each is
+         *     classified already-satisfied (present in range), needs-import (a Modrinth
+         *     project@version to install), unresolvable (no Modrinth match), or blocked (a
+         *     transitive conflict). Read-only: nothing is downloaded or installed.
+         */
+        post: operations["resolve_plugin_dependencies_api_communities__community_id__servers__server_id__plugins_resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/resolve/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply Plugin Resolution
+         * @description Apply dependency auto-resolution (plugin:manage, issue #1309).
+         *
+         *     Installs each non-blocked needs-import dep from Modrinth onto the server via
+         *     the catalog install path, then re-plans. At-rest gated (409
+         *     ``server_unsettled`` while the server is running); a per-dep install failure
+         *     is isolated and reported in ``failed``; a blocked (conflicting) dep is never
+         *     installed.
+         */
+        post: operations["apply_plugin_resolution_api_communities__community_id__servers__server_id__plugins_resolve_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/plugins/updates": {
         parameters: {
             query?: never;
@@ -2109,6 +2160,21 @@ export interface components {
             /** Username */
             username: string;
         };
+        /**
+         * ApplyResolutionResponse
+         * @description The result of applying a resolution: the re-plan, installs, and failures.
+         *
+         *     ``installed`` are the plugins newly installed from Modrinth; ``failed`` are
+         *     the dep identifiers whose Modrinth lookup/install failed (isolated per dep);
+         *     ``plan`` is the re-computed plan after the installs.
+         */
+        ApplyResolutionResponse: {
+            /** Failed */
+            failed: string[];
+            /** Installed */
+            installed: components["schemas"]["PluginResponse"][];
+            plan: components["schemas"]["ResolutionPlanResponse"];
+        };
         /** AssignResourcePackRequest */
         AssignResourcePackRequest: {
             /**
@@ -2933,6 +2999,34 @@ export interface components {
             /** To */
             to: string;
         };
+        /**
+         * ResolutionEntryResponse
+         * @description One required dependency and how it resolves in the plan.
+         */
+        ResolutionEntryResponse: {
+            /** Blocked */
+            blocked: boolean;
+            /** Dep Identifier */
+            dep_identifier: string;
+            /** Depth */
+            depth: number;
+            /** Required By */
+            required_by: string | null;
+            /** Required Range */
+            required_range: string;
+            /** Status */
+            status: string;
+            will_import: components["schemas"]["WillImportResponse"] | null;
+        };
+        /**
+         * ResolutionPlanResponse
+         * @description The dependency-resolution plan plus the phase-B validation checklist.
+         */
+        ResolutionPlanResponse: {
+            /** Entries */
+            entries: components["schemas"]["ResolutionEntryResponse"][];
+            validation: components["schemas"]["PluginValidationResponse"];
+        };
         /** ResourcePackAssignmentResponse */
         ResourcePackAssignmentResponse: {
             /**
@@ -3238,6 +3332,20 @@ export interface components {
         VersionsResponse: {
             /** Versions */
             versions: string[];
+        };
+        /**
+         * WillImportResponse
+         * @description The Modrinth project@version a ``needs_import`` dep resolves to.
+         */
+        WillImportResponse: {
+            /** Project Id */
+            project_id: string;
+            /** Slug */
+            slug: string;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: string;
         };
         /** WorkerResponse */
         WorkerResponse: {
@@ -5739,6 +5847,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_plugin_dependencies_api_communities__community_id__servers__server_id__plugins_resolve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_plugin_resolution_api_communities__community_id__servers__server_id__plugins_resolve_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApplyResolutionResponse"];
                 };
             };
             /** @description Validation Error */

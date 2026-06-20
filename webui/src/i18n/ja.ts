@@ -1352,6 +1352,26 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.validation.conflict": "{mod} は {other} と競合します。",
   "plugins.validation.mcMismatch":
     "{mod} は MC {serverVersion} に対応していません（対応: {modVersions}）。",
+  // 依存関係の自動解決 (issue #1309)。
+  "plugins.resolve.action": "依存関係を解決",
+  "plugins.resolve.loading": "解決プランを計算中…",
+  "plugins.resolve.title": "依存関係を解決",
+  "plugins.resolve.nothing": "必要な依存関係はすべて満たされています。",
+  "plugins.resolve.importsHeading": "Modrinth からインストールします",
+  "plugins.resolve.importItem": "{dependency} → {project} {version}",
+  "plugins.resolve.satisfiedHeading": "解決済み",
+  "plugins.resolve.satisfiedItem": "{dependency}",
+  "plugins.resolve.conflictsHeading": "競合によりブロック",
+  "plugins.resolve.conflictItem":
+    "{dependency} はインストールできません（インストール済みプラグインと競合します）。",
+  "plugins.resolve.unresolvableHeading": "解決できません",
+  "plugins.resolve.unresolvableItem":
+    "{dependency} — 互換性のある Modrinth バージョンが見つかりません。",
+  "plugins.resolve.apply": "依存関係をインストール",
+  "plugins.resolve.cancel": "キャンセル",
+  "plugins.resolve.applied": "依存関係をインストールしました。",
+  "plugins.resolve.appliedWithFailures":
+    "一部の依存関係をインストールできませんでした。",
   "communitySettings.roles.family.plugin": "プラグイン",
   "communitySettings.roles.code.plugin:read": "閲覧",
   "communitySettings.roles.code.plugin:manage": "管理",
