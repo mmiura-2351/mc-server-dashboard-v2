@@ -738,6 +738,7 @@ function PluginValidationChecklist({
 }) {
   const total =
     validation.missing_deps.length +
+    validation.missing_catalog_deps.length +
     validation.version_unsatisfied.length +
     validation.conflicts.length +
     validation.mc_mismatch.length;
@@ -758,6 +759,19 @@ function PluginValidationChecklist({
                 .replace("{mod}", nameOf(finding.mod_id))
                 .replace("{dependency}", finding.depends_on)
                 .replace("{range}", finding.version_range)}
+            </li>
+          ))}
+          {validation.missing_catalog_deps.map((finding) => (
+            <li
+              key={`catdep-${finding.mod_id}-${finding.project_id}`}
+              className="field-error"
+            >
+              {t("plugins.validation.missingCatalogDep")
+                .replace("{mod}", nameOf(finding.mod_id))
+                .replace(
+                  "{dependency}",
+                  finding.title ?? finding.slug ?? finding.project_id,
+                )}
             </li>
           ))}
           {validation.version_unsatisfied.map((finding) => (

@@ -2803,6 +2803,20 @@ export interface components {
             /** Relay Enabled */
             relay_enabled: boolean;
         };
+        /**
+         * MissingCatalogDependencyResponse
+         * @description A required Modrinth catalog dep no installed project covers (issue #1321).
+         */
+        MissingCatalogDependencyResponse: {
+            /** Mod Id */
+            mod_id: string;
+            /** Project Id */
+            project_id: string;
+            /** Slug */
+            slug: string | null;
+            /** Title */
+            title: string | null;
+        };
         /** MissingDependencyResponse */
         MissingDependencyResponse: {
             /** Depends On */
@@ -2924,6 +2938,8 @@ export interface components {
             conflicts: components["schemas"]["ConflictResponse"][];
             /** Mc Mismatch */
             mc_mismatch: components["schemas"]["McMismatchResponse"][];
+            /** Missing Catalog Deps */
+            missing_catalog_deps: components["schemas"]["MissingCatalogDependencyResponse"][];
             /** Missing Deps */
             missing_deps: components["schemas"]["MissingDependencyResponse"][];
             /** Version Unsatisfied */

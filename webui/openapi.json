@@ -1922,6 +1922,49 @@
         "title": "MetaResponse",
         "type": "object"
       },
+      "MissingCatalogDependencyResponse": {
+        "description": "A required Modrinth catalog dep no installed project covers (issue #1321).",
+        "properties": {
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "mod_id",
+          "project_id",
+          "slug",
+          "title"
+        ],
+        "title": "MissingCatalogDependencyResponse",
+        "type": "object"
+      },
       "MissingDependencyResponse": {
         "properties": {
           "depends_on": {
@@ -2288,6 +2331,13 @@
             "title": "Mc Mismatch",
             "type": "array"
           },
+          "missing_catalog_deps": {
+            "items": {
+              "$ref": "#/components/schemas/MissingCatalogDependencyResponse"
+            },
+            "title": "Missing Catalog Deps",
+            "type": "array"
+          },
           "missing_deps": {
             "items": {
               "$ref": "#/components/schemas/MissingDependencyResponse"
@@ -2305,6 +2355,7 @@
         },
         "required": [
           "missing_deps",
+          "missing_catalog_deps",
           "version_unsatisfied",
           "conflicts",
           "mc_mismatch"

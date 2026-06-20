@@ -68,6 +68,7 @@ const allow: Can = () => true;
 
 const EMPTY_VALIDATION: PluginValidationResponse = {
   missing_deps: [],
+  missing_catalog_deps: [],
   version_unsatisfied: [],
   conflicts: [],
   mc_mismatch: [],
@@ -167,6 +168,52 @@ describe("ServerPluginsTab validation checklist", () => {
       expect(
         screen.getByText(/Sodium requires fabric-api/),
       ).toBeInTheDocument();
+    });
+  });
+
+  it("reports a missing Modrinth catalog dependency by its title", async () => {
+    mockGets({
+      plugins: [
+        plugin({ display_name: "Roughly Enough Items", mod_identifier: "rei" }),
+      ],
+      validation: {
+        ...EMPTY_VALIDATION,
+        missing_catalog_deps: [
+          {
+            mod_id: "rei",
+            project_id: "lhGA9TYQ",
+            slug: "architectury-api",
+            title: "Architectury",
+          },
+        ],
+      },
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Roughly Enough Items requires Architectury/),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("falls back to the project id when no catalog label was captured", async () => {
+    mockGets({
+      plugins: [plugin({ mod_identifier: "rei" })],
+      validation: {
+        ...EMPTY_VALIDATION,
+        missing_catalog_deps: [
+          {
+            mod_id: "rei",
+            project_id: "lhGA9TYQ",
+            slug: null,
+            title: null,
+          },
+        ],
+      },
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText(/requires lhGA9TYQ/)).toBeInTheDocument();
     });
   });
 

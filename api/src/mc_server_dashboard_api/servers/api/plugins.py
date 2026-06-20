@@ -264,6 +264,15 @@ class MissingDependencyResponse(BaseModel):
     version_range: str
 
 
+class MissingCatalogDependencyResponse(BaseModel):
+    """A required Modrinth catalog dep no installed project covers (issue #1321)."""
+
+    mod_id: str
+    project_id: str
+    slug: str | None
+    title: str | None
+
+
 class VersionUnsatisfiedResponse(BaseModel):
     mod_id: str
     depends_on: str
@@ -286,6 +295,7 @@ class PluginValidationResponse(BaseModel):
     """The phase-B dependency/compatibility checklist for a server's plugin set."""
 
     missing_deps: list[MissingDependencyResponse]
+    missing_catalog_deps: list[MissingCatalogDependencyResponse]
     version_unsatisfied: list[VersionUnsatisfiedResponse]
     conflicts: list[ConflictResponse]
     mc_mismatch: list[McMismatchResponse]
@@ -300,6 +310,15 @@ class PluginValidationResponse(BaseModel):
                     version_range=f.version_range,
                 )
                 for f in v.missing_deps
+            ],
+            missing_catalog_deps=[
+                MissingCatalogDependencyResponse(
+                    mod_id=f.mod_id,
+                    project_id=f.project_id,
+                    slug=f.slug,
+                    title=f.title,
+                )
+                for f in v.missing_catalog_deps
             ],
             version_unsatisfied=[
                 VersionUnsatisfiedResponse(

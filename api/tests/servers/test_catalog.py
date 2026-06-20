@@ -359,6 +359,63 @@ async def test_install_from_catalog_parses_manifest() -> None:
     assert plugin.mc_versions == ["1.20.4"]
 
 
+async def test_install_from_catalog_captures_required_catalog_deps() -> None:
+    # The selected Modrinth version's REQUIRED catalog deps are captured at
+    # ingest (issue #1321), keyed by project_id, with the dep project's slug/title
+    # for display. Optional deps are not stored.
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    rei_project = _project(project_id="REI", slug="rei", title="Roughly Enough Items")
+    rei_version, content = _version()
+    rei_version = CatalogVersion(
+        version_id=rei_version.version_id,
+        version_number=rei_version.version_number,
+        name=rei_version.name,
+        game_versions=rei_version.game_versions,
+        loaders=rei_version.loaders,
+        files=rei_version.files,
+        date_published=rei_version.date_published,
+        dependencies=[
+            CatalogDependency(
+                version_id=None, project_id="ARCH", dependency_type="required"
+            ),
+            CatalogDependency(
+                version_id=None, project_id="OPT", dependency_type="optional"
+            ),
+        ],
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(rei_project, [rei_version])
+    catalog.seed_file(rei_version.files[0].url, content)
+    catalog.seed_project(
+        _project(project_id="ARCH", slug="architectury-api", title="Architectury")
+    )
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="REI",
+        version_id="ver-1",
+    )
+    assert plugin.catalog_dependencies == [
+        {
+            "project_id": "ARCH",
+            "required": True,
+            "slug": "architectury-api",
+            "title": "Architectury",
+        }
+    ]
+
+
 async def test_install_from_catalog_paper_server() -> None:
     uow = FakeUnitOfWork()
     server = _server(server_type=ServerType.PAPER)
