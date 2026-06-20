@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import io
 import uuid
+import zipfile
 
 import pytest
 
@@ -369,6 +371,85 @@ async def test_upload_allows_outside_content_dir() -> None:
         extract=False,
     )
     assert fs.files["config/data.txt"] == b"config data"
+
+
+# ---------------------------------------------------------------------------
+# Part 1f: Use-case integration -- UploadFile with extract=True (issue #1337)
+# ---------------------------------------------------------------------------
+
+
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+async def test_upload_extract_rejects_entry_targeting_content_dir() -> None:
+    """An archive extracted to root with an entry like ``mods/evil.jar``
+    must be rejected with ContentDirProtectedError (issue #1337)."""
+
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.FABRIC)
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    uc = UploadFile(uow=uow, file_store=fs)
+
+    archive = _zip_bytes({"config/ok.txt": b"safe", "mods/evil.jar": b"pwned"})
+    with pytest.raises(ContentDirProtectedError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            dir_path="",
+            filename="pack.zip",
+            content=archive,
+            extract=True,
+        )
+    # No entries should have been written (fail-early semantics).
+    assert not fs.files
+
+
+async def test_upload_extract_allows_entries_outside_content_dir() -> None:
+    """An archive whose entries do NOT target the content directory succeeds."""
+
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.FABRIC)
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    uc = UploadFile(uow=uow, file_store=fs)
+
+    archive = _zip_bytes({"config/a.yml": b"A", "data/b.txt": b"B"})
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        dir_path="",
+        filename="safe.zip",
+        content=archive,
+        extract=True,
+    )
+    assert fs.files["config/a.yml"] == b"A"
+    assert fs.files["data/b.txt"] == b"B"
+
+
+async def test_upload_non_extract_outside_content_dir_succeeds() -> None:
+    """A non-extract upload to a path outside the content dir still works."""
+
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.FABRIC)
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    uc = UploadFile(uow=uow, file_store=fs)
+
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        dir_path="backups",
+        filename="world.zip",
+        content=b"archive-bytes",
+        extract=False,
+    )
+    assert fs.files["backups/world.zip"] == b"archive-bytes"
 
 
 # ---------------------------------------------------------------------------
