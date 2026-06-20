@@ -150,7 +150,7 @@ def validate_plugin_set(
         missing_deps=missing_deps,
         missing_catalog_deps=_missing_catalog_deps(plugins),
         version_unsatisfied=version_unsatisfied,
-        conflicts=_conflicts(plugins, set(provided)),
+        conflicts=_conflicts(plugins, provided, loader),
         mc_mismatch=_mc_mismatch(plugins, mc_version, loader),
     )
 
@@ -245,14 +245,22 @@ def _missing_catalog_deps(
     return findings
 
 
-def _conflicts(plugins: list[ServerPlugin], provided: set[str]) -> list[Conflict]:
+def _conflicts(
+    plugins: list[ServerPlugin], provided: dict[str, str], loader: str
+) -> list[Conflict]:
     """Flag manifest ``conflict`` edges and Modrinth catalog ``incompatible`` edges.
 
     A manifest ``breaks``/``conflicts`` edge is flagged when its target id is
-    present (the ``mod_identifier`` namespace). A Modrinth catalog ``incompatible``
-    edge (issue #1318) is keyed by ``project_id`` and flagged when an installed
-    plugin has that ``source_project_id``; the finding reports that plugin's
-    ``mod_identifier`` so the checklist stays in the same namespace as the rest.
+    present (the ``mod_identifier`` namespace) **and** the present version falls
+    within the declared break ``version_range`` -- a ``breaks: {X: "<6.2"}`` does
+    not fire when X is present above 6.2 (issue #1324). The range is evaluated by
+    :func:`version_range.version_satisfies` in the server's loader dialect, the
+    same way ``version_unsatisfied`` checks required ranges; an empty/unparseable
+    range is "any version" and so always fires. A Modrinth catalog
+    ``incompatible`` edge (issue #1318) is keyed by ``project_id`` and flagged
+    when an installed plugin has that ``source_project_id``; the finding reports
+    that plugin's ``mod_identifier`` so the checklist stays in the same namespace
+    as the rest.
     """
 
     by_project_id = {
@@ -269,6 +277,10 @@ def _conflicts(plugins: list[ServerPlugin], provided: set[str]) -> list[Conflict
                 continue
             target = dep.get("mod_identifier")
             if not isinstance(target, str) or target not in provided:
+                continue
+            raw_range = dep.get("version_range")
+            break_range = raw_range if isinstance(raw_range, str) else ""
+            if not version_satisfies(provided[target], break_range, loader):
                 continue
             findings.append(
                 Conflict(mod_id=plugin.mod_identifier, conflicts_with=target)
