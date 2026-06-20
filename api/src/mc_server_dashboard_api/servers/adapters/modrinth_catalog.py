@@ -109,6 +109,8 @@ class ModrinthCatalog(CatalogProvider):
             categories=data.get("categories", []),
             game_versions=data.get("game_versions", []),
             loaders=data.get("loaders", []),
+            client_side=data.get("client_side", "unknown"),
+            server_side=data.get("server_side", "unknown"),
         )
 
     async def list_versions(

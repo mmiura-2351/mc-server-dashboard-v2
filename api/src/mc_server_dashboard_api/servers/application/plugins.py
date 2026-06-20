@@ -25,6 +25,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
+    InvalidPluginSideError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
     ServerFileNotFoundError,
@@ -38,11 +39,13 @@ from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
 )
 from mc_server_dashboard_api.servers.domain.plugin import (
     PluginId,
+    PluginSide,
     PluginSource,
     ServerPlugin,
     content_dir_for_server_type,
     loader_type_for_server_type,
     modrinth_loader_for_server_type,
+    working_set_present,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -50,6 +53,9 @@ from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, Se
 
 # Plugin upload size cap: same as the file upload cap (512 MiB).
 MAX_PLUGIN_BYTES = 512 * 1024 * 1024
+
+# The accepted values for a manual side override (issue #1308).
+_VALID_SIDES: frozenset[str] = frozenset({"server", "client", "both"})
 
 
 async def _load(
@@ -168,17 +174,21 @@ class InstallPlugin:
                     loader=modrinth_loader_for_server_type(server.server_type),
                 )
 
-                # Ingest into the content-addressed cache (dedup-on-ingest); the
-                # jar still deploys to the working set below (issue #1306).
+                # Ingest into the content-addressed cache (dedup-on-ingest). The
+                # jar is the byte source for the working set; a client-only mod is
+                # cached but never deployed (issue #1306, #1308).
                 sha256 = await ingest_into_cache(self.cache, content)
 
-                # Write jar to storage.
-                await self.file_store.write_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=rel_path,
-                    content=content,
-                )
+                # Side-aware deploy (issue #1308): only a server-relevant, enabled
+                # jar goes into the working set; a client-only jar is tracked +
+                # cached but never written there.
+                if working_set_present(enabled=True, side=manifest.side):
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=rel_path,
+                        content=content,
+                    )
 
                 checksum = hashlib.sha512(content).hexdigest()
                 now = self.clock.now()
@@ -206,6 +216,7 @@ class InstallPlugin:
                     provides=manifest.provides,
                     dependencies=manifest.dependencies,
                     mc_versions=manifest.mc_versions,
+                    side=manifest.side,
                 )
                 await self.uow.plugins.add(plugin)
                 await self.uow.commit()
@@ -288,6 +299,16 @@ class TogglePlugin:
                     # Append .disabled suffix.
                     new_path = f"{old_path}.disabled"
 
+                # A client-only jar has no working-set file (it is never deployed,
+                # issue #1308), so enable/disable only flips the flag -- there is
+                # nothing to rename and the .disabled convention does not apply.
+                if plugin.side == "client":
+                    plugin.enabled = enable
+                    plugin.updated_at = self.clock.now()
+                    await self.uow.plugins.update(plugin)
+                    await self.uow.commit()
+                    return plugin
+
                 existing = await self.uow.plugins.get_by_rel_path(server_id, new_path)
                 if existing is not None:
                     raise PluginAlreadyExistsError(new_path)
@@ -317,3 +338,96 @@ class TogglePlugin:
                 await self.uow.plugins.update(plugin)
                 await self.uow.commit()
                 return plugin
+
+
+@dataclass(frozen=True)
+class SetPluginSide:
+    """Override an installed plugin's side, re-materializing the working set.
+
+    The side (``server`` / ``client`` / ``both``) governs working-set presence
+    (issue #1308): the running server holds exactly the enabled jars with side in
+    {``server``, ``both``}. Changing the side may flip that presence:
+
+    * client -> {server, both} (and enabled): materialize the jar into the
+      working set from the content-addressed cache.
+    * {server, both} -> client: remove the working-set file.
+
+    The cache is the byte source, so no re-upload is needed. At-rest gated like
+    every other plugin mutation (409 ``server_unsettled`` while running).
+    """
+
+    uow: UnitOfWork
+    file_store: FileStore
+    cache: PluginCacheStore
+    clock: Clock
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        plugin_id: PluginId,
+        side: str,
+    ) -> ServerPlugin:
+        if side not in _VALID_SIDES:
+            raise InvalidPluginSideError(side)
+        new_side: PluginSide = side  # type: ignore[assignment]
+
+        async with self.lifecycle_lock.hold(server_id):
+            async with self.uow:
+                server = await _load(self.uow, community_id, server_id)
+                if not server.is_at_rest():
+                    raise ServerFilesUnsettledError(str(server_id.value))
+
+                plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
+                if plugin is None:
+                    raise PluginNotFoundError(str(plugin_id.value))
+
+                if plugin.side == new_side:
+                    return plugin
+
+                was_present = working_set_present(
+                    enabled=plugin.enabled, side=plugin.side
+                )
+                now_present = working_set_present(enabled=plugin.enabled, side=new_side)
+
+                if now_present and not was_present:
+                    await self._materialize(community_id, server_id, plugin)
+                elif was_present and not now_present:
+                    await self._remove(community_id, server_id, plugin)
+
+                plugin.side = new_side
+                plugin.updated_at = self.clock.now()
+                await self.uow.plugins.update(plugin)
+                await self.uow.commit()
+                return plugin
+
+    async def _materialize(
+        self, community_id: CommunityId, server_id: ServerId, plugin: ServerPlugin
+    ) -> None:
+        """Write the cached jar bytes into the working set at ``plugin.rel_path``."""
+
+        if plugin.sha256 is None:
+            return
+        content = b"".join([chunk async for chunk in self.cache.open(plugin.sha256)])
+        await self.file_store.write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=plugin.rel_path,
+            content=content,
+        )
+
+    async def _remove(
+        self, community_id: CommunityId, server_id: ServerId, plugin: ServerPlugin
+    ) -> None:
+        """Remove the working-set file for ``plugin`` (the cached blob stays)."""
+
+        try:
+            await self.file_store.delete_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=plugin.rel_path,
+            )
+        except ServerFileNotFoundError:
+            pass

@@ -34,13 +34,16 @@ from mc_server_dashboard_api.dependencies import (
     get_check_plugin_update,
     get_check_updates,
     get_current_user,
+    get_download_client_modpack,
     get_get_plugin,
     get_install_plugin,
+    get_list_client_mods,
     get_list_plugin_dependencies,
     get_list_plugins,
     get_membership_visibility,
     get_permission_checker,
     get_remove_plugin,
+    get_set_plugin_side,
     get_toggle_plugin,
     get_update_plugin,
     get_validate_plugin_set,
@@ -57,6 +60,7 @@ from mc_server_dashboard_api.servers.application.plugin_validation import (
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     FileTooLargeError,
+    InvalidPluginSideError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
     ServerFilesUnsettledError,
@@ -79,6 +83,7 @@ def _plugin(
     *,
     server_id: uuid.UUID | None = None,
     plugin_id: uuid.UUID | None = None,
+    side: str = "both",
 ) -> ServerPlugin:
     return ServerPlugin(
         id=PluginId(plugin_id or uuid.uuid4()),
@@ -99,6 +104,7 @@ def _plugin(
         installed_by=None,
         created_at=_NOW,
         updated_at=_NOW,
+        side=side,  # type: ignore[arg-type]
     )
 
 
@@ -167,6 +173,9 @@ def _app(
     update: _FakeUseCase | None = None,
     list_deps: _FakeUseCase | None = None,
     validate: _FakeUseCase | None = None,
+    set_side: _FakeUseCase | None = None,
+    list_client: _FakeUseCase | None = None,
+    download_modpack: _FakeUseCase | None = None,
 ) -> object:
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: make_user()
@@ -194,6 +203,12 @@ def _app(
         app.dependency_overrides[get_list_plugin_dependencies] = lambda: list_deps
     if validate is not None:
         app.dependency_overrides[get_validate_plugin_set] = lambda: validate
+    if set_side is not None:
+        app.dependency_overrides[get_set_plugin_side] = lambda: set_side
+    if list_client is not None:
+        app.dependency_overrides[get_list_client_mods] = lambda: list_client
+    if download_modpack is not None:
+        app.dependency_overrides[get_download_client_modpack] = lambda: download_modpack
     return app
 
 
@@ -560,3 +575,121 @@ def test_validate_plugins_unsupported_server_type_is_422() -> None:
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
     assert resp.status_code == 422
+
+
+# --- side override (issue #1308) -------------------------------------------
+
+
+def test_set_side_authorized_returns_plugin() -> None:
+    pid = uuid.uuid4()
+    p = _plugin(plugin_id=pid, side="both")
+    app = _app(member=True, allow=True, set_side=_FakeUseCase(result=p))
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "both"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["side"] == "both"
+
+
+def test_set_side_invalid_value_is_422() -> None:
+    pid = uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        set_side=_FakeUseCase(error=InvalidPluginSideError("bogus")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "bogus"}
+    )
+    assert resp.status_code == 422
+
+
+def test_set_side_unsettled_is_409() -> None:
+    pid = uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        set_side=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "client"}
+    )
+    assert resp.status_code == 409
+
+
+def test_set_side_non_member_is_404() -> None:
+    pid = uuid.uuid4()
+    app = _app(member=False, allow=True, set_side=_FakeUseCase(result=_plugin()))
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "both"}
+    )
+    assert resp.status_code == 404
+
+
+def test_set_side_member_without_permission_is_403() -> None:
+    pid = uuid.uuid4()
+    app = _app(member=True, allow=False, set_side=_FakeUseCase(result=_plugin()))
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "both"}
+    )
+    assert resp.status_code == 403
+
+
+# --- client modpack (issue #1308) ------------------------------------------
+
+
+def _client_url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> str:
+    return f"/api/communities/{community}/servers/{server}/client-mods{suffix}"
+
+
+def test_list_client_mods_returns_plugins() -> None:
+    p = _plugin(side="client")
+    app = _app(member=True, allow=True, list_client=_FakeUseCase(result=[p]))
+    client = next(_client(app))
+    resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["plugins"]) == 1
+    assert body["plugins"][0]["side"] == "client"
+
+
+def test_list_client_mods_non_member_is_404() -> None:
+    app = _app(member=False, allow=True, list_client=_FakeUseCase(result=[]))
+    client = next(_client(app))
+    resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 404
+
+
+def test_download_client_modpack_streams_zip() -> None:
+    async def _stream() -> object:
+        yield b"PK\x03\x04fake-zip"
+
+    app = _app(
+        member=True,
+        allow=True,
+        download_modpack=_FakeUseCase(result=_stream()),
+    )
+    client = next(_client(app))
+    resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    assert b"fake-zip" in resp.content
+
+
+def test_download_client_modpack_member_without_permission_is_403() -> None:
+    async def _stream() -> object:
+        yield b""
+
+    app = _app(
+        member=True,
+        allow=False,
+        download_modpack=_FakeUseCase(result=_stream()),
+    )
+    client = next(_client(app))
+    resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
+    assert resp.status_code == 403

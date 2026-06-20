@@ -37,6 +37,10 @@ vi.mock("../api/client.ts", async () => {
   return { ...actual, api: mockApi };
 });
 
+const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
+
+vi.mock("../api/download.ts", () => mockDownload);
+
 vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
   useActiveCommunity: () => ({
     communityId: CID,
@@ -89,6 +93,7 @@ function plugin(overrides: Record<string, unknown> = {}) {
     created_at: "2026-06-20T00:00:00Z",
     updated_at: "2026-06-20T00:00:00Z",
     mod_identifier: "sodium",
+    side: "both",
     ...overrides,
   };
 }
@@ -195,6 +200,69 @@ describe("ServerPluginsTab validation checklist", () => {
     });
     expect(
       screen.queryByText("Dependencies & compatibility"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("ServerPluginsTab side + client modpack (issue #1308)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders a side override control reflecting the plugin's side", async () => {
+    mockGets({
+      plugins: [plugin({ side: "client" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    const select = await screen.findByLabelText<HTMLSelectElement>("Side");
+    expect(select.value).toBe("client");
+  });
+
+  it("posts the side override on change", async () => {
+    mockApi.post.mockResolvedValue({});
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    renderTab();
+    const select = await screen.findByLabelText<HTMLSelectElement>("Side");
+    const { fireEvent } = await import("@testing-library/react");
+    fireEvent.change(select, { target: { value: "client" } });
+    await waitFor(() => {
+      expect(mockApi.post).toHaveBeenCalledWith(
+        expect.stringContaining("/plugins/p1/side"),
+        { body: JSON.stringify({ side: "client" }) },
+      );
+    });
+  });
+
+  it("shows the download button when client mods exist and downloads", async () => {
+    mockDownload.downloadFile.mockResolvedValue(undefined);
+    mockGets({
+      plugins: [plugin({ side: "client" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    const button = await screen.findByText("Download client modpack");
+    const { fireEvent } = await import("@testing-library/react");
+    fireEvent.click(button);
+    await waitFor(() => {
+      expect(mockDownload.downloadFile).toHaveBeenCalledWith(
+        expect.stringContaining("/client-mods/download"),
+        "client-modpack.zip",
+      );
+    });
+  });
+
+  it("hides the download button when no client mods exist", async () => {
+    mockGets({
+      plugins: [plugin({ side: "server" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("Download client modpack"),
     ).not.toBeInTheDocument();
   });
 });

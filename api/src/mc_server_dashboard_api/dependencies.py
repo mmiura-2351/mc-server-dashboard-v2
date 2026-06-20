@@ -221,6 +221,10 @@ from mc_server_dashboard_api.servers.application.catalog import (
     SearchCatalog,
     UpdatePlugin,
 )
+from mc_server_dashboard_api.servers.application.client_modpack import (
+    DownloadClientModpack,
+    ListClientMods,
+)
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
@@ -273,6 +277,7 @@ from mc_server_dashboard_api.servers.application.plugins import (
     InstallPlugin,
     ListPlugins,
     RemovePlugin,
+    SetPluginSide,
     TogglePlugin,
     ValidatePluginSet,
 )
@@ -1963,6 +1968,43 @@ def get_toggle_plugin(
         file_store=file_store,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_set_plugin_side(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
+) -> SetPluginSide:
+    """Assemble the :class:`SetPluginSide` use case (plugin:manage, issue #1308)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SetPluginSide(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        cache=cache,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_list_client_mods(request: Request) -> ListClientMods:
+    """Assemble the :class:`ListClientMods` use case (plugin:read, issue #1308)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListClientMods(uow=ServersUnitOfWork(session_factory))
+
+
+def get_download_client_modpack(
+    request: Request,
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
+) -> DownloadClientModpack:
+    """Assemble the :class:`DownloadClientModpack` use case (plugin:read, #1308)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DownloadClientModpack(
+        uow=ServersUnitOfWork(session_factory),
+        cache=cache,
     )
 
 

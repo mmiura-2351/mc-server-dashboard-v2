@@ -45,11 +45,13 @@ from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
 )
 from mc_server_dashboard_api.servers.domain.plugin import (
     PluginId,
+    PluginSide,
     PluginSource,
     ServerPlugin,
     content_dir_for_server_type,
     loader_type_for_server_type,
     modrinth_loader_for_server_type,
+    working_set_present,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -63,6 +65,24 @@ async def _load(
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
     return server
+
+
+def side_from_modrinth(client_side: str, server_side: str) -> PluginSide:
+    """Map Modrinth ``client_side`` / ``server_side`` to a :data:`PluginSide`.
+
+    Modrinth declares each environment as ``required`` / ``optional`` /
+    ``unsupported`` / ``unknown``. Only an explicit ``unsupported`` on one side
+    narrows the result: server-unsupported -> ``client``, client-unsupported ->
+    ``server``. Anything else (the catalog's most common case, and any
+    ``unknown``) is ``both`` -- the safe default that is present everywhere
+    (issue #1308).
+    """
+
+    if server_side == "unsupported" and client_side != "unsupported":
+        return "client"
+    if client_side == "unsupported" and server_side != "unsupported":
+        return "server"
+    return "both"
 
 
 async def _resolve_modrinth_content(
@@ -224,6 +244,10 @@ class InstallFromCatalog:
         # uniform source, same as a local upload. Tolerant of an unreadable jar.
         manifest = parse_manifest_at_ingest(content, loader=loader)
 
+        # Side (issue #1308): Modrinth's per-environment support is the most
+        # accurate source, so it wins over the jar manifest hint here.
+        side = side_from_modrinth(project.client_side, project.server_side)
+
         # Phase 4: At-rest gate + write (hold lock, short duration).
         rel_path = f"{content_dir}/{file.filename}"
         async with self.lifecycle_lock.hold(server_id):
@@ -238,12 +262,15 @@ class InstallFromCatalog:
                 if existing is not None:
                     raise PluginAlreadyExistsError(rel_path)
 
-                await self.file_store.write_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=rel_path,
-                    content=content,
-                )
+                # Side-aware deploy: a client-only mod is cached + recorded but
+                # never placed in the running working set (issue #1308).
+                if working_set_present(enabled=True, side=side):
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=rel_path,
+                        content=content,
+                    )
 
                 now = self.clock.now()
                 plugin = ServerPlugin(
@@ -269,6 +296,7 @@ class InstallFromCatalog:
                     provides=manifest.provides,
                     dependencies=manifest.dependencies,
                     mc_versions=manifest.mc_versions,
+                    side=side,
                 )
                 await self.uow.plugins.add(plugin)
                 await self.uow.commit()
@@ -475,14 +503,19 @@ class UpdatePlugin:
                     if existing is not None and existing.id != plugin_id:
                         raise PluginAlreadyExistsError(new_rel_path)
 
-                await self.file_store.write_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=new_rel_path,
-                    content=content,
-                )
+                # The side carries over from the installed row; a client-only mod
+                # is updated in the cache + record but never (re)written to the
+                # working set (issue #1308).
+                present = working_set_present(enabled=plugin.enabled, side=plugin.side)
+                if present:
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=new_rel_path,
+                        content=content,
+                    )
 
-                if new_rel_path != old_rel_path:
+                if new_rel_path != old_rel_path and present:
                     await self.file_store.delete_file(
                         community_id=community_id,
                         server_id=server_id,
@@ -513,6 +546,7 @@ class UpdatePlugin:
                     provides=manifest.provides,
                     dependencies=manifest.dependencies,
                     mc_versions=manifest.mc_versions,
+                    side=plugin.side,
                 )
                 await self.uow.plugins.update(updated_plugin)
                 await self.uow.commit()

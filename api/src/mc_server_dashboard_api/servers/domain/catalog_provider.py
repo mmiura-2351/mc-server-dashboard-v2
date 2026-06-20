@@ -28,7 +28,13 @@ class CatalogSearchResult:
 
 @dataclass(frozen=True)
 class CatalogProject:
-    """Full project detail from the catalog."""
+    """Full project detail from the catalog.
+
+    ``client_side`` / ``server_side`` are the catalog's per-environment support
+    declarations (Modrinth: ``required`` / ``optional`` / ``unsupported`` /
+    ``unknown``), the most accurate source for a content's side (issue #1308).
+    They default to ``"unknown"`` for catalogs that do not declare them.
+    """
 
     project_id: str
     slug: str
@@ -41,6 +47,8 @@ class CatalogProject:
     categories: list[str]
     game_versions: list[str]
     loaders: list[str]
+    client_side: str = "unknown"
+    server_side: str = "unknown"
 
 
 @dataclass(frozen=True)

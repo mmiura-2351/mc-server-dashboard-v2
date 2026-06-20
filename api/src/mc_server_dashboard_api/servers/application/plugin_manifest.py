@@ -42,6 +42,7 @@ import zipfile
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.domain.errors import InvalidModJarError
+from mc_server_dashboard_api.servers.domain.plugin import PluginSide
 
 # Safety limits (resource_pack_zip.py precedent, plugin upload hardening).
 _MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MiB (matches the plugin upload cap)
@@ -82,12 +83,17 @@ class ParsedManifest:
     Forge/NeoForge ``incompatible``/``discouraged``) rather than a dependency; it
     defaults ``False`` for ordinary deps. ``mod_identifier`` is ``""`` when no
     usable manifest was found.
+
+    ``side`` (issue #1308) is where the content is needed -- detected from the
+    Fabric ``environment`` field; Forge/NeoForge and Paper side hints are
+    unreliable, so they default to ``both`` (present everywhere).
     """
 
     mod_identifier: str
     provides: list[str] = field(default_factory=list)
     mc_versions: list[str] = field(default_factory=list)
     dependencies: list[dict[str, object]] = field(default_factory=list)
+    side: PluginSide = "both"
 
     @classmethod
     def empty(cls) -> ParsedManifest:
@@ -215,6 +221,7 @@ def _parse_fabric(raw: str) -> ParsedManifest | None:
         provides=_str_list(data.get("provides")),
         mc_versions=_fabric_mc_versions(depends.get("minecraft")),
         dependencies=dependencies,
+        side=_fabric_side(data.get("environment")),
     )
 
 
@@ -456,6 +463,20 @@ def _dep(
         "required": required,
         "conflict": conflict,
     }
+
+
+def _fabric_side(environment: object) -> PluginSide:
+    """Map a Fabric ``environment`` value to a :data:`PluginSide` (issue #1308).
+
+    ``client``/``server`` map to the corresponding side; ``*``, a missing field,
+    or anything unrecognized falls back to ``both`` (the safe default -- a
+    ``both`` jar is present everywhere).
+    """
+    if environment == "client":
+        return "client"
+    if environment == "server":
+        return "server"
+    return "both"
 
 
 def _fabric_range(rng: object) -> str:

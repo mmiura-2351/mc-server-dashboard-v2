@@ -16,6 +16,7 @@ from mc_server_dashboard_api.servers.application.catalog import (
     ListPluginDependencies,
     SearchCatalog,
     UpdatePlugin,
+    side_from_modrinth,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
@@ -136,6 +137,32 @@ def _version(
         date_published="2024-01-15T12:00:00Z",
     )
     return version, file_content
+
+
+# -- Modrinth side mapping (issue #1308) --
+
+
+class TestSideFromModrinth:
+    """Map Modrinth ``client_side`` / ``server_side`` to a :data:`PluginSide`."""
+
+    def test_server_only_when_client_unsupported(self) -> None:
+        assert side_from_modrinth("unsupported", "required") == "server"
+
+    def test_client_only_when_server_unsupported(self) -> None:
+        assert side_from_modrinth("required", "unsupported") == "client"
+
+    def test_both_when_required_on_both(self) -> None:
+        assert side_from_modrinth("required", "required") == "both"
+
+    def test_both_when_optional_on_both(self) -> None:
+        assert side_from_modrinth("optional", "optional") == "both"
+
+    def test_both_when_unknown(self) -> None:
+        assert side_from_modrinth("unknown", "unknown") == "both"
+
+    def test_server_when_client_optional_but_server_required(self) -> None:
+        # Only an explicit ``unsupported`` on one side narrows the side.
+        assert side_from_modrinth("optional", "required") == "both"
 
 
 # -- SearchCatalog --

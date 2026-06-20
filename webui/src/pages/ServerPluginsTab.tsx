@@ -11,6 +11,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api/client.ts";
+import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import {
   catalogProjectKey,
@@ -57,6 +58,13 @@ function pluginErrorMessage(error: unknown): string {
 function nameOfPlugin(plugins: PluginResponse[], modId: string): string {
   const match = plugins.find((p) => p.mod_identifier === modId);
   return match?.display_name ?? modId;
+}
+
+/** Human label for a plugin side (issue #1308). */
+function sideLabel(side: string): string {
+  if (side === "server") return t("plugins.side.server");
+  if (side === "client") return t("plugins.side.client");
+  return t("plugins.side.both");
 }
 
 export function ServerPluginsTab({
@@ -223,6 +231,38 @@ export function ServerPluginsTab({
     onError,
   });
 
+  const sideMutation = useMutation({
+    mutationFn: ({ plugin, side }: { plugin: PluginResponse; side: string }) =>
+      api.post(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/side",
+          {
+            community_id: communityId,
+            server_id: serverId,
+            plugin_id: plugin.id,
+          },
+        ),
+        { body: JSON.stringify({ side }) },
+      ),
+    onSuccess: () => {
+      showToast(t("plugins.sideUpdated"), "success");
+      refresh();
+    },
+    onError,
+  });
+
+  const downloadModpackMutation = useMutation({
+    mutationFn: () =>
+      downloadFile(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/client-mods/download",
+          { community_id: communityId, server_id: serverId },
+        ),
+        "client-modpack.zip",
+      ),
+    onError,
+  });
+
   const uploadMutation = useMutation({
     mutationFn: (file: File) => {
       const form = new FormData();
@@ -268,7 +308,12 @@ export function ServerPluginsTab({
     disableMutation.isPending ||
     removeMutation.isPending ||
     updateMutation.isPending ||
+    sideMutation.isPending ||
     uploadMutation.isPending;
+  // Client modpack = enabled plugins whose side is client-relevant.
+  const hasClientMods = plugins.some(
+    (p) => p.enabled && (p.side === "client" || p.side === "both"),
+  );
 
   return (
     <section className="plugins">
@@ -311,6 +356,19 @@ export function ServerPluginsTab({
         </div>
       )}
 
+      {hasClientMods && (
+        <div className="plugins-toolbar">
+          <button
+            type="button"
+            className="btn"
+            disabled={downloadModpackMutation.isPending}
+            onClick={() => downloadModpackMutation.mutate()}
+          >
+            {t("plugins.downloadClientModpack")}
+          </button>
+        </div>
+      )}
+
       <div className="card plugins-table">
         <table className="data">
           <thead>
@@ -318,6 +376,7 @@ export function ServerPluginsTab({
               <th>{t("plugins.col.name")}</th>
               <th>{t("plugins.col.version")}</th>
               <th>{t("plugins.col.source")}</th>
+              <th>{t("plugins.col.side")}</th>
               <th>{t("plugins.col.status")}</th>
               <th>{t("plugins.col.size")}</th>
               {canManage && <th aria-label={t("plugins.col.actions")} />}
@@ -326,7 +385,7 @@ export function ServerPluginsTab({
           <tbody>
             {plugins.length === 0 ? (
               <tr>
-                <td colSpan={canManage ? 6 : 5} className="sub">
+                <td colSpan={canManage ? 7 : 6} className="sub">
                   {t("plugins.empty")}
                 </td>
               </tr>
@@ -353,6 +412,7 @@ export function ServerPluginsTab({
                     onUpdate={(versionId) =>
                       updateMutation.mutate({ plugin, versionId })
                     }
+                    onSetSide={(side) => sideMutation.mutate({ plugin, side })}
                   />
                 );
               })
@@ -415,6 +475,7 @@ function PluginRow({
   onDisable,
   onRemove,
   onUpdate,
+  onSetSide,
 }: {
   plugin: PluginResponse;
   hasUpdate: boolean;
@@ -428,6 +489,7 @@ function PluginRow({
   onDisable: () => void;
   onRemove: () => void;
   onUpdate: (versionId: string) => void;
+  onSetSide: (side: string) => void;
 }) {
   const [depsOpen, setDepsOpen] = useState(false);
 
@@ -450,6 +512,23 @@ function PluginRow({
               ? t("plugins.source.modrinth")
               : t("plugins.source.local")}
           </span>
+        </td>
+        <td>
+          {canManage ? (
+            <select
+              className="plugins-side-select"
+              aria-label={t("plugins.side.label")}
+              value={plugin.side}
+              disabled={busy || !serverAtRest}
+              onChange={(e) => onSetSide(e.target.value)}
+            >
+              <option value="both">{t("plugins.side.both")}</option>
+              <option value="server">{t("plugins.side.server")}</option>
+              <option value="client">{t("plugins.side.client")}</option>
+            </select>
+          ) : (
+            <span className="badge">{sideLabel(plugin.side)}</span>
+          )}
         </td>
         <td>
           <span className={`pill ${plugin.enabled ? "running" : "stopped"}`}>
@@ -503,7 +582,7 @@ function PluginRow({
       </tr>
       {depsOpen && (
         <tr>
-          <td colSpan={canManage ? 6 : 5}>
+          <td colSpan={canManage ? 7 : 6}>
             <DependenciesView
               communityId={communityId}
               serverId={serverId}

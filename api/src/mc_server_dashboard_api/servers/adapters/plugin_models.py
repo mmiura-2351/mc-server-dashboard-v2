@@ -44,6 +44,10 @@ class ServerPluginModel(Base):
             "source IN ('local', 'modrinth')",
             name="ck_server_plugin_source",
         ),
+        CheckConstraint(
+            "side IN ('server', 'client', 'both')",
+            name="ck_server_plugin_side",
+        ),
         UniqueConstraint("server_id", "rel_path", name="uq_server_plugin_server_rel"),
         Index("ix_server_plugin_server_id", "server_id"),
         # Download-cache lookup: a Modrinth version's published sha512 -> cached
@@ -94,3 +98,7 @@ class ServerPluginModel(Base):
         JSONB, nullable=True
     )
     mc_versions: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # Where the content is needed (issue #1308): server / client / both.
+    # Auto-detected at ingest, manually overridable; governs working-set presence.
+    # NOT NULL with a 'both' server default so pre-migration rows backfill safely.
+    side: Mapped[str] = mapped_column(String, nullable=False, server_default="both")
