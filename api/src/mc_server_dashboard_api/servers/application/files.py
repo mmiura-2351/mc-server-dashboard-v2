@@ -687,17 +687,25 @@ class UploadFile:
                     max_bytes=self.max_bytes,
                     max_entries=self.max_entries,
                 )
+                # Guard every extracted entry against the content directory
+                # (issue #1337). Scan all entries before writing so a single
+                # offending member rejects the whole archive cleanly.
+                entries = list(
+                    _archive_entries(
+                        filename,
+                        content,
+                        max_bytes=self.max_bytes,
+                        max_entries=self.max_entries,
+                    )
+                )
+                for entry_path, _data in entries:
+                    _guard_content_dir(server.server_type, _join(dir_path, entry_path))
                 # Duplicate entry names (two members with the same path) are written
                 # in archive order, so the last occurrence wins — the same last-write
                 # semantics a sequence of plain writes would have. Left as-is (no
                 # de-dup / reject) for M2; an archive with colliding names is
                 # malformed and the resulting authoritative copy is well-defined.
-                for entry_path, data in _archive_entries(
-                    filename,
-                    content,
-                    max_bytes=self.max_bytes,
-                    max_entries=self.max_entries,
-                ):
+                for entry_path, data in entries:
                     await self.file_store.write_file(
                         community_id=community_id,
                         server_id=server_id,
