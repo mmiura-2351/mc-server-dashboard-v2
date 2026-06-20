@@ -751,7 +751,7 @@ def _entry_added_id(entry: ResolutionEntry) -> str | None:
     """The id a resolved entry would add, or ``None`` if it adds nothing."""
 
     if entry.status == "needs_import" and entry.will_import is not None:
-        return entry.dep_identifier
+        return entry.will_import.slug
     return None
 
 

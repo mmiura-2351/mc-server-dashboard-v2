@@ -1372,7 +1372,6 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.resolve.applied": "依存関係をインストールしました。",
   "plugins.resolve.appliedWithFailures":
     "一部の依存関係をインストールできませんでした。",
-  "plugins.resolve.failedHeading": "インストールに失敗",
   "communitySettings.roles.family.plugin": "プラグイン",
   "communitySettings.roles.code.plugin:read": "閲覧",
   "communitySettings.roles.code.plugin:manage": "管理",

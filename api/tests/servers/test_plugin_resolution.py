@@ -685,6 +685,112 @@ class TestResolvePluginDependencies:
         assert by_id["fabric-api"].blocked is True
         assert by_id["DEEPLIB"].blocked is True
 
+    async def test_surviving_import_keeps_transitive_dep_when_slug_differs(
+        self,
+    ) -> None:
+        # mod-a -> fabric-api (captured project_id, so the Modrinth slug differs
+        # from the requested dep id); the selected version -> DEEPLIB. No conflict,
+        # so fabric-api survives and DEEPLIB must NOT be pruned. The transitive
+        # child carries required_by = parent.slug, so orphan-pruning must key the
+        # surviving import's added id off its slug, not the requested dep id --
+        # otherwise DEEPLIB is wrongly marked blocked and dropped on apply.
+        server = _server()
+        uow = FakeUnitOfWork()
+        a = _plugin(
+            server_id=server.id,
+            mod_identifier="mod-a",
+            dependencies=[_dep("fabric-api", project_id="FABRICAPI")],
+        )
+        _seed(uow, server, a)
+        catalog = FakeCatalogProvider()
+        fa_version = _version(
+            dependencies=[
+                CatalogDependency(
+                    version_id=None,
+                    project_id="DEEPLIB",
+                    dependency_type="required",
+                )
+            ]
+        )
+        # The Modrinth project's slug ("fabric-api-modrinth") differs from the
+        # requested dep id ("fabric-api"): the project_id-captured path.
+        catalog.seed_project(
+            _project(slug="fabric-api-modrinth"), versions=[fa_version]
+        )
+        catalog.seed_project(
+            _project(project_id="DEEPLIB", slug="deeplib", title="Deep Lib"),
+            versions=[
+                _version(
+                    version_id="DEEPVER",
+                    version_number="1.0.0",
+                    filename="deeplib.jar",
+                )
+            ],
+        )
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        assert by_id["fabric-api"].blocked is False
+        assert by_id["DEEPLIB"].status == "needs_import"
+        assert by_id["DEEPLIB"].blocked is False
+
+    async def test_apply_installs_full_closure_when_slug_differs(self) -> None:
+        # Apply counterpart of the test above: with the parent's slug != dep id,
+        # the surviving import AND its transitive child must both install -- the
+        # exact failure (a plugin left with a missing required dep) this feature
+        # exists to prevent.
+        server = _server()
+        uow = FakeUnitOfWork()
+        a = _plugin(
+            server_id=server.id,
+            mod_identifier="mod-a",
+            dependencies=[_dep("fabric-api", project_id="FABRICAPI")],
+        )
+        _seed(uow, server, a)
+        catalog = FakeCatalogProvider()
+        fa_jar = _fabric_jar(mod_id="fabric-api")
+        fa_version = _version(
+            file_content=fa_jar,
+            dependencies=[
+                CatalogDependency(
+                    version_id=None,
+                    project_id="DEEPLIB",
+                    dependency_type="required",
+                )
+            ],
+        )
+        catalog.seed_project(
+            _project(slug="fabric-api-modrinth"), versions=[fa_version]
+        )
+        _seed_downloadable(catalog, fa_version, fa_jar)
+        deep_jar = _fabric_jar(mod_id="deeplib")
+        deep_version = _version(
+            version_id="DEEPVER",
+            version_number="1.0.0",
+            filename="deeplib.jar",
+            file_content=deep_jar,
+        )
+        catalog.seed_project(
+            _project(project_id="DEEPLIB", slug="deeplib", title="Deep Lib"),
+            versions=[deep_version],
+        )
+        _seed_downloadable(catalog, deep_version, deep_jar)
+        file_store = FakeFileStore()
+        cache = FakePluginCacheStore()
+        install = _install_uc(uow, catalog, file_store, cache)
+
+        _new_plan, installed, failed = await ApplyPluginResolution(
+            uow, catalog, install
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            applied_by=uuid.uuid4(),
+        )
+        assert failed == []
+        assert {p.source_project_id for p in installed} == {"FABRICAPI", "DEEPLIB"}
+
     async def test_unresolvable_when_modrinth_has_nothing(self) -> None:
         server = _server()
         uow = FakeUnitOfWork()
@@ -895,3 +1001,56 @@ class TestApplyPluginResolution:
         )
         assert installed == []
         assert failed == []
+
+    async def test_apply_installs_two_versions_of_the_same_project(self) -> None:
+        # Apply dedups planned imports by version_id, NOT project_id: two deps that
+        # resolve to the same project but DIFFERENT versions must both install. Two
+        # distinct dep ids capture the same project_id "LIB"; their version ranges
+        # select different versions (V1 vs V2).
+        server = _server()
+        uow = FakeUnitOfWork()
+        a = _plugin(
+            server_id=server.id,
+            mod_identifier="mod-a",
+            dependencies=[
+                _dep("lib-old", version_range="<=1.0.0", project_id="LIB"),
+                _dep("lib-new", version_range=">=2.0.0", project_id="LIB"),
+            ],
+        )
+        _seed(uow, server, a)
+        catalog = FakeCatalogProvider()
+        jar_v1 = _fabric_jar(mod_id="lib", version="1.0.0")
+        jar_v2 = _fabric_jar(mod_id="lib", version="2.0.0")
+        v1 = _version(
+            version_id="V1",
+            version_number="1.0.0",
+            filename="lib-1.0.0.jar",
+            file_content=jar_v1,
+        )
+        v2 = _version(
+            version_id="V2",
+            version_number="2.0.0",
+            filename="lib-2.0.0.jar",
+            file_content=jar_v2,
+        )
+        catalog.seed_project(
+            _project(project_id="LIB", slug="lib", title="Lib"),
+            versions=[v1, v2],
+        )
+        _seed_downloadable(catalog, v1, jar_v1)
+        _seed_downloadable(catalog, v2, jar_v2)
+        file_store = FakeFileStore()
+        cache = FakePluginCacheStore()
+        install = _install_uc(uow, catalog, file_store, cache)
+
+        _new_plan, installed, failed = await ApplyPluginResolution(
+            uow, catalog, install
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            applied_by=uuid.uuid4(),
+        )
+        assert failed == []
+        # Both versions installed: same project_id, distinct version_ids.
+        assert [p.source_project_id for p in installed] == ["LIB", "LIB"]
+        assert {p.source_version_id for p in installed} == {"V1", "V2"}

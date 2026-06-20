@@ -1371,7 +1371,6 @@ export const en = {
   "plugins.resolve.applied": "Dependencies installed.",
   "plugins.resolve.appliedWithFailures":
     "Some dependencies could not be installed.",
-  "plugins.resolve.failedHeading": "Failed to install",
   // Permission family and code labels for the role/grant matrix.
   "communitySettings.roles.family.plugin": "Plugins",
   "communitySettings.roles.code.plugin:read": "Read",
