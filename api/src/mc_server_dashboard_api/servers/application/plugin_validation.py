@@ -26,7 +26,9 @@ Five finding kinds:
 * ``conflicts`` -- a dependency entry explicitly marked as a break/conflict whose
   target id is present in the set. The manifest parser emits these entries: a
   declared ``breaks``/incompatible relation is stored as a dependency dict
-  carrying a ``conflict`` flag.
+  carrying a ``conflict`` flag. A Modrinth catalog ``incompatible`` edge (issue
+  #1318), keyed by ``project_id``, is also flagged when an installed plugin has
+  that ``source_project_id``.
 * ``mc_mismatch`` -- an installed plugin none of whose declared ``mc_versions``
   cover the server's ``mc_version``. Each entry is evaluated in the loader's
   range dialect (a Forge Maven interval, a Fabric predicate, or a plain version),
@@ -46,6 +48,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.application.catalog_deps import (
+    incompatible_catalog_deps,
     installed_project_ids,
     required_catalog_deps,
 )
@@ -243,6 +246,20 @@ def _missing_catalog_deps(
 
 
 def _conflicts(plugins: list[ServerPlugin], provided: set[str]) -> list[Conflict]:
+    """Flag manifest ``conflict`` edges and Modrinth catalog ``incompatible`` edges.
+
+    A manifest ``breaks``/``conflicts`` edge is flagged when its target id is
+    present (the ``mod_identifier`` namespace). A Modrinth catalog ``incompatible``
+    edge (issue #1318) is keyed by ``project_id`` and flagged when an installed
+    plugin has that ``source_project_id``; the finding reports that plugin's
+    ``mod_identifier`` so the checklist stays in the same namespace as the rest.
+    """
+
+    by_project_id = {
+        plugin.source_project_id: plugin.mod_identifier
+        for plugin in plugins
+        if plugin.source_project_id is not None and plugin.mod_identifier
+    }
     findings: list[Conflict] = []
     for plugin in plugins:
         if not plugin.mod_identifier:
@@ -255,6 +272,13 @@ def _conflicts(plugins: list[ServerPlugin], provided: set[str]) -> list[Conflict
                 continue
             findings.append(
                 Conflict(mod_id=plugin.mod_identifier, conflicts_with=target)
+            )
+        for cdep in incompatible_catalog_deps(plugin):
+            target_id = by_project_id.get(cdep.project_id)
+            if target_id is None:
+                continue
+            findings.append(
+                Conflict(mod_id=plugin.mod_identifier, conflicts_with=target_id)
             )
     return findings
 

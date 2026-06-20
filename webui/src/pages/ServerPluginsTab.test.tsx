@@ -533,4 +533,47 @@ describe("ServerPluginsTab dependency resolution (issue #1309)", () => {
       screen.getByText("Install dependencies").closest("button"),
     ).toBeDisabled();
   });
+
+  it("labels a catalog-incompatible block with the project slug", async () => {
+    // A catalog-incompatible block (issue #1318) carries a project_id as its
+    // dep_identifier; the readable label comes from will_import.slug.
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    mockApi.post.mockImplementation((url: string) => {
+      if (url.endsWith("/plugins/resolve")) {
+        return Promise.resolve({
+          entries: [
+            {
+              dep_identifier: "ARCHPROJECTID",
+              required_range: "",
+              status: "needs_import",
+              will_import: {
+                project_id: "ARCHPROJECTID",
+                version_id: "V1",
+                slug: "architectury",
+                version_number: "9.0.0",
+              },
+              depth: 0,
+              required_by: null,
+              blocked: true,
+            },
+          ],
+          validation: EMPTY_VALIDATION,
+        });
+      }
+      return Promise.resolve({});
+    });
+    renderTab();
+
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resolve dependencies"));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/architectury cannot be installed/),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/ARCHPROJECTID/)).not.toBeInTheDocument();
+  });
 });

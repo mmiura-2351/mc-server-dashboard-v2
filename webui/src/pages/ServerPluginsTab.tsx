@@ -923,7 +923,7 @@ function PluginResolveModal({
                   >
                     {t("plugins.resolve.conflictItem").replace(
                       "{dependency}",
-                      e.dep_identifier,
+                      e.will_import?.slug ?? e.dep_identifier,
                     )}
                   </li>
                 ))}

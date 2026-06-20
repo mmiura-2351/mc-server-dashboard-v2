@@ -59,9 +59,11 @@ from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCach
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
-# Modrinth's per-catalog-version dependency classification we capture as required
-# (issue #1321). The other types (optional/incompatible/embedded) are not stored.
+# Modrinth's per-catalog-version dependency classifications we capture: required
+# (issue #1321, drives validation/resolution) and incompatible (issue #1318,
+# blocks resolution). The other types (optional/embedded) are not stored.
 _REQUIRED_DEP_TYPE = "required"
+_INCOMPATIBLE_DEP_TYPE = "incompatible"
 
 
 async def _load(
@@ -79,21 +81,24 @@ _CATALOG_DEPS_CONCURRENCY = 5  # Max parallel dep-project lookups at ingest.
 async def capture_catalog_dependencies(
     catalog: CatalogProvider, version: CatalogVersion
 ) -> list[dict[str, object]]:
-    """Capture a version's REQUIRED catalog deps for storage (issue #1321).
+    """Capture a version's REQUIRED and INCOMPATIBLE catalog deps (issues #1321, #1318).
 
-    Returns the persisted shape ``[{"project_id", "required", "slug", "title"}]``
-    for each ``required`` catalog dependency edge of ``version``, keyed by
-    ``project_id``. Each dep project's ``slug`` / ``title`` is fetched so the
+    Returns the persisted shape, keyed by ``project_id``, for each ``required`` and
+    each ``incompatible`` catalog dependency edge of ``version``. A required edge is
+    stored as ``{"project_id", "required": True, "slug", "title"}`` (drives missing-
+    dep validation and resolution); an incompatible edge as ``{"project_id",
+    "incompatible": True, "slug", "title"}`` (blocks resolution when the target is
+    present, issue #1318). Each dep project's ``slug`` / ``title`` is fetched so the
     WebUI can render a human label without an extra Modrinth round-trip later; a
     failed/unavailable lookup leaves them ``None`` (best-effort, never aborts the
-    install). Optional/incompatible/embedded edges are not stored -- only required
-    deps drive validation and resolution.
+    install). Optional/embedded edges are not stored.
     """
 
-    required = [
+    captured = [
         dep
         for dep in version.dependencies
-        if dep.dependency_type == _REQUIRED_DEP_TYPE and dep.project_id
+        if dep.dependency_type in (_REQUIRED_DEP_TYPE, _INCOMPATIBLE_DEP_TYPE)
+        and dep.project_id
     ]
     sem = asyncio.Semaphore(_CATALOG_DEPS_CONCURRENCY)
 
@@ -107,14 +112,17 @@ async def capture_catalog_dependencies(
                 title = proj.title
             except (CatalogUnavailableError, CatalogProjectNotFoundError):
                 pass
+        kind = (
+            "required" if dep.dependency_type == _REQUIRED_DEP_TYPE else "incompatible"
+        )
         return {
             "project_id": dep.project_id,
-            "required": True,
+            kind: True,
             "slug": slug,
             "title": title,
         }
 
-    return list(await asyncio.gather(*(_label(dep) for dep in required)))
+    return list(await asyncio.gather(*(_label(dep) for dep in captured)))
 
 
 def side_from_modrinth(client_side: str, server_side: str) -> PluginSide:

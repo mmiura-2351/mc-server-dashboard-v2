@@ -97,6 +97,17 @@ def _catalog_dep(
     }
 
 
+def _incompatible_catalog_dep(
+    project_id: str, *, slug: str | None = None, title: str | None = None
+) -> dict[str, object]:
+    return {
+        "project_id": project_id,
+        "incompatible": True,
+        "slug": slug,
+        "title": title,
+    }
+
+
 def _dep(
     mod_identifier: str, *, required: bool, version_range: str = ""
 ) -> dict[str, object]:
@@ -296,6 +307,42 @@ class TestConflicts:
 
         assert len(result.conflicts) == 1
         assert result.conflicts[0].conflicts_with == "sodium"
+
+    def test_catalog_incompatible_against_installed_project_is_flagged(self) -> None:
+        # A Modrinth catalog ``incompatible`` edge (issue #1318), keyed by
+        # project_id, is flagged when an installed plugin has that
+        # source_project_id; the finding reports that plugin's mod_identifier.
+        mod = _plugin(
+            mod_identifier="mod-a",
+            source=PluginSource.MODRINTH,
+            source_project_id="MODA",
+            catalog_dependencies=[_incompatible_catalog_dep("RIVAL")],
+        )
+        rival = _plugin(
+            mod_identifier="rival",
+            source=PluginSource.MODRINTH,
+            source_project_id="RIVAL",
+        )
+        result = validate_plugin_set(
+            server_type="fabric", mc_version="1.21", plugins=[mod, rival]
+        )
+
+        assert len(result.conflicts) == 1
+        assert result.conflicts[0].mod_id == "mod-a"
+        assert result.conflicts[0].conflicts_with == "rival"
+
+    def test_catalog_incompatible_target_absent_is_not_flagged(self) -> None:
+        mod = _plugin(
+            mod_identifier="mod-a",
+            source=PluginSource.MODRINTH,
+            source_project_id="MODA",
+            catalog_dependencies=[_incompatible_catalog_dep("RIVAL")],
+        )
+        result = validate_plugin_set(
+            server_type="fabric", mc_version="1.21", plugins=[mod]
+        )
+
+        assert result.conflicts == []
 
 
 class TestMcMismatch:
