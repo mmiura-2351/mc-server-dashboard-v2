@@ -35,6 +35,7 @@ def _to_plugin(row: ServerPluginModel) -> ServerPlugin:
         source_version_id=row.source_version_id,
         version_number=row.version_number,
         checksum_sha512=row.checksum_sha512,
+        sha256=row.sha256,
         size_bytes=row.size_bytes,
         enabled=row.enabled,
         installed_by=row.installed_by,
@@ -64,6 +65,7 @@ class SqlAlchemyPluginRepository(PluginRepository):
                 source_version_id=plugin.source_version_id,
                 version_number=plugin.version_number,
                 checksum_sha512=plugin.checksum_sha512,
+                sha256=plugin.sha256,
                 size_bytes=plugin.size_bytes,
                 enabled=plugin.enabled,
                 installed_by=plugin.installed_by,
@@ -120,6 +122,7 @@ class SqlAlchemyPluginRepository(PluginRepository):
                 source_version_id=plugin.source_version_id,
                 version_number=plugin.version_number,
                 checksum_sha512=plugin.checksum_sha512,
+                sha256=plugin.sha256,
                 size_bytes=plugin.size_bytes,
                 enabled=plugin.enabled,
                 installed_by=plugin.installed_by,
@@ -140,3 +143,14 @@ class SqlAlchemyPluginRepository(PluginRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_plugin(row) for row in rows]
+
+    async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
+        stmt = (
+            select(ServerPluginModel.sha256)
+            .where(
+                ServerPluginModel.checksum_sha512 == checksum_sha512,
+                ServerPluginModel.sha256.is_not(None),
+            )
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()

@@ -48,3 +48,12 @@ class PluginRepository(abc.ABC):
     @abc.abstractmethod
     async def list_modrinth_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
         """Return plugins with source=MODRINTH and a non-null source_project_id."""
+
+    @abc.abstractmethod
+    async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
+        """Return a cached SHA-256 content address for a known SHA-512, or ``None``.
+
+        The download-cache lookup (issue #1306): a Modrinth version's published
+        SHA-512 maps to the SHA-256 of an already-cached jar, so the same version
+        is served from the cache instead of being re-downloaded per server.
+        """

@@ -100,6 +100,9 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
     ServersLateSnapshotResultSink,
 )
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
+from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
+    ObjectPluginCacheStore,
+)
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
     run_reconciler_loop,
 )
@@ -262,6 +265,33 @@ def _build_resource_pack_store(
     assert obj.access_key is not None
     assert obj.secret_key is not None
     return ObjectResourcePackStore(
+        make_s3_client_factory(
+            endpoint=obj.endpoint,
+            bucket=obj.bucket,
+            access_key=obj.access_key,
+            secret_key=obj.secret_key,
+        )
+    )
+
+
+def _build_plugin_cache_store(
+    settings: Settings,
+) -> ObjectPluginCacheStore | None:
+    """Build the content-addressed plugin cache store (issue #1306).
+
+    Only available for the ``object`` storage backend; returns ``None`` for
+    ``fs``/``remote-fs`` (no fs adapter yet). The dependency layer raises 503 when
+    the store is ``None``.
+    """
+
+    if settings.storage.backend in ("fs", "remote-fs"):
+        return None
+    obj = settings.storage.object
+    assert obj.endpoint is not None
+    assert obj.bucket is not None
+    assert obj.access_key is not None
+    assert obj.secret_key is not None
+    return ObjectPluginCacheStore(
         make_s3_client_factory(
             endpoint=obj.endpoint,
             bucket=obj.bucket,
@@ -494,6 +524,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # backend; None for fs/remote-fs.
     resource_pack_store = _build_resource_pack_store(settings)
 
+    # Build the content-addressed plugin cache store (issue #1306): same backend
+    # gating as the resource pack store.
+    plugin_cache_store = _build_plugin_cache_store(settings)
+
     # Build the process-wide version catalog now so its in-process manifest cache
     # is shared across requests (FR-VER-2). No external secret is required, so it
     # cannot fail at boot; it is stored on app state below.
@@ -527,6 +561,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.storage = storage
         app.state.resource_pack_store = resource_pack_store
+        app.state.plugin_cache_store = plugin_cache_store
         app.state.version_catalog = version_catalog
         # The catalog's manifest-cache invalidator + per-type source prefixes, for
         # the platform-admin manual refresh (issue #286).

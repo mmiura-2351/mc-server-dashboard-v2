@@ -46,6 +46,10 @@ class ServerPluginModel(Base):
         ),
         UniqueConstraint("server_id", "rel_path", name="uq_server_plugin_server_rel"),
         Index("ix_server_plugin_server_id", "server_id"),
+        # Download-cache lookup: a Modrinth version's published sha512 -> cached
+        # sha256 content address, so the same version is not re-downloaded per
+        # server (issue #1306).
+        Index("ix_server_plugin_checksum_sha512", "checksum_sha512"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -64,6 +68,8 @@ class ServerPluginModel(Base):
     source_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
     version_number: Mapped[str | None] = mapped_column(String, nullable=True)
     checksum_sha512: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Content address for the content-addressed cache (issue #1306).
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"

@@ -86,6 +86,7 @@ def _plugin(
         source_version_id=None,
         version_number=None,
         checksum_sha512="abc123",
+        sha256="def456",
         size_bytes=1024,
         enabled=True,
         installed_by=None,
