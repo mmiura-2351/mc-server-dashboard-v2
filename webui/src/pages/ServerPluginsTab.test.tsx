@@ -196,11 +196,61 @@ describe("ServerPluginsTab validation checklist", () => {
     mockGets({ plugins: [], validation: EMPTY_VALIDATION });
     renderTab();
     await waitFor(() => {
-      expect(screen.getByText("No plugins installed.")).toBeInTheDocument();
+      // The fabric fixture manages mods, so the empty-state names "mods" (#1320).
+      expect(screen.getByText("No mods installed.")).toBeInTheDocument();
     });
     expect(
       screen.queryByText("Dependencies & compatibility"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("ServerPluginsTab loader-aware noun (#1320)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function renderTabFor(serverType: string) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return render(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <ToastProvider>
+            <ServerPluginsTab
+              server={server({ server_type: serverType })}
+              communityId={CID}
+              can={allow}
+            />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("names the empty-state 'mods' for a fabric server", async () => {
+    mockGets({ plugins: [], validation: EMPTY_VALIDATION });
+    renderTabFor("fabric");
+    await waitFor(() => {
+      expect(screen.getByText("No mods installed.")).toBeInTheDocument();
+    });
+  });
+
+  it("names the empty-state 'mods' for a forge server", async () => {
+    mockGets({ plugins: [], validation: EMPTY_VALIDATION });
+    renderTabFor("forge");
+    await waitFor(() => {
+      expect(screen.getByText("No mods installed.")).toBeInTheDocument();
+    });
+  });
+
+  it("names the empty-state 'plugins' for a paper server", async () => {
+    mockGets({ plugins: [], validation: EMPTY_VALIDATION });
+    renderTabFor("paper");
+    await waitFor(() => {
+      expect(screen.getByText("No plugins installed.")).toBeInTheDocument();
+    });
   });
 });
 

@@ -1272,12 +1272,23 @@ export const en = {
   // Plugins tab (issue #1153). One contiguous block to keep merge conflicts
   // with sibling i18n PRs minimal.
   "serverDetail.tab.plugins": "Plugins",
-  "plugins.loading": "Loading plugins…",
-  "plugins.loadError": "Could not load plugins.",
-  "plugins.noRead": "You do not have permission to view plugins.",
-  "plugins.empty": "No plugins installed.",
+  // Loader-aware tab label + noun (#1320): Fabric/Forge servers manage mods,
+  // Paper manages plugins. Three grammatical forms feed the `{…}` placeholders
+  // in the tab strings: `{nouns}` lowercase plural, `{noun}` lowercase
+  // singular, `{Noun}` capitalized singular (Japanese has one invariant form).
+  "serverDetail.tab.mods": "Mods",
+  "plugins.contentNoun.plural.plugins": "plugins",
+  "plugins.contentNoun.plural.mods": "mods",
+  "plugins.contentNoun.singular.plugins": "plugin",
+  "plugins.contentNoun.singular.mods": "mod",
+  "plugins.contentNoun.singularCap.plugins": "Plugin",
+  "plugins.contentNoun.singularCap.mods": "Mod",
+  "plugins.loading": "Loading {nouns}…",
+  "plugins.loadError": "Could not load {nouns}.",
+  "plugins.noRead": "You do not have permission to view {nouns}.",
+  "plugins.empty": "No {nouns} installed.",
   "plugins.unsupported": "This server type does not support plugins or mods.",
-  "plugins.serverNotStopped": "Stop the server to manage plugins.",
+  "plugins.serverNotStopped": "Stop the server to manage {nouns}.",
   // Table columns.
   "plugins.col.name": "Name",
   "plugins.col.version": "Version",
@@ -1306,11 +1317,12 @@ export const en = {
   "plugins.downloadClientModpack": "Download client modpack",
   // Update indicators.
   "plugins.updateAvailable": "Update available: ",
-  // Remove dialog.
-  "plugins.removeDialog.title": "Remove plugin",
+  // Remove dialog. `{Noun}` is the capitalized loader-aware noun, `{noun}` the
+  // lowercase form (#1320).
+  "plugins.removeDialog.title": "Remove {Noun}",
   "plugins.removeDialog.body":
-    "This permanently removes the plugin file from the server. This cannot be undone.",
-  "plugins.removeDialog.confirm": "Remove plugin",
+    "This permanently removes the {noun} file from the server. This cannot be undone.",
+  "plugins.removeDialog.confirm": "Remove {Noun}",
   "plugins.removeDialog.prompt": "Type REMOVE to confirm",
   "plugins.removeDialog.phrase": "REMOVE",
   // Dependencies.
@@ -1331,15 +1343,15 @@ export const en = {
   "plugins.search.installing": "Installing…",
   "plugins.search.versions": "Versions",
   "plugins.search.back": "Back to search",
-  // Outcomes (toasts).
-  "plugins.enabled": "Plugin enabled.",
-  "plugins.disabled": "Plugin disabled.",
-  "plugins.removed": "Plugin removed.",
-  "plugins.updated": "Plugin updated.",
-  "plugins.installed": "Plugin installed.",
-  "plugins.sideUpdated": "Plugin side updated.",
-  "plugins.catalogInstalled": "Plugin installed from Modrinth.",
-  "plugins.error.notStopped": "Stop the server before managing plugins.",
+  // Outcomes (toasts). `{Noun}` is the capitalized loader-aware noun (#1320).
+  "plugins.enabled": "{Noun} enabled.",
+  "plugins.disabled": "{Noun} disabled.",
+  "plugins.removed": "{Noun} removed.",
+  "plugins.updated": "{Noun} updated.",
+  "plugins.installed": "{Noun} installed.",
+  "plugins.sideUpdated": "{Noun} side updated.",
+  "plugins.catalogInstalled": "{Noun} installed from Modrinth.",
+  "plugins.error.notStopped": "Stop the server before managing {nouns}.",
   "plugins.error.generic": "Something went wrong. Please try again.",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "Dependencies & compatibility",
@@ -1381,6 +1393,8 @@ export const en = {
   "communitySettings.audit.op.plugin:enable": "Enable plugin",
   "communitySettings.audit.op.plugin:disable": "Disable plugin",
   "communitySettings.audit.op.plugin:update": "Update plugin",
+  "communitySettings.audit.op.plugin:set_side": "Set plugin side",
+  "communitySettings.audit.op.plugin:resolve": "Resolve plugin dependencies",
   "communitySettings.audit.targetType.plugin": "Plugin",
 
   // Resource pack library (issue #1178). One contiguous block to keep merge

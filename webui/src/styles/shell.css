@@ -1265,6 +1265,32 @@ body.col-resizing {
   gap: 6px;
   justify-content: flex-end;
 }
+/* Per-row "Side" selector — mirror the form-control `.field select` styling so
+ * it matches the table rather than rendering as a bare browser default (#1320).
+ * The smaller padding/font keep it in scale with the 13px table rows. */
+.plugins-side-select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+.plugins-side-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.plugins-side-select:disabled {
+  opacity: 0.6;
+}
+/* An inert placeholder standing in for the conditional "Dependencies" button on
+ * rows that lack it, so the Disable/Remove buttons stay column-aligned across
+ * rows (#1320). Occupies the slot but is invisible and non-interactive. */
+.plugins-table .row-actions-spacer {
+  visibility: hidden;
+  pointer-events: none;
+}
 .plugins-update-badge {
   margin-left: 8px;
   font-size: 11px;
