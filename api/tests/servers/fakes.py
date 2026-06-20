@@ -705,10 +705,20 @@ class FakePluginRepository(PluginRepository):
     async def get_by_rel_path(
         self, server_id: ServerId, rel_path: str
     ) -> ServerPlugin | None:
-        for plugin in self.by_id.values():
-            if plugin.server_id == server_id and plugin.rel_path == rel_path:
-                return plugin
-        return None
+        # Normalize the .disabled suffix so a clean path and its disabled variant
+        # share the same per-server slot (issue #1316), mirroring the adapter:
+        # prefer an exact-path match, else fall back to the suffix sibling.
+        clean = rel_path.removesuffix(".disabled")
+        candidates = [
+            plugin
+            for plugin in self.by_id.values()
+            if plugin.server_id == server_id
+            and plugin.rel_path.removesuffix(".disabled") == clean
+        ]
+        exact = next((p for p in candidates if p.rel_path == rel_path), None)
+        if exact is not None:
+            return exact
+        return candidates[0] if candidates else None
 
     async def update(self, plugin: ServerPlugin) -> None:
         self.by_id[plugin.id] = plugin

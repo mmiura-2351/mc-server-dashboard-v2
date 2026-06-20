@@ -115,11 +115,20 @@ class SqlAlchemyPluginRepository(PluginRepository):
     async def get_by_rel_path(
         self, server_id: ServerId, rel_path: str
     ) -> ServerPlugin | None:
+        # Normalize the .disabled suffix so a clean path and its disabled variant
+        # share the same per-server slot (issue #1316): a disabled plugin still
+        # occupies its base filename and must block a same-named install. Prefer an
+        # exact-path match so the collision guards see the row actually at the
+        # queried path rather than its (self-excluded) suffix sibling.
+        clean = rel_path.removesuffix(".disabled")
         stmt = select(ServerPluginModel).where(
             ServerPluginModel.server_id == server_id.value,
-            ServerPluginModel.rel_path == rel_path,
+            ServerPluginModel.rel_path.in_((clean, f"{clean}.disabled")),
         )
-        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        rows = (await self._session.execute(stmt)).scalars().all()
+        row = next((r for r in rows if r.rel_path == rel_path), None)
+        if row is None:
+            row = next(iter(rows), None)
         return _to_plugin(row) if row is not None else None
 
     async def update(self, plugin: ServerPlugin) -> None:

@@ -554,6 +554,47 @@ async def test_install_duplicate_raises_already_exists() -> None:
         )
 
 
+async def test_install_same_name_blocked_when_existing_is_disabled() -> None:
+    # Regression for #1316: the per-server filename dedup must normalise the
+    # `.disabled` suffix, so a disabled plugin still blocks a same-named install.
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    install = InstallPlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
+    toggle = TogglePlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
+
+    plugin = await install(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="collide.jar",
+        display_name="Collide",
+        content=b"jar-bytes",
+    )
+    # Disable it: rel_path becomes mods/collide.jar.disabled.
+    disabled = await toggle(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        plugin_id=plugin.id,
+        enable=False,
+    )
+    assert disabled.rel_path == "mods/collide.jar.disabled"
+
+    # A second same-named install must now be rejected (was wrongly allowed).
+    with pytest.raises(PluginAlreadyExistsError):
+        await install(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            filename="collide.jar",
+            display_name="Collide v2",
+            content=b"other-jar-bytes",
+        )
+
+
 # -- Toggle collision (Bug 2) --
 
 

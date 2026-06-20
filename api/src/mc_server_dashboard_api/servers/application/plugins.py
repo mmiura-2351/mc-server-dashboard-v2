@@ -460,6 +460,15 @@ class SetPluginSide:
                     clean_path=clean_path, enabled=plugin.enabled, side=new_side
                 )
 
+                # Block a cross-plugin collision on the target path (a different
+                # row already occupying it); the plugin's own row never counts.
+                if desired_path is not None and desired_path != current_path:
+                    existing = await self.uow.plugins.get_by_rel_path(
+                        server_id, desired_path
+                    )
+                    if existing is not None and existing.id != plugin.id:
+                        raise PluginAlreadyExistsError(desired_path)
+
                 await _reconcile_working_set(
                     file_store=self.file_store,
                     cache=self.cache,

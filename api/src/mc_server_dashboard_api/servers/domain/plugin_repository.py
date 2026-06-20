@@ -39,7 +39,13 @@ class PluginRepository(abc.ABC):
     async def get_by_rel_path(
         self, server_id: ServerId, rel_path: str
     ) -> ServerPlugin | None:
-        """Return the plugin at ``rel_path`` scoped to ``server_id``, or ``None``."""
+        """Return the plugin occupying ``rel_path`` scoped to ``server_id``.
+
+        Returns ``None`` when the slot is empty. A trailing ``.disabled`` suffix is
+        normalized on both the query and the stored path (issue #1316), so a clean
+        path and its disabled variant share one per-server slot: a disabled plugin
+        still blocks a same-named install.
+        """
 
     @abc.abstractmethod
     async def update(self, plugin: ServerPlugin) -> None:
