@@ -12,8 +12,12 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.plugin_cache import (
+    ingest_into_cache,
+)
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
+    CatalogFile,
     CatalogProject,
     CatalogProvider,
     CatalogSearchResponse,
@@ -44,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     loader_type_for_server_type,
     modrinth_loader_for_server_type,
 )
+from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
@@ -55,6 +60,41 @@ async def _load(
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
     return server
+
+
+async def _resolve_modrinth_content(
+    *,
+    uow: UnitOfWork,
+    catalog: CatalogProvider,
+    cache: PluginCacheStore,
+    file: CatalogFile,
+) -> tuple[bytes, str]:
+    """Return ``(jar bytes, sha256)`` for a Modrinth ``file``, using the cache.
+
+    Download cache (issue #1306): if a prior install recorded this version's
+    published SHA-512 against a cached SHA-256 whose blob still exists, the bytes
+    are served from the cache and the HTTP download is skipped. Otherwise the jar
+    is downloaded, its SHA-512 verified against the catalog hash, its SHA-256
+    computed, and the blob stored once (dedup-on-ingest).
+    """
+
+    if not file.sha512:
+        raise CatalogChecksumMismatchError("no sha512 hash provided by catalog")
+
+    async with uow:
+        cached_sha256 = await uow.plugins.find_sha256_by_sha512(file.sha512)
+    if cached_sha256 is not None and await cache.has(cached_sha256):
+        content = b"".join([chunk async for chunk in cache.open(cached_sha256)])
+        return content, cached_sha256
+
+    content = await catalog.download_file(file.url)
+    computed_hash = hashlib.sha512(content).hexdigest()
+    if computed_hash != file.sha512:
+        raise CatalogChecksumMismatchError(
+            f"expected {file.sha512}, got {computed_hash}"
+        )
+    sha256 = await ingest_into_cache(cache, content)
+    return content, sha256
 
 
 @dataclass(frozen=True)
@@ -122,6 +162,7 @@ class InstallFromCatalog:
     uow: UnitOfWork
     catalog: CatalogProvider
     file_store: FileStore
+    cache: PluginCacheStore
     clock: Clock
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
@@ -167,15 +208,14 @@ class InstallFromCatalog:
 
         project = await self.catalog.get_project(project_id)
 
-        # Phase 3: Download + verify (no lock, no DB).
-        content = await self.catalog.download_file(file.url)
-        if not file.sha512:
-            raise CatalogChecksumMismatchError("no sha512 hash provided by catalog")
-        computed_hash = hashlib.sha512(content).hexdigest()
-        if computed_hash != file.sha512:
-            raise CatalogChecksumMismatchError(
-                f"expected {file.sha512}, got {computed_hash}"
-            )
+        # Phase 3: Resolve bytes from the cache or download + verify (no lock).
+        # The download cache skips the HTTP fetch when this version is cached.
+        content, sha256 = await _resolve_modrinth_content(
+            uow=self.uow,
+            catalog=self.catalog,
+            cache=self.cache,
+            file=file,
+        )
 
         # Phase 4: At-rest gate + write (hold lock, short duration).
         rel_path = f"{content_dir}/{file.filename}"
@@ -211,7 +251,8 @@ class InstallFromCatalog:
                     source_project_id=project_id,
                     source_version_id=version_id,
                     version_number=version.version_number,
-                    checksum_sha512=computed_hash,
+                    checksum_sha512=file.sha512,
+                    sha256=sha256,
                     size_bytes=len(content),
                     enabled=True,
                     installed_by=installed_by,
@@ -346,6 +387,7 @@ class UpdatePlugin:
     uow: UnitOfWork
     catalog: CatalogProvider
     file_store: FileStore
+    cache: PluginCacheStore
     clock: Clock
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
@@ -391,15 +433,14 @@ class UpdatePlugin:
         if not file.filename.lower().endswith(".jar"):
             raise InvalidFilePathError(file.filename)
 
-        # Phase 3: Download + verify (no lock, no DB).
-        content = await self.catalog.download_file(file.url)
-        if not file.sha512:
-            raise CatalogChecksumMismatchError("no sha512 hash provided by catalog")
-        computed_hash = hashlib.sha512(content).hexdigest()
-        if computed_hash != file.sha512:
-            raise CatalogChecksumMismatchError(
-                f"expected {file.sha512}, got {computed_hash}"
-            )
+        # Phase 3: Resolve bytes from the cache or download + verify (no lock).
+        # The download cache skips the HTTP fetch when this version is cached.
+        content, sha256 = await _resolve_modrinth_content(
+            uow=self.uow,
+            catalog=self.catalog,
+            cache=self.cache,
+            file=file,
+        )
 
         # Phase 4: At-rest gate + write (hold lock, short duration).
         new_rel_path = f"{content_dir}/{file.filename}"
@@ -446,7 +487,8 @@ class UpdatePlugin:
                     source_project_id=plugin.source_project_id,
                     source_version_id=version_id,
                     version_number=version.version_number,
-                    checksum_sha512=computed_hash,
+                    checksum_sha512=file.sha512,
+                    sha256=sha256,
                     size_bytes=len(content),
                     enabled=plugin.enabled,
                     installed_by=plugin.installed_by,

@@ -189,6 +189,7 @@ def _plugin() -> ServerPlugin:
         source_version_id="ver-1",
         version_number="1.0.0",
         checksum_sha512="abc123",
+        sha256="def456",
         size_bytes=1024,
         enabled=True,
         installed_by=None,

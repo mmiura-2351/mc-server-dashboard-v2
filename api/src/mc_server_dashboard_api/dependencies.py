@@ -303,6 +303,9 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.file_store import (
     FileStore as ServersFileStore,
 )
+from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
+    PluginCacheStore,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
@@ -1540,6 +1543,24 @@ def get_servers_file_store(
     return StorageFileStoreAdapter(storage=storage)
 
 
+def get_plugin_cache_store(request: Request) -> PluginCacheStore:
+    """Return the content-addressed plugin cache store from app state (issue #1306).
+
+    Built by the app factory from the storage config; ``None`` when the storage
+    backend is ``fs`` (no fs adapter yet). A missing store is a 503.
+    """
+
+    store: PluginCacheStore | None = getattr(
+        request.app.state, "plugin_cache_store", None
+    )
+    if store is None:
+        raise problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "plugin_cache_store_unavailable",
+        )
+    return store
+
+
 def get_read_file(
     request: Request,
     control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
@@ -1894,6 +1915,7 @@ def get_get_plugin(request: Request) -> GetPlugin:
 def get_install_plugin(
     request: Request,
     file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
 ) -> InstallPlugin:
     """Assemble the :class:`InstallPlugin` use case (plugin:manage, issue #1150)."""
 
@@ -1901,6 +1923,7 @@ def get_install_plugin(
     return InstallPlugin(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+        cache=cache,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
     )
@@ -1980,6 +2003,7 @@ def get_install_from_catalog(
     request: Request,
     catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
     file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
 ) -> InstallFromCatalog:
     """Assemble :class:`InstallFromCatalog` (plugin:manage, issue #1151)."""
 
@@ -1988,6 +2012,7 @@ def get_install_from_catalog(
         uow=ServersUnitOfWork(session_factory),
         catalog=catalog,
         file_store=file_store,
+        cache=cache,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
     )
@@ -2103,6 +2128,7 @@ def get_update_plugin(
     request: Request,
     catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
     file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
 ) -> UpdatePlugin:
     """Assemble :class:`UpdatePlugin` (plugin:manage, issue #1152)."""
 
@@ -2111,6 +2137,7 @@ def get_update_plugin(
         uow=ServersUnitOfWork(session_factory),
         catalog=catalog,
         file_store=file_store,
+        cache=cache,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
     )

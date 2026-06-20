@@ -58,7 +58,9 @@ class ServerPlugin:
     ``rel_path`` is the relative path within the working set (e.g.
     ``mods/fabric-api.jar``). ``source_project_id`` / ``source_version_id``
     carry Modrinth provenance when present; ``checksum_sha512`` is the SHA-512
-    of the jar bytes at install time. ``enabled`` tracks the
+    of the jar bytes at install time. ``sha256`` is the content address of the
+    jar in the content-addressed cache (issue #1306): identical content shares
+    one cached blob keyed by this hash. ``enabled`` tracks the
     ``.disabled``-suffix rename convention: a disabled plugin's ``rel_path``
     ends with ``.disabled``.
     """
@@ -75,6 +77,7 @@ class ServerPlugin:
     source_version_id: str | None
     version_number: str | None
     checksum_sha512: str | None
+    sha256: str | None
     size_bytes: int | None
     enabled: bool
     installed_by: uuid.UUID | None

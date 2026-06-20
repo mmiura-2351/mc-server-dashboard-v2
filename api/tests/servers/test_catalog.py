@@ -54,6 +54,7 @@ from tests.servers.fakes import (
     FakeCatalogProvider,
     FakeClock,
     FakeFileStore,
+    FakePluginCacheStore,
     FakeUnitOfWork,
 )
 
@@ -253,7 +254,11 @@ async def test_install_from_catalog_happy_path() -> None:
     catalog.seed_file(version.files[0].url, content)
 
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     plugin = await uc(
         community_id=_COMMUNITY,
@@ -290,7 +295,11 @@ async def test_install_from_catalog_paper_server() -> None:
     catalog.seed_file(version.files[0].url, content)
 
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     plugin = await uc(
         community_id=_COMMUNITY,
@@ -314,7 +323,11 @@ async def test_install_from_catalog_checksum_mismatch() -> None:
     catalog.seed_file(version.files[0].url, b"fake-jar-bytes")
 
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     with pytest.raises(CatalogChecksumMismatchError):
         await uc(
@@ -335,7 +348,11 @@ async def test_install_from_catalog_version_not_found() -> None:
     catalog.seed_project(project)  # No versions seeded
 
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     with pytest.raises(CatalogProjectNotFoundError):
         await uc(
@@ -361,7 +378,11 @@ async def test_install_from_catalog_not_at_rest() -> None:
     catalog.seed_file(version.files[0].url, content)
 
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     with pytest.raises(ServerFilesUnsettledError):
         await uc(
@@ -385,7 +406,11 @@ async def test_install_from_catalog_duplicate() -> None:
     catalog.seed_file(version.files[0].url, content)
 
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     # First install.
     await uc(
@@ -411,7 +436,11 @@ async def test_install_from_catalog_unavailable() -> None:
 
     catalog = FakeCatalogProvider(unavailable=True)
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     with pytest.raises(CatalogUnavailableError):
         await uc(
@@ -452,7 +481,11 @@ async def test_install_from_catalog_empty_sha512_fails() -> None:
     catalog.seed_file(version.files[0].url, file_content)
 
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     with pytest.raises(CatalogChecksumMismatchError, match="no sha512"):
         await uc(
@@ -496,7 +529,11 @@ async def test_install_from_catalog_filters_versions_by_loader_and_game_version(
     catalog.list_versions = _recording_list_versions  # type: ignore[method-assign]
 
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     await uc(
         community_id=_COMMUNITY,
@@ -542,7 +579,11 @@ async def test_install_from_catalog_non_jar_filename_fails() -> None:
     catalog.seed_file(version.files[0].url, file_content)
 
     uc = InstallFromCatalog(
-        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     with pytest.raises(InvalidFilePathError):
         await uc(
@@ -566,6 +607,8 @@ def _plugin(
     rel_path: str = "mods/fabric-api-0.92.0.jar",
     filename: str = "fabric-api-0.92.0.jar",
     display_name: str = "Fabric API",
+    checksum_sha512: str | None = "a" * 128,
+    sha256: str | None = None,
 ) -> ServerPlugin:
     return ServerPlugin(
         id=PluginId.new(),
@@ -579,7 +622,8 @@ def _plugin(
         source_project_id=source_project_id,
         source_version_id=source_version_id,
         version_number=version_number,
-        checksum_sha512="a" * 128,
+        checksum_sha512=checksum_sha512,
+        sha256=sha256,
         size_bytes=100,
         enabled=True,
         installed_by=None,
@@ -814,7 +858,13 @@ async def test_update_plugin_same_filename() -> None:
     catalog.seed_project(project, [ver_new])
     catalog.seed_file(ver_new.files[0].url, new_content)
 
-    uc = UpdatePlugin(uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW))
+    uc = UpdatePlugin(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
     result = await uc(
         community_id=_COMMUNITY,
         server_id=server.id,
@@ -851,7 +901,13 @@ async def test_update_plugin_different_filename() -> None:
     catalog.seed_project(project, [ver_new])
     catalog.seed_file(ver_new.files[0].url, new_content)
 
-    uc = UpdatePlugin(uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW))
+    uc = UpdatePlugin(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
     result = await uc(
         community_id=_COMMUNITY,
         server_id=server.id,
@@ -885,7 +941,11 @@ async def test_update_plugin_not_at_rest() -> None:
     catalog.seed_file(ver_new.files[0].url, new_content)
 
     uc = UpdatePlugin(
-        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     with pytest.raises(ServerFilesUnsettledError):
         await uc(
@@ -911,7 +971,11 @@ async def test_update_plugin_checksum_mismatch() -> None:
     catalog.seed_file(ver_new.files[0].url, b"fake-jar-bytes")
 
     uc = UpdatePlugin(
-        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     with pytest.raises(CatalogChecksumMismatchError):
         await uc(
@@ -937,7 +1001,11 @@ async def test_update_plugin_local_raises() -> None:
 
     catalog = FakeCatalogProvider()
     uc = UpdatePlugin(
-        uow=uow, catalog=catalog, file_store=FakeFileStore(), clock=FakeClock(_NOW)
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
     )
     with pytest.raises(PluginNotFoundError):
         await uc(
@@ -987,7 +1055,13 @@ async def test_update_plugin_rel_path_collision() -> None:
     catalog.seed_project(project, [ver_new])
     catalog.seed_file(ver_new.files[0].url, new_content)
 
-    uc = UpdatePlugin(uow=uow, catalog=catalog, file_store=fs, clock=FakeClock(_NOW))
+    uc = UpdatePlugin(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
     with pytest.raises(PluginAlreadyExistsError):
         await uc(
             community_id=_COMMUNITY,
@@ -1127,3 +1201,133 @@ async def test_list_plugin_dependencies_installed_flag() -> None:
     deps = await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id)
     assert len(deps) == 1
     assert deps[0].installed is True
+
+
+# -- Content-addressed cache + download cache (issue #1306) --
+
+
+async def test_install_from_catalog_stores_sha256_and_caches_blob() -> None:
+    """A Modrinth install caches the jar under its sha256 and records the address."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+    cache = FakePluginCacheStore()
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    assert plugin.sha256 == expected_sha256
+    assert plugin.checksum_sha512 == hashlib.sha512(content).hexdigest()
+    assert await cache.has(expected_sha256)
+    # The first install downloaded once.
+    assert catalog.downloads == [version.files[0].url]
+
+
+async def test_install_from_catalog_same_version_skips_redownload() -> None:
+    """A second per-server install of the same version serves from the download cache.
+
+    The first install downloads + caches; the second resolves the version's
+    published sha512 to the cached sha256 and skips the HTTP fetch entirely.
+    """
+    uow = FakeUnitOfWork()
+    server_a = _server()
+    server_b = _server()
+    uow.servers.seed(server_a)
+    uow.servers.seed(server_b)
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+    cache = FakePluginCacheStore()
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+
+    plugin_a = await uc(
+        community_id=_COMMUNITY,
+        server_id=server_a.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    plugin_b = await uc(
+        community_id=_COMMUNITY,
+        server_id=server_b.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    assert plugin_a.sha256 == expected_sha256
+    assert plugin_b.sha256 == expected_sha256
+    # Downloaded only once across both per-server installs (download cache hit).
+    assert catalog.downloads == [version.files[0].url]
+
+
+async def test_install_from_catalog_cache_hit_skips_download_when_url_dead() -> None:
+    """A cached version installs even if the catalog can no longer serve the file.
+
+    Pre-seed the DB index (sha512 -> sha256) and the cache blob, then drop the
+    file from the catalog. A successful install proves the bytes came from the
+    cache, not an HTTP download.
+    """
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    # NOTE: deliberately do NOT seed_file, so download_file would raise.
+
+    sha256 = hashlib.sha256(content).hexdigest()
+    cache = FakePluginCacheStore()
+    cache.blobs[sha256] = content
+    # Seed the download-cache index: a prior install on another server.
+    prior = _plugin(
+        server_id=ServerId.new(),
+        checksum_sha512=version.files[0].sha512,
+        sha256=sha256,
+    )
+    uow.plugins.seed(prior)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert plugin.sha256 == sha256
+    # No HTTP download happened (the cache served the bytes).
+    assert catalog.downloads == []

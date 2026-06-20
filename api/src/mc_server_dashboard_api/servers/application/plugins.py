@@ -10,6 +10,9 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.plugin_cache import (
+    ingest_into_cache,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -33,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     content_dir_for_server_type,
     loader_type_for_server_type,
 )
+from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
@@ -88,6 +92,7 @@ class InstallPlugin:
 
     uow: UnitOfWork
     file_store: FileStore
+    cache: PluginCacheStore
     clock: Clock
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
@@ -121,6 +126,10 @@ class InstallPlugin:
                 if existing is not None:
                     raise PluginAlreadyExistsError(rel_path)
 
+                # Ingest into the content-addressed cache (dedup-on-ingest); the
+                # jar still deploys to the working set below (issue #1306).
+                sha256 = await ingest_into_cache(self.cache, content)
+
                 # Write jar to storage.
                 await self.file_store.write_file(
                     community_id=community_id,
@@ -145,6 +154,7 @@ class InstallPlugin:
                     source_version_id=None,
                     version_number=None,
                     checksum_sha512=checksum,
+                    sha256=sha256,
                     size_bytes=len(content),
                     enabled=True,
                     installed_by=installed_by,

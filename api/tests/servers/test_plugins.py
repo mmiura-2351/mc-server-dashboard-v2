@@ -42,6 +42,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.servers.fakes import (
     FakeClock,
     FakeFileStore,
+    FakePluginCacheStore,
     FakeUnitOfWork,
 )
 
@@ -93,6 +94,7 @@ def _plugin(
         source_version_id=None,
         version_number=None,
         checksum_sha512="abc",
+        sha256=None,
         size_bytes=100,
         enabled=enabled,
         installed_by=None,
@@ -191,7 +193,9 @@ async def test_install_fabric_mod() -> None:
     server = _server()
     uow.servers.seed(server)
     fs = FakeFileStore()
-    uc = InstallPlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    uc = InstallPlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
     content = b"fake-jar-bytes"
     plugin = await uc(
         community_id=_COMMUNITY,
@@ -214,7 +218,12 @@ async def test_install_paper_plugin() -> None:
     uow = FakeUnitOfWork()
     server = _server(server_type=ServerType.PAPER)
     uow.servers.seed(server)
-    uc = InstallPlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
+    uc = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
     plugin = await uc(
         community_id=_COMMUNITY,
         server_id=server.id,
@@ -230,7 +239,12 @@ async def test_install_rejects_non_jar() -> None:
     uow = FakeUnitOfWork()
     server = _server()
     uow.servers.seed(server)
-    uc = InstallPlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
+    uc = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
     with pytest.raises(InvalidFilePathError):
         await uc(
             community_id=_COMMUNITY,
@@ -246,7 +260,12 @@ async def test_install_accepts_uppercase_jar_extension() -> None:
     uow = FakeUnitOfWork()
     server = _server()
     uow.servers.seed(server)
-    uc = InstallPlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
+    uc = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
     plugin = await uc(
         community_id=_COMMUNITY,
         server_id=server.id,
@@ -264,7 +283,12 @@ async def test_install_requires_at_rest() -> None:
         observed_state=ObservedState.RUNNING,
     )
     uow.servers.seed(server)
-    uc = InstallPlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
+    uc = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
     with pytest.raises(ServerFilesUnsettledError):
         await uc(
             community_id=_COMMUNITY,
@@ -366,7 +390,9 @@ async def test_install_duplicate_raises_already_exists() -> None:
     server = _server()
     uow.servers.seed(server)
     fs = FakeFileStore()
-    uc = InstallPlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    uc = InstallPlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
     await uc(
         community_id=_COMMUNITY,
         server_id=server.id,
@@ -432,3 +458,72 @@ async def test_remove_plugin_succeeds_when_jar_already_gone() -> None:
     uc = RemovePlugin(uow=uow, file_store=_RaisingFileStore())
     await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
     assert p.id not in uow.plugins.by_id
+
+
+# -- Content-addressed cache (issue #1306) --
+
+
+async def test_install_stores_sha256_and_caches_blob() -> None:
+    """Install computes the sha256 content address and caches the jar blob."""
+    import hashlib
+
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    cache = FakePluginCacheStore()
+    uc = InstallPlugin(
+        uow=uow, file_store=FakeFileStore(), cache=cache, clock=FakeClock(_NOW)
+    )
+    content = b"fabric-jar-bytes"
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="fabric-api.jar",
+        display_name="Fabric API",
+        content=content,
+    )
+    assert plugin.sha256 == expected_sha256
+    assert await cache.has(expected_sha256)
+
+
+async def test_install_identical_content_dedups_blob() -> None:
+    """A second install of identical bytes (different server) reuses the blob.
+
+    Both rows record the same content address; the cache stores the blob once even
+    though ``put`` is called twice (dedup-on-ingest).
+    """
+    import hashlib
+
+    uow = FakeUnitOfWork()
+    server_a = _server()
+    server_b = _server()
+    uow.servers.seed(server_a)
+    uow.servers.seed(server_b)
+    cache = FakePluginCacheStore()
+    uc = InstallPlugin(
+        uow=uow, file_store=FakeFileStore(), cache=cache, clock=FakeClock(_NOW)
+    )
+    content = b"identical-jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+
+    plugin_a = await uc(
+        community_id=_COMMUNITY,
+        server_id=server_a.id,
+        filename="lib.jar",
+        display_name="Lib",
+        content=content,
+    )
+    plugin_b = await uc(
+        community_id=_COMMUNITY,
+        server_id=server_b.id,
+        filename="lib.jar",
+        display_name="Lib",
+        content=content,
+    )
+
+    assert plugin_a.sha256 == sha256
+    assert plugin_b.sha256 == sha256
+    # put was attempted both times, but only one blob is stored (deduped).
+    assert cache.puts == [sha256, sha256]
+    assert list(cache.blobs) == [sha256]

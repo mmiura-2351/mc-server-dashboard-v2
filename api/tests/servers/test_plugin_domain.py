@@ -80,6 +80,7 @@ class TestServerPluginEntity:
             source_version_id=None,
             version_number=None,
             checksum_sha512="abc123",
+            sha256="def456",
             size_bytes=1024,
             enabled=True,
             installed_by=None,
@@ -87,6 +88,7 @@ class TestServerPluginEntity:
             updated_at=now,
         )
         assert plugin.display_name == "Test Plugin"
+        assert plugin.sha256 == "def456"
         assert plugin.enabled is True
         assert plugin.loader_type is LoaderType.MOD
         assert plugin.source is PluginSource.LOCAL

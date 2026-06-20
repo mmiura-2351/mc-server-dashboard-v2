@@ -71,6 +71,9 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
 )
+from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
+    PluginCacheStore,
+)
 from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
@@ -722,6 +725,12 @@ class FakePluginRepository(PluginRepository):
             key=lambda p: (p.display_name, str(p.id.value)),
         )
 
+    async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
+        for plugin in self.by_id.values():
+            if plugin.checksum_sha512 == checksum_sha512 and plugin.sha256 is not None:
+                return plugin.sha256
+        return None
+
 
 class FakeResourcePackRepository(ResourcePackRepository):
     def __init__(self) -> None:
@@ -1148,6 +1157,9 @@ class FakeCatalogProvider(CatalogProvider):
         self.projects: dict[str, CatalogProject] = {}
         self.versions: dict[str, list[CatalogVersion]] = {}
         self.file_bytes: dict[str, bytes] = {}
+        # Records each download_file URL so a test can assert the download cache
+        # skipped an HTTP fetch for an already-cached Modrinth version (#1306).
+        self.downloads: list[str] = []
         self._unavailable = unavailable
 
     def seed_project(
@@ -1240,6 +1252,7 @@ class FakeCatalogProvider(CatalogProvider):
 
         if self._unavailable:
             raise CatalogUnavailableError("fake unavailable")
+        self.downloads.append(url)
         content = self.file_bytes.get(url)
         if content is None:
             raise CatalogProjectNotFoundError(url)
@@ -1274,3 +1287,34 @@ class FakeResourcePackStore(ResourcePackStore):
 
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
         return len(self.blobs[pack_id])
+
+
+class FakePluginCacheStore(PluginCacheStore):
+    """In-memory content-addressed plugin cache for use-case tests (issue #1306).
+
+    Keyed by SHA-256 content address. ``puts`` records each ``put`` call (even the
+    deduped ones) and ``stored`` holds the keys actually persisted, so a test can
+    assert dedup (a second put of identical bytes does not grow ``stored``) and the
+    download cache (a cached ``has`` short-circuits the HTTP download).
+    """
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, bytes] = {}
+        self.puts: list[str] = []
+
+    async def has(self, sha256: str) -> bool:
+        return sha256 in self.blobs
+
+    async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
+        self.puts.append(sha256)
+        data = b"".join([chunk async for chunk in stream])
+        # Dedup-on-ingest: identical content addresses the same key.
+        self.blobs.setdefault(sha256, data)
+
+    def open(self, sha256: str) -> AsyncIterator[bytes]:
+        data = self.blobs[sha256]
+
+        async def _gen() -> AsyncIterator[bytes]:
+            yield data
+
+        return _gen()
