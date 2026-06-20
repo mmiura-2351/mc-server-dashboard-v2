@@ -25,7 +25,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
-import { t } from "../i18n/index.ts";
+import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { atRest, normalizeState } from "./serverState.ts";
@@ -47,10 +47,39 @@ function supportsPlugins(serverType: string): boolean {
   return !["vanilla", "spigot"].includes(serverType);
 }
 
-function pluginErrorMessage(error: unknown): string {
+/** Server types whose content is mods, mirroring the backend (#1320). */
+function isModLoader(serverType: string): boolean {
+  return serverType === "fabric" || serverType === "forge";
+}
+
+/** The loader-aware content noun in its three grammatical forms (#1320). */
+interface ContentNoun {
+  plural: string;
+  singular: string;
+  singularCap: string;
+}
+
+function contentNoun(serverType: string): ContentNoun {
+  const kind = isModLoader(serverType) ? "mods" : "plugins";
+  return {
+    plural: t(`plugins.contentNoun.plural.${kind}`),
+    singular: t(`plugins.contentNoun.singular.${kind}`),
+    singularCap: t(`plugins.contentNoun.singularCap.${kind}`),
+  };
+}
+
+/** Substitute the `{nouns}` / `{noun}` / `{Noun}` placeholders in a string. */
+function applyNoun(text: string, noun: ContentNoun): string {
+  return text
+    .replace(/\{nouns\}/g, noun.plural)
+    .replace(/\{noun\}/g, noun.singular)
+    .replace(/\{Noun\}/g, noun.singularCap);
+}
+
+function pluginErrorMessage(error: unknown, noun: ContentNoun): string {
   if (error instanceof ApiError) {
     if (error.reason === "server_not_stopped") {
-      return t("plugins.error.notStopped");
+      return applyNoun(t("plugins.error.notStopped"), noun);
     }
   }
   return t("plugins.error.generic");
@@ -79,6 +108,9 @@ export function ServerPluginsTab({
   can: Can;
 }) {
   const serverId = server.id;
+  // Loader-aware content noun (Plugins vs Mods) for this server (#1320).
+  const noun = contentNoun(server.server_type);
+  const tn = (key: TranslationKey) => applyNoun(t(key), noun);
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
@@ -96,7 +128,7 @@ export function ServerPluginsTab({
 
   const onError = (error: unknown) => {
     if (onForbidden(error)) return;
-    showToast(pluginErrorMessage(error), "error");
+    showToast(pluginErrorMessage(error, noun), "error");
   };
 
   const refresh = () => {
@@ -164,7 +196,7 @@ export function ServerPluginsTab({
         ),
       ),
     onSuccess: () => {
-      showToast(t("plugins.enabled"), "success");
+      showToast(tn("plugins.enabled"), "success");
       refresh();
     },
     onError,
@@ -183,7 +215,7 @@ export function ServerPluginsTab({
         ),
       ),
     onSuccess: () => {
-      showToast(t("plugins.disabled"), "success");
+      showToast(tn("plugins.disabled"), "success");
       refresh();
     },
     onError,
@@ -202,7 +234,7 @@ export function ServerPluginsTab({
         ),
       ),
     onSuccess: () => {
-      showToast(t("plugins.removed"), "success");
+      showToast(tn("plugins.removed"), "success");
       refresh();
     },
     onError,
@@ -228,7 +260,7 @@ export function ServerPluginsTab({
         { body: JSON.stringify({ version_id: versionId }) },
       ),
     onSuccess: () => {
-      showToast(t("plugins.updated"), "success");
+      showToast(tn("plugins.updated"), "success");
       refresh();
     },
     onError,
@@ -248,7 +280,7 @@ export function ServerPluginsTab({
         { body: JSON.stringify({ side }) },
       ),
     onSuccess: () => {
-      showToast(t("plugins.sideUpdated"), "success");
+      showToast(tn("plugins.sideUpdated"), "success");
       refresh();
     },
     onError,
@@ -280,7 +312,7 @@ export function ServerPluginsTab({
       );
     },
     onSuccess: () => {
-      showToast(t("plugins.installed"), "success");
+      showToast(tn("plugins.installed"), "success");
       refresh();
     },
     onError,
@@ -292,13 +324,13 @@ export function ServerPluginsTab({
     return <p className="sub">{t("plugins.unsupported")}</p>;
   }
   if (!canRead) {
-    return <p className="sub">{t("plugins.noRead")}</p>;
+    return <p className="sub">{tn("plugins.noRead")}</p>;
   }
   if (listQuery.isPending) {
-    return <p className="sub">{t("plugins.loading")}</p>;
+    return <p className="sub">{tn("plugins.loading")}</p>;
   }
   if (listQuery.isError) {
-    return <p className="field-error">{t("plugins.loadError")}</p>;
+    return <p className="field-error">{tn("plugins.loadError")}</p>;
   }
 
   const plugins = listQuery.data.plugins;
@@ -322,7 +354,7 @@ export function ServerPluginsTab({
     <section className="plugins">
       {!serverAtRest && (
         <p className="field-hint plugins-notice">
-          {t("plugins.serverNotStopped")}
+          {tn("plugins.serverNotStopped")}
         </p>
       )}
 
@@ -397,7 +429,7 @@ export function ServerPluginsTab({
             {plugins.length === 0 ? (
               <tr>
                 <td colSpan={canManage ? 7 : 6} className="sub">
-                  {t("plugins.empty")}
+                  {tn("plugins.empty")}
                 </td>
               </tr>
             ) : (
@@ -441,10 +473,10 @@ export function ServerPluginsTab({
 
       <ConfirmDialog
         open={removeTarget !== null}
-        title={t("plugins.removeDialog.title")}
-        body={t("plugins.removeDialog.body")}
+        title={tn("plugins.removeDialog.title")}
+        body={tn("plugins.removeDialog.body")}
         confirmPhrase={t("plugins.removeDialog.phrase")}
-        confirmLabel={t("plugins.removeDialog.confirm")}
+        confirmLabel={tn("plugins.removeDialog.confirm")}
         promptLabel={t("plugins.removeDialog.prompt")}
         onConfirm={() => {
           const target = removeTarget;
@@ -459,6 +491,7 @@ export function ServerPluginsTab({
           communityId={communityId}
           serverId={serverId}
           serverAtRest={serverAtRest}
+          noun={noun}
           onDone={() => {
             setBrowseOpen(false);
             refresh();
@@ -576,7 +609,10 @@ function PluginRow({
             >
               {plugin.enabled ? t("plugins.disable") : t("plugins.enable")}
             </button>
-            {hasUpdate && updateVersion !== null && (
+            {/* The Update button only renders when an update is available. Render
+                an inert, hidden placeholder of the same width otherwise so the
+                following actions stay column-aligned across rows (#1320). */}
+            {hasUpdate && updateVersion !== null ? (
               <button
                 type="button"
                 className="btn sm"
@@ -585,6 +621,10 @@ function PluginRow({
               >
                 {t("plugins.update")}
               </button>
+            ) : (
+              <span className="btn sm row-actions-spacer" aria-hidden>
+                {t("plugins.update")}
+              </span>
             )}
             <button
               type="button"
@@ -594,7 +634,10 @@ function PluginRow({
             >
               {t("plugins.remove")}
             </button>
-            {plugin.source === "modrinth" && (
+            {/* The Dependencies button only applies to Modrinth plugins. Render
+                an inert, hidden placeholder of the same width otherwise so the
+                Disable/Remove buttons stay column-aligned across rows (#1320). */}
+            {plugin.source === "modrinth" ? (
               <button
                 type="button"
                 className="btn sm ghost"
@@ -602,6 +645,10 @@ function PluginRow({
               >
                 {t("plugins.dependencies")}
               </button>
+            ) : (
+              <span className="btn sm ghost row-actions-spacer" aria-hidden>
+                {t("plugins.dependencies")}
+              </span>
             )}
           </td>
         )}
@@ -930,6 +977,7 @@ function ModrinthBrowser({
   communityId,
   serverId,
   serverAtRest,
+  noun,
   onDone,
   onClose,
   onError,
@@ -937,6 +985,7 @@ function ModrinthBrowser({
   communityId: string;
   serverId: string;
   serverAtRest: boolean;
+  noun: ContentNoun;
   onDone: () => void;
   onClose: () => void;
   onError: (error: unknown) => void;
@@ -966,6 +1015,7 @@ function ModrinthBrowser({
         serverId={serverId}
         projectIdOrSlug={selectedProject}
         serverAtRest={serverAtRest}
+        noun={noun}
         onBack={() => setSelectedProject(null)}
         onDone={onDone}
         onClose={onClose}
@@ -989,6 +1039,7 @@ function ModrinthBrowser({
           communityId={communityId}
           serverId={serverId}
           query={query}
+          noun={noun}
           onSelect={(projectId) => setSelectedProject(projectId)}
         />
       )}
@@ -1000,11 +1051,13 @@ function SearchResults({
   communityId,
   serverId,
   query,
+  noun,
   onSelect,
 }: {
   communityId: string;
   serverId: string;
   query: string;
+  noun: ContentNoun;
   onSelect: (projectId: string) => void;
 }) {
   const searchQuery = useQuery({
@@ -1020,7 +1073,7 @@ function SearchResults({
   });
 
   if (searchQuery.isPending) {
-    return <p className="sub">{t("plugins.loading")}</p>;
+    return <p className="sub">{applyNoun(t("plugins.loading"), noun)}</p>;
   }
   if (searchQuery.isError) {
     return <p className="field-error">{t("plugins.error.generic")}</p>;
@@ -1068,6 +1121,7 @@ function ProjectDetailModal({
   serverId,
   projectIdOrSlug,
   serverAtRest,
+  noun,
   onBack,
   onDone,
   onClose,
@@ -1077,6 +1131,7 @@ function ProjectDetailModal({
   serverId: string;
   projectIdOrSlug: string;
   serverAtRest: boolean;
+  noun: ContentNoun;
   onBack: () => void;
   onDone: () => void;
   onClose: () => void;
@@ -1115,7 +1170,7 @@ function ProjectDetailModal({
         },
       ),
     onSuccess: () => {
-      showToast(t("plugins.catalogInstalled"), "success");
+      showToast(applyNoun(t("plugins.catalogInstalled"), noun), "success");
       onDone();
     },
     onError: (error) => {
@@ -1135,7 +1190,9 @@ function ProjectDetailModal({
         </button>
       }
     >
-      {detailQuery.isPending && <p className="sub">{t("plugins.loading")}</p>}
+      {detailQuery.isPending && (
+        <p className="sub">{applyNoun(t("plugins.loading"), noun)}</p>
+      )}
       {detailQuery.isError && (
         <p className="field-error">{t("plugins.error.generic")}</p>
       )}

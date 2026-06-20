@@ -84,6 +84,13 @@ const OPERATION_LABEL_KEY: Record<string, TranslationKey> = {
   "group:player_remove": "communitySettings.audit.op.group:player_remove",
   "group:attach": "communitySettings.audit.op.group:attach",
   "group:detach": "communitySettings.audit.op.group:detach",
+  "plugin:install": "communitySettings.audit.op.plugin:install",
+  "plugin:remove": "communitySettings.audit.op.plugin:remove",
+  "plugin:enable": "communitySettings.audit.op.plugin:enable",
+  "plugin:disable": "communitySettings.audit.op.plugin:disable",
+  "plugin:update": "communitySettings.audit.op.plugin:update",
+  "plugin:set_side": "communitySettings.audit.op.plugin:set_side",
+  "plugin:resolve": "communitySettings.audit.op.plugin:resolve",
 };
 
 // The `target_type` prefixes (TARGET_* in operations.py), mapped to label keys.
@@ -97,6 +104,7 @@ const TARGET_TYPE_LABEL_KEY: Record<string, TranslationKey> = {
   worker: "communitySettings.audit.targetType.worker",
   file: "communitySettings.audit.targetType.file",
   group: "communitySettings.audit.targetType.group",
+  plugin: "communitySettings.audit.targetType.plugin",
 };
 
 // Human-readable label for an audit `operation` code; an unmapped/unknown code

@@ -30,6 +30,20 @@ describe("operationLabel", () => {
     );
   });
 
+  it("maps the plugin ops, including resolve and set_side (#1319/#1320)", () => {
+    expect(operationLabel("plugin:resolve")).toBe(
+      t("communitySettings.audit.op.plugin:resolve"),
+    );
+    expect(operationLabel("plugin:resolve")).not.toBe("plugin:resolve");
+    expect(operationLabel("plugin:set_side")).toBe(
+      t("communitySettings.audit.op.plugin:set_side"),
+    );
+    expect(operationLabel("plugin:set_side")).not.toBe("plugin:set_side");
+    expect(operationLabel("plugin:install")).toBe(
+      t("communitySettings.audit.op.plugin:install"),
+    );
+  });
+
   it("falls back to the raw code for an unmapped/unknown operation", () => {
     expect(operationLabel("community.permission_grant_revoke")).toBe(
       "community.permission_grant_revoke",
@@ -50,6 +64,13 @@ describe("targetTypeLabel", () => {
     expect(targetTypeLabel("server")).toBe(
       t("communitySettings.audit.targetType.server"),
     );
+  });
+
+  it("maps the plugin target type (#1320)", () => {
+    expect(targetTypeLabel("plugin")).toBe(
+      t("communitySettings.audit.targetType.plugin"),
+    );
+    expect(targetTypeLabel("plugin")).not.toBe("plugin");
   });
 
   it("falls back to the raw type for an unmapped value", () => {

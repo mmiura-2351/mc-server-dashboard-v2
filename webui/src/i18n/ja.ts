@@ -1279,14 +1279,24 @@ export const ja: Record<TranslationKey, string> = {
 
   // Plugins tab (issue #1153).
   "serverDetail.tab.plugins": "プラグイン",
-  "plugins.loading": "プラグインを読み込み中…",
-  "plugins.loadError": "プラグインを読み込めませんでした。",
-  "plugins.noRead": "プラグインを閲覧する権限がありません。",
-  "plugins.empty": "プラグインがインストールされていません。",
+  // Loader-aware tab label + noun (#1320): Fabric/Forge は Mod、Paper はプラグイン
+  // を管理する。日本語では語形は一つだが、英語の `{nouns}` / `{noun}` / `{Noun}`
+  // と対になるよう三つのキーを揃える。
+  "serverDetail.tab.mods": "Mod",
+  "plugins.contentNoun.plural.plugins": "プラグイン",
+  "plugins.contentNoun.plural.mods": "Mod",
+  "plugins.contentNoun.singular.plugins": "プラグイン",
+  "plugins.contentNoun.singular.mods": "Mod",
+  "plugins.contentNoun.singularCap.plugins": "プラグイン",
+  "plugins.contentNoun.singularCap.mods": "Mod",
+  "plugins.loading": "{nouns}を読み込み中…",
+  "plugins.loadError": "{nouns}を読み込めませんでした。",
+  "plugins.noRead": "{nouns}を閲覧する権限がありません。",
+  "plugins.empty": "{nouns}がインストールされていません。",
   "plugins.unsupported":
     "このサーバータイプはプラグインやModに対応していません。",
   "plugins.serverNotStopped":
-    "プラグインを管理するにはサーバーを停止してください。",
+    "{nouns}を管理するにはサーバーを停止してください。",
   "plugins.col.name": "名前",
   "plugins.col.version": "バージョン",
   "plugins.col.source": "ソース",
@@ -1310,10 +1320,10 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.browse": "Modrinthで検索",
   "plugins.downloadClientModpack": "クライアントModパックをダウンロード",
   "plugins.updateAvailable": "更新あり: ",
-  "plugins.removeDialog.title": "プラグインを削除",
+  "plugins.removeDialog.title": "{Noun}を削除",
   "plugins.removeDialog.body":
-    "プラグインファイルをサーバーから完全に削除します。この操作は取り消せません。",
-  "plugins.removeDialog.confirm": "プラグインを削除",
+    "{noun}ファイルをサーバーから完全に削除します。この操作は取り消せません。",
+  "plugins.removeDialog.confirm": "{Noun}を削除",
   "plugins.removeDialog.prompt": "REMOVEと入力して削除を有効にしてください",
   "plugins.removeDialog.phrase": "REMOVE",
   "plugins.dependencies": "依存関係",
@@ -1332,15 +1342,15 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.search.installing": "インストール中…",
   "plugins.search.versions": "バージョン",
   "plugins.search.back": "検索に戻る",
-  "plugins.enabled": "プラグインを有効にしました。",
-  "plugins.disabled": "プラグインを無効にしました。",
-  "plugins.removed": "プラグインを削除しました。",
-  "plugins.updated": "プラグインを更新しました。",
-  "plugins.installed": "プラグインをインストールしました。",
-  "plugins.sideUpdated": "プラグインのサイドを更新しました。",
-  "plugins.catalogInstalled": "Modrinthからプラグインをインストールしました。",
+  "plugins.enabled": "{Noun}を有効にしました。",
+  "plugins.disabled": "{Noun}を無効にしました。",
+  "plugins.removed": "{Noun}を削除しました。",
+  "plugins.updated": "{Noun}を更新しました。",
+  "plugins.installed": "{Noun}をインストールしました。",
+  "plugins.sideUpdated": "{Noun}のサイドを更新しました。",
+  "plugins.catalogInstalled": "Modrinthから{Noun}をインストールしました。",
   "plugins.error.notStopped":
-    "プラグインを管理するにはサーバーを停止してください。",
+    "{nouns}を管理するにはサーバーを停止してください。",
   "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "依存関係と互換性",
@@ -1380,6 +1390,8 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.audit.op.plugin:enable": "プラグインを有効化",
   "communitySettings.audit.op.plugin:disable": "プラグインを無効化",
   "communitySettings.audit.op.plugin:update": "プラグインを更新",
+  "communitySettings.audit.op.plugin:set_side": "プラグインのサイドを設定",
+  "communitySettings.audit.op.plugin:resolve": "プラグインの依存関係を解決",
   "communitySettings.audit.targetType.plugin": "プラグイン",
 
   // Resource pack library (issue #1178).

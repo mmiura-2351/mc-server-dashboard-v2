@@ -196,11 +196,127 @@ describe("ServerPluginsTab validation checklist", () => {
     mockGets({ plugins: [], validation: EMPTY_VALIDATION });
     renderTab();
     await waitFor(() => {
-      expect(screen.getByText("No plugins installed.")).toBeInTheDocument();
+      // The fabric fixture manages mods, so the empty-state names "mods" (#1320).
+      expect(screen.getByText("No mods installed.")).toBeInTheDocument();
     });
     expect(
       screen.queryByText("Dependencies & compatibility"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("ServerPluginsTab loader-aware noun (#1320)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function renderTabFor(serverType: string) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return render(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <ToastProvider>
+            <ServerPluginsTab
+              server={server({ server_type: serverType })}
+              communityId={CID}
+              can={allow}
+            />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("names the empty-state 'mods' for a fabric server", async () => {
+    mockGets({ plugins: [], validation: EMPTY_VALIDATION });
+    renderTabFor("fabric");
+    await waitFor(() => {
+      expect(screen.getByText("No mods installed.")).toBeInTheDocument();
+    });
+  });
+
+  it("names the empty-state 'mods' for a forge server", async () => {
+    mockGets({ plugins: [], validation: EMPTY_VALIDATION });
+    renderTabFor("forge");
+    await waitFor(() => {
+      expect(screen.getByText("No mods installed.")).toBeInTheDocument();
+    });
+  });
+
+  it("names the empty-state 'plugins' for a paper server", async () => {
+    mockGets({ plugins: [], validation: EMPTY_VALIDATION });
+    renderTabFor("paper");
+    await waitFor(() => {
+      expect(screen.getByText("No plugins installed.")).toBeInTheDocument();
+    });
+  });
+});
+
+describe("ServerPluginsTab action-button alignment (#1320)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** A minimal latest_version payload to mark a plugin as update-available. */
+  const LATEST_VERSION = {
+    date_published: "2026-06-20T00:00:00Z",
+    dependencies: [],
+    files: [],
+    game_versions: ["1.21"],
+    loaders: ["fabric"],
+    name: "Sodium 0.6.0",
+    version_id: "v-new",
+    version_number: "0.6.0",
+  };
+
+  // One plugin has an update available, the other does not. The update row
+  // renders a real "Update" button; the other reserves an inert placeholder so
+  // the always-present actions stay column-aligned across rows.
+  function mockGetsWithUpdate() {
+    const updated = plugin({ id: "p1", display_name: "Sodium" });
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.endsWith("/plugins/validate")) {
+        return Promise.resolve(EMPTY_VALIDATION);
+      }
+      if (url.endsWith("/plugins/updates")) {
+        return Promise.resolve({
+          updates: [{ plugin: updated, latest_version: LATEST_VERSION }],
+        });
+      }
+      if (url.endsWith("/plugins")) {
+        return Promise.resolve({
+          plugins: [updated, plugin({ id: "p2", display_name: "Lithium" })],
+        });
+      }
+      return Promise.resolve({});
+    });
+  }
+
+  it("keeps the action column aligned: real Update button on the update row, an inert placeholder otherwise", async () => {
+    mockGetsWithUpdate();
+    renderTab();
+
+    await waitFor(() => {
+      expect(screen.getByText("Lithium")).toBeInTheDocument();
+    });
+
+    // The update-available row renders a real, clickable Update button.
+    const updateButtons = screen
+      .getAllByText("Update")
+      .filter((el) => el.tagName === "BUTTON");
+    expect(updateButtons).toHaveLength(1);
+
+    // The non-update row reserves an inert placeholder of the same width so the
+    // following Remove button stays column-aligned (not a clickable button).
+    const updatePlaceholders = screen
+      .getAllByText("Update")
+      .filter(
+        (el) =>
+          el.tagName === "SPAN" && el.classList.contains("row-actions-spacer"),
+      );
+    expect(updatePlaceholders).toHaveLength(1);
   });
 });
 

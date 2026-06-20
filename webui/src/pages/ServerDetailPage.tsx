@@ -72,6 +72,20 @@ const TAB_LABEL: Record<Tab, TranslationKey> = {
 /** Server types that do not support plugins/mods (no backend support). */
 const PLUGIN_UNSUPPORTED_TYPES = new Set(["vanilla", "spigot"]);
 
+/**
+ * Server types whose managed content lives in `mods/` rather than `plugins/`,
+ * mirroring the backend mapping (servers/domain/plugin.py): Fabric/Forge are
+ * mods, Paper is plugins (#1320).
+ */
+const MOD_LOADER_TYPES = new Set(["fabric", "forge"]);
+
+/** The loader-aware label key for the content tab (Mods vs Plugins). */
+function pluginTabLabelKey(serverType: string): TranslationKey {
+  return MOD_LOADER_TYPES.has(serverType)
+    ? "serverDetail.tab.mods"
+    : "serverDetail.tab.plugins";
+}
+
 export function ServerDetailPage() {
   const { cid, sid } = useParams();
   if (cid === undefined || sid === undefined) {
@@ -139,7 +153,11 @@ function Loaded({
             onClick={() => setTab(name)}
             onKeyDown={(e) => handleTabKeyDown(e, TABS, tab, setTab, "sd")}
           >
-            {t(TAB_LABEL[name])}
+            {t(
+              name === "plugins"
+                ? pluginTabLabelKey(server.server_type)
+                : TAB_LABEL[name],
+            )}
           </button>
         ))}
       </div>
