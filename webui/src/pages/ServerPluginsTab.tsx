@@ -758,7 +758,9 @@ function PluginValidationChecklist({
               {t("plugins.validation.missingDep")
                 .replace("{mod}", nameOf(finding.mod_id))
                 .replace("{dependency}", finding.depends_on)
-                .replace("{range}", finding.version_range)}
+                .replace("{range}", finding.version_range)
+                .replace(" ()", "")
+                .replace("（）", "")}
             </li>
           ))}
           {validation.missing_catalog_deps.map((finding) => (
@@ -783,6 +785,8 @@ function PluginValidationChecklist({
                 .replace("{mod}", nameOf(finding.mod_id))
                 .replace("{dependency}", finding.depends_on)
                 .replace("{range}", finding.version_range)
+                .replace(" ()", "")
+                .replace("（）", "")
                 .replace("{present}", finding.present_version)}
             </li>
           ))}
