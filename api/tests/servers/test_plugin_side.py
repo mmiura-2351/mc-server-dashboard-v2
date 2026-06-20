@@ -35,6 +35,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidPluginSideError,
+    PluginAlreadyExistsError,
     PluginNotFoundError,
     ServerFilesUnsettledError,
 )
@@ -453,6 +454,57 @@ async def test_set_side_plugin_not_found() -> None:
             plugin_id=PluginId.new(),
             side="both",
         )
+
+
+async def test_set_side_blocks_cross_plugin_collision() -> None:
+    # Defense-in-depth for #1316: a side change must not materialize a jar over a
+    # path already occupied by a *different* plugin. Construct the two-same-base
+    # state (occupant disabled at the .disabled path) and switch the other plugin
+    # client -> both while disabled, whose desired path is that same .disabled
+    # path. SetPluginSide must reject it instead of overwriting the occupant.
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    cache = FakePluginCacheStore()
+    content = b"the-jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+    cache.blobs[sha256] = content
+    fs = FakeFileStore()
+
+    # Occupant: a disabled server/both jar holding mods/foo.jar.disabled.
+    occupant = _plugin(
+        server_id=server.id,
+        side="both",
+        enabled=False,
+        rel_path="mods/foo.jar.disabled",
+        filename="foo.jar",
+        sha256="occupant-sha",
+    )
+    uow.plugins.seed(occupant)
+    fs.files["mods/foo.jar.disabled"] = b"occupant-bytes"
+
+    # Other plugin: a disabled client jar with the same clean base (mods/foo.jar).
+    other = _plugin(
+        server_id=server.id,
+        side="client",
+        enabled=False,
+        rel_path="mods/foo.jar",
+        filename="foo.jar",
+        sha256=sha256,
+    )
+    uow.plugins.seed(other)
+
+    uc = SetPluginSide(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
+    with pytest.raises(PluginAlreadyExistsError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=other.id,
+            side="both",
+        )
+
+    # The occupant's working-set file is untouched.
+    assert fs.files["mods/foo.jar.disabled"] == b"occupant-bytes"
 
 
 # -- Toggle interaction with client-only plugins --
