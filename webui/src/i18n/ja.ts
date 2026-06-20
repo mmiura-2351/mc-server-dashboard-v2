@@ -1335,6 +1335,16 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.error.notStopped":
     "プラグインを管理するにはサーバーを停止してください。",
   "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",
+  // Dependency / compatibility validation checklist (issue #1307).
+  "plugins.validation.heading": "依存関係と互換性",
+  "plugins.validation.ok": "問題は見つかりませんでした。",
+  "plugins.validation.missingDep":
+    "{mod} は {dependency}（{range}）を必要としますが、インストールされていません。",
+  "plugins.validation.versionUnsatisfied":
+    "{mod} は {dependency}（{range}）を必要としますが、インストール済みの {present} は条件を満たしません。",
+  "plugins.validation.conflict": "{mod} は {other} と競合します。",
+  "plugins.validation.mcMismatch":
+    "{mod} は MC {serverVersion} に対応していません（対応: {modVersions}）。",
   "communitySettings.roles.family.plugin": "プラグイン",
   "communitySettings.roles.code.plugin:read": "閲覧",
   "communitySettings.roles.code.plugin:manage": "管理",

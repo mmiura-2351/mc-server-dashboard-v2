@@ -1152,6 +1152,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Validate Plugins
+         * @description Validate the server's installed plugin set (plugin:read, issue #1307).
+         *
+         *     Returns the phase-B dependency/compatibility checklist (missing required
+         *     deps, version-unsatisfied deps, conflicts, MC-version mismatch). Read-only:
+         *     it never mutates the set.
+         */
+        get: operations["validate_plugins_api_communities__community_id__servers__server_id__plugins_validate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}": {
         parameters: {
             query?: never;
@@ -2345,6 +2369,13 @@ export interface components {
             /** Name */
             name: string;
         };
+        /** ConflictResponse */
+        ConflictResponse: {
+            /** Conflicts With */
+            conflicts_with: string;
+            /** Mod Id */
+            mod_id: string;
+        };
         /** CreateGrantRequest */
         CreateGrantRequest: {
             /** Permissions */
@@ -2584,6 +2615,15 @@ export interface components {
             /** Refresh Token */
             refresh_token?: string | null;
         };
+        /** McMismatchResponse */
+        McMismatchResponse: {
+            /** Mod Id */
+            mod_id: string;
+            /** Mod Mc Versions */
+            mod_mc_versions: string[];
+            /** Server Mc Version */
+            server_mc_version: string;
+        };
         /**
          * MemberResponse
          * @description A member of a community with their username and the roles they hold.
@@ -2624,6 +2664,15 @@ export interface components {
             max_memory_limit_mb: number | null;
             /** Relay Enabled */
             relay_enabled: boolean;
+        };
+        /** MissingDependencyResponse */
+        MissingDependencyResponse: {
+            /** Depends On */
+            depends_on: string;
+            /** Mod Id */
+            mod_id: string;
+            /** Version Range */
+            version_range: string;
         };
         /** PlatformAdminRequest */
         PlatformAdminRequest: {
@@ -2691,6 +2740,8 @@ export interface components {
             installed_by: string | null;
             /** Loader Type */
             loader_type: string;
+            /** Mod Identifier */
+            mod_identifier: string | null;
             /** Rel Path */
             rel_path: string;
             /**
@@ -2723,6 +2774,20 @@ export interface components {
         PluginUpdatesResponse: {
             /** Updates */
             updates: components["schemas"]["PluginUpdateInfoResponse"][];
+        };
+        /**
+         * PluginValidationResponse
+         * @description The phase-B dependency/compatibility checklist for a server's plugin set.
+         */
+        PluginValidationResponse: {
+            /** Conflicts */
+            conflicts: components["schemas"]["ConflictResponse"][];
+            /** Mc Mismatch */
+            mc_mismatch: components["schemas"]["McMismatchResponse"][];
+            /** Missing Deps */
+            missing_deps: components["schemas"]["MissingDependencyResponse"][];
+            /** Version Unsatisfied */
+            version_unsatisfied: components["schemas"]["VersionUnsatisfiedResponse"][];
         };
         /**
          * PortCheckResponse
@@ -3072,6 +3137,17 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** VersionUnsatisfiedResponse */
+        VersionUnsatisfiedResponse: {
+            /** Depends On */
+            depends_on: string;
+            /** Mod Id */
+            mod_id: string;
+            /** Present Version */
+            present_version: string;
+            /** Version Range */
+            version_range: string;
         };
         /**
          * VersionsResponse
@@ -5549,6 +5625,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PluginUpdatesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    validate_plugins_api_communities__community_id__servers__server_id__plugins_validate_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginValidationResponse"];
                 };
             };
             /** @description Validation Error */

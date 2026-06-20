@@ -8,6 +8,10 @@ export function pluginUpdatesKey(communityId: string, serverId: string) {
   return ["plugins", communityId, serverId, "updates"] as const;
 }
 
+export function pluginValidationKey(communityId: string, serverId: string) {
+  return ["plugins", communityId, serverId, "validation"] as const;
+}
+
 export function catalogSearchKey(
   communityId: string,
   serverId: string,

@@ -25,7 +25,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from mc_server_dashboard_api.core.adapters.database import Base
@@ -84,3 +84,13 @@ class ServerPluginModel(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    # Jar manifest metadata parsed at ingest (issue #1307): the uniform
+    # dependency source for local uploads and Modrinth installs. Nullable so
+    # rows installed before this migration keep NULL until re-ingested; the
+    # repository maps a NULL JSON column to an empty list.
+    mod_identifier: Mapped[str | None] = mapped_column(String, nullable=True)
+    provides: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    dependencies: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    mc_versions: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)

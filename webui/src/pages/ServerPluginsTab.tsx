@@ -17,6 +17,7 @@ import {
   catalogSearchKey,
   pluginsKey,
   pluginUpdatesKey,
+  pluginValidationKey,
 } from "../api/pluginQueryKeys.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
@@ -35,6 +36,8 @@ type PluginUpdateInfoResponse =
 type CatalogSearchResultResponse =
   components["schemas"]["CatalogSearchResultResponse"];
 type CatalogVersionResponse = components["schemas"]["CatalogVersionResponse"];
+type PluginValidationResponse =
+  components["schemas"]["PluginValidationResponse"];
 
 /** Server types that support plugins/mods. Vanilla and Spigot do not. */
 function supportsPlugins(serverType: string): boolean {
@@ -48,6 +51,12 @@ function pluginErrorMessage(error: unknown): string {
     }
   }
   return t("plugins.error.generic");
+}
+
+/** Map a manifest mod id to a friendly plugin name, falling back to the id. */
+function nameOfPlugin(plugins: PluginResponse[], modId: string): string {
+  const match = plugins.find((p) => p.mod_identifier === modId);
+  return match?.display_name ?? modId;
 }
 
 export function ServerPluginsTab({
@@ -86,6 +95,9 @@ export function ServerPluginsTab({
     queryClient.invalidateQueries({
       queryKey: pluginUpdatesKey(communityId, serverId),
     });
+    queryClient.invalidateQueries({
+      queryKey: pluginValidationKey(communityId, serverId),
+    });
   };
 
   // -- Queries --
@@ -109,6 +121,18 @@ export function ServerPluginsTab({
       api.get(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/plugins/updates",
+          { community_id: communityId, server_id: serverId },
+        ),
+      ),
+  });
+
+  const validationQuery = useQuery({
+    queryKey: pluginValidationKey(communityId, serverId),
+    enabled: canRead,
+    queryFn: () =>
+      api.get(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/plugins/validate",
           { community_id: communityId, server_id: serverId },
         ),
       ),
@@ -337,6 +361,13 @@ export function ServerPluginsTab({
         </table>
       </div>
 
+      {validationQuery.data !== undefined && plugins.length > 0 && (
+        <PluginValidationChecklist
+          validation={validationQuery.data}
+          nameOf={(modId) => nameOfPlugin(plugins, modId)}
+        />
+      )}
+
       <ConfirmDialog
         open={removeTarget !== null}
         title={t("plugins.removeDialog.title")}
@@ -541,6 +572,75 @@ function DependenciesView({
         </li>
       ))}
     </ul>
+  );
+}
+
+// ── Dependency / compatibility validation checklist (issue #1307) ─────────
+
+function PluginValidationChecklist({
+  validation,
+  nameOf,
+}: {
+  validation: PluginValidationResponse;
+  nameOf: (modId: string) => string;
+}) {
+  const total =
+    validation.missing_deps.length +
+    validation.version_unsatisfied.length +
+    validation.conflicts.length +
+    validation.mc_mismatch.length;
+
+  return (
+    <div className="plugins-validation card">
+      <h3>{t("plugins.validation.heading")}</h3>
+      {total === 0 ? (
+        <p className="field-hint">{t("plugins.validation.ok")}</p>
+      ) : (
+        <ul>
+          {validation.missing_deps.map((finding) => (
+            <li
+              key={`dep-${finding.mod_id}-${finding.depends_on}`}
+              className="field-error"
+            >
+              {t("plugins.validation.missingDep")
+                .replace("{mod}", nameOf(finding.mod_id))
+                .replace("{dependency}", finding.depends_on)
+                .replace("{range}", finding.version_range)}
+            </li>
+          ))}
+          {validation.version_unsatisfied.map((finding) => (
+            <li
+              key={`version-${finding.mod_id}-${finding.depends_on}`}
+              className="field-error"
+            >
+              {t("plugins.validation.versionUnsatisfied")
+                .replace("{mod}", nameOf(finding.mod_id))
+                .replace("{dependency}", finding.depends_on)
+                .replace("{range}", finding.version_range)
+                .replace("{present}", finding.present_version)}
+            </li>
+          ))}
+          {validation.conflicts.map((finding) => (
+            <li
+              key={`conflict-${finding.mod_id}-${finding.conflicts_with}`}
+              className="field-error"
+            >
+              {t("plugins.validation.conflict")
+                .replace("{mod}", nameOf(finding.mod_id))
+                .replace("{other}", finding.conflicts_with)}
+            </li>
+          ))}
+          {validation.mc_mismatch.map((finding) => (
+            <li key={`mc-${finding.mod_id}`} className="field-hint warn">
+              {t("plugins.validation.mcMismatch")
+                .replace("{mod}", nameOf(finding.mod_id))
+                .replace("{serverVersion}", finding.server_mc_version)
+                .replace("{modVersions}", finding.mod_mc_versions.join(", "))}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

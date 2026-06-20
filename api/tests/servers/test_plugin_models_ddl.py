@@ -65,3 +65,11 @@ def test_size_bytes_is_nullable() -> None:
 
 def test_enabled_default_true() -> None:
     assert _TABLE.c.enabled.server_default is not None
+
+
+def test_manifest_columns_present_and_nullable() -> None:
+    # Manifest metadata parsed at ingest (issue #1307); nullable so pre-existing
+    # rows keep NULL until re-ingested.
+    for column in ("mod_identifier", "provides", "dependencies", "mc_versions"):
+        assert column in _TABLE.c
+        assert _TABLE.c[column].nullable is True

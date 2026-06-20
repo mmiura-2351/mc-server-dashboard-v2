@@ -1112,6 +1112,24 @@
         "title": "CommunityResponse",
         "type": "object"
       },
+      "ConflictResponse": {
+        "properties": {
+          "conflicts_with": {
+            "title": "Conflicts With",
+            "type": "string"
+          },
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "conflicts_with"
+        ],
+        "title": "ConflictResponse",
+        "type": "object"
+      },
       "CreateGrantRequest": {
         "properties": {
           "permissions": {
@@ -1736,6 +1754,32 @@
         "title": "LogoutRequest",
         "type": "object"
       },
+      "McMismatchResponse": {
+        "properties": {
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "mod_mc_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mod Mc Versions",
+            "type": "array"
+          },
+          "server_mc_version": {
+            "title": "Server Mc Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "mod_mc_versions",
+          "server_mc_version"
+        ],
+        "title": "McMismatchResponse",
+        "type": "object"
+      },
       "MemberResponse": {
         "description": "A member of a community with their username and the roles they hold.\n\n``username`` is ``null`` only when the id does not resolve in the identity\nstore \u2014 unreachable in normal operation given the ``ON DELETE CASCADE`` FK\nfrom ``membership`` to ``user`` (DATABASE.md Section 5); it is a defensive\nfallback so a UI client always receives the member row (issue #78).",
         "properties": {
@@ -1830,6 +1874,29 @@
           "max_memory_limit_mb"
         ],
         "title": "MetaResponse",
+        "type": "object"
+      },
+      "MissingDependencyResponse": {
+        "properties": {
+          "depends_on": {
+            "title": "Depends On",
+            "type": "string"
+          },
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "version_range": {
+            "title": "Version Range",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "depends_on",
+          "version_range"
+        ],
+        "title": "MissingDependencyResponse",
         "type": "object"
       },
       "PlatformAdminRequest": {
@@ -2017,6 +2084,17 @@
             "title": "Loader Type",
             "type": "string"
           },
+          "mod_identifier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mod Identifier"
+          },
           "rel_path": {
             "title": "Rel Path",
             "type": "string"
@@ -2097,7 +2175,8 @@
           "enabled",
           "installed_by",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "mod_identifier"
         ],
         "title": "PluginResponse",
         "type": "object"
@@ -2139,6 +2218,47 @@
           "updates"
         ],
         "title": "PluginUpdatesResponse",
+        "type": "object"
+      },
+      "PluginValidationResponse": {
+        "description": "The phase-B dependency/compatibility checklist for a server's plugin set.",
+        "properties": {
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/ConflictResponse"
+            },
+            "title": "Conflicts",
+            "type": "array"
+          },
+          "mc_mismatch": {
+            "items": {
+              "$ref": "#/components/schemas/McMismatchResponse"
+            },
+            "title": "Mc Mismatch",
+            "type": "array"
+          },
+          "missing_deps": {
+            "items": {
+              "$ref": "#/components/schemas/MissingDependencyResponse"
+            },
+            "title": "Missing Deps",
+            "type": "array"
+          },
+          "version_unsatisfied": {
+            "items": {
+              "$ref": "#/components/schemas/VersionUnsatisfiedResponse"
+            },
+            "title": "Version Unsatisfied",
+            "type": "array"
+          }
+        },
+        "required": [
+          "missing_deps",
+          "version_unsatisfied",
+          "conflicts",
+          "mc_mismatch"
+        ],
+        "title": "PluginValidationResponse",
         "type": "object"
       },
       "PortCheckResponse": {
@@ -3019,6 +3139,34 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VersionUnsatisfiedResponse": {
+        "properties": {
+          "depends_on": {
+            "title": "Depends On",
+            "type": "string"
+          },
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "present_version": {
+            "title": "Present Version",
+            "type": "string"
+          },
+          "version_range": {
+            "title": "Version Range",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "depends_on",
+          "version_range",
+          "present_version"
+        ],
+        "title": "VersionUnsatisfiedResponse",
         "type": "object"
       },
       "VersionsResponse": {
@@ -7368,6 +7516,62 @@
           }
         ],
         "summary": "Check Updates"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/validate": {
+      "get": {
+        "description": "Validate the server's installed plugin set (plugin:read, issue #1307).\n\nReturns the phase-B dependency/compatibility checklist (missing required\ndeps, version-unsatisfied deps, conflicts, MC-version mismatch). Read-only:\nit never mutates the set.",
+        "operationId": "validate_plugins_api_communities__community_id__servers__server_id__plugins_validate_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginValidationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Validate Plugins"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}": {

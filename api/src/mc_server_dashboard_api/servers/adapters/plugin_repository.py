@@ -41,6 +41,10 @@ def _to_plugin(row: ServerPluginModel) -> ServerPlugin:
         installed_by=row.installed_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        mod_identifier=row.mod_identifier,
+        provides=row.provides or [],
+        dependencies=row.dependencies or [],
+        mc_versions=row.mc_versions or [],
     )
 
 
@@ -71,6 +75,10 @@ class SqlAlchemyPluginRepository(PluginRepository):
                 installed_by=plugin.installed_by,
                 created_at=plugin.created_at,
                 updated_at=plugin.updated_at,
+                mod_identifier=plugin.mod_identifier,
+                provides=plugin.provides,
+                dependencies=plugin.dependencies,
+                mc_versions=plugin.mc_versions,
             )
         )
 
@@ -127,6 +135,10 @@ class SqlAlchemyPluginRepository(PluginRepository):
                 enabled=plugin.enabled,
                 installed_by=plugin.installed_by,
                 updated_at=plugin.updated_at,
+                mod_identifier=plugin.mod_identifier,
+                provides=plugin.provides,
+                dependencies=plugin.dependencies,
+                mc_versions=plugin.mc_versions,
             )
         )
         await self._session.execute(stmt)

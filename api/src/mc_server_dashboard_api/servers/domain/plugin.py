@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import enum
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedPluginServerTypeError,
@@ -63,6 +63,16 @@ class ServerPlugin:
     one cached blob keyed by this hash. ``enabled`` tracks the
     ``.disabled``-suffix rename convention: a disabled plugin's ``rel_path``
     ends with ``.disabled``.
+
+    ``mod_identifier`` / ``provides`` / ``dependencies`` / ``mc_versions`` carry
+    the jar manifest metadata parsed at ingest (issue #1307): the uniform
+    dependency source for both local uploads and Modrinth installs.
+    ``mod_identifier`` is the manifest's declared id (``None`` when the jar
+    carried no recognized manifest); ``provides`` are alias ids the jar also
+    satisfies; ``dependencies`` use the shape ``[{"mod_identifier",
+    "version_range", "required", "conflict"}]``; ``mc_versions`` are the declared
+    compatible Minecraft versions. The phase-B validator reads these to surface
+    missing required deps, conflicts, and MC-version mismatch.
     """
 
     id: PluginId
@@ -83,6 +93,10 @@ class ServerPlugin:
     installed_by: uuid.UUID | None
     created_at: dt.datetime
     updated_at: dt.datetime
+    mod_identifier: str | None = None
+    provides: list[str] = field(default_factory=list)
+    dependencies: list[dict[str, object]] = field(default_factory=list)
+    mc_versions: list[str] = field(default_factory=list)
 
 
 def content_dir_for_server_type(server_type: ServerType) -> str:

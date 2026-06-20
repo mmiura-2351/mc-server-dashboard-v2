@@ -274,6 +274,7 @@ from mc_server_dashboard_api.servers.application.plugins import (
     ListPlugins,
     RemovePlugin,
     TogglePlugin,
+    ValidatePluginSet,
 )
 from mc_server_dashboard_api.servers.application.port_availability import (
     CheckPort,
@@ -1910,6 +1911,13 @@ def get_get_plugin(request: Request) -> GetPlugin:
 
     session_factory = create_session_factory(get_engine(request))
     return GetPlugin(uow=ServersUnitOfWork(session_factory))
+
+
+def get_validate_plugin_set(request: Request) -> ValidatePluginSet:
+    """Assemble the :class:`ValidatePluginSet` use case (plugin:read, issue #1307)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ValidatePluginSet(uow=ServersUnitOfWork(session_factory))
 
 
 def get_install_plugin(

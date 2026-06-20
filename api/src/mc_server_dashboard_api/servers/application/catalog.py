@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.servers.application.plugin_cache import (
     ingest_into_cache,
 )
+from mc_server_dashboard_api.servers.application.plugin_manifest import (
+    parse_manifest_at_ingest,
+)
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
     CatalogFile,
@@ -217,6 +220,10 @@ class InstallFromCatalog:
             file=file,
         )
 
+        # Parse the jar manifest for dependency metadata (issue #1307): the
+        # uniform source, same as a local upload. Tolerant of an unreadable jar.
+        manifest = parse_manifest_at_ingest(content, loader=loader)
+
         # Phase 4: At-rest gate + write (hold lock, short duration).
         rel_path = f"{content_dir}/{file.filename}"
         async with self.lifecycle_lock.hold(server_id):
@@ -258,6 +265,10 @@ class InstallFromCatalog:
                     installed_by=installed_by,
                     created_at=now,
                     updated_at=now,
+                    mod_identifier=manifest.mod_identifier or None,
+                    provides=manifest.provides,
+                    dependencies=manifest.dependencies,
+                    mc_versions=manifest.mc_versions,
                 )
                 await self.uow.plugins.add(plugin)
                 await self.uow.commit()
@@ -442,6 +453,10 @@ class UpdatePlugin:
             file=file,
         )
 
+        # Re-parse the new jar's manifest so the dependency metadata tracks the
+        # updated version (issue #1307). Tolerant of an unreadable jar.
+        manifest = parse_manifest_at_ingest(content, loader=loader)
+
         # Phase 4: At-rest gate + write (hold lock, short duration).
         new_rel_path = f"{content_dir}/{file.filename}"
         async with self.lifecycle_lock.hold(server_id):
@@ -494,6 +509,10 @@ class UpdatePlugin:
                     installed_by=plugin.installed_by,
                     created_at=plugin.created_at,
                     updated_at=now,
+                    mod_identifier=manifest.mod_identifier or None,
+                    provides=manifest.provides,
+                    dependencies=manifest.dependencies,
+                    mc_versions=manifest.mc_versions,
                 )
                 await self.uow.plugins.update(updated_plugin)
                 await self.uow.commit()
