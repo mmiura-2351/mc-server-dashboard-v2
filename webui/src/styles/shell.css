@@ -1284,9 +1284,10 @@ body.col-resizing {
 .plugins-side-select:disabled {
   opacity: 0.6;
 }
-/* An inert placeholder standing in for the conditional "Dependencies" button on
- * rows that lack it, so the Disable/Remove buttons stay column-aligned across
- * rows (#1320). Occupies the slot but is invisible and non-interactive. */
+/* An inert placeholder standing in for a conditional action button ("Update" or
+ * "Dependencies") on rows that lack it, so the always-present actions stay
+ * column-aligned across rows (#1320). Occupies the slot but is invisible and
+ * non-interactive. */
 .plugins-table .row-actions-spacer {
   visibility: hidden;
   pointer-events: none;

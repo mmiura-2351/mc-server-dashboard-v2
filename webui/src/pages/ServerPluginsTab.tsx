@@ -609,7 +609,10 @@ function PluginRow({
             >
               {plugin.enabled ? t("plugins.disable") : t("plugins.enable")}
             </button>
-            {hasUpdate && updateVersion !== null && (
+            {/* The Update button only renders when an update is available. Render
+                an inert, hidden placeholder of the same width otherwise so the
+                following actions stay column-aligned across rows (#1320). */}
+            {hasUpdate && updateVersion !== null ? (
               <button
                 type="button"
                 className="btn sm"
@@ -618,6 +621,10 @@ function PluginRow({
               >
                 {t("plugins.update")}
               </button>
+            ) : (
+              <span className="btn sm row-actions-spacer" aria-hidden>
+                {t("plugins.update")}
+              </span>
             )}
             <button
               type="button"
