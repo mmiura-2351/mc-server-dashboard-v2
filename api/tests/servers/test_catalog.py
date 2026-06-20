@@ -282,6 +282,56 @@ async def test_install_from_catalog_happy_path() -> None:
     assert uow.commits == 1
 
 
+async def test_install_from_catalog_parses_manifest() -> None:
+    # The downloaded jar's manifest is parsed at ingest (issue #1307): the same
+    # uniform source as a local upload, populated on the Modrinth path too.
+    import io
+    import json
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "fabric.mod.json",
+            json.dumps(
+                {
+                    "id": "fabric-api",
+                    "version": "0.92.0",
+                    "depends": {"minecraft": "1.20.4"},
+                    "provides": ["fabric-api-base"],
+                }
+            ),
+        )
+    jar = buf.getvalue()
+
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    project = _project()
+    version, _ = _version(file_content=jar)
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, jar)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert plugin.mod_identifier == "fabric-api"
+    assert plugin.provides == ["fabric-api-base"]
+    assert plugin.mc_versions == ["1.20.4"]
+
+
 async def test_install_from_catalog_paper_server() -> None:
     uow = FakeUnitOfWork()
     server = _server(server_type=ServerType.PAPER)
@@ -876,6 +926,62 @@ async def test_update_plugin_same_filename() -> None:
     assert result.checksum_sha512 == hashlib.sha512(new_content).hexdigest()
     assert "mods/fabric-api-0.92.0.jar" in fs.files
     assert uow.commits == 1
+
+
+async def test_update_plugin_reparses_manifest() -> None:
+    # The updated jar's manifest is re-parsed so the stored dependency metadata
+    # tracks the new version (issue #1307).
+    import io
+    import json
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "fabric.mod.json",
+            json.dumps(
+                {
+                    "id": "fabric-api",
+                    "version": "0.93.0",
+                    "depends": {"minecraft": "1.20.4", "newdep": ">=1.0.0"},
+                }
+            ),
+        )
+    new_content = buf.getvalue()
+
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    plugin = _plugin(server_id=server.id, source_version_id="ver-1")
+    uow.plugins.seed(plugin)
+
+    ver_new, _ = _version(
+        version_id="ver-2",
+        version_number="0.93.0",
+        filename="fabric-api-0.92.0.jar",
+        file_content=new_content,
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_project(), [ver_new])
+    catalog.seed_file(ver_new.files[0].url, new_content)
+
+    uc = UpdatePlugin(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    result = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        plugin_id=plugin.id,
+        version_id="ver-2",
+    )
+    assert result.mod_identifier == "fabric-api"
+    deps = {d["mod_identifier"]: d for d in result.dependencies}
+    assert "newdep" in deps
 
 
 async def test_update_plugin_different_filename() -> None:

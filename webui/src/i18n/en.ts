@@ -1333,6 +1333,16 @@ export const en = {
   "plugins.catalogInstalled": "Plugin installed from Modrinth.",
   "plugins.error.notStopped": "Stop the server before managing plugins.",
   "plugins.error.generic": "Something went wrong. Please try again.",
+  // Dependency / compatibility validation checklist (issue #1307).
+  "plugins.validation.heading": "Dependencies & compatibility",
+  "plugins.validation.ok": "No issues found.",
+  "plugins.validation.missingDep":
+    "{mod} requires {dependency} ({range}), which is not installed.",
+  "plugins.validation.versionUnsatisfied":
+    "{mod} requires {dependency} ({range}), but the installed {present} does not satisfy it.",
+  "plugins.validation.conflict": "{mod} conflicts with {other}.",
+  "plugins.validation.mcMismatch":
+    "{mod} does not list MC {serverVersion} (supports {modVersions}).",
   // Permission family and code labels for the role/grant matrix.
   "communitySettings.roles.family.plugin": "Plugins",
   "communitySettings.roles.code.plugin:read": "Read",

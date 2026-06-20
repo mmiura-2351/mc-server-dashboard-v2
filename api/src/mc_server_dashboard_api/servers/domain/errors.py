@@ -457,6 +457,17 @@ class UnsupportedPluginServerTypeError(ServerError):
     """
 
 
+class InvalidModJarError(ServerError):
+    """A jar's bytes could not be read as a bounded zip (issue #1307).
+
+    Raised by the manifest parser when the bytes are not a readable zip, carry
+    too many entries, or decompress past the size cap (a decompression bomb). A
+    readable jar with no recognized manifest is *not* an error -- the parser
+    returns empty metadata so the install still proceeds (the loader is known
+    from the server type regardless of the manifest).
+    """
+
+
 class PluginAlreadyExistsError(ServerError):
     """A plugin install hit the per-server rel_path uniqueness constraint.
 

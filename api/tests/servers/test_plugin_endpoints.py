@@ -43,10 +43,16 @@ from mc_server_dashboard_api.dependencies import (
     get_remove_plugin,
     get_toggle_plugin,
     get_update_plugin,
+    get_validate_plugin_set,
 )
 from mc_server_dashboard_api.servers.application.catalog import (
     PluginDependencyInfo,
     PluginUpdateInfo,
+)
+from mc_server_dashboard_api.servers.application.plugin_validation import (
+    McMismatch,
+    MissingDependency,
+    PluginValidation,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
@@ -55,6 +61,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
+    UnsupportedPluginServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.plugin import (
     LoaderType,
@@ -159,6 +166,7 @@ def _app(
     check_plugin_update: _FakeUseCase | None = None,
     update: _FakeUseCase | None = None,
     list_deps: _FakeUseCase | None = None,
+    validate: _FakeUseCase | None = None,
 ) -> object:
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: make_user()
@@ -184,6 +192,8 @@ def _app(
         app.dependency_overrides[get_update_plugin] = lambda: update
     if list_deps is not None:
         app.dependency_overrides[get_list_plugin_dependencies] = lambda: list_deps
+    if validate is not None:
+        app.dependency_overrides[get_validate_plugin_set] = lambda: validate
     return app
 
 
@@ -491,3 +501,62 @@ def test_list_dependencies_returns_200() -> None:
     body = resp.json()
     assert len(body["dependencies"]) == 1
     assert body["dependencies"][0]["project_id"] == "proj-1"
+
+
+# --- validate plugin set (issue #1307) -------------------------------------
+
+
+def test_validate_plugins_returns_200_with_findings() -> None:
+    validation = PluginValidation(
+        missing_deps=[
+            MissingDependency(
+                mod_id="sodium", depends_on="fabric-api", version_range=">=0.90.0"
+            )
+        ],
+        mc_mismatch=[
+            McMismatch(
+                mod_id="sodium",
+                mod_mc_versions=["1.20.4"],
+                server_mc_version="1.21",
+            )
+        ],
+    )
+    app = _app(member=True, allow=True, validate=_FakeUseCase(result=validation))
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["missing_deps"][0]["depends_on"] == "fabric-api"
+    assert body["mc_mismatch"][0]["server_mc_version"] == "1.21"
+    assert body["conflicts"] == []
+    assert body["version_unsatisfied"] == []
+
+
+def test_validate_plugins_empty_is_200() -> None:
+    app = _app(
+        member=True, allow=True, validate=_FakeUseCase(result=PluginValidation())
+    )
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
+    assert resp.status_code == 200
+    assert resp.json()["missing_deps"] == []
+
+
+def test_validate_plugins_non_member_is_404() -> None:
+    app = _app(
+        member=False, allow=True, validate=_FakeUseCase(result=PluginValidation())
+    )
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
+    assert resp.status_code == 404
+
+
+def test_validate_plugins_unsupported_server_type_is_422() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        validate=_FakeUseCase(error=UnsupportedPluginServerTypeError("vanilla")),
+    )
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
+    assert resp.status_code == 422

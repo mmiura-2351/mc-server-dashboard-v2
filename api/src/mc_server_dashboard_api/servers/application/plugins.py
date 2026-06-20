@@ -13,6 +13,13 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.servers.application.plugin_cache import (
     ingest_into_cache,
 )
+from mc_server_dashboard_api.servers.application.plugin_manifest import (
+    parse_manifest_at_ingest,
+)
+from mc_server_dashboard_api.servers.application.plugin_validation import (
+    PluginValidation,
+    validate_plugin_set,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -35,6 +42,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
     content_dir_for_server_type,
     loader_type_for_server_type,
+    modrinth_loader_for_server_type,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -67,6 +75,33 @@ class ListPlugins:
             # Verify this server type supports plugins (raises if not).
             content_dir_for_server_type(server.server_type)
             return await self.uow.plugins.list_for_server(server_id)
+
+
+@dataclass(frozen=True)
+class ValidatePluginSet:
+    """Validate a server's installed plugin set (plugin:read, issue #1307).
+
+    Loads the server (for its loader + MC version) and its installed plugins,
+    then runs the pure :func:`validate_plugin_set` phase-B checklist. Display
+    only: it never mutates the set. Runnable on demand from the WebUI and at
+    assignment time after an install/update.
+    """
+
+    uow: UnitOfWork
+
+    async def __call__(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> PluginValidation:
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+            # Verify this server type supports plugins (raises if not).
+            content_dir_for_server_type(server.server_type)
+            plugins = await self.uow.plugins.list_for_server(server_id)
+        return validate_plugin_set(
+            server_type=server.server_type.value,
+            mc_version=server.mc_version,
+            plugins=plugins,
+        )
 
 
 @dataclass(frozen=True)
@@ -126,6 +161,13 @@ class InstallPlugin:
                 if existing is not None:
                     raise PluginAlreadyExistsError(rel_path)
 
+                # Parse the jar manifest for dependency metadata (issue #1307);
+                # tolerant of an unreadable jar (the install still proceeds).
+                manifest = parse_manifest_at_ingest(
+                    content,
+                    loader=modrinth_loader_for_server_type(server.server_type),
+                )
+
                 # Ingest into the content-addressed cache (dedup-on-ingest); the
                 # jar still deploys to the working set below (issue #1306).
                 sha256 = await ingest_into_cache(self.cache, content)
@@ -160,6 +202,10 @@ class InstallPlugin:
                     installed_by=installed_by,
                     created_at=now,
                     updated_at=now,
+                    mod_identifier=manifest.mod_identifier or None,
+                    provides=manifest.provides,
+                    dependencies=manifest.dependencies,
+                    mc_versions=manifest.mc_versions,
                 )
                 await self.uow.plugins.add(plugin)
                 await self.uow.commit()

@@ -35,6 +35,7 @@ from mc_server_dashboard_api.dependencies import (
     get_remove_plugin,
     get_toggle_plugin,
     get_update_plugin,
+    get_validate_plugin_set,
     require_permission,
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
@@ -45,6 +46,9 @@ from mc_server_dashboard_api.servers.application.catalog import (
     ListPluginDependencies,
     UpdatePlugin,
 )
+from mc_server_dashboard_api.servers.application.plugin_validation import (
+    PluginValidation,
+)
 from mc_server_dashboard_api.servers.application.plugins import (
     MAX_PLUGIN_BYTES,
     GetPlugin,
@@ -52,6 +56,7 @@ from mc_server_dashboard_api.servers.application.plugins import (
     ListPlugins,
     RemovePlugin,
     TogglePlugin,
+    ValidatePluginSet,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogVersion as CatalogVersionDomain,
@@ -101,6 +106,10 @@ class PluginResponse(BaseModel):
     installed_by: uuid.UUID | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
+    # The jar manifest's declared id (issue #1307), or None when the jar carried
+    # no recognized manifest. Surfaced so the validation checklist can map a
+    # finding's mod_id back to a human-friendly plugin name.
+    mod_identifier: str | None
 
     @classmethod
     def from_plugin(cls, plugin: ServerPlugin) -> "PluginResponse":
@@ -122,6 +131,7 @@ class PluginResponse(BaseModel):
             installed_by=plugin.installed_by,
             created_at=plugin.created_at,
             updated_at=plugin.updated_at,
+            mod_identifier=plugin.mod_identifier,
         )
 
 
@@ -209,6 +219,76 @@ class PluginDependencyResponse(BaseModel):
 
 class PluginDependenciesResponse(BaseModel):
     dependencies: list[PluginDependencyResponse]
+
+
+# -- Plugin-set validation (issue #1307) --
+
+
+class MissingDependencyResponse(BaseModel):
+    mod_id: str
+    depends_on: str
+    version_range: str
+
+
+class VersionUnsatisfiedResponse(BaseModel):
+    mod_id: str
+    depends_on: str
+    version_range: str
+    present_version: str
+
+
+class ConflictResponse(BaseModel):
+    mod_id: str
+    conflicts_with: str
+
+
+class McMismatchResponse(BaseModel):
+    mod_id: str
+    mod_mc_versions: list[str]
+    server_mc_version: str
+
+
+class PluginValidationResponse(BaseModel):
+    """The phase-B dependency/compatibility checklist for a server's plugin set."""
+
+    missing_deps: list[MissingDependencyResponse]
+    version_unsatisfied: list[VersionUnsatisfiedResponse]
+    conflicts: list[ConflictResponse]
+    mc_mismatch: list[McMismatchResponse]
+
+    @classmethod
+    def from_validation(cls, v: PluginValidation) -> "PluginValidationResponse":
+        return cls(
+            missing_deps=[
+                MissingDependencyResponse(
+                    mod_id=f.mod_id,
+                    depends_on=f.depends_on,
+                    version_range=f.version_range,
+                )
+                for f in v.missing_deps
+            ],
+            version_unsatisfied=[
+                VersionUnsatisfiedResponse(
+                    mod_id=f.mod_id,
+                    depends_on=f.depends_on,
+                    version_range=f.version_range,
+                    present_version=f.present_version,
+                )
+                for f in v.version_unsatisfied
+            ],
+            conflicts=[
+                ConflictResponse(mod_id=f.mod_id, conflicts_with=f.conflicts_with)
+                for f in v.conflicts
+            ],
+            mc_mismatch=[
+                McMismatchResponse(
+                    mod_id=f.mod_id,
+                    mod_mc_versions=f.mod_mc_versions,
+                    server_mc_version=f.server_mc_version,
+                )
+                for f in v.mc_mismatch
+            ],
+        )
 
 
 @router.get("/communities/{community_id}/servers/{server_id}/plugins")
@@ -344,6 +424,41 @@ async def check_updates(
             for r in results
         ]
     )
+
+
+@router.get("/communities/{community_id}/servers/{server_id}/plugins/validate")
+async def validate_plugins(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("plugin:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ValidatePluginSet, Depends(get_validate_plugin_set)],
+) -> PluginValidationResponse:
+    """Validate the server's installed plugin set (plugin:read, issue #1307).
+
+    Returns the phase-B dependency/compatibility checklist (missing required
+    deps, version-unsatisfied deps, conflicts, MC-version mismatch). Read-only:
+    it never mutates the set.
+    """
+
+    try:
+        result = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except UnsupportedPluginServerTypeError as exc:
+        raise _unprocessable("unsupported_server_type") from exc
+    return PluginValidationResponse.from_validation(result)
 
 
 @router.get(

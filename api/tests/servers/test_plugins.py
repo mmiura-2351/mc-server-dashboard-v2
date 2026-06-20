@@ -13,6 +13,7 @@ from mc_server_dashboard_api.servers.application.plugins import (
     ListPlugins,
     RemovePlugin,
     TogglePlugin,
+    ValidatePluginSet,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -145,6 +146,74 @@ async def test_list_plugins_unsupported_server_type() -> None:
         await uc(community_id=_COMMUNITY, server_id=server.id)
 
 
+# -- ValidatePluginSet --
+
+
+async def test_validate_plugin_set_reports_missing_dep() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()  # mc_version 1.20.4, fabric
+    uow.servers.seed(server)
+    sodium = _plugin(server_id=server.id)
+    sodium.mod_identifier = "sodium"
+    sodium.mc_versions = ["1.20.4"]
+    sodium.dependencies = [
+        {"mod_identifier": "fabric-api", "version_range": "", "required": True}
+    ]
+    uow.plugins.seed(sodium)
+
+    uc = ValidatePluginSet(uow=uow)
+    result = await uc(community_id=_COMMUNITY, server_id=server.id)
+
+    assert len(result.missing_deps) == 1
+    assert result.missing_deps[0].depends_on == "fabric-api"
+
+
+async def test_validate_plugin_set_reports_mc_mismatch() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()  # mc_version 1.20.4
+    uow.servers.seed(server)
+    sodium = _plugin(server_id=server.id)
+    sodium.mod_identifier = "sodium"
+    sodium.mc_versions = ["1.21"]
+    uow.plugins.seed(sodium)
+
+    uc = ValidatePluginSet(uow=uow)
+    result = await uc(community_id=_COMMUNITY, server_id=server.id)
+
+    assert len(result.mc_mismatch) == 1
+    assert result.mc_mismatch[0].server_mc_version == "1.20.4"
+
+
+async def test_validate_plugin_set_empty_is_valid() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    uc = ValidatePluginSet(uow=uow)
+    result = await uc(community_id=_COMMUNITY, server_id=server.id)
+    assert result.missing_deps == []
+    assert result.mc_mismatch == []
+    assert result.conflicts == []
+    assert result.version_unsatisfied == []
+
+
+async def test_validate_plugin_set_unknown_server() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    uc = ValidatePluginSet(uow=uow)
+    with pytest.raises(ServerNotFoundError):
+        await uc(community_id=_COMMUNITY, server_id=ServerId.new())
+
+
+async def test_validate_plugin_set_unsupported_server_type() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.VANILLA)
+    uow.servers.seed(server)
+    uc = ValidatePluginSet(uow=uow)
+    with pytest.raises(UnsupportedPluginServerTypeError):
+        await uc(community_id=_COMMUNITY, server_id=server.id)
+
+
 # -- GetPlugin --
 
 
@@ -212,6 +281,75 @@ async def test_install_fabric_mod() -> None:
     assert plugin.size_bytes == len(content)
     assert plugin.checksum_sha512 is not None
     assert "mods/fabric-api.jar" in fs.files
+
+
+async def test_install_parses_manifest_metadata() -> None:
+    # The jar manifest is parsed at ingest and its dependency metadata stored
+    # (issue #1307): the uniform source for local uploads.
+    import io
+    import json
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "fabric.mod.json",
+            json.dumps(
+                {
+                    "id": "sodium",
+                    "version": "0.5.0",
+                    "depends": {"minecraft": "1.20.4", "fabric-api": ">=0.90.0"},
+                    "provides": ["sodium-extra"],
+                }
+            ),
+        )
+    jar = buf.getvalue()
+
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    uc = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="sodium.jar",
+        display_name="Sodium",
+        content=jar,
+    )
+    assert plugin.mod_identifier == "sodium"
+    assert plugin.provides == ["sodium-extra"]
+    assert plugin.mc_versions == ["1.20.4"]
+    deps = {d["mod_identifier"]: d for d in plugin.dependencies}
+    assert deps["fabric-api"]["required"] is True
+    assert "minecraft" not in deps
+
+
+async def test_install_unreadable_jar_stores_empty_manifest() -> None:
+    # A jar that is not a readable zip must not block the install (the loader is
+    # known from the server type); it simply carries no manifest metadata.
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    uc = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="weird.jar",
+        display_name="Weird",
+        content=b"not a zip",
+    )
+    assert plugin.mod_identifier is None
+    assert plugin.dependencies == []
 
 
 async def test_install_paper_plugin() -> None:
