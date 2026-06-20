@@ -56,6 +56,17 @@ class PluginRepository(abc.ABC):
         """Return plugins with source=MODRINTH and a non-null source_project_id."""
 
     @abc.abstractmethod
+    async def get_by_source_project_id(
+        self, server_id: ServerId, source_project_id: str
+    ) -> ServerPlugin | None:
+        """Return the plugin with ``source_project_id`` scoped to ``server_id``.
+
+        Returns ``None`` when no plugin on the server originates from the given
+        catalog project. Used to prevent installing two versions of the same
+        Modrinth project on one server (issue #1332).
+        """
+
+    @abc.abstractmethod
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
         """Return a cached SHA-256 content address for a known SHA-512, or ``None``.
 

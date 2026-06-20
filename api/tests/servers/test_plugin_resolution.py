@@ -1438,10 +1438,10 @@ class TestApplyPluginResolution:
         assert failed == []
 
     async def test_apply_installs_two_versions_of_the_same_project(self) -> None:
-        # Apply dedups planned imports by version_id, NOT project_id: two deps that
-        # resolve to the same project but DIFFERENT versions must both install. Two
-        # distinct dep ids capture the same project_id "LIB"; their version ranges
-        # select different versions (V1 vs V2).
+        # Two deps that resolve to the same project but DIFFERENT versions: the
+        # first install succeeds, the second is rejected by the per-server
+        # source_project_id uniqueness guard (issue #1332). Two versions of the
+        # same mod crash or produce undefined behavior at MC runtime.
         server = _server()
         uow = FakeUnitOfWork()
         a = _plugin(
@@ -1485,7 +1485,7 @@ class TestApplyPluginResolution:
             server_id=server.id,
             applied_by=uuid.uuid4(),
         )
-        assert failed == []
-        # Both versions installed: same project_id, distinct version_ids.
-        assert [p.source_project_id for p in installed] == ["LIB", "LIB"]
-        assert {p.source_version_id for p in installed} == {"V1", "V2"}
+        # First version installs; second is blocked (duplicate project).
+        assert len(installed) == 1
+        assert installed[0].source_project_id == "LIB"
+        assert len(failed) == 1

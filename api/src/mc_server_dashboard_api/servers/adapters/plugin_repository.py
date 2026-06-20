@@ -174,6 +174,16 @@ class SqlAlchemyPluginRepository(PluginRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_plugin(row) for row in rows]
 
+    async def get_by_source_project_id(
+        self, server_id: ServerId, source_project_id: str
+    ) -> ServerPlugin | None:
+        stmt = select(ServerPluginModel).where(
+            ServerPluginModel.server_id == server_id.value,
+            ServerPluginModel.source_project_id == source_project_id,
+        )
+        row = (await self._session.execute(stmt)).scalars().first()
+        return _to_plugin(row) if row is not None else None
+
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
         stmt = (
             select(ServerPluginModel.sha256)

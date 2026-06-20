@@ -735,6 +735,17 @@ class FakePluginRepository(PluginRepository):
             key=lambda p: (p.display_name, str(p.id.value)),
         )
 
+    async def get_by_source_project_id(
+        self, server_id: ServerId, source_project_id: str
+    ) -> ServerPlugin | None:
+        for plugin in self.by_id.values():
+            if (
+                plugin.server_id == server_id
+                and plugin.source_project_id == source_project_id
+            ):
+                return plugin
+        return None
+
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
         for plugin in self.by_id.values():
             if plugin.checksum_sha512 == checksum_sha512 and plugin.sha256 is not None:

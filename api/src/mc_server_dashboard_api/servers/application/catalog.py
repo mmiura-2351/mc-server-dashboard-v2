@@ -324,6 +324,15 @@ class InstallFromCatalog:
                 if existing is not None:
                     raise PluginAlreadyExistsError(rel_path)
 
+                # Guard: reject a second version of the same Modrinth project
+                # on this server (issue #1332). Two versions of one mod crash
+                # or produce undefined behavior at MC runtime.
+                by_project = await self.uow.plugins.get_by_source_project_id(
+                    server_id, project_id
+                )
+                if by_project is not None:
+                    raise PluginAlreadyExistsError(project_id)
+
                 # Side-aware deploy: a client-only mod is cached + recorded but
                 # never placed in the running working set (issue #1308).
                 if working_set_present(enabled=True, side=side):
