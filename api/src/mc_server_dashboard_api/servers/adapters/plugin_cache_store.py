@@ -17,7 +17,6 @@ from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     PluginCacheStore,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import S3ClientFactory
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 
 
 def _key(sha256: str) -> str:
@@ -48,7 +47,7 @@ class ObjectPluginCacheStore(PluginCacheStore):
     async def _open_gen(self, sha256: str) -> AsyncIterator[bytes]:
         key = _key(sha256)
         async with self._client_factory() as client:
-            if await client.head_object(key) is None:
-                raise NotFoundError(f"cached jar not found: {sha256}")
+            # get_object already raises NotFoundError on a missing key, so no
+            # redundant head_object first — mirrors ObjectResourcePackStore.open.
             async for chunk in await client.get_object(key):
                 yield chunk

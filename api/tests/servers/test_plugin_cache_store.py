@@ -45,12 +45,13 @@ async def test_put_dedups_identical_content() -> None:
     key = f"plugin-cache/{sha256}"
 
     await cache.put(sha256, _stream(content))
-    first_parts = store.multipart_parts[key]
+    assert store.upload_calls[key] == 1
 
     await cache.put(sha256, _stream(content))
-    # The second put head-checked the existing key and did NOT re-upload, so the
-    # recorded multipart part count is unchanged.
-    assert store.multipart_parts[key] == first_parts
+    # The second put head-checked the existing key and skipped the upload, so the
+    # stub's per-key upload tally stays at one. (multipart_parts can't catch a
+    # re-upload of identical content — it's overwritten with the same count.)
+    assert store.upload_calls[key] == 1
 
 
 async def test_open_round_trips_bytes() -> None:
