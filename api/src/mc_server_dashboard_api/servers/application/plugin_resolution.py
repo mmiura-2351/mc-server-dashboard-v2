@@ -64,6 +64,7 @@ from typing import Literal
 
 from mc_server_dashboard_api.servers.application.catalog import InstallFromCatalog
 from mc_server_dashboard_api.servers.application.catalog_deps import (
+    incompatible_catalog_deps,
     installed_project_ids,
     required_catalog_deps,
 )
@@ -115,8 +116,10 @@ ResolutionStatus = Literal[
 #: than resolved, so a pathological graph can never loop or blow the stack.
 MAX_RESOLUTION_DEPTH = 10
 
-# Modrinth's per-catalog-version dependency classification we treat as required.
+# Modrinth's per-catalog-version dependency classifications: required (resolved)
+# and incompatible (blocks resolution, issue #1318).
 _REQUIRED_DEP_TYPE = "required"
+_INCOMPATIBLE_DEP_TYPE = "incompatible"
 
 # Catalog errors a per-dep Modrinth lookup may raise; swallowed for isolation so
 # one bad dependency never aborts the whole plan.
@@ -546,6 +549,26 @@ def _conflict_edges(plugins: list[ServerPlugin]) -> list[tuple[str, str]]:
     return edges
 
 
+def _installed_incompatible_edges(
+    plugins: list[ServerPlugin],
+) -> list[tuple[str, str]]:
+    """``(declaring_project_id, target_project_id)`` for installed incompatible edges.
+
+    A Modrinth catalog ``incompatible`` edge (issue #1318) is keyed by
+    ``project_id``: the declaring plugin's own ``source_project_id`` is incompatible
+    with the dep's ``project_id``. Only the installed set's captured edges are read
+    here; an import candidate's edges are collected during the closure walk.
+    """
+
+    edges: list[tuple[str, str]] = []
+    for plugin in plugins:
+        if plugin.source_project_id is None:
+            continue
+        for dep in incompatible_catalog_deps(plugin):
+            edges.append((plugin.source_project_id, dep.project_id))
+    return edges
+
+
 async def resolve_closure(
     *,
     server_type: str,
@@ -585,6 +608,9 @@ async def resolve_closure(
     # Every requirer (by added-id, or ``None`` for an installed root) that pulled
     # in each dep id; drives orphan-of-blocked pruning.
     requirers: dict[str, set[str | None]] = {}
+    # ``(import_project_id, target_project_id)`` incompatible edges declared by the
+    # imports walked this run, threaded into conflict detection (issue #1318).
+    import_incompatible_edges: list[tuple[str, str]] = []
     provided = _provided_versions(plugins)
 
     frontier: list[_FrontierDep] = []
@@ -648,18 +674,23 @@ async def resolve_closure(
                 )
             )
             if will_import is not None:
-                next_frontier.extend(
-                    await _frontier_from_will_import(
-                        will_import,
-                        catalog=catalog,
-                        loader=loader,
-                        mc_version=mc_version,
-                        depth=dep.depth + 1,
-                    )
+                child_frontier, child_incompatible = await _frontier_from_will_import(
+                    will_import,
+                    catalog=catalog,
+                    loader=loader,
+                    mc_version=mc_version,
+                    depth=dep.depth + 1,
                 )
+                next_frontier.extend(child_frontier)
+                import_incompatible_edges.extend(child_incompatible)
         frontier = next_frontier
 
-    entries = _block_and_prune(entries, plugins=plugins, requirers=requirers)
+    entries = _block_and_prune(
+        entries,
+        plugins=plugins,
+        requirers=requirers,
+        import_incompatible_edges=import_incompatible_edges,
+    )
     validation = validate_plugin_set(
         server_type=server_type, mc_version=mc_version, plugins=plugins
     )
@@ -673,14 +704,16 @@ async def _frontier_from_will_import(
     loader: str,
     mc_version: str,
     depth: int,
-) -> list[_FrontierDep]:
-    """The required deps of a Modrinth ``will_import`` version as frontier entries.
+) -> tuple[list[_FrontierDep], list[tuple[str, str]]]:
+    """A ``will_import`` version's required deps (as frontier) and incompatible edges.
 
     The per-server :class:`CatalogProvider` has no ``get_version``, so the
     selected version's catalog dependency edges are read from a re-list of the
     project's versions. Each required edge carries a ``project_id`` (the
     depended-on project): the next level resolves it through the same Modrinth
-    path. A catalog failure yields no expansion -- the rest of the closure still
+    path. Each ``incompatible`` edge is returned as an
+    ``(import_project_id, target_project_id)`` pair for conflict detection (issue
+    #1318). A catalog failure yields no expansion -- the rest of the closure still
     resolves.
     """
 
@@ -689,24 +722,26 @@ async def _frontier_from_will_import(
             will.project_id, loader=loader, game_versions=[mc_version]
         )
     except _CATALOG_ERRORS:
-        return []
+        return [], []
     version = next((v for v in versions if v.version_id == will.version_id), None)
     if version is None:
-        return []
+        return [], []
     frontier: list[_FrontierDep] = []
+    incompatible: list[tuple[str, str]] = []
     for cdep in version.dependencies:
-        if cdep.dependency_type != _REQUIRED_DEP_TYPE:
-            continue
-        frontier.append(
-            _FrontierDep(
-                identifier=cdep.project_id,
-                version_range="",
-                project_id=cdep.project_id,
-                depth=depth,
-                required_by=will.slug,
+        if cdep.dependency_type == _REQUIRED_DEP_TYPE:
+            frontier.append(
+                _FrontierDep(
+                    identifier=cdep.project_id,
+                    version_range="",
+                    project_id=cdep.project_id,
+                    depth=depth,
+                    required_by=will.slug,
+                )
             )
-        )
-    return frontier
+        elif cdep.dependency_type == _INCOMPATIBLE_DEP_TYPE and cdep.project_id:
+            incompatible.append((will.project_id, cdep.project_id))
+    return frontier, incompatible
 
 
 def _block_and_prune(
@@ -714,14 +749,17 @@ def _block_and_prune(
     *,
     plugins: list[ServerPlugin],
     requirers: dict[str, set[str | None]],
+    import_incompatible_edges: list[tuple[str, str]],
 ) -> list[ResolutionEntry]:
     """Block conflicting imports and prune the orphans they leave behind.
 
     Two reasons an import entry must not be auto-added:
 
-    * **Conflict** -- the mod it would add either declares a ``conflict`` edge
-      against an id present/added, or is itself the target of such an edge from
-      another present/added plugin.
+    * **Conflict** -- the mod it would add either declares a manifest ``conflict``
+      edge against an id present/added, or is itself the target of such an edge
+      from another present/added plugin; or it sits on a Modrinth catalog
+      ``incompatible`` edge (issue #1318, keyed by ``project_id``) whose other
+      endpoint is present/being-imported.
     * **Orphan-of-blocked** -- it exists in the closure *only* because a blocked
       mod required it: none of its requirers is an installed root or a surviving
       (non-blocked) import.
@@ -738,6 +776,11 @@ def _block_and_prune(
             installed_ids.add(plugin.mod_identifier)
             installed_ids.update(plugin.provides)
 
+    installed_project_ids_present = installed_project_ids(plugins)
+    incompatible_edges = (
+        _installed_incompatible_edges(plugins) + import_incompatible_edges
+    )
+
     blocked: set[int] = set()
     while True:
         present_ids = _present_ids(entries, installed_ids, blocked)
@@ -745,6 +788,13 @@ def _block_and_prune(
         broken_ids = {target for _d, target in edges if target in present_ids}
         breaking_ids = {decl for decl, target in edges if target in present_ids}
         conflict_ids = broken_ids | breaking_ids
+
+        present_project_ids = _present_project_ids(
+            entries, installed_project_ids_present, blocked
+        )
+        conflict_project_ids = _incompatible_project_ids(
+            incompatible_edges, present_project_ids
+        )
 
         added_ids = {
             added_id
@@ -762,6 +812,13 @@ def _block_and_prune(
             if added_id in conflict_ids:
                 new_blocked.add(idx)
                 continue
+            added_project_id = _entry_added_project_id(entry)
+            if (
+                added_project_id is not None
+                and added_project_id in conflict_project_ids
+            ):
+                new_blocked.add(idx)
+                continue
             edge_requirers = requirers.get(entry.dep_identifier, {entry.required_by})
             if any(
                 req is None or req in installed_ids or req in added_ids
@@ -775,6 +832,41 @@ def _block_and_prune(
         blocked |= new_blocked
 
     return _mark_blocked(entries, blocked)
+
+
+def _present_project_ids(
+    entries: list[ResolutionEntry],
+    installed_project_ids_present: set[str],
+    blocked: set[int],
+) -> set[str]:
+    """Every Modrinth ``project_id`` present if the plan applies, minus blocked ones."""
+
+    present: set[str] = set(installed_project_ids_present)
+    for idx, entry in enumerate(entries):
+        if idx in blocked:
+            continue
+        project_id = _entry_added_project_id(entry)
+        if project_id is not None:
+            present.add(project_id)
+    return present
+
+
+def _incompatible_project_ids(
+    edges: list[tuple[str, str]], present_project_ids: set[str]
+) -> set[str]:
+    """Project ids on an incompatible edge whose other endpoint is also present.
+
+    A catalog ``incompatible`` edge ``(a, b)`` is a live conflict only when both
+    ``a`` and ``b`` are present (installed or being imported); then both endpoints
+    are flagged so a present import on either side is blocked.
+    """
+
+    conflicting: set[str] = set()
+    for decl, target in edges:
+        if decl in present_project_ids and target in present_project_ids:
+            conflicting.add(decl)
+            conflicting.add(target)
+    return conflicting
 
 
 def _present_ids(
@@ -799,6 +891,14 @@ def _entry_added_id(entry: ResolutionEntry) -> str | None:
 
     if entry.status == "needs_import" and entry.will_import is not None:
         return entry.will_import.slug
+    return None
+
+
+def _entry_added_project_id(entry: ResolutionEntry) -> str | None:
+    """The Modrinth ``project_id`` a resolved import would add, else ``None``."""
+
+    if entry.status == "needs_import" and entry.will_import is not None:
+        return entry.will_import.project_id
     return None
 
 

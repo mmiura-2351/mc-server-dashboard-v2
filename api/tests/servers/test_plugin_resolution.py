@@ -162,6 +162,20 @@ def _catalog_dep(
     }
 
 
+def _incompatible_catalog_dep(
+    project_id: str,
+    *,
+    slug: str | None = None,
+    title: str | None = None,
+) -> dict[str, object]:
+    return {
+        "project_id": project_id,
+        "incompatible": True,
+        "slug": slug,
+        "title": title,
+    }
+
+
 def _fabric_jar(
     *, mod_id: str, version: str = "0.92.0", depends: dict[str, str] | None = None
 ) -> bytes:
@@ -957,6 +971,161 @@ class TestResolveCatalogDeps:
         )
         assert failed == []
         assert [p.source_project_id for p in installed] == ["ARCH"]
+
+
+class TestResolveIncompatibleCatalogEdges:
+    # A Modrinth catalog ``incompatible`` edge (issue #1318), keyed by project_id,
+    # blocks resolution when both endpoints are present/being-imported.
+
+    async def test_installed_incompatible_blocks_imported_project(self) -> None:
+        # Installed "rival" (project RIVAL) declares it is incompatible with ARCH;
+        # installed "rei" requires ARCH (catalog dep). Importing ARCH would clash
+        # with RIVAL, so the ARCH import is blocked.
+        server = _server()
+        rei = _plugin(
+            server_id=server.id,
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            catalog_dependencies=[_catalog_dep("ARCH")],
+        )
+        rival = _plugin(
+            server_id=server.id,
+            mod_identifier="rival",
+            source=PluginSource.MODRINTH,
+            source_project_id="RIVAL",
+            catalog_dependencies=[_incompatible_catalog_dep("ARCH")],
+        )
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei, rival)
+        catalog = FakeCatalogProvider()
+        catalog.seed_project(
+            _project(project_id="ARCH", slug="architectury", title="Architectury"),
+            versions=[_version(version_id="ARCHVER")],
+        )
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        entry = next(e for e in plan.entries if e.dep_identifier == "ARCH")
+        assert entry.blocked is True
+
+    async def test_imported_project_incompatible_with_installed_is_blocked(
+        self,
+    ) -> None:
+        # Installed "rei" requires ARCH (catalog dep); the ARCH version's own
+        # Modrinth metadata declares it incompatible with installed RIVAL. The
+        # import is blocked by the import-declared incompatible edge.
+        server = _server()
+        rei = _plugin(
+            server_id=server.id,
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            catalog_dependencies=[_catalog_dep("ARCH")],
+        )
+        rival = _plugin(
+            server_id=server.id,
+            mod_identifier="rival",
+            source=PluginSource.MODRINTH,
+            source_project_id="RIVAL",
+        )
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei, rival)
+        catalog = FakeCatalogProvider()
+        arch_version = _version(
+            version_id="ARCHVER",
+            dependencies=[
+                CatalogDependency(
+                    version_id=None,
+                    project_id="RIVAL",
+                    dependency_type="incompatible",
+                )
+            ],
+        )
+        catalog.seed_project(
+            _project(project_id="ARCH", slug="architectury", title="Architectury"),
+            versions=[arch_version],
+        )
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        entry = next(e for e in plan.entries if e.dep_identifier == "ARCH")
+        assert entry.blocked is True
+
+    async def test_incompatible_target_absent_does_not_block(self) -> None:
+        # "rei" requires ARCH and declares ARCH incompatible with RIVAL, but RIVAL
+        # is not installed, so the incompatible edge is inert: ARCH still imports.
+        server = _server()
+        rei = _plugin(
+            server_id=server.id,
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            catalog_dependencies=[
+                _catalog_dep("ARCH"),
+                _incompatible_catalog_dep("RIVAL"),
+            ],
+        )
+        server = _server()
+        rei.server_id = server.id
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei)
+        catalog = FakeCatalogProvider()
+        catalog.seed_project(
+            _project(project_id="ARCH", slug="architectury", title="Architectury"),
+            versions=[_version(version_id="ARCHVER")],
+        )
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        entry = next(e for e in plan.entries if e.dep_identifier == "ARCH")
+        assert entry.status == "needs_import"
+        assert entry.blocked is False
+
+    async def test_apply_skips_incompatible_blocked_import(self) -> None:
+        # Apply counterpart: the ARCH import blocked by an installed incompatible
+        # edge is never installed.
+        server = _server()
+        rei = _plugin(
+            server_id=server.id,
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            catalog_dependencies=[_catalog_dep("ARCH")],
+        )
+        rival = _plugin(
+            server_id=server.id,
+            mod_identifier="rival",
+            source=PluginSource.MODRINTH,
+            source_project_id="RIVAL",
+            catalog_dependencies=[_incompatible_catalog_dep("ARCH")],
+        )
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei, rival)
+        catalog = FakeCatalogProvider()
+        arch_jar = _fabric_jar(mod_id="architectury")
+        arch_version = _version(
+            version_id="ARCHVER", filename="architectury.jar", file_content=arch_jar
+        )
+        catalog.seed_project(
+            _project(project_id="ARCH", slug="architectury", title="Architectury"),
+            versions=[arch_version],
+        )
+        _seed_downloadable(catalog, arch_version, arch_jar)
+        install = _install_uc(uow, catalog, FakeFileStore(), FakePluginCacheStore())
+
+        _new_plan, installed, failed = await ApplyPluginResolution(
+            uow, catalog, install
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            applied_by=uuid.uuid4(),
+        )
+        assert installed == []
+        assert failed == []
 
 
 # ---------------------------------------------------------------------------

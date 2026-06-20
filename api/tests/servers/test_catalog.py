@@ -416,6 +416,62 @@ async def test_install_from_catalog_captures_required_catalog_deps() -> None:
     ]
 
 
+async def test_install_from_catalog_captures_incompatible_catalog_deps() -> None:
+    # The selected version's INCOMPATIBLE catalog edges are captured at ingest
+    # (issue #1318), keyed by project_id and marked ``incompatible`` (distinct from
+    # the ``required`` flag), with the dep project's slug/title for display.
+    # Embedded edges are not stored.
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    mod_project = _project(project_id="MOD", slug="mod", title="Mod")
+    mod_version, content = _version()
+    mod_version = CatalogVersion(
+        version_id=mod_version.version_id,
+        version_number=mod_version.version_number,
+        name=mod_version.name,
+        game_versions=mod_version.game_versions,
+        loaders=mod_version.loaders,
+        files=mod_version.files,
+        date_published=mod_version.date_published,
+        dependencies=[
+            CatalogDependency(
+                version_id=None, project_id="RIVAL", dependency_type="incompatible"
+            ),
+            CatalogDependency(
+                version_id=None, project_id="EMB", dependency_type="embedded"
+            ),
+        ],
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(mod_project, [mod_version])
+    catalog.seed_file(mod_version.files[0].url, content)
+    catalog.seed_project(_project(project_id="RIVAL", slug="rival-mod", title="Rival"))
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="MOD",
+        version_id="ver-1",
+    )
+    assert plugin.catalog_dependencies == [
+        {
+            "project_id": "RIVAL",
+            "incompatible": True,
+            "slug": "rival-mod",
+            "title": "Rival",
+        }
+    ]
+
+
 async def test_install_from_catalog_paper_server() -> None:
     uow = FakeUnitOfWork()
     server = _server(server_type=ServerType.PAPER)
