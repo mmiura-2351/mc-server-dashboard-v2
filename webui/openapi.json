@@ -204,6 +204,35 @@
         "title": "AdminUserResponse",
         "type": "object"
       },
+      "ApplyResolutionResponse": {
+        "description": "The result of applying a resolution: the re-plan, installs, and failures.\n\n``installed`` are the plugins newly installed from Modrinth; ``failed`` are\nthe dep identifiers whose Modrinth lookup/install failed (isolated per dep);\n``plan`` is the re-computed plan after the installs.",
+        "properties": {
+          "failed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Failed",
+            "type": "array"
+          },
+          "installed": {
+            "items": {
+              "$ref": "#/components/schemas/PluginResponse"
+            },
+            "title": "Installed",
+            "type": "array"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/ResolutionPlanResponse"
+          }
+        },
+        "required": [
+          "plan",
+          "installed",
+          "failed"
+        ],
+        "title": "ApplyResolutionResponse",
+        "type": "object"
+      },
       "AssignResourcePackRequest": {
         "properties": {
           "require_resource_pack": {
@@ -2459,6 +2488,84 @@
         "title": "RenameRequest",
         "type": "object"
       },
+      "ResolutionEntryResponse": {
+        "description": "One required dependency and how it resolves in the plan.",
+        "properties": {
+          "blocked": {
+            "title": "Blocked",
+            "type": "boolean"
+          },
+          "dep_identifier": {
+            "title": "Dep Identifier",
+            "type": "string"
+          },
+          "depth": {
+            "title": "Depth",
+            "type": "integer"
+          },
+          "required_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required By"
+          },
+          "required_range": {
+            "title": "Required Range",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "will_import": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WillImportResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "dep_identifier",
+          "required_range",
+          "status",
+          "will_import",
+          "depth",
+          "required_by",
+          "blocked"
+        ],
+        "title": "ResolutionEntryResponse",
+        "type": "object"
+      },
+      "ResolutionPlanResponse": {
+        "description": "The dependency-resolution plan plus the phase-B validation checklist.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ResolutionEntryResponse"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/PluginValidationResponse"
+          }
+        },
+        "required": [
+          "entries",
+          "validation"
+        ],
+        "title": "ResolutionPlanResponse",
+        "type": "object"
+      },
       "ResourcePackAssignmentResponse": {
         "properties": {
           "assigned_at": {
@@ -3220,6 +3327,35 @@
           "versions"
         ],
         "title": "VersionsResponse",
+        "type": "object"
+      },
+      "WillImportResponse": {
+        "description": "The Modrinth project@version a ``needs_import`` dep resolves to.",
+        "properties": {
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "version_id",
+          "slug",
+          "version_number"
+        ],
+        "title": "WillImportResponse",
         "type": "object"
       },
       "WorkerResponse": {
@@ -7606,6 +7742,118 @@
           }
         ],
         "summary": "Install Plugin"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/resolve": {
+      "post": {
+        "description": "Plan dependency auto-resolution (plugin:read, issue #1309).\n\nComputes the transitive closure of the server's required deps: each is\nclassified already-satisfied (present in range), needs-import (a Modrinth\nproject@version to install), unresolvable (no Modrinth match), or blocked (a\ntransitive conflict). Read-only: nothing is downloaded or installed.",
+        "operationId": "resolve_plugin_dependencies_api_communities__community_id__servers__server_id__plugins_resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolutionPlanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Resolve Plugin Dependencies"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/resolve/apply": {
+      "post": {
+        "description": "Apply dependency auto-resolution (plugin:manage, issue #1309).\n\nInstalls each non-blocked needs-import dep from Modrinth onto the server via\nthe catalog install path, then re-plans. At-rest gated (409\n``server_unsettled`` while the server is running); a per-dep install failure\nis isolated and reported in ``failed``; a blocked (conflicting) dep is never\ninstalled.",
+        "operationId": "apply_plugin_resolution_api_communities__community_id__servers__server_id__plugins_resolve_apply_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyResolutionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Apply Plugin Resolution"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/plugins/updates": {

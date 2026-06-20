@@ -26,6 +26,7 @@ from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
+    get_apply_plugin_resolution,
     get_audit_recorder,
     get_check_plugin_update,
     get_check_updates,
@@ -36,6 +37,7 @@ from mc_server_dashboard_api.dependencies import (
     get_list_plugin_dependencies,
     get_list_plugins,
     get_remove_plugin,
+    get_resolve_plugin_dependencies,
     get_set_plugin_side,
     get_toggle_plugin,
     get_update_plugin,
@@ -53,6 +55,11 @@ from mc_server_dashboard_api.servers.application.catalog import (
 from mc_server_dashboard_api.servers.application.client_modpack import (
     DownloadClientModpack,
     ListClientMods,
+)
+from mc_server_dashboard_api.servers.application.plugin_resolution import (
+    ApplyPluginResolution,
+    ResolutionPlan,
+    ResolvePluginDependencies,
 )
 from mc_server_dashboard_api.servers.application.plugin_validation import (
     PluginValidation,
@@ -318,6 +325,77 @@ class PluginValidationResponse(BaseModel):
         )
 
 
+# -- Dependency auto-resolution (issue #1309) --
+
+
+class WillImportResponse(BaseModel):
+    """The Modrinth project@version a ``needs_import`` dep resolves to."""
+
+    project_id: str
+    version_id: str
+    slug: str
+    version_number: str
+
+
+class ResolutionEntryResponse(BaseModel):
+    """One required dependency and how it resolves in the plan."""
+
+    dep_identifier: str
+    required_range: str
+    status: str
+    will_import: WillImportResponse | None
+    depth: int
+    required_by: str | None
+    blocked: bool
+
+
+class ResolutionPlanResponse(BaseModel):
+    """The dependency-resolution plan plus the phase-B validation checklist."""
+
+    entries: list[ResolutionEntryResponse]
+    validation: PluginValidationResponse
+
+    @classmethod
+    def from_plan(cls, plan: ResolutionPlan) -> "ResolutionPlanResponse":
+        return cls(
+            entries=[
+                ResolutionEntryResponse(
+                    dep_identifier=e.dep_identifier,
+                    required_range=e.required_range,
+                    status=e.status,
+                    will_import=(
+                        WillImportResponse(
+                            project_id=e.will_import.project_id,
+                            version_id=e.will_import.version_id,
+                            slug=e.will_import.slug,
+                            version_number=e.will_import.version_number,
+                        )
+                        if e.will_import is not None
+                        else None
+                    ),
+                    depth=e.depth,
+                    required_by=e.required_by,
+                    blocked=e.blocked,
+                )
+                for e in plan.entries
+            ],
+            validation=PluginValidationResponse.from_validation(plan.validation),
+        )
+
+
+class ApplyResolutionResponse(BaseModel):
+    """The result of applying a resolution: the re-plan, installs, and failures.
+
+    ``installed`` are the plugins newly installed from Modrinth; ``failed`` are
+    the dep identifiers whose Modrinth lookup/install failed (isolated per dep);
+    ``plan`` is the re-computed plan after the installs.
+    """
+
+    plan: ResolutionPlanResponse
+    installed: list[PluginResponse]
+    failed: list[str]
+
+
 @router.get("/communities/{community_id}/servers/{server_id}/plugins")
 async def list_plugins(
     community_id: uuid.UUID,
@@ -486,6 +564,104 @@ async def validate_plugins(
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
     return PluginValidationResponse.from_validation(result)
+
+
+@router.post("/communities/{community_id}/servers/{server_id}/plugins/resolve")
+async def resolve_plugin_dependencies(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("plugin:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[
+        ResolvePluginDependencies, Depends(get_resolve_plugin_dependencies)
+    ],
+) -> ResolutionPlanResponse:
+    """Plan dependency auto-resolution (plugin:read, issue #1309).
+
+    Computes the transitive closure of the server's required deps: each is
+    classified already-satisfied (present in range), needs-import (a Modrinth
+    project@version to install), unresolvable (no Modrinth match), or blocked (a
+    transitive conflict). Read-only: nothing is downloaded or installed.
+    """
+
+    try:
+        plan = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except UnsupportedPluginServerTypeError as exc:
+        raise _unprocessable("unsupported_server_type") from exc
+    except CatalogUnavailableError as exc:
+        raise _bad_gateway("catalog_unavailable") from exc
+    return ResolutionPlanResponse.from_plan(plan)
+
+
+@router.post("/communities/{community_id}/servers/{server_id}/plugins/resolve/apply")
+async def apply_plugin_resolution(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("plugin:manage"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ApplyPluginResolution, Depends(get_apply_plugin_resolution)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> ApplyResolutionResponse:
+    """Apply dependency auto-resolution (plugin:manage, issue #1309).
+
+    Installs each non-blocked needs-import dep from Modrinth onto the server via
+    the catalog install path, then re-plans. At-rest gated (409
+    ``server_unsettled`` while the server is running); a per-dep install failure
+    is isolated and reported in ``failed``; a blocked (conflicting) dep is never
+    installed.
+    """
+
+    try:
+        plan, installed, failed = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            applied_by=authorized.user_id.value,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except UnsupportedPluginServerTypeError as exc:
+        raise _unprocessable("unsupported_server_type") from exc
+    except CatalogUnavailableError as exc:
+        raise _bad_gateway("catalog_unavailable") from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_RESOLVE, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+    except ServerBusyError as exc:
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_RESOLVE, authorized, community_id, server_id
+        )
+        raise _conflict("server_busy") from exc
+    await _record_plugin(
+        recorder, ops.PLUGIN_RESOLVE, authorized, community_id, server_id
+    )
+    return ApplyResolutionResponse(
+        plan=ResolutionPlanResponse.from_plan(plan),
+        installed=[PluginResponse.from_plugin(p) for p in installed],
+        failed=failed,
+    )
 
 
 @router.get(

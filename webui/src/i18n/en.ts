@@ -1351,6 +1351,27 @@ export const en = {
   "plugins.validation.conflict": "{mod} conflicts with {other}.",
   "plugins.validation.mcMismatch":
     "{mod} does not list MC {serverVersion} (supports {modVersions}).",
+  // Dependency auto-resolution (issue #1309).
+  "plugins.resolve.action": "Resolve dependencies",
+  "plugins.resolve.loading": "Computing resolution plan…",
+  "plugins.resolve.title": "Resolve dependencies",
+  "plugins.resolve.nothing": "All required dependencies are already satisfied.",
+  "plugins.resolve.importsHeading": "Will install from Modrinth",
+  "plugins.resolve.importItem": "{dependency} → {project} {version}",
+  "plugins.resolve.satisfiedHeading": "Already satisfied",
+  "plugins.resolve.satisfiedItem": "{dependency}",
+  "plugins.resolve.conflictsHeading": "Blocked by conflicts",
+  "plugins.resolve.conflictItem":
+    "{dependency} cannot be installed — it conflicts with an installed plugin.",
+  "plugins.resolve.unresolvableHeading": "Cannot be resolved",
+  "plugins.resolve.unresolvableItem":
+    "{dependency} — no compatible Modrinth version found.",
+  "plugins.resolve.apply": "Install dependencies",
+  "plugins.resolve.cancel": "Cancel",
+  "plugins.resolve.applied": "Dependencies installed.",
+  "plugins.resolve.appliedWithFailures":
+    "Some dependencies could not be installed.",
+  "plugins.resolve.failedHeading": "Failed to install",
   // Permission family and code labels for the role/grant matrix.
   "communitySettings.roles.family.plugin": "Plugins",
   "communitySettings.roles.code.plugin:read": "Read",
