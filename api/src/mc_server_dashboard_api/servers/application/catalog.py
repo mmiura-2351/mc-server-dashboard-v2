@@ -35,6 +35,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
+    ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
 )
@@ -51,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     content_dir_for_server_type,
     loader_type_for_server_type,
     modrinth_loader_for_server_type,
+    working_set_path,
     working_set_present,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
@@ -485,48 +487,60 @@ class UpdatePlugin:
         # updated version (issue #1307). Tolerant of an unreadable jar.
         manifest = parse_manifest_at_ingest(content, loader=loader)
 
-        # Phase 4: At-rest gate + write (hold lock, short duration).
-        new_rel_path = f"{content_dir}/{file.filename}"
+        # Phase 4: At-rest gate + write (hold lock, short duration). The new jar's
+        # working-set path follows the (enabled, side) desired state (issue #1308):
+        # a disabled server/both jar lives at the .disabled path, a client jar has
+        # no file. Reconciling old -> new keeps rel_path and the on-disk file
+        # consistent and never orphans the prior .disabled file.
+        new_clean_path = f"{content_dir}/{file.filename}"
+        old_path = working_set_path(
+            clean_path=plugin.rel_path.removesuffix(".disabled"),
+            enabled=plugin.enabled,
+            side=plugin.side,
+        )
+        new_path = working_set_path(
+            clean_path=new_clean_path, enabled=plugin.enabled, side=plugin.side
+        )
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 if not server.is_at_rest():
                     raise ServerFilesUnsettledError(str(server_id.value))
 
-                self.file_store.validate_rel_path(new_rel_path)
+                self.file_store.validate_rel_path(new_clean_path)
 
-                old_rel_path = plugin.rel_path
-                if new_rel_path != old_rel_path:
+                if new_path is not None and new_path != old_path:
                     existing = await self.uow.plugins.get_by_rel_path(
-                        server_id, new_rel_path
+                        server_id, new_path
                     )
                     if existing is not None and existing.id != plugin_id:
-                        raise PluginAlreadyExistsError(new_rel_path)
+                        raise PluginAlreadyExistsError(new_path)
 
-                # The side carries over from the installed row; a client-only mod
-                # is updated in the cache + record but never (re)written to the
-                # working set (issue #1308).
-                present = working_set_present(enabled=plugin.enabled, side=plugin.side)
-                if present:
+                # Write the fresh bytes at the desired path and remove the old file
+                # (also when only the side/enabled mapping leaves the new bytes at a
+                # different path). A client-only jar has no working-set file.
+                if new_path is not None:
                     await self.file_store.write_file(
                         community_id=community_id,
                         server_id=server_id,
-                        rel_path=new_rel_path,
+                        rel_path=new_path,
                         content=content,
                     )
-
-                if new_rel_path != old_rel_path and present:
-                    await self.file_store.delete_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=old_rel_path,
-                    )
+                if old_path is not None and old_path != new_path:
+                    try:
+                        await self.file_store.delete_file(
+                            community_id=community_id,
+                            server_id=server_id,
+                            rel_path=old_path,
+                        )
+                    except ServerFileNotFoundError:
+                        pass
 
                 now = self.clock.now()
                 updated_plugin = ServerPlugin(
                     id=plugin.id,
                     server_id=plugin.server_id,
-                    rel_path=new_rel_path,
+                    rel_path=new_path if new_path is not None else new_clean_path,
                     filename=file.filename,
                     display_name=plugin.display_name,
                     description=plugin.description,

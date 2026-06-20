@@ -468,7 +468,9 @@ async def test_disable_client_plugin_does_not_touch_working_set() -> None:
     uow.plugins.seed(plugin)
     fs = FakeFileStore()  # client plugin has no working-set file
 
-    uc = TogglePlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    uc = TogglePlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
     updated = await uc(
         community_id=_COMMUNITY,
         server_id=server.id,
@@ -481,6 +483,143 @@ async def test_disable_client_plugin_does_not_touch_working_set() -> None:
     assert updated.rel_path == "mods/c.jar"
     assert "mods/c.jar" not in fs.files
     assert "mods/c.jar.disabled" not in fs.files
+
+
+# -- Reconcile: cross-axis transitions around the .disabled invariant (#1308) --
+
+
+async def test_disabled_client_to_both_then_enable_materializes_from_cache() -> None:
+    """Regression for the state-machine bug: a client jar disabled (no rename,
+    rel_path stays suffix-less) then switched client -> both while disabled
+    (materialized at the .disabled path) must, on enable, end up at the clean path
+    with the cached bytes -- not take the old rename branch and self-collide."""
+
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    cache = FakePluginCacheStore()
+    content = b"the-jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+    cache.blobs[sha256] = content
+    plugin = _plugin(
+        server_id=server.id,
+        side="client",
+        rel_path="mods/c.jar",
+        filename="c.jar",
+        sha256=sha256,
+    )
+    uow.plugins.seed(plugin)
+    fs = FakeFileStore()  # client plugin has no working-set file
+
+    toggle = TogglePlugin(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
+    set_side = SetPluginSide(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
+
+    # 1. Disable the client mod (no rename; rel_path stays clean).
+    await toggle(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=False
+    )
+    assert plugin.rel_path == "mods/c.jar"
+    assert "mods/c.jar" not in fs.files
+    assert "mods/c.jar.disabled" not in fs.files
+
+    # 2. Switch client -> both while disabled: a disabled server/both jar lives
+    # at the .disabled path, materialized from the cache.
+    await set_side(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, side="both"
+    )
+    assert plugin.side == "both"
+    assert plugin.enabled is False
+    assert plugin.rel_path == "mods/c.jar.disabled"
+    assert fs.files["mods/c.jar.disabled"] == content
+    assert "mods/c.jar" not in fs.files
+
+    # 3. Enable: this is the formerly-broken path. Must succeed and place the
+    # working-set file at the clean path (rename from .disabled).
+    enabled = await toggle(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=True
+    )
+    assert enabled.enabled is True
+    assert enabled.rel_path == "mods/c.jar"
+    assert fs.files["mods/c.jar"] == content
+    assert "mods/c.jar.disabled" not in fs.files
+
+    # 4. Re-disable -> re-enable still works (idempotent reconcile).
+    await toggle(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=False
+    )
+    assert plugin.rel_path == "mods/c.jar.disabled"
+    assert fs.files["mods/c.jar.disabled"] == content
+    assert "mods/c.jar" not in fs.files
+
+    await toggle(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=True
+    )
+    assert plugin.rel_path == "mods/c.jar"
+    assert fs.files["mods/c.jar"] == content
+    assert "mods/c.jar.disabled" not in fs.files
+
+
+async def test_disabled_both_to_client_removes_file_then_back_then_enable() -> None:
+    """Disable a server/both jar (file at .disabled), switch both -> client (file
+    removed), switch back to both while disabled (re-materialized at the .disabled
+    path), then enable (file lands at the clean path)."""
+
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    cache = FakePluginCacheStore()
+    content = b"both-jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+    cache.blobs[sha256] = content
+    plugin = _plugin(
+        server_id=server.id,
+        side="both",
+        rel_path="mods/b.jar",
+        filename="b.jar",
+        sha256=sha256,
+    )
+    uow.plugins.seed(plugin)
+    fs = FakeFileStore()
+    fs.files["mods/b.jar"] = content  # deployed
+
+    toggle = TogglePlugin(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
+    set_side = SetPluginSide(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
+
+    # 1. Disable: file renamed to the .disabled path.
+    await toggle(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=False
+    )
+    assert plugin.rel_path == "mods/b.jar.disabled"
+    assert fs.files["mods/b.jar.disabled"] == content
+    assert "mods/b.jar" not in fs.files
+
+    # 2. both -> client while disabled: working-set file removed entirely.
+    to_client = await set_side(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, side="client"
+    )
+    assert to_client.side == "client"
+    assert "mods/b.jar.disabled" not in fs.files
+    assert "mods/b.jar" not in fs.files
+    # rel_path normalizes to the clean path for a client jar (no .disabled).
+    assert to_client.rel_path == "mods/b.jar"
+
+    # 3. client -> both while disabled: re-materialized at the .disabled path.
+    to_both = await set_side(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, side="both"
+    )
+    assert to_both.side == "both"
+    assert to_both.rel_path == "mods/b.jar.disabled"
+    assert fs.files["mods/b.jar.disabled"] == content
+    assert "mods/b.jar" not in fs.files
+
+    # 4. Enable: the file lands at the clean path (rename from .disabled).
+    await toggle(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=True
+    )
+    assert plugin.enabled is True
+    assert plugin.rel_path == "mods/b.jar"
+    assert fs.files["mods/b.jar"] == content
+    assert "mods/b.jar.disabled" not in fs.files
 
 
 # -- Client modpack list + zip --

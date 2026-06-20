@@ -125,6 +125,26 @@ def working_set_present(*, enabled: bool, side: PluginSide) -> bool:
     return enabled and side != "client"
 
 
+def working_set_path(*, clean_path: str, enabled: bool, side: PluginSide) -> str | None:
+    """The working-set path a plugin's jar should occupy (issue #1308).
+
+    The desired on-disk state derived from ``(enabled, side)``, given the
+    suffix-free ``clean_path`` (e.g. ``mods/<name>.jar``):
+
+    * ``side == "client"`` -> no working-set file (ever); ``None``.
+    * server/both + enabled  -> the clean path.
+    * server/both + disabled -> the ``.disabled`` path.
+
+    Use cases reconcile the on-disk file to this single source of truth so the
+    recorded ``rel_path`` and the actual file never drift (the ``.disabled``
+    state-machine invariant).
+    """
+
+    if not working_set_present(enabled=True, side=side):
+        return None
+    return clean_path if enabled else f"{clean_path}.disabled"
+
+
 def content_dir_for_server_type(server_type: ServerType) -> str:
     """Return the content directory name for ``server_type``.
 

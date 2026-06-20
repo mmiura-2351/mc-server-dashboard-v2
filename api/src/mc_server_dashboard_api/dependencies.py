@@ -1959,6 +1959,7 @@ def get_remove_plugin(
 def get_toggle_plugin(
     request: Request,
     file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
 ) -> TogglePlugin:
     """Assemble the :class:`TogglePlugin` use case (plugin:manage, issue #1150)."""
 
@@ -1966,6 +1967,7 @@ def get_toggle_plugin(
     return TogglePlugin(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+        cache=cache,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
     )

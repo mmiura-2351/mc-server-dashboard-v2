@@ -478,7 +478,9 @@ async def test_disable_plugin() -> None:
     fs.files["mods/test.jar"] = b"jar"
     p = _plugin(server_id=server.id, enabled=True, rel_path="mods/test.jar")
     uow.plugins.seed(p)
-    uc = TogglePlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    uc = TogglePlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
     result = await uc(
         community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id, enable=False
     )
@@ -496,7 +498,9 @@ async def test_enable_plugin() -> None:
     fs.files["mods/test.jar.disabled"] = b"jar"
     p = _plugin(server_id=server.id, enabled=False, rel_path="mods/test.jar.disabled")
     uow.plugins.seed(p)
-    uc = TogglePlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    uc = TogglePlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
     result = await uc(
         community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id, enable=True
     )
@@ -512,7 +516,9 @@ async def test_toggle_noop_if_already_desired_state() -> None:
     fs.files["mods/test.jar"] = b"jar"
     p = _plugin(server_id=server.id, enabled=True, rel_path="mods/test.jar")
     uow.plugins.seed(p)
-    uc = TogglePlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    uc = TogglePlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
     result = await uc(
         community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id, enable=True
     )
@@ -566,7 +572,9 @@ async def test_enable_collision_raises_already_exists() -> None:
     )
     uow.plugins.seed(plugin_b)
     fs.files["mods/foo.jar.disabled"] = b"jar-b"
-    uc = TogglePlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    uc = TogglePlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
     with pytest.raises(PluginAlreadyExistsError):
         await uc(
             community_id=_COMMUNITY,
