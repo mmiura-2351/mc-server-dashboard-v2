@@ -619,6 +619,151 @@ async def test_install_from_catalog_duplicate() -> None:
         )
 
 
+async def test_install_from_catalog_duplicate_project_different_version() -> None:
+    """Installing the same Modrinth project at a different version is rejected.
+
+    Two versions of the same mod crash at MC runtime (issue #1332 item 1).
+    The guard checks source_project_id, not just rel_path.
+    """
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+
+    project = _project()
+    ver_a, content_a = _version(
+        version_id="ver-1",
+        version_number="0.92.0",
+        filename="fabric-api-0.92.0.jar",
+    )
+    ver_b_content = b"different-jar-bytes-v2"
+    ver_b, _ = _version(
+        version_id="ver-2",
+        version_number="0.93.0",
+        filename="fabric-api-0.93.0.jar",
+        file_content=ver_b_content,
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [ver_a, ver_b])
+    catalog.seed_file(ver_a.files[0].url, content_a)
+    catalog.seed_file(ver_b.files[0].url, ver_b_content)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    # First install succeeds.
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    # Second install of the SAME project at a DIFFERENT version is rejected.
+    with pytest.raises(PluginAlreadyExistsError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="proj-1",
+            version_id="ver-2",
+        )
+
+
+async def test_install_from_catalog_different_project_succeeds() -> None:
+    """Installing a different Modrinth project on the same server succeeds."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+
+    proj_a = _project(project_id="proj-1", slug="fabric-api", title="Fabric API")
+    ver_a, content_a = _version(
+        version_id="ver-1",
+        version_number="0.92.0",
+        filename="fabric-api-0.92.0.jar",
+    )
+    proj_b = _project(project_id="proj-2", slug="lithium", title="Lithium")
+    content_b = b"lithium-jar-bytes"
+    ver_b, _ = _version(
+        version_id="ver-10",
+        version_number="0.15.3",
+        filename="lithium-0.15.3.jar",
+        file_content=content_b,
+    )
+
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(proj_a, [ver_a])
+    catalog.seed_project(proj_b, [ver_b])
+    catalog.seed_file(ver_a.files[0].url, content_a)
+    catalog.seed_file(ver_b.files[0].url, content_b)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    # Different project succeeds.
+    plugin_b = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-2",
+        version_id="ver-10",
+    )
+    assert plugin_b.source_project_id == "proj-2"
+
+
+async def test_install_from_catalog_local_upload_unaffected_by_project_guard() -> None:
+    """A local upload (no source_project_id) does not block a Modrinth install."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    # Seed a pre-existing local plugin (no source_project_id).
+    local_plugin = _plugin(
+        server_id=server.id,
+        source=PluginSource.LOCAL,
+        source_project_id=None,
+        source_version_id=None,
+        rel_path="mods/some-local-mod.jar",
+        filename="some-local-mod.jar",
+        display_name="Local Mod",
+    )
+    uow.plugins.seed(local_plugin)
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    # Modrinth install should succeed despite the existing local plugin.
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert plugin.source_project_id == "proj-1"
+
+
 async def test_install_from_catalog_unavailable() -> None:
     uow = FakeUnitOfWork()
     server = _server()
