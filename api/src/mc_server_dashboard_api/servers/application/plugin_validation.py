@@ -4,13 +4,20 @@ A pure function over (server loader + MC version, the server's installed
 plugins) that surfaces a checklist of problems the operator should fix by hand.
 **Display only** -- it never mutates the set; auto-resolution is item 6 (#1309).
 
-Four finding kinds:
+Five finding kinds:
 
 * ``missing_deps`` -- a required dependency of an installed plugin whose target
   ``mod_identifier`` is not present anywhere in the set. A dependency's id is
   present when it appears as some plugin's ``mod_identifier`` *or* in that
   plugin's ``provides`` list. This catches the canonical "Fabric API entirely
   absent" failure.
+* ``missing_catalog_deps`` -- a required **Modrinth catalog** dependency of a
+  Modrinth-sourced plugin (issue #1321) whose ``project_id`` is not present
+  anywhere in the set. Catalog deps live in a different namespace from manifest
+  deps: they are keyed by ``project_id`` and satisfied iff some installed plugin
+  has a matching ``source_project_id``. Many mods (e.g. Roughly Enough Items)
+  declare deps only in their Modrinth metadata, not the jar manifest, so this
+  surfaces what the manifest-driven ``missing_deps`` cannot. Captured at ingest.
 * ``version_unsatisfied`` -- the dependency's target id **is** present, but the
   present plugin's ``version_number`` does not satisfy the required
   ``version_range``. The range is evaluated by
@@ -38,6 +45,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from mc_server_dashboard_api.servers.application.catalog_deps import (
+    installed_project_ids,
+    required_catalog_deps,
+)
 from mc_server_dashboard_api.servers.application.version_range import version_satisfies
 from mc_server_dashboard_api.servers.domain.plugin import ServerPlugin
 
@@ -66,6 +77,22 @@ class MissingDependency:
     mod_id: str
     depends_on: str
     version_range: str
+
+
+@dataclass(frozen=True)
+class MissingCatalogDependency:
+    """A required Modrinth catalog dep of ``mod_id`` no installed project covers.
+
+    Keyed by ``project_id`` (the Modrinth namespace, distinct from the manifest
+    ``mod_identifier`` deps). ``slug`` / ``title`` are the dep project's
+    human-readable label, captured at ingest so display needs no extra round-trip
+    (either may be ``None`` if the catalog did not return it at install time).
+    """
+
+    mod_id: str
+    project_id: str
+    slug: str | None
+    title: str | None
 
 
 @dataclass(frozen=True)
@@ -100,6 +127,7 @@ class PluginValidation:
     """The full checklist for a server's plugin set; all-empty == fully valid."""
 
     missing_deps: list[MissingDependency] = field(default_factory=list)
+    missing_catalog_deps: list[MissingCatalogDependency] = field(default_factory=list)
     version_unsatisfied: list[VersionUnsatisfied] = field(default_factory=list)
     conflicts: list[Conflict] = field(default_factory=list)
     mc_mismatch: list[McMismatch] = field(default_factory=list)
@@ -117,6 +145,7 @@ def validate_plugin_set(
     )
     return PluginValidation(
         missing_deps=missing_deps,
+        missing_catalog_deps=_missing_catalog_deps(plugins),
         version_unsatisfied=version_unsatisfied,
         conflicts=_conflicts(plugins, set(provided)),
         mc_mismatch=_mc_mismatch(plugins, mc_version, loader),
@@ -181,6 +210,36 @@ def _required_dep_findings(
                 )
             )
     return missing, unsatisfied
+
+
+def _missing_catalog_deps(
+    plugins: list[ServerPlugin],
+) -> list[MissingCatalogDependency]:
+    """Flag each required Modrinth catalog dep no installed project covers.
+
+    Evaluated only for Modrinth-sourced plugins (a local upload has no catalog
+    deps). A dep with ``project_id = X`` is satisfied iff some installed plugin
+    has ``source_project_id == X``; otherwise it is a missing-dependency finding
+    carrying the dep project's slug/title for display.
+    """
+
+    present = installed_project_ids(plugins)
+    findings: list[MissingCatalogDependency] = []
+    for plugin in plugins:
+        if not plugin.mod_identifier:
+            continue
+        for dep in required_catalog_deps(plugin):
+            if dep.project_id in present:
+                continue
+            findings.append(
+                MissingCatalogDependency(
+                    mod_id=plugin.mod_identifier,
+                    project_id=dep.project_id,
+                    slug=dep.slug,
+                    title=dep.title,
+                )
+            )
+    return findings
 
 
 def _conflicts(plugins: list[ServerPlugin], provided: set[str]) -> list[Conflict]:

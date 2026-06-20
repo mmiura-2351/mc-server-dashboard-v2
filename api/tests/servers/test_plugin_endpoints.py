@@ -54,6 +54,7 @@ from mc_server_dashboard_api.servers.application.catalog import (
 )
 from mc_server_dashboard_api.servers.application.plugin_validation import (
     McMismatch,
+    MissingCatalogDependency,
     MissingDependency,
     PluginValidation,
 )
@@ -545,6 +546,30 @@ def test_validate_plugins_returns_200_with_findings() -> None:
     assert body["mc_mismatch"][0]["server_mc_version"] == "1.21"
     assert body["conflicts"] == []
     assert body["version_unsatisfied"] == []
+
+
+def test_validate_plugins_surfaces_missing_catalog_deps() -> None:
+    validation = PluginValidation(
+        missing_catalog_deps=[
+            MissingCatalogDependency(
+                mod_id="roughlyenoughitems",
+                project_id="lhGA9TYQ",
+                slug="architectury-api",
+                title="Architectury",
+            )
+        ],
+    )
+    app = _app(member=True, allow=True, validate=_FakeUseCase(result=validation))
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["missing_catalog_deps"]) == 1
+    finding = body["missing_catalog_deps"][0]
+    assert finding["mod_id"] == "roughlyenoughitems"
+    assert finding["project_id"] == "lhGA9TYQ"
+    assert finding["slug"] == "architectury-api"
+    assert finding["title"] == "Architectury"
 
 
 def test_validate_plugins_empty_is_200() -> None:

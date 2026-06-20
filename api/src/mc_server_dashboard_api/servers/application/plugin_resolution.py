@@ -63,6 +63,10 @@ from functools import cmp_to_key
 from typing import Literal
 
 from mc_server_dashboard_api.servers.application.catalog import InstallFromCatalog
+from mc_server_dashboard_api.servers.application.catalog_deps import (
+    installed_project_ids,
+    required_catalog_deps,
+)
 from mc_server_dashboard_api.servers.application.plugin_validation import (
     PluginValidation,
     _loader_dialect,
@@ -484,6 +488,48 @@ def _frontier_from_plugin(
     return frontier
 
 
+def _catalog_frontier(
+    plugins: list[ServerPlugin], manifest_frontier: list[_FrontierDep]
+) -> list[_FrontierDep]:
+    """Depth-0 frontier entries for installed Modrinth plugins' catalog deps (#1321).
+
+    Each required catalog dep is keyed by ``project_id`` -- the same key the
+    transitive walk (:func:`_frontier_from_will_import`) uses -- so the closure
+    machinery resolves and imports it by a direct project lookup, dedups it
+    against a transitive dep on the same project, and the slug≠id orphan-pruning
+    keeps working unchanged.
+
+    Dedup against the manifest frontier and the installed set: a dep whose
+    project is already installed (by ``source_project_id``) or already queued by a
+    manifest dep that captured the same ``project_id`` is skipped, so a project
+    needed via both a manifest dep and a catalog dep is planned/imported once.
+    """
+
+    present = installed_project_ids(plugins)
+    manifest_project_ids = {f.project_id for f in manifest_frontier if f.project_id}
+    seen: set[str] = set()
+    frontier: list[_FrontierDep] = []
+    for plugin in plugins:
+        for dep in required_catalog_deps(plugin):
+            if (
+                dep.project_id in present
+                or dep.project_id in manifest_project_ids
+                or dep.project_id in seen
+            ):
+                continue
+            seen.add(dep.project_id)
+            frontier.append(
+                _FrontierDep(
+                    identifier=dep.project_id,
+                    version_range="",
+                    project_id=dep.project_id,
+                    depth=0,
+                    required_by=None,
+                )
+            )
+    return frontier
+
+
 def _conflict_edges(plugins: list[ServerPlugin]) -> list[tuple[str, str]]:
     """``(declaring_id, target_id)`` pairs for every ``conflict`` dep edge."""
 
@@ -544,6 +590,7 @@ async def resolve_closure(
     frontier: list[_FrontierDep] = []
     for plugin in plugins:
         frontier.extend(_frontier_from_plugin(plugin, depth=0, required_by=None))
+    frontier.extend(_catalog_frontier(plugins, frontier))
 
     while frontier:
         next_frontier: list[_FrontierDep] = []

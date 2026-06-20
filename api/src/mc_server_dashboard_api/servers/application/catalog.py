@@ -59,6 +59,10 @@ from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCach
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
+# Modrinth's per-catalog-version dependency classification we capture as required
+# (issue #1321). The other types (optional/incompatible/embedded) are not stored.
+_REQUIRED_DEP_TYPE = "required"
+
 
 async def _load(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
@@ -67,6 +71,50 @@ async def _load(
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
     return server
+
+
+_CATALOG_DEPS_CONCURRENCY = 5  # Max parallel dep-project lookups at ingest.
+
+
+async def capture_catalog_dependencies(
+    catalog: CatalogProvider, version: CatalogVersion
+) -> list[dict[str, object]]:
+    """Capture a version's REQUIRED catalog deps for storage (issue #1321).
+
+    Returns the persisted shape ``[{"project_id", "required", "slug", "title"}]``
+    for each ``required`` catalog dependency edge of ``version``, keyed by
+    ``project_id``. Each dep project's ``slug`` / ``title`` is fetched so the
+    WebUI can render a human label without an extra Modrinth round-trip later; a
+    failed/unavailable lookup leaves them ``None`` (best-effort, never aborts the
+    install). Optional/incompatible/embedded edges are not stored -- only required
+    deps drive validation and resolution.
+    """
+
+    required = [
+        dep
+        for dep in version.dependencies
+        if dep.dependency_type == _REQUIRED_DEP_TYPE and dep.project_id
+    ]
+    sem = asyncio.Semaphore(_CATALOG_DEPS_CONCURRENCY)
+
+    async def _label(dep: CatalogDependency) -> dict[str, object]:
+        slug: str | None = None
+        title: str | None = None
+        async with sem:
+            try:
+                proj = await catalog.get_project(dep.project_id)
+                slug = proj.slug
+                title = proj.title
+            except (CatalogUnavailableError, CatalogProjectNotFoundError):
+                pass
+        return {
+            "project_id": dep.project_id,
+            "required": True,
+            "slug": slug,
+            "title": title,
+        }
+
+    return list(await asyncio.gather(*(_label(dep) for dep in required)))
 
 
 def side_from_modrinth(client_side: str, server_side: str) -> PluginSide:
@@ -250,6 +298,10 @@ class InstallFromCatalog:
         # accurate source, so it wins over the jar manifest hint here.
         side = side_from_modrinth(project.client_side, project.server_side)
 
+        # Capture the version's required catalog deps (issue #1321), keyed by
+        # project_id with a display label -- the source manifest deps often miss.
+        catalog_dependencies = await capture_catalog_dependencies(self.catalog, version)
+
         # Phase 4: At-rest gate + write (hold lock, short duration).
         rel_path = f"{content_dir}/{file.filename}"
         async with self.lifecycle_lock.hold(server_id):
@@ -299,6 +351,7 @@ class InstallFromCatalog:
                     dependencies=manifest.dependencies,
                     mc_versions=manifest.mc_versions,
                     side=side,
+                    catalog_dependencies=catalog_dependencies,
                 )
                 await self.uow.plugins.add(plugin)
                 await self.uow.commit()
@@ -487,6 +540,10 @@ class UpdatePlugin:
         # updated version (issue #1307). Tolerant of an unreadable jar.
         manifest = parse_manifest_at_ingest(content, loader=loader)
 
+        # Re-capture the new version's required catalog deps (issue #1321) so they
+        # track the update, same as the manifest metadata above.
+        catalog_dependencies = await capture_catalog_dependencies(self.catalog, version)
+
         # Phase 4: At-rest gate + write (hold lock, short duration). The new jar's
         # working-set path follows the (enabled, side) desired state (issue #1308):
         # a disabled server/both jar lives at the .disabled path, a client jar has
@@ -561,6 +618,7 @@ class UpdatePlugin:
                     dependencies=manifest.dependencies,
                     mc_versions=manifest.mc_versions,
                     side=plugin.side,
+                    catalog_dependencies=catalog_dependencies,
                 )
                 await self.uow.plugins.update(updated_plugin)
                 await self.uow.commit()

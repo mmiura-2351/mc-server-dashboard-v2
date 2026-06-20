@@ -102,3 +102,11 @@ class ServerPluginModel(Base):
     # Auto-detected at ingest, manually overridable; governs working-set presence.
     # NOT NULL with a 'both' server default so pre-migration rows backfill safely.
     side: Mapped[str] = mapped_column(String, nullable=False, server_default="both")
+    # Required Modrinth catalog dependencies, keyed by project_id (issue #1321):
+    # [{"project_id", "required", "slug", "title"}]. Captured at ingest from the
+    # selected version's catalog deps; evaluated (by project_id) alongside the
+    # manifest deps for Modrinth plugins. Nullable -- pre-migration rows and local
+    # uploads keep NULL; the repository maps a NULL JSON column to an empty list.
+    catalog_dependencies: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSONB, nullable=True
+    )

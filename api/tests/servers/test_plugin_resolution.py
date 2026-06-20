@@ -116,6 +116,9 @@ def _plugin(
     version_number: str = "1.0.0",
     dependencies: list[dict[str, object]] | None = None,
     mc_versions: list[str] | None = None,
+    source: PluginSource = PluginSource.LOCAL,
+    source_project_id: str | None = None,
+    catalog_dependencies: list[dict[str, object]] | None = None,
 ) -> ServerPlugin:
     return ServerPlugin(
         id=PluginId.new(),
@@ -125,8 +128,8 @@ def _plugin(
         display_name=mod_identifier or "plugin",
         description=None,
         loader_type=LoaderType.MOD,
-        source=PluginSource.LOCAL,
-        source_project_id=None,
+        source=source,
+        source_project_id=source_project_id,
         source_version_id=None,
         version_number=version_number,
         checksum_sha512=None,
@@ -140,7 +143,23 @@ def _plugin(
         provides=provides or [],
         dependencies=dependencies or [],
         mc_versions=mc_versions if mc_versions is not None else ["1.20.4"],
+        catalog_dependencies=catalog_dependencies or [],
     )
+
+
+def _catalog_dep(
+    project_id: str,
+    *,
+    required: bool = True,
+    slug: str | None = None,
+    title: str | None = None,
+) -> dict[str, object]:
+    return {
+        "project_id": project_id,
+        "required": required,
+        "slug": slug,
+        "title": title,
+    }
 
 
 def _fabric_jar(
@@ -806,6 +825,138 @@ class TestResolvePluginDependencies:
         )
         entry = next(e for e in plan.entries if e.dep_identifier == "missing-lib")
         assert entry.status == "unresolvable"
+
+
+class TestResolveCatalogDeps:
+    # A Modrinth-sourced plugin whose manifest declares no deps but whose Modrinth
+    # catalog declares required deps (keyed by project_id). The closure must seed
+    # those by project_id, import them, and walk their transitive deps. The
+    # canonical case is Roughly Enough Items requiring Architectury.
+
+    async def test_catalog_dep_seeds_needs_import(self) -> None:
+        rei = _plugin(
+            server_id=ServerId.new(),
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            dependencies=[],
+            catalog_dependencies=[
+                _catalog_dep("ARCH", slug="architectury-api", title="Architectury")
+            ],
+        )
+        server = _server()
+        rei.server_id = server.id
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei)
+        catalog = FakeCatalogProvider()
+        catalog.seed_project(
+            _project(project_id="ARCH", slug="architectury-api", title="Architectury"),
+            versions=[_version(version_id="ARCHVER")],
+        )
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        assert by_id["ARCH"].status == "needs_import"
+        assert by_id["ARCH"].depth == 0
+        assert by_id["ARCH"].will_import is not None
+        assert by_id["ARCH"].will_import.project_id == "ARCH"
+
+    async def test_catalog_dep_satisfied_by_installed_project_id(self) -> None:
+        rei = _plugin(
+            server_id=ServerId.new(),
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            catalog_dependencies=[_catalog_dep("ARCH")],
+        )
+        arch = _plugin(
+            server_id=rei.server_id,
+            mod_identifier="architectury",
+            source=PluginSource.MODRINTH,
+            source_project_id="ARCH",
+        )
+        server = _server()
+        rei.server_id = server.id
+        arch.server_id = server.id
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei, arch)
+
+        plan = await ResolvePluginDependencies(uow, FakeCatalogProvider())(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        # ARCH is already installed (by source_project_id), so the catalog dep is
+        # not seeded as a needs_import entry at all.
+        assert all(e.dep_identifier != "ARCH" for e in plan.entries)
+
+    async def test_manifest_and_catalog_dep_for_same_project_dedup(self) -> None:
+        # A manifest dep (mod_identifier "architectury", carrying project_id ARCH)
+        # AND a catalog dep on the same project ARCH. The project must be planned
+        # once, not twice.
+        rei = _plugin(
+            server_id=ServerId.new(),
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            dependencies=[_dep("architectury", project_id="ARCH")],
+            catalog_dependencies=[_catalog_dep("ARCH")],
+        )
+        server = _server()
+        rei.server_id = server.id
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei)
+        catalog = FakeCatalogProvider()
+        catalog.seed_project(
+            _project(project_id="ARCH", slug="architectury", title="Architectury"),
+            versions=[_version(version_id="ARCHVER")],
+        )
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        importing = [
+            e
+            for e in plan.entries
+            if e.will_import is not None and e.will_import.project_id == "ARCH"
+        ]
+        assert len(importing) == 1
+
+    async def test_apply_imports_catalog_dep(self) -> None:
+        rei = _plugin(
+            server_id=ServerId.new(),
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="REI",
+            catalog_dependencies=[_catalog_dep("ARCH")],
+        )
+        server = _server()
+        rei.server_id = server.id
+        uow = FakeUnitOfWork()
+        _seed(uow, server, rei)
+        catalog = FakeCatalogProvider()
+        arch_jar = _fabric_jar(mod_id="architectury")
+        arch_version = _version(
+            version_id="ARCHVER", filename="architectury.jar", file_content=arch_jar
+        )
+        catalog.seed_project(
+            _project(project_id="ARCH", slug="architectury", title="Architectury"),
+            versions=[arch_version],
+        )
+        _seed_downloadable(catalog, arch_version, arch_jar)
+        file_store = FakeFileStore()
+        cache = FakePluginCacheStore()
+        install = _install_uc(uow, catalog, file_store, cache)
+
+        _new_plan, installed, failed = await ApplyPluginResolution(
+            uow, catalog, install
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            applied_by=uuid.uuid4(),
+        )
+        assert failed == []
+        assert [p.source_project_id for p in installed] == ["ARCH"]
 
 
 # ---------------------------------------------------------------------------

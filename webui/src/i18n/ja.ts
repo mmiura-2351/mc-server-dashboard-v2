@@ -1357,6 +1357,8 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.validation.ok": "問題は見つかりませんでした。",
   "plugins.validation.missingDep":
     "{mod} は {dependency}（{range}）を必要としますが、インストールされていません。",
+  "plugins.validation.missingCatalogDep":
+    "{mod} は {dependency} を必要としますが、インストールされていません。",
   "plugins.validation.versionUnsatisfied":
     "{mod} は {dependency}（{range}）を必要としますが、インストール済みの {present} は条件を満たしません。",
   "plugins.validation.conflict": "{mod} は {other} と競合します。",

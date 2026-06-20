@@ -1358,6 +1358,8 @@ export const en = {
   "plugins.validation.ok": "No issues found.",
   "plugins.validation.missingDep":
     "{mod} requires {dependency} ({range}), which is not installed.",
+  "plugins.validation.missingCatalogDep":
+    "{mod} requires {dependency}, which is not installed.",
   "plugins.validation.versionUnsatisfied":
     "{mod} requires {dependency} ({range}), but the installed {present} does not satisfy it.",
   "plugins.validation.conflict": "{mod} conflicts with {other}.",

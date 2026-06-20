@@ -85,6 +85,16 @@ class ServerPlugin:
     It governs working-set presence: only a jar with side in {``server``,
     ``both``} deploys to the running server (see :func:`working_set_present`); a
     ``client``-only jar is tracked and cached but never placed in the working set.
+
+    ``catalog_dependencies`` (issue #1321) are the **required** Modrinth catalog
+    dependencies of a Modrinth-sourced plugin, captured at ingest from the
+    selected version's ``dependencies``. Keyed by ``project_id`` (a different
+    namespace from the manifest ``mod_identifier`` deps), they use the shape
+    ``[{"project_id", "required", "slug", "title"}]`` -- the ``slug`` / ``title``
+    carried so a human label needs no extra Modrinth round-trip. Many mods (e.g.
+    Roughly Enough Items) declare deps only in Modrinth metadata, not the jar
+    manifest, so validation/resolution also evaluate these (by ``project_id``)
+    for Modrinth plugins. A local upload leaves this empty.
     """
 
     id: PluginId
@@ -110,6 +120,7 @@ class ServerPlugin:
     dependencies: list[dict[str, object]] = field(default_factory=list)
     mc_versions: list[str] = field(default_factory=list)
     side: PluginSide = "both"
+    catalog_dependencies: list[dict[str, object]] = field(default_factory=list)
 
 
 def working_set_present(*, enabled: bool, side: PluginSide) -> bool:

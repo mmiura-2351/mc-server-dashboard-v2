@@ -45,22 +45,26 @@ def _jar(entries: dict[str, str]) -> bytes:
 
 def _plugin(
     *,
-    mod_identifier: str,
+    mod_identifier: str | None,
     provides: list[str] | None = None,
     mc_versions: list[str] | None = None,
     dependencies: list[dict[str, object]] | None = None,
     version_number: str = "1.0.0",
+    source: PluginSource = PluginSource.LOCAL,
+    source_project_id: str | None = None,
+    catalog_dependencies: list[dict[str, object]] | None = None,
 ) -> ServerPlugin:
+    name = mod_identifier or "plugin"
     return ServerPlugin(
         id=PluginId.new(),
         server_id=ServerId(uuid.uuid4()),
-        rel_path=f"mods/{mod_identifier}.jar",
-        filename=f"{mod_identifier}.jar",
-        display_name=mod_identifier,
+        rel_path=f"mods/{name}.jar",
+        filename=f"{name}.jar",
+        display_name=name,
         description=None,
         loader_type=LoaderType.MOD,
-        source=PluginSource.LOCAL,
-        source_project_id=None,
+        source=source,
+        source_project_id=source_project_id,
         source_version_id=None,
         version_number=version_number,
         checksum_sha512=None,
@@ -74,7 +78,23 @@ def _plugin(
         provides=provides or [],
         dependencies=dependencies or [],
         mc_versions=mc_versions if mc_versions is not None else ["1.21"],
+        catalog_dependencies=catalog_dependencies or [],
     )
+
+
+def _catalog_dep(
+    project_id: str,
+    *,
+    required: bool = True,
+    slug: str | None = None,
+    title: str | None = None,
+) -> dict[str, object]:
+    return {
+        "project_id": project_id,
+        "required": required,
+        "slug": slug,
+        "title": title,
+    }
 
 
 def _dep(
@@ -385,3 +405,78 @@ class TestFullyValidSet:
         )
 
         assert result == PluginValidation()
+
+
+class TestMissingCatalogDeps:
+    # A Modrinth-sourced plugin whose jar manifest declares no deps but whose
+    # Modrinth catalog declares required deps (keyed by project_id). The canonical
+    # case: Roughly Enough Items, manifest depends only on minecraft, catalog
+    # requires Architectury / Cloth Config / Fabric API.
+
+    def test_unsatisfied_catalog_dep_is_flagged(self) -> None:
+        rei = _plugin(
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="nfn13YXA",
+            catalog_dependencies=[
+                _catalog_dep("lhGA9TYQ", slug="architectury-api", title="Architectury")
+            ],
+        )
+        result = validate_plugin_set(
+            server_type="fabric", mc_version="1.21.1", plugins=[rei]
+        )
+
+        assert len(result.missing_catalog_deps) == 1
+        finding = result.missing_catalog_deps[0]
+        assert finding.mod_id == "roughlyenoughitems"
+        assert finding.project_id == "lhGA9TYQ"
+        assert finding.slug == "architectury-api"
+        assert finding.title == "Architectury"
+        # The manifest-driven missing-deps list is untouched.
+        assert result.missing_deps == []
+
+    def test_catalog_dep_satisfied_by_installed_project_id(self) -> None:
+        rei = _plugin(
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="nfn13YXA",
+            catalog_dependencies=[_catalog_dep("lhGA9TYQ")],
+        )
+        architectury = _plugin(
+            mod_identifier="architectury",
+            source=PluginSource.MODRINTH,
+            source_project_id="lhGA9TYQ",
+        )
+        result = validate_plugin_set(
+            server_type="fabric", mc_version="1.21.1", plugins=[rei, architectury]
+        )
+
+        assert result.missing_catalog_deps == []
+
+    def test_optional_catalog_dep_is_not_flagged(self) -> None:
+        rei = _plugin(
+            mod_identifier="roughlyenoughitems",
+            source=PluginSource.MODRINTH,
+            source_project_id="nfn13YXA",
+            catalog_dependencies=[_catalog_dep("modmenu", required=False)],
+        )
+        result = validate_plugin_set(
+            server_type="fabric", mc_version="1.21.1", plugins=[rei]
+        )
+
+        assert result.missing_catalog_deps == []
+
+    def test_local_plugin_catalog_deps_are_ignored(self) -> None:
+        # A local upload never carries catalog deps; even if some were present
+        # they must not be evaluated (only Modrinth-sourced plugins are).
+        local = _plugin(
+            mod_identifier="some-mod",
+            source=PluginSource.LOCAL,
+            source_project_id=None,
+            catalog_dependencies=[_catalog_dep("lhGA9TYQ")],
+        )
+        result = validate_plugin_set(
+            server_type="fabric", mc_version="1.21.1", plugins=[local]
+        )
+
+        assert result.missing_catalog_deps == []
