@@ -15,12 +15,18 @@ const mockApi = vi.hoisted(() => ({
   postForm: vi.fn(),
 }));
 
+const mockPostFormWithProgress = vi.hoisted(() => vi.fn());
+
 vi.mock("../api/client.ts", async () => {
   const actual =
     await vi.importActual<typeof import("../api/client.ts")>(
       "../api/client.ts",
     );
-  return { ...actual, api: mockApi };
+  return {
+    ...actual,
+    api: mockApi,
+    postFormWithProgress: mockPostFormWithProgress,
+  };
 });
 
 let mockCanCreate = true;
@@ -127,6 +133,7 @@ beforeEach(() => {
   mockApi.get.mockReset();
   mockApi.post.mockReset();
   mockApi.postForm.mockReset();
+  mockPostFormWithProgress.mockReset();
   lastPath = "";
   lastHash = "";
   mockCanCreate = true;
@@ -740,7 +747,7 @@ describe("Step 3 — join address name (slug) field (issue #981, gated on relay 
 
 describe("import tab", () => {
   it("imports a ZIP and navigates to the new server", async () => {
-    mockApi.postForm.mockResolvedValue({ id: "s-imported" });
+    mockPostFormWithProgress.mockResolvedValue({ id: "s-imported" });
     renderPage();
     fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
 
@@ -762,7 +769,7 @@ describe("import tab", () => {
     await waitFor(() => {
       expect(lastPath).toBe(`/communities/${CID}/servers/s-imported`);
     });
-    const form = mockApi.postForm.mock.calls[0][1] as FormData;
+    const form = mockPostFormWithProgress.mock.calls[0][1] as FormData;
     expect(form.get("name")).toBe("restored");
     expect(form.get("execution_backend")).toBe("container");
     expect(form.get("file")).toBeInstanceOf(File);
@@ -790,7 +797,7 @@ describe("import tab", () => {
   });
 
   it("surfaces an invalid export archive", async () => {
-    mockApi.postForm.mockRejectedValue(
+    mockPostFormWithProgress.mockRejectedValue(
       new ApiError(422, { reason: "invalid_export_metadata" }),
     );
     renderPage();

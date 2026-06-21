@@ -29,12 +29,18 @@ const mockApi = vi.hoisted(() => ({
   delete: vi.fn(),
 }));
 
+const mockPostFormWithProgress = vi.hoisted(() => vi.fn());
+
 vi.mock("../api/client.ts", async () => {
   const actual =
     await vi.importActual<typeof import("../api/client.ts")>(
       "../api/client.ts",
     );
-  return { ...actual, api: mockApi };
+  return {
+    ...actual,
+    api: mockApi,
+    postFormWithProgress: mockPostFormWithProgress,
+  };
 });
 
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
@@ -153,6 +159,7 @@ beforeEach(() => {
   mockApi.postForm.mockReset();
   mockApi.patch.mockReset();
   mockApi.delete.mockReset();
+  mockPostFormWithProgress.mockReset();
   mockDownload.downloadFile.mockReset();
   mockCan = () => true;
   // The detail page opens a per-server events socket; without a mock the events
@@ -293,9 +300,9 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
     );
   });
 
-  it("uploads a chosen file via postForm multipart", async () => {
+  it("uploads a chosen file via multipart with progress", async () => {
     routeGet();
-    mockApi.postForm.mockResolvedValue(backup());
+    mockPostFormWithProgress.mockResolvedValue(backup());
     await openBackups();
 
     const input = (await screen.findByLabelText(
@@ -304,8 +311,8 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
     const file = new File(["x"], "b.tar.gz", { type: "application/gzip" });
     fireEvent.change(input, { target: { files: [file] } });
 
-    await waitFor(() => expect(mockApi.postForm).toHaveBeenCalled());
-    const [path, form] = mockApi.postForm.mock.calls[0];
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    const [path, form] = mockPostFormWithProgress.mock.calls[0];
     expect(path).toBe(`/api/communities/${CID}/servers/${SID}/backups/upload`);
     expect(form).toBeInstanceOf(FormData);
     expect((form as FormData).get("file")).toBe(file);
