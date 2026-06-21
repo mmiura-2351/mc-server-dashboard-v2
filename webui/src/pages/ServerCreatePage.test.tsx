@@ -12,7 +12,6 @@ const CID = "c1";
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
-  postForm: vi.fn(),
 }));
 
 const mockPostFormWithProgress = vi.hoisted(() => vi.fn());
@@ -132,7 +131,6 @@ async function reachConfigStep(name = "survival") {
 beforeEach(() => {
   mockApi.get.mockReset();
   mockApi.post.mockReset();
-  mockApi.postForm.mockReset();
   mockPostFormWithProgress.mockReset();
   lastPath = "";
   lastHash = "";

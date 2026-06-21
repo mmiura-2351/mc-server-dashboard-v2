@@ -131,8 +131,6 @@ export const ja: Record<TranslationKey, string> = {
   "upload.bytes": "{loaded} / {total}",
   "upload.percent": "{percent}%",
   "upload.elapsed": "{seconds}秒経過",
-  "upload.complete": "アップロード完了",
-  "upload.failed": "アップロードに失敗しました",
 
   // Account page (WEBUI_SPEC.md 6.11)
   "account.subtitle": "プロフィール、セキュリティ、メンバーシップ。",

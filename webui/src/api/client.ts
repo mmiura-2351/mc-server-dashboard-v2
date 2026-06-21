@@ -248,8 +248,7 @@ function sendForm(
  * Multipart POST with real-time upload progress (issue #1207). XHR is the
  * pragmatic choice: fetch cannot surface bytes-uploaded progress. It runs the
  * FormData body through the same auth, single-flight 401 refresh, and typed
- * error/JSON handling as {@link request}, so the only difference from
- * {@link api.postForm} is the `onProgress` feedback.
+ * error/JSON handling as {@link request}, adding the `onProgress` feedback.
  */
 export async function postFormWithProgress<P extends PathsWith<"post">>(
   path: P,
@@ -296,11 +295,6 @@ export const api = {
     request("get", path, init),
   post: <P extends PathsWith<"post">>(path: P, init?: RequestInit) =>
     request("post", path, init),
-  // Multipart POST: the only typed-client escape hatch for `multipart/form-data`
-  // endpoints (server import / file & backup upload). Sends a FormData body
-  // through the same refresh/error pipeline; the browser sets the boundary.
-  postForm: <P extends PathsWith<"post">>(path: P, body: FormData) =>
-    request("post", path, { body }),
   put: <P extends PathsWith<"put">>(path: P, init?: RequestInit) =>
     request("put", path, init),
   patch: <P extends PathsWith<"patch">>(path: P, init?: RequestInit) =>

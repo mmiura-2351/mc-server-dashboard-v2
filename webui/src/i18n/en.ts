@@ -125,8 +125,6 @@ export const en = {
   "upload.bytes": "{loaded} / {total}",
   "upload.percent": "{percent}%",
   "upload.elapsed": "{seconds}s elapsed",
-  "upload.complete": "Upload complete",
-  "upload.failed": "Upload failed",
 
   // Account page (WEBUI_SPEC.md 6.11) — one contiguous block to minimise
   // merge conflicts with sibling PRs adding keys under other prefixes.
