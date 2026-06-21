@@ -33,12 +33,8 @@ export const ja: Record<TranslationKey, string> = {
   "nav.sharedResources": "共有リソース",
 
   // Placeholder pages (Phase 1: routing skeleton only)
-  "page.login": "サインイン",
-  "page.register": "登録",
   "page.dashboard": "サーバー",
   "page.serverCreate": "サーバーを作成",
-  "page.serverDetail": "サーバー詳細",
-  "page.communitySettings": "コミュニティ設定",
   "page.account": "アカウント",
   "page.adminOverview": "プラットフォーム概要",
   "page.adminUsers": "ユーザー管理",
@@ -280,7 +276,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.tab.backups": "バックアップ",
   "serverDetail.tab.players": "プレイヤー",
   "serverDetail.tab.settings": "設定",
-  "serverDetail.tabPlaceholder": "後のフェーズで追加されます。",
   // Overview live metrics strip + log tail (issue #440, WEBUI_SPEC.md 6.4).
   "serverDetail.metric.cpu": "CPU",
   "serverDetail.metric.memory": "メモリ",
@@ -529,7 +524,6 @@ export const ja: Record<TranslationKey, string> = {
   "files.delete.dialogBody":
     "選択したファイルまたはディレクトリを完全に削除します。確認のためその名前を入力してください。",
   "files.delete.confirm": "完全に削除",
-  "files.delete.prompt": "削除を有効にするには名前を入力",
   // Search (files/search).
   "files.search.label": "ファイルを検索",
   "files.search.placeholder": "名前で検索…",
@@ -761,8 +755,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.members.removeDialogBody":
     "このメンバーを削除すると、このコミュニティでのすべてのロールとサーバーごとの権限付与が取り消されます。この操作は元に戻せません。",
   "communitySettings.members.removeConfirm": "メンバーを削除",
-  "communitySettings.members.removePrompt":
-    "削除を有効にするにはユーザー名を入力",
   "communitySettings.members.removed": "メンバーを削除しました。",
   "communitySettings.members.removeError":
     "メンバーを削除できませんでした。もう一度お試しください。",
@@ -900,7 +892,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.roles.deleteDialogBody":
     "このロールを削除すると、保持しているすべてのメンバーから削除されます。この操作は元に戻せません。",
   "communitySettings.roles.deleteConfirm": "ロールを削除",
-  "communitySettings.roles.deletePrompt": "削除を有効にするにはロール名を入力",
   // Permission family group labels (WEBUI_SPEC.md 2.2).
   "communitySettings.roles.family.server": "サーバー",
   "communitySettings.roles.family.file": "ファイル",
@@ -967,8 +958,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.grants.revokeDialogBody":
     "このサーバーでのメンバーのサーバーごとの権限を削除します。この操作は元に戻せません。",
   "communitySettings.grants.revokeConfirm": "権限付与を取り消し",
-  "communitySettings.grants.revokePrompt": "確認のため REVOKE と入力",
-  "communitySettings.grants.revokeConfirmPhrase": "REVOKE",
   "communitySettings.grants.createDialogTitle": "サーバーごとのアクセスを付与",
   "communitySettings.grants.createDialogBody":
     "メンバーに、ロールを超えて1つのサーバーで追加の権限を付与します。",
@@ -1037,7 +1026,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.groups.deleteDialogBody":
     "このグループを削除すると、適用されているすべてのサーバーから削除されます。この操作は元に戻せません。",
   "communitySettings.groups.deleteConfirm": "グループを削除",
-  "communitySettings.groups.deletePrompt": "確認のためグループ名を入力。",
   "communitySettings.groups.deleted": "グループを削除しました。",
   "communitySettings.groups.playersHeading": "プレイヤー",
   "communitySettings.groups.playersEmpty":
@@ -1120,7 +1108,6 @@ export const ja: Record<TranslationKey, string> = {
   "admin.versions.gcDialog.body":
     "稼働中のどのサーバーも使用していないダウンロード済みサーバーJARを削除します。次に必要になったときに再ダウンロードされます。",
   "admin.versions.gcDialog.confirm": "未使用ファイルを削除",
-  "admin.versions.gcDialog.promptLabel": "確認のため CLEAN と入力",
   // Interpolated with freed bytes + deleted count, e.g.
   // "Freed 412 MiB by deleting 3 unused JARs.".
   "admin.versions.gcDone":
@@ -1211,7 +1198,6 @@ export const ja: Record<TranslationKey, string> = {
     "ドレインすると、Workerへの新規配置を停止します。稼働中のサーバーは最終スナップショットとともに停止され、別の場所で再起動できます。オフラインのWorkerは再接続時に自動的に再表示されます。",
 
   // Admin Users page (WEBUI_SPEC.md 6.12) — #475
-  "admin.users.subtitle": "プラットフォーム全体のユーザー管理",
   "admin.users.loading": "ユーザーを読み込んでいます…",
   "admin.users.loadError": "ユーザーを読み込めませんでした。",
   "admin.users.empty": "ユーザーがいません。",
@@ -1298,8 +1284,6 @@ export const ja: Record<TranslationKey, string> = {
   "resourcePacks.uploadDialog.file": "ファイル（.zip）",
   "resourcePacks.uploadDialog.submit": "アップロード",
   "resourcePacks.uploadDialog.uploading": "アップロードしています…",
-  "resourcePacks.uploadDialog.nameRequired": "表示名を入力してください。",
-  "resourcePacks.uploadDialog.fileRequired": ".zipファイルを選択してください。",
   "resourcePacks.uploaded": "リソースパックをアップロードしました。",
   "resourcePacks.deleted": "リソースパックを削除しました。",
   "resourcePacks.deleteDialog.title": "リソースパックを削除",
