@@ -1354,7 +1354,25 @@ export const en = {
   "plugins.installed": "{Noun} installed.",
   "plugins.sideUpdated": "{Noun} side updated.",
   "plugins.catalogInstalled": "{Noun} installed from Modrinth.",
+  "plugins.error.alreadyExists":
+    "A {noun} with the same name or project is already installed.",
   "plugins.error.notStopped": "Stop the server before managing {nouns}.",
+  "plugins.error.unsettled":
+    "The server is not ready. Wait for the current operation to finish.",
+  "plugins.error.busy": "Another operation is in progress. Please wait.",
+  "plugins.error.invalidPath":
+    "Invalid file. Only .jar files can be uploaded as {nouns}.",
+  "plugins.error.tooLarge":
+    "The file is too large. Maximum upload size is 512 MB.",
+  "plugins.error.catalogUnavailable":
+    "Could not reach Modrinth. Please try again later.",
+  "plugins.error.catalogNotFound": "Project or version not found on Modrinth.",
+  "plugins.error.checksumMismatch":
+    "Download integrity check failed. Please try again.",
+  "plugins.error.unsupportedServerType":
+    "This server type does not support {nouns}.",
+  "plugins.error.invalidSide": "Invalid side for this server type.",
+  "plugins.error.notFound": "{Noun} not found. It may have been removed.",
   "plugins.error.generic": "Something went wrong. Please try again.",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "Dependencies & compatibility",

@@ -76,11 +76,26 @@ function applyNoun(text: string, noun: ContentNoun): string {
     .replace(/\{Noun\}/g, noun.singularCap);
 }
 
+/** Map API reason codes to i18n keys for plugin operation errors. */
+const pluginErrorKeys: Record<string, TranslationKey> = {
+  plugin_already_exists: "plugins.error.alreadyExists",
+  server_not_stopped: "plugins.error.notStopped",
+  server_unsettled: "plugins.error.unsettled",
+  server_busy: "plugins.error.busy",
+  invalid_path: "plugins.error.invalidPath",
+  file_too_large: "plugins.error.tooLarge",
+  catalog_unavailable: "plugins.error.catalogUnavailable",
+  catalog_project_not_found: "plugins.error.catalogNotFound",
+  checksum_mismatch: "plugins.error.checksumMismatch",
+  unsupported_server_type: "plugins.error.unsupportedServerType",
+  invalid_side: "plugins.error.invalidSide",
+  not_found: "plugins.error.notFound",
+};
+
 function pluginErrorMessage(error: unknown, noun: ContentNoun): string {
-  if (error instanceof ApiError) {
-    if (error.reason === "server_not_stopped") {
-      return applyNoun(t("plugins.error.notStopped"), noun);
-    }
+  if (error instanceof ApiError && error.reason !== undefined) {
+    const key = pluginErrorKeys[error.reason];
+    if (key !== undefined) return applyNoun(t(key), noun);
   }
   return t("plugins.error.generic");
 }
