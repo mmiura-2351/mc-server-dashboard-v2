@@ -1344,6 +1344,8 @@ export const en = {
   "plugins.search.by": "by",
   "plugins.search.install": "Install",
   "plugins.search.installing": "Installing…",
+  "plugins.search.installed": "Installed",
+  "plugins.search.update": "Update",
   "plugins.search.versions": "Versions",
   "plugins.search.back": "Back to search",
   // Outcomes (toasts). `{Noun}` is the capitalized loader-aware noun (#1320).

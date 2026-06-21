@@ -513,6 +513,7 @@ export function ServerPluginsTab({
           serverId={serverId}
           serverAtRest={serverAtRest}
           noun={noun}
+          plugins={plugins}
           onDone={() => {
             setBrowseOpen(false);
             refresh();
@@ -1021,6 +1022,7 @@ function ModrinthBrowser({
   serverId,
   serverAtRest,
   noun,
+  plugins,
   onDone,
   onClose,
   onError,
@@ -1029,6 +1031,7 @@ function ModrinthBrowser({
   serverId: string;
   serverAtRest: boolean;
   noun: ContentNoun;
+  plugins: PluginResponse[];
   onDone: () => void;
   onClose: () => void;
   onError: (error: unknown) => void;
@@ -1059,6 +1062,7 @@ function ModrinthBrowser({
         projectIdOrSlug={selectedProject}
         serverAtRest={serverAtRest}
         noun={noun}
+        plugins={plugins}
         onBack={() => setSelectedProject(null)}
         onDone={onDone}
         onClose={onClose}
@@ -1077,15 +1081,13 @@ function ModrinthBrowser({
         value={searchInput}
         onChange={(e) => handleSearchChange(e.target.value)}
       />
-      {query.length > 0 && (
-        <SearchResults
-          communityId={communityId}
-          serverId={serverId}
-          query={query}
-          noun={noun}
-          onSelect={(projectId) => setSelectedProject(projectId)}
-        />
-      )}
+      <SearchResults
+        communityId={communityId}
+        serverId={serverId}
+        query={query}
+        noun={noun}
+        onSelect={(projectId) => setSelectedProject(projectId)}
+      />
     </Modal>
   );
 }
@@ -1110,7 +1112,8 @@ function SearchResults({
         "/api/communities/{community_id}/servers/{server_id}/catalog/search",
         { community_id: communityId, server_id: serverId },
       );
-      const url = `${basePath}?q=${encodeURIComponent(query)}&limit=20`;
+      const params = query.length > 0 ? `q=${encodeURIComponent(query)}&` : "";
+      const url = `${basePath}?${params}limit=20`;
       return api.get(url as typeof basePath);
     },
   });
@@ -1165,6 +1168,7 @@ function ProjectDetailModal({
   projectIdOrSlug,
   serverAtRest,
   noun,
+  plugins,
   onBack,
   onDone,
   onClose,
@@ -1175,6 +1179,7 @@ function ProjectDetailModal({
   projectIdOrSlug: string;
   serverAtRest: boolean;
   noun: ContentNoun;
+  plugins: PluginResponse[];
   onBack: () => void;
   onDone: () => void;
   onClose: () => void;
@@ -1222,6 +1227,14 @@ function ProjectDetailModal({
     },
   });
 
+  // Determine whether this project is already installed and which version.
+  const projectId = detailQuery.data?.project.project_id ?? null;
+  const installedPlugin =
+    projectId !== null
+      ? plugins.find((p) => p.source_project_id === projectId)
+      : undefined;
+  const installedVersionId = installedPlugin?.source_version_id ?? null;
+
   return (
     <Modal
       open={true}
@@ -1245,30 +1258,42 @@ function ProjectDetailModal({
           <h3>{t("plugins.search.versions")}</h3>
           <div className="plugins-versions">
             {detailQuery.data.versions.map(
-              (version: CatalogVersionResponse) => (
-                <div key={version.version_id} className="plugins-version-row">
-                  <div>
-                    <strong>{version.version_number}</strong>
-                    {version.name !== version.version_number && (
-                      <span className="sub"> {version.name}</span>
+              (version: CatalogVersionResponse) => {
+                const isInstalled = version.version_id === installedVersionId;
+                const isOtherVersion =
+                  !isInstalled && installedPlugin !== undefined;
+                return (
+                  <div key={version.version_id} className="plugins-version-row">
+                    <div>
+                      <strong>{version.version_number}</strong>
+                      <span className="sub">
+                        {" "}
+                        {version.game_versions.join(", ")}
+                      </span>
+                    </div>
+                    {isInstalled ? (
+                      <span className="badge">
+                        {t("plugins.search.installed")}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn sm primary"
+                        disabled={installMutation.isPending || !serverAtRest}
+                        onClick={() =>
+                          installMutation.mutate(version.version_id)
+                        }
+                      >
+                        {installMutation.isPending
+                          ? t("plugins.search.installing")
+                          : isOtherVersion
+                            ? t("plugins.search.update")
+                            : t("plugins.search.install")}
+                      </button>
                     )}
-                    <span className="sub">
-                      {" "}
-                      · {version.game_versions.join(", ")}
-                    </span>
                   </div>
-                  <button
-                    type="button"
-                    className="btn sm primary"
-                    disabled={installMutation.isPending || !serverAtRest}
-                    onClick={() => installMutation.mutate(version.version_id)}
-                  >
-                    {installMutation.isPending
-                      ? t("plugins.search.installing")
-                      : t("plugins.search.install")}
-                  </button>
-                </div>
-              ),
+                );
+              },
             )}
           </div>
         </>
