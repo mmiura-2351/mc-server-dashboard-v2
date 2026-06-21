@@ -1969,3 +1969,115 @@ body.col-resizing {
 .sortable:hover {
   color: var(--text);
 }
+
+/* ---------- Responsive foundation (#583) ----------
+ * Phone breakpoint: max-width 640px. Tablet: max-width 1024px.
+ * Desktop: above 1024px (default — no media query needed).
+ * The sidebar drawer, topbar collapse, content padding reduction, table
+ * horizontal scroll, form stacking, and button wrapping are all handled here.
+ * Page-specific layout changes (file browser 2-pane, role matrix grid) are
+ * follow-up sub-issues and NOT included. */
+
+/* Hamburger / menu toggle — hidden on desktop, shown on phone. */
+.menu-toggle {
+  display: none;
+  font: inherit;
+  font-size: 20px;
+  line-height: 1;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  padding: 4px;
+  flex-shrink: 0;
+}
+
+/* Sidebar backdrop — covers the content when the drawer is open on phone. */
+.sidebar-backdrop {
+  display: none;
+}
+
+/* Table horizontal scroll: shared table containers get overflow-x so wide
+ * tables scroll on narrow viewports rather than overflowing the shell (#583).
+ * Page-specific table-to-card transformations are follow-ups. */
+.backups-table,
+.dashboard-table,
+.admin-versions .table-card,
+.admin-users,
+.admin-workers,
+.admin-communities,
+.audit,
+.account {
+  overflow-x: auto;
+}
+
+@media (max-width: 640px) {
+  /* --- Sidebar → off-canvas drawer --- */
+  .sidebar {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 220px;
+    z-index: 40;
+  }
+  .sidebar.open {
+    display: flex;
+  }
+
+  /* Restore text labels in the drawer (the 900px icon-rail rule hides them,
+   * but the drawer should show the full nav). */
+  .sidebar.open .brand .label,
+  .sidebar.open .nav-group .nav-label,
+  .sidebar.open .nav-hint,
+  .sidebar.open .nav-item .label {
+    display: revert;
+  }
+  .sidebar.open .brand,
+  .sidebar.open .nav-item {
+    justify-content: revert;
+  }
+
+  /* Backdrop overlay */
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 35;
+  }
+
+  /* Show the hamburger button */
+  .menu-toggle {
+    display: block;
+  }
+
+  /* --- Top bar --- */
+  .topbar {
+    gap: 8px;
+    padding: 0 12px;
+  }
+  .lang-switcher {
+    margin-right: 0;
+  }
+  .user-menu .label {
+    display: none;
+  }
+
+  /* --- Content area --- */
+  .content {
+    padding: 12px;
+  }
+
+  /* --- Buttons: allow wrapping --- */
+  .btn {
+    white-space: normal;
+  }
+
+  /* --- Form rows: stack vertically --- */
+  .account .form-row,
+  .settings .form-row {
+    flex-direction: column;
+  }
+}
