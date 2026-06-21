@@ -1241,12 +1241,6 @@ body.col-resizing {
   gap: 10px;
   margin-bottom: 14px;
 }
-/* Table top-right header (download button, right-aligned). */
-.plugins-table-header {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 8px;
-}
 .plugins-table {
   padding: 0;
 }

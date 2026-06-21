@@ -375,59 +375,61 @@ export function ServerPluginsTab({
         </p>
       )}
 
-      {canManage && (
+      {(canManage || (hasClientMods && showSide)) && (
         <div className="plugins-toolbar">
-          <button
-            type="button"
-            className="btn primary"
-            disabled={busy || !serverAtRest}
-            onClick={() => fileInput.current?.click()}
-          >
-            {t("plugins.install")}
-          </button>
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".jar"
-            hidden
-            aria-label={t("plugins.install")}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file !== undefined) uploadMutation.mutate(file);
-              e.target.value = "";
-            }}
-          />
-          <button
-            type="button"
-            className="btn"
-            disabled={busy || !serverAtRest}
-            onClick={() => setBrowseOpen(true)}
-          >
-            {t("plugins.browse")}
-          </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={busy || !serverAtRest}
-            onClick={() => setResolveOpen(true)}
-          >
-            {t("plugins.resolve.action")}
-          </button>
+          {canManage && (
+            <>
+              <button
+                type="button"
+                className="btn primary"
+                disabled={busy || !serverAtRest}
+                onClick={() => fileInput.current?.click()}
+              >
+                {t("plugins.install")}
+              </button>
+              <input
+                ref={fileInput}
+                type="file"
+                accept=".jar"
+                hidden
+                aria-label={t("plugins.install")}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file !== undefined) uploadMutation.mutate(file);
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                className="btn"
+                disabled={busy || !serverAtRest}
+                onClick={() => setBrowseOpen(true)}
+              >
+                {t("plugins.browse")}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy || !serverAtRest}
+                onClick={() => setResolveOpen(true)}
+              >
+                {t("plugins.resolve.action")}
+              </button>
+            </>
+          )}
+          {hasClientMods && showSide && (
+            <button
+              type="button"
+              className="btn"
+              style={{ marginLeft: "auto" }}
+              disabled={downloadModpackMutation.isPending}
+              onClick={() => downloadModpackMutation.mutate()}
+            >
+              {t("plugins.downloadClientModpack")}
+            </button>
+          )}
         </div>
       )}
-
-      <div className="plugins-table-header">
-        {hasClientMods && showSide && (
-          <button
-            type="button"
-            className="btn"
-            disabled={downloadModpackMutation.isPending}
-            onClick={() => downloadModpackMutation.mutate()}
-          >
-            {t("plugins.downloadClientModpack")}
-          </button>
-        )}
-      </div>
 
       <div className="card plugins-table">
         <table className="data">
