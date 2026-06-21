@@ -311,6 +311,10 @@ class RevokeOtherSessionsRequest(BaseModel):
     # else logout). Optional: an access-token-only caller cannot present it, in
     # which case all active sessions are revoked (see RevokeOtherSessions).
     refresh_token: str | None = Field(default=None, min_length=1)
+    # The row id of the session to keep (issue #606). An alternative to
+    # refresh_token for callers that know their session id (from GET
+    # /users/me/sessions) but cannot present the refresh token.
+    keep_session_id: str | None = Field(default=None, min_length=1)
 
 
 @router.get("/users/me/sessions")
@@ -364,11 +368,23 @@ async def revoke_other_sessions(
     # /api/auth and not sent here) can DELETE with no body at all.
     body: Annotated[RevokeOtherSessionsRequest | None, Body()] = None,
 ) -> Response:
-    # Everywhere-else logout: the session matching the presented refresh token is
-    # kept alive, the rest revoked. With no token presented, every active session
-    # is revoked (the safe option — never another user's, issue #387).
+    # Everywhere-else logout: the session matching the presented refresh token or
+    # keep_session_id is kept alive, the rest revoked. With neither presented,
+    # every active session is revoked (the safe option — never another user's,
+    # issue #387, #606).
     current = body.refresh_token if body is not None else None
-    await use_case(user_id=user.id, current_refresh_token=current)
+    raw_keep_id = body.keep_session_id if body is not None else None
+    keep_id: RefreshTokenId | None = None
+    if raw_keep_id is not None:
+        try:
+            keep_id = RefreshTokenId(uuid.UUID(raw_keep_id))
+        except ValueError:
+            pass  # Malformed id is silently ignored — revokes all.
+    await use_case(
+        user_id=user.id,
+        current_refresh_token=current,
+        keep_session_id=keep_id,
+    )
     await recorder.record(
         AuditEvent(
             operation=ops.AUTH_SESSION_REVOKE,

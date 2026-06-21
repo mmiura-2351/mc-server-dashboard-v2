@@ -211,3 +211,49 @@ async def test_revoked_session_can_no_longer_refresh() -> None:
         assert "RefreshToken" in type(exc).__name__
     else:  # pragma: no cover - the refresh must be rejected
         raise AssertionError("expected the revoked session to be unrefreshable")
+
+
+async def test_revoke_others_by_session_id_keeps_that_session() -> None:
+    """keep_session_id identifies the session to spare by its row id (issue #606)."""
+    uow = FakeUnitOfWork()
+    alice = UserId.new()
+    bob = UserId.new()
+    current_id = RefreshTokenId.new()
+    current = _token(user_id=alice, secret="current", token_id=current_id)
+    other = _token(user_id=alice, secret="other")
+    bobs = _token(user_id=bob, secret="bobs")
+    for tok in (current, other, bobs):
+        uow.refresh_tokens.seed(tok)
+
+    await _revoke_others(uow)(
+        user_id=alice, current_refresh_token=None, keep_session_id=current_id
+    )
+
+    assert uow.refresh_tokens.by_hash["hash::current"].revoked_at is None
+    assert uow.refresh_tokens.by_hash["hash::other"].revoked_at == _NOW
+    assert uow.refresh_tokens.by_hash["hash::other"].revoked_reason == REVOKED_USER
+    # Another user's session is untouched (cross-user isolation).
+    assert uow.refresh_tokens.by_hash["hash::bobs"].revoked_at is None
+    assert uow.commits == 1
+
+
+async def test_revoke_others_keep_session_id_without_refresh_token_revokes_rest() -> (
+    None
+):
+    """keep_session_id alone (no refresh token) keeps only the named session."""
+    uow = FakeUnitOfWork()
+    alice = UserId.new()
+    keep_id = RefreshTokenId.new()
+    kept = _token(user_id=alice, secret="kept", token_id=keep_id)
+    gone1 = _token(user_id=alice, secret="gone1")
+    gone2 = _token(user_id=alice, secret="gone2")
+    for tok in (kept, gone1, gone2):
+        uow.refresh_tokens.seed(tok)
+
+    await _revoke_others(uow)(
+        user_id=alice, current_refresh_token=None, keep_session_id=keep_id
+    )
+
+    assert uow.refresh_tokens.by_hash["hash::kept"].revoked_at is None
+    assert uow.refresh_tokens.by_hash["hash::gone1"].revoked_at == _NOW
+    assert uow.refresh_tokens.by_hash["hash::gone2"].revoked_at == _NOW
