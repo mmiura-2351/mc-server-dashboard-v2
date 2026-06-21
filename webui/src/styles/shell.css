@@ -1294,6 +1294,33 @@ body.col-resizing {
   font-size: 13px;
   color: var(--text-dim);
 }
+/* Upload progress bar (issue #1207): a filled track plus a meta row showing
+ * the percentage, transferred bytes, and elapsed time. Shared by every upload
+ * site via the UploadProgress component. */
+.upload-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+}
+.upload-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.upload-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.15s ease;
+}
+.upload-progress-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
 .file-crumbs {
   font-size: 13px;
   color: var(--text-dim);

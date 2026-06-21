@@ -147,6 +147,68 @@ describe("AdminAuditPage", () => {
     );
   });
 
+  it("renders resolved actor/target/community names, keeping raw ids on hover (#682)", async () => {
+    signedInAs(ADMIN, [
+      record({
+        actor_id: "u9",
+        actor_username: "alice",
+        community_id: COMMUNITY.id,
+        community_name: "Alpha",
+        target_type: "server",
+        target_id: "s9",
+        target_name: "survival",
+      }),
+    ]);
+
+    renderApp({ path: "/admin/audit" });
+
+    // Actor shows the resolved username; the raw id stays in the hover title.
+    const actorCell = (await screen.findByText("alice")).closest("td");
+    expect(actorCell).toHaveAttribute("title", "u9");
+    // Target shows the humanized type prefix + the resolved server name; the raw
+    // "type:id" stays in the title.
+    const targetCell = screen
+      .getByText(`${t("communitySettings.audit.targetType.server")}: survival`)
+      .closest("td");
+    expect(targetCell).toHaveAttribute("title", "server:s9");
+    // Community column shows the resolved name; the raw id stays in the title.
+    // "Alpha" also appears as a picker option, so scope to the table cell.
+    const communityCell = screen
+      .getAllByText("Alpha")
+      .map((el) => el.closest("td"))
+      .find((cell) => cell !== null);
+    expect(communityCell).toHaveAttribute("title", COMMUNITY.id);
+  });
+
+  it("falls back to raw ids when names are absent (deleted subject, #682)", async () => {
+    signedInAs(ADMIN, [
+      record({
+        actor_id: "u9",
+        actor_username: null,
+        community_id: COMMUNITY.id,
+        community_name: null,
+        target_type: "server",
+        target_id: "s9",
+        target_name: null,
+      }),
+    ]);
+
+    renderApp({ path: "/admin/audit" });
+
+    // Actor falls back to the raw id.
+    expect((await screen.findByText("u9")).closest("td")).toHaveAttribute(
+      "title",
+      "u9",
+    );
+    // Target falls back to the humanized type + raw id.
+    expect(
+      screen.getByText(`${t("communitySettings.audit.targetType.server")}: s9`),
+    ).toBeInTheDocument();
+    // Community falls back to the raw id.
+    const communityCells = screen.getAllByText(COMMUNITY.id);
+    expect(communityCells.length).toBeGreaterThan(0);
+  });
+
   it("warns that the community picker is truncated when more communities exist than one page", async () => {
     // The picker requests one page (limit=100); report a larger total so the
     // hint surfaces, mirroring the Provision owner picker (#476/#488).

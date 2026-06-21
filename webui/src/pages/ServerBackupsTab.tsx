@@ -14,7 +14,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { ApiError, api } from "../api/client.ts";
+import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -22,6 +22,8 @@ import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { UploadProgress } from "../components/UploadProgress.tsx";
+import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { formatDateTime, humanizeBytes, shortId } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
@@ -79,6 +81,7 @@ export function ServerBackupsTab({
     null,
   );
   const [deleteTarget, setDeleteTarget] = useState<BackupResponse | null>(null);
+  const progress = useUploadProgress();
 
   const canRead = can("backup:read", { serverId });
   const canCreate = can("backup:create", { serverId });
@@ -155,19 +158,25 @@ export function ServerBackupsTab({
     mutationFn: (file: File) => {
       const form = new FormData();
       form.append("file", file);
-      return api.postForm(
+      progress.start(file.size);
+      return postFormWithProgress(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/backups/upload",
           { community_id: communityId, server_id: serverId },
         ),
         form,
+        progress.onProgress,
       );
     },
     onSuccess: () => {
+      progress.reset();
       showToast(t("backups.uploaded"), "success");
       refresh();
     },
-    onError,
+    onError: (error) => {
+      progress.reset();
+      onError(error);
+    },
   });
 
   const download = useMutation({
@@ -299,6 +308,15 @@ export function ServerBackupsTab({
           />
         )}
       </div>
+
+      {progress.active && (
+        <UploadProgress
+          loaded={progress.loaded}
+          total={progress.total}
+          percent={progress.percent}
+          elapsedMs={progress.elapsedMs}
+        />
+      )}
 
       <div className="card backups-table">
         <ResizableTable storageKey="mcsd.colw.backups" className="data">
