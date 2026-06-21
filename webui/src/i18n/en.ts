@@ -549,6 +549,9 @@ export const en = {
   "files.rolledBack": "Rolled back to the selected version.",
   "files.error.serverMustBeStopped":
     "Stop the server before uploading files or creating folders.",
+  "files.error.contentDirProtected":
+    "This directory is managed by the {noun} tab. Use the {noun} tab to add or remove content.",
+  "files.error.goToContentTab": "Go to {noun} tab",
   "files.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "files.error.generic": "Something went wrong. Please try again.",
 
