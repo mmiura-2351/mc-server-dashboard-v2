@@ -74,6 +74,14 @@ async def _hydrate(
     return read_tar(await drain(storage.open_hydrate_source(s_com, s_srv)))
 
 
+# The publish -> backup -> restore round trip is a real-filesystem path whose
+# every step fsyncs (atomic snapshot flip, marker rewrite, archive write). That
+# makes it legitimately slow under disk contention -- it passes in ~1s isolated
+# but has hit the suite-wide 120s pytest-timeout at os.fsync when another full
+# suite runs concurrently on the same box (issue #1373). Override the cap for
+# just this IO-bound test so disk pressure does not turn a slow-but-correct run
+# into a false failure, while still bounding a genuine hang.
+@pytest.mark.timeout(300)
 async def test_restore_round_trip_recovers_backed_up_content(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path, version_retention=10)
     adapter = StorageBackupStoreAdapter(storage=storage)
