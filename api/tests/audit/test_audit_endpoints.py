@@ -30,12 +30,13 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_name_resolver,
     get_current_user,
     get_list_audit_log,
     get_membership_visibility,
     get_permission_checker,
 )
-from tests.audit.fakes import CapturingAuditQuery
+from tests.audit.fakes import CapturingAuditQuery, FakeNameResolver
 from tests.identity.fakes import make_user
 
 _COMMUNITY = uuid.uuid4()
@@ -80,6 +81,7 @@ def _app(
     platform_admin: bool = False,
     member: bool = True,
     allow: bool = True,
+    resolver: FakeNameResolver | None = None,
 ) -> object:
     app = create_app()
     user = make_user()
@@ -90,6 +92,9 @@ def _app(
         member=member
     )
     app.dependency_overrides[get_permission_checker] = lambda: _FakeChecker(allow=allow)
+    app.dependency_overrides[get_audit_name_resolver] = lambda: (
+        resolver if resolver is not None else FakeNameResolver()
+    )
     return app
 
 
@@ -194,3 +199,164 @@ def test_community_audit_forces_path_community_onto_filter() -> None:
     assert resp.status_code == 200
     assert query.last_filter is not None
     assert query.last_filter.community_id == _COMMUNITY
+
+
+# --- read-time name enrichment (issue #682) --------------------------------
+
+
+def _record(
+    *,
+    actor_id: uuid.UUID | None = None,
+    community_id: uuid.UUID | None = None,
+    target_type: str | None = None,
+    target_id: uuid.UUID | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        id=uuid.uuid4(),
+        operation="server:create",
+        outcome=Outcome.SUCCESS,
+        created_at=dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc),
+        actor_id=actor_id,
+        community_id=community_id,
+        target_type=target_type,
+        target_id=target_id,
+    )
+
+
+def test_resolves_actor_username_and_community_name() -> None:
+    actor = uuid.uuid4()
+    record = _record(actor_id=actor, community_id=_COMMUNITY)
+    resolver = FakeNameResolver(
+        usernames={actor: "alice"}, community_names={_COMMUNITY: "Acme"}
+    )
+    app = _app(
+        CapturingAuditQuery(records=[record]), platform_admin=True, resolver=resolver
+    )
+    client = next(_client(app))
+
+    row = client.get("/api/audit").json()["records"][0]
+
+    assert row["actor_id"] == str(actor)
+    assert row["actor_username"] == "alice"
+    assert row["community_name"] == "Acme"
+
+
+def test_resolves_user_target_to_username() -> None:
+    target = uuid.uuid4()
+    record = _record(target_type="user", target_id=target)
+    resolver = FakeNameResolver(usernames={target: "bob"})
+    app = _app(
+        CapturingAuditQuery(records=[record]), platform_admin=True, resolver=resolver
+    )
+    client = next(_client(app))
+
+    row = client.get("/api/audit").json()["records"][0]
+
+    assert row["target_name"] == "bob"
+
+
+def test_resolves_server_target_to_server_name() -> None:
+    target = uuid.uuid4()
+    record = _record(target_type="server", target_id=target)
+    resolver = FakeNameResolver(server_names={target: "survival"})
+    app = _app(
+        CapturingAuditQuery(records=[record]), platform_admin=True, resolver=resolver
+    )
+    client = next(_client(app))
+
+    row = client.get("/api/audit").json()["records"][0]
+
+    assert row["target_name"] == "survival"
+
+
+def test_resolves_file_target_as_server_name() -> None:
+    # A `file` target's id is the owning server's UUID (audit convention), so it
+    # resolves to the server name.
+    target = uuid.uuid4()
+    record = _record(target_type="file", target_id=target)
+    resolver = FakeNameResolver(server_names={target: "creative"})
+    app = _app(
+        CapturingAuditQuery(records=[record]), platform_admin=True, resolver=resolver
+    )
+    client = next(_client(app))
+
+    row = client.get("/api/audit").json()["records"][0]
+
+    assert row["target_name"] == "creative"
+
+
+def test_target_name_null_for_type_with_no_name_source() -> None:
+    # A `role` target has no name source the resolver knows about: leave it null.
+    record = _record(target_type="role", target_id=uuid.uuid4())
+    app = _app(CapturingAuditQuery(records=[record]), platform_admin=True)
+    client = next(_client(app))
+
+    row = client.get("/api/audit").json()["records"][0]
+
+    assert row["target_name"] is None
+
+
+def test_deleted_subject_falls_back_to_null_names() -> None:
+    # Soft-referenced ids outlive their subjects: a deleted actor/target/community
+    # is absent from the resolver, so the display fields are null (the client keeps
+    # showing the raw id).
+    record = _record(
+        actor_id=uuid.uuid4(),
+        community_id=uuid.uuid4(),
+        target_type="server",
+        target_id=uuid.uuid4(),
+    )
+    app = _app(
+        CapturingAuditQuery(records=[record]),
+        platform_admin=True,
+        resolver=FakeNameResolver(),
+    )
+    client = next(_client(app))
+
+    row = client.get("/api/audit").json()["records"][0]
+
+    assert row["actor_username"] is None
+    assert row["target_name"] is None
+    assert row["community_name"] is None
+
+
+def test_batches_lookups_across_rows() -> None:
+    # Distinct ids on the page are resolved in a single batched call per kind, not
+    # per row (no N+1). Two rows share one actor; both their distinct user ids are
+    # asked for at once.
+    actor = uuid.uuid4()
+    user_target = uuid.uuid4()
+    records = [
+        _record(actor_id=actor, target_type="user", target_id=user_target),
+        _record(actor_id=actor, target_type="user", target_id=user_target),
+    ]
+    resolver = FakeNameResolver(usernames={actor: "alice", user_target: "bob"})
+    app = _app(
+        CapturingAuditQuery(records=records), platform_admin=True, resolver=resolver
+    )
+    client = next(_client(app))
+
+    rows = client.get("/api/audit").json()["records"]
+
+    assert [r["actor_username"] for r in rows] == ["alice", "alice"]
+    assert [r["target_name"] for r in rows] == ["bob", "bob"]
+    # One batched user lookup, holding the two distinct user ids.
+    assert len(resolver.user_id_calls) == 1
+    assert set(resolver.user_id_calls[0]) == {actor, user_target}
+
+
+def test_community_audit_enriches_names() -> None:
+    actor = uuid.uuid4()
+    record = _record(actor_id=actor, community_id=_COMMUNITY)
+    resolver = FakeNameResolver(usernames={actor: "carol"})
+    app = _app(
+        CapturingAuditQuery(records=[record]),
+        member=True,
+        allow=True,
+        resolver=resolver,
+    )
+    client = next(_client(app))
+
+    row = client.get(f"/api/communities/{_COMMUNITY}/audit").json()["records"][0]
+
+    assert row["actor_username"] == "carol"
