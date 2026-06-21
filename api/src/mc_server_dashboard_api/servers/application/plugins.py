@@ -50,7 +50,11 @@ from mc_server_dashboard_api.servers.domain.plugin import (
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
-from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
+    ServerId,
+    ServerType,
+)
 
 # Plugin upload size cap: same as the file upload cap (512 MiB).
 MAX_PLUGIN_BYTES = 512 * 1024 * 1024
@@ -260,10 +264,16 @@ class InstallPlugin:
                 # cached but never deployed (issue #1306, #1308).
                 sha256 = await ingest_into_cache(self.cache, content)
 
+                # Paper plugins are always server-side only (issue #1342).
+                if server.server_type is ServerType.PAPER:
+                    side: PluginSide = "server"
+                else:
+                    side = manifest.side
+
                 # Side-aware deploy (issue #1308): only a server-relevant, enabled
                 # jar goes into the working set; a client-only jar is tracked +
                 # cached but never written there.
-                if working_set_present(enabled=True, side=manifest.side):
+                if working_set_present(enabled=True, side=side):
                     await self.file_store.write_file(
                         community_id=community_id,
                         server_id=server_id,
@@ -297,7 +307,7 @@ class InstallPlugin:
                     provides=manifest.provides,
                     dependencies=manifest.dependencies,
                     mc_versions=manifest.mc_versions,
-                    side=manifest.side,
+                    side=side,
                 )
                 await self.uow.plugins.add(plugin)
                 await self.uow.commit()
@@ -454,6 +464,11 @@ class SetPluginSide:
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
+                # Paper plugins are always server-side only (issue #1342).
+                if server.server_type is ServerType.PAPER and new_side != "server":
+                    raise InvalidPluginSideError(
+                        "paper servers only support server side"
+                    )
                 if not server.is_at_rest():
                     raise ServerFilesUnsettledError(str(server_id.value))
 

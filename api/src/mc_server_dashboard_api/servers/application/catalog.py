@@ -57,7 +57,11 @@ from mc_server_dashboard_api.servers.domain.plugin import (
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
-from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
+    ServerId,
+    ServerType,
+)
 
 # Modrinth's per-catalog-version dependency classifications we capture: required
 # (issue #1321, drives validation/resolution) and incompatible (issue #1318,
@@ -304,7 +308,11 @@ class InstallFromCatalog:
 
         # Side (issue #1308): Modrinth's per-environment support is the most
         # accurate source, so it wins over the jar manifest hint here.
-        side = side_from_modrinth(project.client_side, project.server_side)
+        # Paper plugins are always server-side only (issue #1342).
+        if server.server_type is ServerType.PAPER:
+            side: PluginSide = "server"
+        else:
+            side = side_from_modrinth(project.client_side, project.server_side)
 
         # Capture the version's required catalog deps (issue #1321), keyed by
         # project_id with a display label -- the source manifest deps often miss.

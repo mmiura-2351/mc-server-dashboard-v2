@@ -628,3 +628,80 @@ describe("ServerPluginsTab dependency resolution (issue #1309)", () => {
     expect(screen.queryByText(/ARCHPROJECTID/)).not.toBeInTheDocument();
   });
 });
+
+describe("ServerPluginsTab Paper: no side column, no download button (issue #1342)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function renderTabFor(serverType: string) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return render(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <ToastProvider>
+            <ServerPluginsTab
+              server={server({ server_type: serverType })}
+              communityId={CID}
+              can={allow}
+            />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("hides the side column on a paper server", async () => {
+    mockGets({
+      plugins: [plugin({ side: "server" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTabFor("paper");
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    // The Side column header should not be rendered.
+    expect(
+      screen.queryByText("Side", { selector: "th" }),
+    ).not.toBeInTheDocument();
+    // The Side select should not be rendered.
+    expect(screen.queryByLabelText("Side")).not.toBeInTheDocument();
+  });
+
+  it("hides the download button on a paper server even with client-side plugins", async () => {
+    mockGets({
+      plugins: [plugin({ side: "client" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTabFor("paper");
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("Download client modpack"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the side column on a fabric server", async () => {
+    mockGets({
+      plugins: [plugin({ side: "both" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTabFor("fabric");
+    const select = await screen.findByLabelText<HTMLSelectElement>("Side");
+    expect(select).toBeInTheDocument();
+  });
+
+  it("shows the download button on a fabric server with client mods", async () => {
+    mockDownload.downloadFile.mockResolvedValue(undefined);
+    mockGets({
+      plugins: [plugin({ side: "client" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTabFor("fabric");
+    const button = await screen.findByText("Download client modpack");
+    expect(button).toBeInTheDocument();
+  });
+});

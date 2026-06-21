@@ -338,6 +338,7 @@ def _parse_paper(raw: str) -> ParsedManifest | None:
         provides=[],
         mc_versions=mc_versions,
         dependencies=dependencies,
+        side="server",
     )
 
 
