@@ -272,10 +272,11 @@ export function AdminUsersPage() {
           {t("admin.users.prev")}
         </button>
         <span className="sub">
-          {t("admin.users.range")
-            .replace("{from}", String(rangeFrom))
-            .replace("{to}", String(rangeTo))
-            .replace("{total}", String(total))}
+          {t("admin.users.range", {
+            from: rangeFrom,
+            to: rangeTo,
+            total,
+          })}
         </span>
         <button
           type="button"
