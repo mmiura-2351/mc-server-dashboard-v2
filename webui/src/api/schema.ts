@@ -2395,6 +2395,8 @@ export interface components {
         };
         /** RevokeOtherSessionsRequest */
         RevokeOtherSessionsRequest: {
+            /** Keep Session Id */
+            keep_session_id?: string | null;
             /** Refresh Token */
             refresh_token?: string | null;
         };

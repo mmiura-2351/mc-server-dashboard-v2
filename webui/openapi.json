@@ -1733,6 +1733,18 @@
       },
       "RevokeOtherSessionsRequest": {
         "properties": {
+          "keep_session_id": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keep Session Id"
+          },
           "refresh_token": {
             "anyOf": [
               {

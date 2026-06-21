@@ -12,6 +12,8 @@ export const en = {
   "shell.language": "Language",
   "shell.language.en": "English",
   "shell.language.ja": "日本語",
+  "shell.menuOpen": "Open menu",
+  "shell.menuClose": "Close menu",
 
   // Sidebar navigation (WEBUI_SPEC.md Section 5)
   "nav.community": "Community",

@@ -167,13 +167,20 @@ class RefreshTokenRepository(abc.ABC):
         user_id: UserId,
         *,
         keep_token_hash: str | None,
+        keep_session_id: RefreshTokenId | None = None,
         revoked_at: dt.datetime,
         reason: str,
     ) -> None:
-        """Revoke ``user_id``'s active tokens except ``keep_token_hash`` (issue #387).
+        """Revoke ``user_id``'s active tokens except the kept one (issue #387, #606).
 
-        Backs everywhere-else logout: the caller's current session (identified by
-        the refresh token it presented) is kept alive, the rest revoked. With
-        ``keep_token_hash`` ``None`` no row is spared (the caller could not
-        identify its current session).
+        The session to keep can be identified two ways (at most one should be set):
+
+        - ``keep_token_hash`` — the hash of the refresh token the caller presented
+          (original mechanism).
+        - ``keep_session_id`` — the row id of the session to spare (issue #606),
+          usable by clients that know their session id but cannot present the
+          refresh token (e.g. the SPA whose cookie is ``/api/auth``-confined).
+
+        With both ``None`` no row is spared (the caller could not identify its
+        current session).
         """
