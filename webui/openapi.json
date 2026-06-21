@@ -265,7 +265,7 @@
         "type": "object"
       },
       "AuditRecordResponse": {
-        "description": "Public view of one audit-log row (DATABASE.md Section 9).",
+        "description": "Public view of one audit-log row (DATABASE.md Section 9).\n\n``actor_username``/``target_name``/``community_name`` are read-time display\nfields resolved from the live tables (issue #682); they are ``None`` when the\nsoft-referenced subject was deleted or has no name source, in which case the\nclient falls back to the raw id.",
         "properties": {
           "actor_id": {
             "anyOf": [
@@ -278,6 +278,17 @@
             ],
             "title": "Actor Id"
           },
+          "actor_username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Username"
+          },
           "community_id": {
             "anyOf": [
               {
@@ -288,6 +299,17 @@
               }
             ],
             "title": "Community Id"
+          },
+          "community_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Community Name"
           },
           "created_at": {
             "format": "date-time",
@@ -317,6 +339,17 @@
             ],
             "title": "Target Id"
           },
+          "target_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Name"
+          },
           "target_type": {
             "anyOf": [
               {
@@ -335,9 +368,12 @@
           "outcome",
           "created_at",
           "actor_id",
+          "actor_username",
           "community_id",
+          "community_name",
           "target_type",
-          "target_id"
+          "target_id",
+          "target_name"
         ],
         "title": "AuditRecordResponse",
         "type": "object"
