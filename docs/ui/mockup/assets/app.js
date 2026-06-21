@@ -62,18 +62,41 @@
 
     const degraded = document.body.dataset.conn === "degraded";
     topbar.innerHTML = `
+      <button class="menu-toggle" aria-label="Open menu">☰</button>
       <div class="community-switcher" onclick="mockToast()">
         ${MOCK.currentCommunity.name} <span class="chev">▼</span>
       </div>
       <div class="spacer"></div>
       <div class="conn-indicator${degraded ? " degraded" : ""}">
-        <span class="dot"></span>${degraded ? t("conn.degraded") : t("conn.live")}
+        <span class="dot"></span><span class="conn-label">${degraded ? t("conn.degraded") : t("conn.live")}</span>
       </div>
       <span class="lang-switcher" style="font-size:12px;color:var(--text-dim);cursor:pointer" onclick="mockToast('Language toggled')" title="Language"><strong>EN</strong> / JA</span>
       <a class="user-menu" href="account.html" title="${t("nav.account")}">
         <span class="avatar">${MOCK.me.username.slice(0, 1).toUpperCase()}</span>
-        ${MOCK.me.username}
+        <span class="user-label">${MOCK.me.username}</span>
       </a>`;
+
+    // Drawer backdrop (inserted after sidebar for mobile drawer)
+    const backdrop = document.createElement("div");
+    backdrop.className = "drawer-backdrop";
+    sidebar.parentNode.insertBefore(backdrop, sidebar.nextSibling);
+
+    // Drawer toggle handlers
+    function openDrawer() {
+      sidebar.classList.add("open");
+      backdrop.classList.add("open");
+    }
+    function closeDrawer() {
+      sidebar.classList.remove("open");
+      backdrop.classList.remove("open");
+    }
+    topbar.querySelector(".menu-toggle").addEventListener("click", function () {
+      if (sidebar.classList.contains("open")) { closeDrawer(); } else { openDrawer(); }
+    });
+    backdrop.addEventListener("click", closeDrawer);
+    sidebar.querySelectorAll(".nav-item").forEach(function (item) {
+      item.addEventListener("click", closeDrawer);
+    });
 
     const banner = document.createElement("div");
     banner.className = "mock-banner";
@@ -210,8 +233,20 @@
     }, 7000);
   };
 
+  // ---------- responsive table wrapping ----------
+  function wrapTables() {
+    document.querySelectorAll("table.data").forEach(function (tbl) {
+      if (tbl.parentNode.classList.contains("table-wrap")) return;
+      var wrap = document.createElement("div");
+      wrap.className = "table-wrap";
+      tbl.parentNode.insertBefore(wrap, tbl);
+      wrap.appendChild(tbl);
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     if (document.getElementById("sidebar")) buildShell();
     initTabs();
+    wrapTables();
   });
 })();
