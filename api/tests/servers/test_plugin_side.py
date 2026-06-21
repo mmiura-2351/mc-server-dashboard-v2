@@ -751,9 +751,9 @@ async def test_download_client_modpack_streams_zip_from_cache() -> None:
 
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
         names = set(zf.namelist())
-        assert names == {"c.jar", "b.jar"}
-        assert zf.read("c.jar") == c_bytes
-        assert zf.read("b.jar") == b_bytes
+        assert names == {"mods/c.jar", "mods/b.jar"}
+        assert zf.read("mods/c.jar") == c_bytes
+        assert zf.read("mods/b.jar") == b_bytes
 
 
 # -- Paper: plugins are always server-side only (issue #1342) --

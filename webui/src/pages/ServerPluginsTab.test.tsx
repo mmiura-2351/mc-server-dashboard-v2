@@ -462,7 +462,7 @@ describe("ServerPluginsTab side + client modpack (issue #1308)", () => {
     await waitFor(() => {
       expect(mockDownload.downloadFile).toHaveBeenCalledWith(
         expect.stringContaining("/client-mods/download"),
-        "client-modpack.zip",
+        "mods.zip",
       );
     });
   });

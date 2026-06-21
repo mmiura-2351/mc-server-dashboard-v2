@@ -76,9 +76,9 @@ async def test_stream_dedups_colliding_filenames() -> None:
 
     archive = b"".join([chunk async for chunk in stream_client_modpack(cache, plugins)])
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-        assert set(zf.namelist()) == {"mod.jar", "mod (1).jar"}
-        assert zf.read("mod.jar") == a
-        assert zf.read("mod (1).jar") == b
+        assert set(zf.namelist()) == {"mods/mod.jar", "mods/mod (1).jar"}
+        assert zf.read("mods/mod.jar") == a
+        assert zf.read("mods/mod (1).jar") == b
 
 
 async def test_stream_skips_plugin_without_sha256() -> None:
@@ -94,4 +94,4 @@ async def test_stream_skips_plugin_without_sha256() -> None:
 
     archive = b"".join([chunk async for chunk in stream_client_modpack(cache, plugins)])
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-        assert set(zf.namelist()) == {"kept.jar"}
+        assert set(zf.namelist()) == {"mods/kept.jar"}

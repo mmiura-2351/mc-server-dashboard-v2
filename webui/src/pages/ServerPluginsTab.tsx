@@ -308,7 +308,7 @@ export function ServerPluginsTab({
           "/api/communities/{community_id}/servers/{server_id}/client-mods/download",
           { community_id: communityId, server_id: serverId },
         ),
-        "client-modpack.zip",
+        "mods.zip",
       ),
     onError,
   });
