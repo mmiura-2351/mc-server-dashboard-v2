@@ -1137,7 +1137,7 @@ async def download_client_modpack(
     return StreamingResponse(
         stream,
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="client-modpack.zip"'},
+        headers={"Content-Disposition": 'attachment; filename="mods.zip"'},
     )
 
 
