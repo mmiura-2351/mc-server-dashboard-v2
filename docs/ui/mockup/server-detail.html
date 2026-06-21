@@ -23,8 +23,7 @@
             <span class="badge type">paper 1.21.6</span>
             <span class="badge">container</span>
             <span class="badge">:25565</span>
-            <span class="badge">host</span>
-            · up 6h 12m · observed 3s ago
+            Host: worker-a
           </div>
         </div>
         <div class="actions">
@@ -51,7 +50,7 @@
 
       <!-- ============ OVERVIEW ============ -->
       <section class="tabpane" id="pane-overview">
-        <div class="grid cols-4" style="margin-bottom:14px">
+        <div class="grid cols-3" style="margin-bottom:14px">
           <div class="card metric-tile">
             <div class="label">CPU</div>
             <div class="value">38<span class="unit">%</span></div>
@@ -67,17 +66,13 @@
             <div class="value">7<span class="unit">/ 20</span></div>
             <div class="sparkline" id="spark-players"></div>
           </div>
-          <div class="card metric-tile">
-            <div class="label">State</div>
-            <div class="value" style="font-size:15px;color:var(--green)">running</div>
-          </div>
         </div>
 
         <div class="card" style="padding:0">
           <div class="console" style="border:none">
             <div class="toolbar">
-              <strong style="font-size:13px">Log tail</strong>
-              <span class="right" style="margin-left:auto"><a class="tab" data-pane="console" href="#console" style="padding:0;border:none">open console →</a></span>
+              <strong style="font-size:13px">Recent log</strong>
+              <span class="right" style="margin-left:auto"><a class="tab" data-pane="console" href="#console" style="padding:0;border:none">Open Console</a></span>
             </div>
             <div class="log-view" id="log-tail" style="height:260px"></div>
           </div>
@@ -91,7 +86,6 @@
             <label class="checkbox" style="font-size:12px"><input type="checkbox" checked onchange="document.getElementById('log-main').dataset.paused = this.checked ? '' : '1'"> follow</label>
             <input type="text" placeholder="filter…">
             <button class="btn sm ghost" onclick="document.getElementById('log-main').innerHTML=''">clear</button>
-            <span style="margin-left:auto;font-size:11px;color:var(--text-faint)">streams: status · log · metrics (ws)</span>
           </div>
           <div class="log-view" id="log-main" style="height:430px"></div>
           <div class="cmd-input">
@@ -120,7 +114,7 @@
               <span style="margin-left:auto;display:flex;gap:6px">
                 <button class="btn sm" onclick="openModal('history-modal')">History</button>
                 <button class="btn sm" onclick="mockToast('GET …/files/download?path=server.properties')">Download</button>
-                <button class="btn sm primary" onclick="mockToast('PUT …/files?path=server.properties — new version retained', )">Save</button>
+                <button class="btn sm primary" onclick="mockToast('PUT …/files?path=server.properties — new version retained')">Save</button>
               </span>
             </div>
             <textarea id="file-editor" spellcheck="false"></textarea>
@@ -145,7 +139,7 @@
         </div>
         <div class="card" style="padding:0">
           <table class="data">
-            <thead><tr><th>Created</th><th>Origin</th><th>Size</th><th>By</th><th></th></tr></thead>
+            <thead><tr><th>Created</th><th>Origin</th><th>Condition</th><th>Size</th><th>By</th><th></th></tr></thead>
             <tbody id="backup-rows"></tbody>
           </table>
         </div>
@@ -157,28 +151,24 @@
           <span style="color:var(--text-dim);font-size:13px">Applied groups. Manage community-wide groups in <a href="community-settings.html#groups">Community settings → Groups</a>.</span>
           <div class="right"><button class="btn sm" onclick="mockToast('Pick a community group to apply')">+ Apply group</button></div>
         </div>
-        <div class="grid cols-2">
-          <div class="card">
-            <h2 style="display:flex;gap:8px;align-items:center">Admins <span class="badge kind-op">op</span>
-              <button class="btn sm ghost" style="margin-left:auto" onclick="mockToast('Remove group from this server')">Remove</button></h2>
-            <table class="data">
-              <tbody>
-                <tr><td>miura</td><td class="num" style="color:var(--text-faint)">069a79f4</td></tr>
-                <tr><td>alex_dig</td><td class="num" style="color:var(--text-faint)">ec70bcaf</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="card">
-            <h2 style="display:flex;gap:8px;align-items:center">Regulars <span class="badge kind-whitelist">whitelist</span>
-              <button class="btn sm ghost" style="margin-left:auto" onclick="mockToast('Remove group from this server')">Remove</button></h2>
-            <table class="data">
-              <tbody>
-                <tr><td>steve_99</td><td class="num" style="color:var(--text-faint)">7125ba8b</td></tr>
-                <tr><td>enderchan</td><td class="num" style="color:var(--text-faint)">c06f8906</td></tr>
-                <tr><td>zombie_hunter</td><td class="num" style="color:var(--text-faint)">61699b2e</td></tr>
-              </tbody>
-            </table>
-          </div>
+        <div class="card" style="padding:0">
+          <table class="data">
+            <thead><tr><th>Group</th><th>Kind</th><th>Members</th><th></th></tr></thead>
+            <tbody>
+              <tr>
+                <td><strong>Admins</strong></td>
+                <td><span class="badge kind-op">op</span></td>
+                <td class="num">2 members</td>
+                <td class="row-actions"><button class="btn sm" onclick="mockToast('Remove group from this server')">Remove</button></td>
+              </tr>
+              <tr>
+                <td><strong>Regulars</strong></td>
+                <td><span class="badge kind-whitelist">whitelist</span></td>
+                <td class="num">3 members</td>
+                <td class="row-actions"><button class="btn sm" onclick="mockToast('Remove group from this server')">Remove</button></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -202,20 +192,50 @@
               <div class="hint">Immutable after creation.</div>
             </div>
           </div>
+          <div class="form-row" style="max-width:480px">
+            <div class="field">
+              <label>Memory limit (MiB)</label>
+              <input type="number" placeholder="Default">
+              <div class="hint">Leave blank to use the default.</div>
+            </div>
+            <div class="field">
+              <label>CPU allocation (millicores)</label>
+              <input type="number" placeholder="Auto">
+              <div class="hint">1000 = one core. Leave blank for auto.</div>
+            </div>
+          </div>
           <div class="field">
             <label>Config overrides</label>
-            <textarea rows="4">max-players=20
-difficulty=hard
-view-distance=10</textarea>
+            <div style="display:flex;gap:8px;margin-bottom:6px">
+              <input type="text" value="max-players" placeholder="Key" style="flex:1">
+              <input type="text" value="20" placeholder="Value" style="flex:1">
+              <button class="btn sm" onclick="mockToast('Remove override')">Remove</button>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:6px">
+              <input type="text" value="difficulty" placeholder="Key" style="flex:1">
+              <input type="text" value="hard" placeholder="Value" style="flex:1">
+              <button class="btn sm" onclick="mockToast('Remove override')">Remove</button>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:6px">
+              <input type="text" value="view-distance" placeholder="Key" style="flex:1">
+              <input type="text" value="10" placeholder="Value" style="flex:1">
+              <button class="btn sm" onclick="mockToast('Remove override')">Remove</button>
+            </div>
+            <button class="btn sm" onclick="mockToast('Add override row')">Add override</button>
           </div>
           <button class="btn primary" onclick="mockToast('PATCH …/servers/s-1')">Save changes</button>
+        </div>
+
+        <div class="card" style="margin-bottom:14px;max-width:640px">
+          <h2>Resource pack</h2>
+          <p style="font-size:13px;color:var(--text-dim)">No resource pack assigned.</p>
+          <button class="btn sm" onclick="mockToast('Open resource pack picker')">Assign a resource pack</button>
         </div>
 
         <dl class="kv card" style="margin-bottom:14px;max-width:640px">
           <dt>Server id</dt><dd>s-1 (uuid)</dd>
           <dt>Created</dt><dd>2026-05-12 08:30 by miura</dd>
           <dt>EULA</dt><dd style="color:var(--green)">accepted</dd>
-          <dt>Desired state</dt><dd>running</dd>
         </dl>
 
         <div class="card danger-zone" style="max-width:640px">
@@ -304,6 +324,7 @@ document.addEventListener("DOMContentLoaded", () => {
     <tr>
       <td>${b.created_at}</td>
       <td><span class="badge">${b.source}</span></td>
+      <td><span class="pill running" style="font-size:11px">Healthy</span></td>
       <td class="num">${b.size}</td>
       <td>${b.created_by_username}</td>
       <td class="row-actions">

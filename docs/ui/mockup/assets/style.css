@@ -123,17 +123,17 @@ h3 { font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-
 }
 
 .community-switcher {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   background: var(--bg-overlay);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 5px 12px;
   cursor: pointer;
   font-weight: 600;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  width: auto;
 }
-.community-switcher .chev { color: var(--text-faint); font-size: 11px; }
 
 .topbar .spacer { flex: 1; }
 
@@ -185,8 +185,8 @@ h3 { font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-
 .btn:hover { border-color: var(--text-faint); }
 .btn.primary { background: var(--accent-dim); border-color: var(--accent-dim); }
 .btn.primary:hover { background: #356fb4; }
-.btn.success { background: #1f5c35; border-color: #2c7a47; }
-.btn.success:hover { background: #27713f; }
+.btn.success { background: transparent; border-color: rgba(63, 207, 110, 0.4); color: var(--green); }
+.btn.success:hover { background: rgba(63, 207, 110, 0.08); }
 .btn.danger { background: #5c1f1f; border-color: #7a2c2c; }
 .btn.danger:hover { background: #712727; }
 .btn.ghost { background: transparent; }
@@ -205,6 +205,7 @@ h3 { font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-
 .grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
 .grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
 @media (max-width: 1100px) { .grid.cols-3, .grid.cols-4 { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 900px) { .grid.cols-2 { grid-template-columns: 1fr; } }
 
 /* state pills */
 .pill {
@@ -290,6 +291,7 @@ table.data td {
 table.data tr:hover td { background: rgba(255,255,255,.015); }
 table.data td.num { font-family: var(--mono); }
 table.data .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+table.data td[title] { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* tabs */
 .tabs {
@@ -346,7 +348,7 @@ textarea { font-family: var(--mono); resize: vertical; }
     radial-gradient(800px 400px at 70% -10%, rgba(77,159,255,.07), transparent),
     var(--bg);
 }
-.auth-card { width: 380px; padding: 28px; }
+.auth-card { width: 360px; padding: 28px; }
 .auth-card .brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; margin-bottom: 22px; }
 .auth-card .alt { text-align: center; font-size: 13px; color: var(--text-dim); margin-top: 16px; }
 
@@ -371,7 +373,7 @@ textarea { font-family: var(--mono); resize: vertical; }
   padding: 10px 12px;
   overflow-y: auto;
   white-space: pre-wrap;
-  word-break: break-all;
+  word-break: break-word;
 }
 .console .log-view .ln { display: block; }
 .console .log-view .ln .t { color: var(--text-faint); }
@@ -459,7 +461,7 @@ textarea { font-family: var(--mono); resize: vertical; }
 .danger-zone .row .desc { font-size: 12px; color: var(--text-dim); }
 .danger-zone .row .btn { margin-left: auto; }
 
-.kv { display: grid; grid-template-columns: 160px 1fr; gap: 6px 16px; font-size: 13px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 13px; }
 .kv dt { color: var(--text-faint); }
 .kv dd { margin: 0; font-family: var(--mono); }
 
@@ -483,7 +485,7 @@ textarea { font-family: var(--mono); resize: vertical; }
 }
 .wizard-steps .step.active { color: var(--text); border-bottom-color: var(--accent); }
 .wizard-steps .step.done { color: var(--green); border-bottom-color: var(--green); }
-.type-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.type-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
 .type-card {
   border: 1px solid var(--border); border-radius: var(--radius);
   padding: 14px 10px; text-align: center; cursor: pointer;
@@ -565,8 +567,7 @@ textarea { font-family: var(--mono); resize: vertical; }
   /* topbar: reduce gap/padding */
   .topbar { gap: 8px; padding: 0 12px; }
 
-  /* hide connection indicator text and username text (keep icons/avatar) */
-  .conn-label { display: none; }
+  /* hide username text (keep avatar) */
   .user-label { display: none; }
 
   /* content: reduce padding */
@@ -597,6 +598,10 @@ textarea { font-family: var(--mono); resize: vertical; }
 
   /* kv pairs: single column */
   .kv { grid-template-columns: 1fr; }
+
+  /* toolbar inputs: override fixed inline widths */
+  .toolbar-row input[type=text],
+  .toolbar-row select { width: 100% !important; min-width: 0; }
 
   /* type cards (wizard): 2 columns */
   .type-cards { grid-template-columns: repeat(2, 1fr); }

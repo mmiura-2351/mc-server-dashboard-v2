@@ -15,7 +15,7 @@
       <div class="page-head">
         <div>
           <h1>Account</h1>
-          <div class="sub">miura · platform administrator</div>
+          <div class="sub">Your profile, security, and memberships.</div>
         </div>
         <div class="actions"><button class="btn" onclick="mockToast('POST /auth/logout'); setTimeout(()=>location.href='login.html', 700)">Sign out</button></div>
       </div>
@@ -65,17 +65,6 @@
         </table>
       </div>
 
-      <div class="card" style="margin-bottom:14px">
-        <h2>Sessions</h2>
-        <table class="data">
-          <thead><tr><th>Created</th><th>Last used</th><th>IP</th><th>Browser</th><th></th></tr></thead>
-          <tbody id="session-rows"></tbody>
-        </table>
-        <div style="margin-top:12px">
-          <button class="btn" onclick="mockToast('All other sessions revoked.')">Revoke all other sessions</button>
-        </div>
-      </div>
-
       <div class="card danger-zone">
         <h2>Danger zone</h2>
         <div class="row">
@@ -91,19 +80,5 @@
 </div>
 <script src="assets/mock-data.js"></script>
 <script src="assets/app.js"></script>
-<script>
-document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("session-rows").innerHTML = MOCK.accountSessions.map((s) => `
-    <tr>
-      <td class="num">${s.created_at}</td>
-      <td class="num">${s.last_used}</td>
-      <td class="num">${s.ip}</td>
-      <td>${s.user_agent}${s.current ? ' <span class="badge">current</span>' : ""}</td>
-      <td class="row-actions">
-        ${s.current ? "" : `<button class="btn sm" onclick="mockToast('Session revoked.')">Revoke</button>`}
-      </td>
-    </tr>`).join("");
-});
-</script>
 </body>
 </html>

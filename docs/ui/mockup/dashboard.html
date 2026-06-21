@@ -15,12 +15,24 @@
       <div class="page-head">
         <div>
           <h1>Servers</h1>
-          <div class="sub">4 servers · 2 running · 1 crashed</div>
+          <div class="sub">Servers in this community.</div>
         </div>
         <div class="actions">
-          <a class="btn" href="server-create.html#import">Import ZIP</a>
           <a class="btn primary" href="server-create.html">+ Create server</a>
         </div>
+      </div>
+
+      <div class="toolbar-row">
+        <input type="text" placeholder="Search by name…" style="width:220px">
+        <span class="chip" style="font-weight:600">All</span>
+        <span class="chip">Running</span>
+        <span class="chip">Stopped</span>
+        <span class="chip">Crashed</span>
+        <select style="width:auto;padding:4px 8px;font-size:12px">
+          <option>Sort: Name</option>
+          <option>Sort: State</option>
+          <option>Sort: Type</option>
+        </select>
       </div>
 
       <div class="grid cols-2">
@@ -35,13 +47,10 @@
             <span class="badge">container</span>
             <span class="badge">:25565</span>
           </div>
-          <div class="stats">
-            <span>players 7/20</span><span>cpu 38%</span><span>mem 3.2 GiB</span><span>host</span>
-          </div>
           <div class="foot">
             <button class="btn sm" onclick="mockToast('Stop requested (graceful)')">Stop</button>
             <button class="btn sm" onclick="mockToast('Restart requested')">Restart</button>
-            <span class="right">up 6h 12m</span>
+            <span class="right">Host: worker-a</span>
           </div>
         </div>
 
@@ -55,13 +64,10 @@
             <span class="badge">container</span>
             <span class="badge">:25566</span>
           </div>
-          <div class="stats">
-            <span>players —</span><span>cpu 71%</span><span>mem 1.8 GiB</span><span>host</span>
-          </div>
           <div class="foot">
             <button class="btn sm" disabled>Stop</button>
             <button class="btn sm" disabled>Restart</button>
-            <span class="right">starting…</span>
+            <span class="right">Host: worker-a</span>
           </div>
         </div>
 
@@ -75,13 +81,10 @@
             <span class="badge">container</span>
             <span class="badge">:25570</span>
           </div>
-          <div class="stats">
-            <span style="color:var(--red)">boot crash · restart backoff (3/5)</span>
-          </div>
           <div class="foot">
             <button class="btn sm success" onclick="mockToast('Restart requested')">Restart</button>
             <button class="btn sm" onclick="mockToast('Stop requested')">Stop</button>
-            <span class="right">crashed 52m ago</span>
+            <span class="right">Host: worker-b</span>
           </div>
         </div>
 
@@ -94,9 +97,6 @@
             <span class="badge type">fabric 1.21.4</span>
             <span class="badge">container</span>
             <span class="badge">:25571</span>
-          </div>
-          <div class="stats">
-            <span>last run 2026-06-05 22:40</span>
           </div>
           <div class="foot">
             <button class="btn sm success" onclick="mockToast('Start requested')">Start</button>

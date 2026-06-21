@@ -21,8 +21,6 @@
       "nav.adminVersions": "Versions & JARs",
       "nav.adminAudit": "Global audit",
       "nav.account": "Account",
-      "conn.live": "live",
-      "conn.degraded": "Reconnecting — updates may lag",
       "toast.mock": "Mockup: no real API call was made.",
     },
   };
@@ -50,6 +48,10 @@
         ${navItem("community-settings.html", "⚙", t("nav.settings"), page === "community-settings")}
       </div>
       <div class="nav-group">
+        <div class="nav-label">Shared resources</div>
+        ${navItem("#", "📦", "Resource packs", false)}
+      </div>
+      <div class="nav-group">
         <div class="nav-label">${t("nav.admin")}</div>
         ${navItem("admin-overview.html", "◎", t("nav.adminOverview"), page === "admin-overview")}
         ${navItem("admin-users.html", "👤", t("nav.adminUsers"), page === "admin-users")}
@@ -57,23 +59,22 @@
         ${navItem("admin-workers.html", "🖧", t("nav.adminWorkers"), page === "admin-workers")}
         ${navItem("admin-versions.html", "⬇", t("nav.adminVersions"), page === "admin-versions")}
         ${navItem("admin-audit.html", "≡", t("nav.adminAudit"), page === "admin-audit")}
-      </div>
-      <div class="sidebar-foot">api v1.0 · ui mockup</div>`;
+      </div>`;
 
-    const degraded = document.body.dataset.conn === "degraded";
+
     topbar.innerHTML = `
       <button class="menu-toggle" aria-label="Open menu">☰</button>
-      <div class="community-switcher" onclick="mockToast()">
-        ${MOCK.currentCommunity.name} <span class="chev">▼</span>
-      </div>
+      <select class="community-switcher" onchange="mockToast()">
+        ${MOCK.communities.map((c) => `<option${c.id === MOCK.currentCommunity.id ? " selected" : ""}>${c.name}</option>`).join("")}
+      </select>
       <div class="spacer"></div>
-      <div class="conn-indicator${degraded ? " degraded" : ""}">
-        <span class="dot"></span><span class="conn-label">${degraded ? t("conn.degraded") : t("conn.live")}</span>
-      </div>
-      <span class="lang-switcher" style="font-size:12px;color:var(--text-dim);cursor:pointer" onclick="mockToast('Language toggled')" title="Language"><strong>EN</strong> / JA</span>
+      <select class="lang-switcher" style="font-size:12px;width:auto;padding:4px 8px" onchange="mockToast('Language toggled')">
+        <option selected>English</option>
+        <option>日本語</option>
+      </select>
       <a class="user-menu" href="account.html" title="${t("nav.account")}">
-        <span class="avatar">${MOCK.me.username.slice(0, 1).toUpperCase()}</span>
-        <span class="user-label">${MOCK.me.username}</span>
+        <span class="avatar">A</span>
+        <span class="user-label">${t("nav.account")}</span>
       </a>`;
 
     // Drawer backdrop (inserted after sidebar for mobile drawer)
