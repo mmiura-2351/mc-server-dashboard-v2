@@ -54,21 +54,18 @@ export function statusPill(status: string): string {
 // (#1214).
 export function heartbeatAge(
   iso: string,
-  tr: (key: TranslationKey) => string,
+  tr: (key: TranslationKey, params?: Record<string, string | number>) => string,
 ): string {
   const seconds = Math.max(
     0,
     Math.round((Date.now() - Date.parse(iso)) / 1000),
   );
   if (seconds < 60) {
-    return tr("format.secondsAgo").replace("{value}", String(seconds));
+    return tr("format.secondsAgo", { value: seconds });
   }
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) {
-    return tr("format.minutesAgo").replace("{value}", String(minutes));
+    return tr("format.minutesAgo", { value: minutes });
   }
-  return tr("format.hoursAgo").replace(
-    "{value}",
-    String(Math.round(minutes / 60)),
-  );
+  return tr("format.hoursAgo", { value: Math.round(minutes / 60) });
 }

@@ -19,9 +19,10 @@ export function UploadProgress({
   elapsedMs,
 }: UploadProgressProps) {
   const seconds = Math.round(elapsedMs / 1000);
-  const bytes = t("upload.bytes")
-    .replace("{loaded}", humanizeBytes(loaded))
-    .replace("{total}", humanizeBytes(total));
+  const bytes = t("upload.bytes", {
+    loaded: humanizeBytes(loaded),
+    total: humanizeBytes(total),
+  });
 
   return (
     <div className="upload-progress">
@@ -36,9 +37,9 @@ export function UploadProgress({
         <div className="upload-bar-fill" style={{ width: `${percent}%` }} />
       </div>
       <div className="upload-progress-meta">
-        <span>{t("upload.percent").replace("{percent}", String(percent))}</span>
+        <span>{t("upload.percent", { percent })}</span>
         {total > 0 && <span>{bytes}</span>}
-        <span>{t("upload.elapsed").replace("{seconds}", String(seconds))}</span>
+        <span>{t("upload.elapsed", { seconds })}</span>
       </div>
     </div>
   );

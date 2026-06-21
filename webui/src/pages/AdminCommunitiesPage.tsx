@@ -144,10 +144,11 @@ export function AdminCommunitiesPage() {
           {t("admin.communities.prev")}
         </button>
         <span className="sub">
-          {t("admin.communities.range")
-            .replace("{from}", String(rangeFrom))
-            .replace("{to}", String(rangeTo))
-            .replace("{total}", String(total))}
+          {t("admin.communities.range", {
+            from: rangeFrom,
+            to: rangeTo,
+            total,
+          })}
         </span>
         <button
           type="button"
