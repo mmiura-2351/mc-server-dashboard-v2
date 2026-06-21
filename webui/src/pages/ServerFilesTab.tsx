@@ -80,7 +80,9 @@ function isContentDirProtected(error: unknown): boolean {
 
 /** The loader-aware noun for the managed-content tab (Mods vs Plugins). */
 function contentTabNoun(serverType: string): string {
-  return serverType === "fabric" || serverType === "forge" ? "Mods" : "Plugins";
+  return serverType === "fabric" || serverType === "forge"
+    ? t("serverDetail.tab.mods")
+    : t("serverDetail.tab.plugins");
 }
 
 /** Base `/communities/{cid}/servers/{sid}/files` path for `server`. */

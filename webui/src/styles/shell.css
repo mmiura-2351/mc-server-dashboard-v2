@@ -1418,9 +1418,15 @@ body.col-resizing {
   background: rgba(77, 159, 255, 0.08);
 }
 .files .notice.warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--amber);
   border-color: var(--pill-transition-border);
   background: var(--pill-transition-bg);
+}
+.files .notice.warn .btn {
+  margin-left: auto;
 }
 .files-toolbar {
   display: flex;
