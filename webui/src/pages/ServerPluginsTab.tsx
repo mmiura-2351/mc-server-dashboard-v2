@@ -24,7 +24,7 @@ import type { components } from "../api/schema";
 import { Modal } from "../components/Modal.tsx";
 import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
-import { humanizeBytes } from "../format.ts";
+import { formatRange, humanizeBytes } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
@@ -789,7 +789,7 @@ function PluginValidationChecklist({
               {t("plugins.validation.missingDep")
                 .replace("{mod}", nameOf(finding.mod_id))
                 .replace("{dependency}", finding.depends_on)
-                .replace("{range}", finding.version_range)
+                .replace("{range}", formatRange(finding.version_range))
                 .replace(" ()", "")
                 .replace("（）", "")}
             </li>
@@ -815,7 +815,7 @@ function PluginValidationChecklist({
               {t("plugins.validation.versionUnsatisfied")
                 .replace("{mod}", nameOf(finding.mod_id))
                 .replace("{dependency}", finding.depends_on)
-                .replace("{range}", finding.version_range)
+                .replace("{range}", formatRange(finding.version_range))
                 .replace(" ()", "")
                 .replace("（）", "")
                 .replace("{present}", finding.present_version)}

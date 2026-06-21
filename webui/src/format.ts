@@ -47,6 +47,35 @@ export function statusPill(status: string): string {
   return "crashed";
 }
 
+// Convert a Maven-style version interval (e.g. "[1.9.10,)") to a
+// human-readable string (e.g. "1.9.10+"). Non-Maven ranges (fabric semver,
+// plain versions) pass through unchanged. Wildcard / empty returns "" (#1361).
+const MAVEN_RE = /^([[(])\s*([^,]*?)\s*,\s*([^\])]*?)\s*([\])])$/;
+
+export function formatRange(range: string): string {
+  if (!range || range === "*") return "";
+
+  const m = MAVEN_RE.exec(range);
+  if (!m) return range;
+
+  const [, , lo, hi, closeBracket] = m;
+
+  // Lower-bounded only: [lo,) → "lo+"
+  if (lo && !hi) {
+    return `${lo}+`;
+  }
+  // Upper-bounded only: (,hi) → "< hi" or (,hi] → "<= hi"
+  if (!lo && hi) {
+    return closeBracket === "]" ? `<= ${hi}` : `< ${hi}`;
+  }
+  // Both bounds: range display
+  if (lo && hi) {
+    return `${lo} – ${hi}`;
+  }
+  // (,) — degenerate, pass through
+  return range;
+}
+
 // Compact heartbeat age, e.g. "2s ago" / "4m ago" / "3h ago". A negative or
 // missing delta falls back to seconds so the cell always renders.
 // Shared across the Overview and Workers fleet pages (#477).
