@@ -51,6 +51,16 @@ GOLANGCI := worker/.bin/golangci-lint
 # runners are fresh, so this is a no-op there.
 GOLANGCI_LINT_CACHE := $(shell git rev-parse --absolute-git-dir)/golangci-lint-cache
 
+# Bound golangci-lint's footprint so it degrades instead of being OS-killed under
+# memory/CPU pressure (#1373: SIGKILL mid-PR when two full `make check` runs
+# overlapped, after `0 issues.` had already printed). GOMEMLIMIT is a soft cap
+# that makes the Go GC reclaim aggressively before the heap balloons toward the
+# OOM threshold; --concurrency bounds the parallel package analyses that multiply
+# peak memory. A loaded box trades speed for survival; CI runners are fresh and
+# unloaded, so the bound is effectively free there.
+GOLANGCI_LINT_MEMLIMIT := 2GiB
+GOLANGCI_LINT_CONCURRENCY := 2
+
 # protoc code-generation plugins. Pinned + documented (proto/README.md,
 # docs/dev/DEPENDENCIES.md). The Go plugins install into the same gitignored
 # worker/.bin; the Python generators come from the api/ dev group (uv).
@@ -120,7 +130,7 @@ worker-lint: $(GOLANGCI)
 		exit 1; \
 	fi
 	cd worker && go vet ./...
-	cd worker && GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ./.bin/golangci-lint run
+	cd worker && GOMEMLIMIT="$(GOLANGCI_LINT_MEMLIMIT)" GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ./.bin/golangci-lint run --concurrency=$(GOLANGCI_LINT_CONCURRENCY)
 
 worker-format:
 	cd worker && gofmt -w .
@@ -163,7 +173,7 @@ relay-lint: $(GOLANGCI)
 		exit 1; \
 	fi
 	cd relay && go vet ./...
-	cd relay && GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ../worker/.bin/golangci-lint run
+	cd relay && GOMEMLIMIT="$(GOLANGCI_LINT_MEMLIMIT)" GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ../worker/.bin/golangci-lint run --concurrency=$(GOLANGCI_LINT_CONCURRENCY)
 
 relay-format:
 	cd relay && gofmt -w .
