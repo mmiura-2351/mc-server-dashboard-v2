@@ -353,9 +353,10 @@ export function ServerBackupsTab({
                       : t("backups.unknownSize")}
                   </td>
                   <td title={backup.created_by ?? undefined}>
-                    {backup.created_by !== null
-                      ? shortId(backup.created_by)
-                      : t("backups.unknownCreator")}
+                    {backup.created_by_username ??
+                      (backup.created_by !== null
+                        ? shortId(backup.created_by)
+                        : t("backups.unknownCreator"))}
                   </td>
                   <td className="row-actions">
                     <button

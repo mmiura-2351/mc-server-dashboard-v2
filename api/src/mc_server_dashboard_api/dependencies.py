@@ -179,6 +179,9 @@ from mc_server_dashboard_api.identity.domain.password_policy import (
 )
 from mc_server_dashboard_api.identity.domain.registration import RegistrationConfig
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
+from mc_server_dashboard_api.servers.adapters.backup_author_directory import (
+    IdentityBackupAuthorDirectory,
+)
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
@@ -1786,7 +1789,9 @@ def get_list_backups(
 
     session_factory = create_session_factory(get_engine(request))
     return ListBackups(
-        uow=ServersUnitOfWork(session_factory), backup_store=backup_store
+        uow=ServersUnitOfWork(session_factory),
+        backup_store=backup_store,
+        users=IdentityBackupAuthorDirectory(SqlAlchemyUnitOfWork(session_factory)),
     )
 
 

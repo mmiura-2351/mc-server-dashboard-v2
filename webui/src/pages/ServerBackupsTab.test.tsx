@@ -209,6 +209,21 @@ describe("ServerBackupsTab stats + table", () => {
     );
   });
 
+  it("shows the resolved author username with the full id in the title (#688)", async () => {
+    const authorId = "ad1051a7-1234-5678-9abc-def012345678";
+    routeGet({
+      backups: [backup({ created_by: authorId, created_by_username: "alice" })],
+    });
+    await openBackups();
+
+    // The username is shown instead of the shortened id, and the full id stays
+    // in the cell title for hover.
+    const cell = (await screen.findByText("alice")).closest("td");
+    expect(cell).toHaveAttribute("title", authorId);
+    // The shortened id is not shown when a username resolved.
+    expect(screen.queryByText("ad1051a7")).not.toBeInTheDocument();
+  });
+
   it("formats the newest/oldest stat timestamps (#644)", async () => {
     // Empty list so the formatted stat values cannot collide with a row's
     // created-at cell.

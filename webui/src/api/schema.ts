@@ -1879,6 +1879,8 @@ export interface components {
             created_at: string;
             /** Created By */
             created_by: string | null;
+            /** Created By Username */
+            created_by_username?: string | null;
             /** Health */
             health: string;
             /**
