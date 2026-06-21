@@ -1156,3 +1156,123 @@ describe("Modrinth modal: simplified version display (issue #1354)", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("ServerPluginsTab remove confirmation dialog (#1353)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows a confirmation dialog with the plugin name on remove", async () => {
+    mockGets({
+      plugins: [plugin({ display_name: "Sodium" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Remove"));
+    await waitFor(() => {
+      expect(screen.getByText("Remove Sodium?")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(
+        "This will permanently remove this mod from the server.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("does not call the delete API until confirmed", async () => {
+    mockApi.delete.mockResolvedValue({});
+    mockGets({
+      plugins: [plugin({ display_name: "Sodium" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Remove"));
+    await waitFor(() => {
+      expect(screen.getByText("Remove Sodium?")).toBeInTheDocument();
+    });
+    // API should not have been called yet.
+    expect(mockApi.delete).not.toHaveBeenCalled();
+    // Click the destructive "Remove" confirm button in the dialog footer.
+    // It is inside the modal-foot and does NOT have the .sm class (unlike the
+    // table row action button which has .btn.sm.danger).
+    const confirmBtn = screen
+      .getAllByText("Remove")
+      .find(
+        (el) =>
+          el.tagName === "BUTTON" &&
+          el.classList.contains("danger") &&
+          !el.classList.contains("sm"),
+      );
+    expect(confirmBtn).toBeDefined();
+    fireEvent.click(confirmBtn!);
+    await waitFor(() => {
+      expect(mockApi.delete).toHaveBeenCalledWith(
+        expect.stringContaining("/plugins/p1"),
+      );
+    });
+  });
+});
+
+describe("ServerPluginsTab dependencies toggle active state (#1357)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("adds active class to Dependencies button when expanded", async () => {
+    mockGets({
+      plugins: [plugin({ source: "modrinth" })],
+      validation: EMPTY_VALIDATION,
+    });
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes("/dependencies")) {
+        return Promise.resolve({ dependencies: [] });
+      }
+      if (url.endsWith("/plugins/validate")) {
+        return Promise.resolve(EMPTY_VALIDATION);
+      }
+      if (url.endsWith("/plugins/updates")) {
+        return Promise.resolve({ updates: [] });
+      }
+      if (url.endsWith("/plugins")) {
+        return Promise.resolve({
+          plugins: [plugin({ source: "modrinth" })],
+        });
+      }
+      return Promise.resolve({});
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    const depsBtn = screen.getByText("Dependencies", { selector: "button" });
+    // Initially not active.
+    expect(depsBtn.classList.contains("active")).toBe(false);
+    fireEvent.click(depsBtn);
+    // After click, should have the active class.
+    expect(depsBtn.classList.contains("active")).toBe(true);
+  });
+});
+
+describe("ServerPluginsTab download button position (#1352)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders the download button inside the table header area", async () => {
+    mockDownload.downloadFile.mockResolvedValue(undefined);
+    mockGets({
+      plugins: [plugin({ side: "client" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    const button = await screen.findByText("Download client modpack");
+    // The button should be inside the .plugins-table-header wrapper.
+    expect(button.closest(".plugins-table-header")).not.toBeNull();
+  });
+});

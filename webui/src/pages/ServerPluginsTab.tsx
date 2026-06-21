@@ -21,8 +21,8 @@ import {
   pluginValidationKey,
 } from "../api/pluginQueryKeys.ts";
 import type { components } from "../api/schema";
-import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -416,8 +416,8 @@ export function ServerPluginsTab({
         </div>
       )}
 
-      {hasClientMods && isModLoader(server.server_type) && (
-        <div className="plugins-toolbar">
+      <div className="plugins-table-header">
+        {hasClientMods && showSide && (
           <button
             type="button"
             className="btn"
@@ -426,8 +426,8 @@ export function ServerPluginsTab({
           >
             {t("plugins.downloadClientModpack")}
           </button>
-        </div>
-      )}
+        )}
+      </div>
 
       <div className="card plugins-table">
         <table className="data">
@@ -492,13 +492,18 @@ export function ServerPluginsTab({
         />
       )}
 
-      <ConfirmDialog
+      <SimpleConfirmDialog
         open={removeTarget !== null}
-        title={tn("plugins.removeDialog.title")}
+        title={
+          removeTarget !== null
+            ? t("plugins.removeDialog.title").replace(
+                "{name}",
+                removeTarget.display_name,
+              )
+            : ""
+        }
         body={tn("plugins.removeDialog.body")}
-        confirmPhrase={t("plugins.removeDialog.phrase")}
-        confirmLabel={tn("plugins.removeDialog.confirm")}
-        promptLabel={t("plugins.removeDialog.prompt")}
+        confirmLabel={t("plugins.removeDialog.confirm")}
         onConfirm={() => {
           const target = removeTarget;
           setRemoveTarget(null);
@@ -666,7 +671,7 @@ function PluginRow({
             {plugin.source === "modrinth" ? (
               <button
                 type="button"
-                className="btn sm ghost"
+                className={`btn sm ghost${depsOpen ? " active" : ""}`}
                 onClick={() => setDepsOpen((v) => !v)}
               >
                 {t("plugins.dependencies")}
