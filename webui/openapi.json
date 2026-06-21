@@ -395,6 +395,17 @@
             ],
             "title": "Created By"
           },
+          "created_by_username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By Username"
+          },
           "health": {
             "title": "Health",
             "type": "string"

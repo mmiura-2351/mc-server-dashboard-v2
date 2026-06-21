@@ -47,7 +47,10 @@ from mc_server_dashboard_api.dependencies import (
     get_server_backup_statistics,
     get_upload_backup,
 )
-from mc_server_dashboard_api.servers.application.backups import RestoreResult
+from mc_server_dashboard_api.servers.application.backups import (
+    ListedBackup,
+    RestoreResult,
+)
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
@@ -288,7 +291,10 @@ def test_create_corrupt_working_set_is_500_with_reason() -> None:
 
 def test_list_returns_backups() -> None:
     server = ServerId(uuid.uuid4())
-    use_case = _FakeUseCase(result=[_backup(server)])
+    backup = _backup(server)
+    use_case = _FakeUseCase(
+        result=[ListedBackup(backup=backup, created_by_username="alice")]
+    )
     app = _app(member=True, allow=True, list_=use_case)
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), server.value))
@@ -297,6 +303,24 @@ def test_list_returns_backups() -> None:
     assert len(backups) == 1
     # The list response carries each backup's health (issue #742).
     assert backups[0]["health"] == "healthy"
+    # The author's resolved username is surfaced (issue #688); the raw id stays.
+    assert backups[0]["created_by_username"] == "alice"
+    assert backups[0]["created_by"] == str(backup.created_by)
+
+
+def test_list_unresolved_author_username_is_null() -> None:
+    # A deleted or null author does not resolve: the username is null and the
+    # client falls back to the raw id (issue #688).
+    server = ServerId(uuid.uuid4())
+    backup = _backup(server)
+    use_case = _FakeUseCase(
+        result=[ListedBackup(backup=backup, created_by_username=None)]
+    )
+    app = _app(member=True, allow=True, list_=use_case)
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), server.value))
+    assert resp.status_code == 200
+    assert resp.json()["backups"][0]["created_by_username"] is None
 
 
 def test_list_unknown_server_is_404() -> None:

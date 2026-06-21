@@ -45,6 +45,9 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
+from mc_server_dashboard_api.servers.domain.backup_author_directory import (
+    BackupAuthorDirectory,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
@@ -126,6 +129,16 @@ def _running(*, server_id: ServerId | None = None) -> Server:
         worker=_WORKER,
         server_id=server_id,
     )
+
+
+class _FakeAuthorDirectory(BackupAuthorDirectory):
+    def __init__(self, usernames: dict[uuid.UUID, str] | None = None) -> None:
+        self._usernames = usernames or {}
+        self.calls: list[list[uuid.UUID]] = []
+
+    async def usernames_for(self, user_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        self.calls.append(list(user_ids))
+        return {uid: self._usernames[uid] for uid in user_ids if uid in self._usernames}
 
 
 def _make_create(
@@ -328,7 +341,106 @@ async def test_list_is_community_scoped_and_newest_first() -> None:
     listed = await ListBackups(uow=uow, backup_store=FakeBackupArchiveStore())(
         community_id=_COMMUNITY, server_id=server.id
     )
-    assert [b.id for b in listed] == [newer.id, older.id]
+    assert [b.backup.id for b in listed] == [newer.id, older.id]
+
+
+def _seed_authored(
+    backups: FakeBackupRepository,
+    server_id: ServerId,
+    *,
+    created_by: uuid.UUID | None,
+) -> Backup:
+    backup = Backup(
+        id=BackupId.new(),
+        server_id=server_id,
+        storage_ref="ref",
+        size_bytes=1,
+        source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
+        created_by=created_by,
+        created_at=_NOW,
+    )
+    backups.seed(backup)
+    return backup
+
+
+async def test_list_resolves_author_username() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    author = uuid.uuid4()
+    _seed_authored(backups, server.id, created_by=author)
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+    users = _FakeAuthorDirectory({author: "alice"})
+
+    listed = await ListBackups(
+        uow=uow, backup_store=FakeBackupArchiveStore(), users=users
+    )(community_id=_COMMUNITY, server_id=server.id)
+
+    assert listed[0].created_by_username == "alice"
+
+
+async def test_list_falls_back_to_none_when_author_deleted() -> None:
+    # The author id no longer resolves (the user was deleted): the listing still
+    # succeeds and the username is None so the client shows the raw id.
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    _seed_authored(backups, server.id, created_by=uuid.uuid4())
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+    users = _FakeAuthorDirectory({})  # resolves nothing
+
+    listed = await ListBackups(
+        uow=uow, backup_store=FakeBackupArchiveStore(), users=users
+    )(community_id=_COMMUNITY, server_id=server.id)
+
+    assert listed[0].created_by_username is None
+
+
+async def test_list_null_author_is_not_resolved() -> None:
+    # A scheduled backup has no actor (created_by is None): no username, and the
+    # null id is never sent to the directory.
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    _seed_authored(backups, server.id, created_by=None)
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+    users = _FakeAuthorDirectory({})
+
+    listed = await ListBackups(
+        uow=uow, backup_store=FakeBackupArchiveStore(), users=users
+    )(community_id=_COMMUNITY, server_id=server.id)
+
+    assert listed[0].created_by_username is None
+    assert users.calls == [[]]
+
+
+async def test_list_resolves_authors_in_a_single_batch() -> None:
+    # The page's distinct author ids are resolved in one directory call, never one
+    # lookup per row (no N+1).
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    alice = uuid.uuid4()
+    bob = uuid.uuid4()
+    _seed_authored(backups, server.id, created_by=alice)
+    _seed_authored(backups, server.id, created_by=bob)
+    _seed_authored(backups, server.id, created_by=alice)  # repeated author
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+    users = _FakeAuthorDirectory({alice: "alice", bob: "bob"})
+
+    listed = await ListBackups(
+        uow=uow, backup_store=FakeBackupArchiveStore(), users=users
+    )(community_id=_COMMUNITY, server_id=server.id)
+
+    assert {b.created_by_username for b in listed} == {"alice", "bob"}
+    # One batch call; the repeated author id is deduplicated.
+    assert len(users.calls) == 1
+    assert set(users.calls[0]) == {alice, bob}
 
 
 async def test_list_unknown_server_is_not_found() -> None:
@@ -386,7 +498,7 @@ async def test_list_backfills_null_size_when_archive_exists() -> None:
     )
 
     # The returned row carries the computed size, and it is persisted to the row.
-    assert listed[0].size_bytes == 42
+    assert listed[0].backup.size_bytes == 42
     persisted = await uow.backups.get_by_id(backup.id)
     assert persisted is not None
     assert persisted.size_bytes == 42
@@ -411,7 +523,7 @@ async def test_list_leaves_null_size_when_archive_missing() -> None:
     )
 
     # The archive is gone: the listing still succeeds and the row stays unknown.
-    assert listed[0].size_bytes is None
+    assert listed[0].backup.size_bytes is None
     persisted = await uow.backups.get_by_id(backup.id)
     assert persisted is not None
     assert persisted.size_bytes is None
@@ -484,7 +596,7 @@ async def test_list_survives_store_failure_and_leaves_row_null(
         )
 
     # The listing succeeded, the row stays unknown, and nothing was committed.
-    assert listed[0].size_bytes is None
+    assert listed[0].backup.size_bytes is None
     persisted = await uow.backups.get_by_id(backup.id)
     assert persisted is not None
     assert persisted.size_bytes is None
